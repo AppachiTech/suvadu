@@ -1262,7 +1262,7 @@ dependencies = [
 
 [[package]]
 name = "suvadu"
-version = "0.0.20"
+version = "0.0.1"
 dependencies = [
  "arboard",
  "chrono",

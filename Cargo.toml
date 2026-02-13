@@ -9,7 +9,7 @@ homepage = "https://www.appachi.tech/suvadu"
 repository = "https://github.com/AppachiTech/suvadu"
 readme = "README.md"
 categories = ["command-line-utilities"]
-keywords = ["shell", "history", "zsh", "bash", "cli"]
+keywords = ["shell", "history", "tui", "ai", "cli"]
 
 [[bin]]
 name = "suv"

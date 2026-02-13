@@ -37,6 +37,8 @@ fn main() {
 
 #[allow(clippy::too_many_lines)]
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    print_setup_hint(&cli.command);
+
     match cli.command {
         Commands::Enable => {
             let mut cfg = config::load_config()?;
@@ -84,11 +86,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             "zsh" => {
                 let config = config::load_config().unwrap_or_default();
                 println!("{}", hooks::get_zsh_hook(&config)?);
+                print_first_run_tip();
                 Ok(())
             }
             "bash" => {
                 let config = config::load_config().unwrap_or_default();
                 println!("{}", hooks::get_bash_hook(&config)?);
+                print_first_run_tip();
                 Ok(())
             }
             "claude-code" => integrations::handle_init_claude_code(),
@@ -725,6 +729,65 @@ fn handle_uninstall() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Check if a command should show the setup hint (skip internal/setup commands).
+fn is_user_facing_command(cmd: &Commands) -> bool {
+    !matches!(
+        cmd,
+        Commands::Init { .. }
+            | Commands::Add { .. }
+            | Commands::Get { .. }
+            | Commands::HookClaudeCode
+            | Commands::HookClaudePrompt
+            | Commands::Completions { .. }
+            | Commands::Man
+            | Commands::Wrap { .. }
+    )
+}
+
+/// Show setup instructions when the database doesn't exist yet (fresh install).
+/// Prints to stderr so it doesn't interfere with stdout.
+fn print_setup_hint(cmd: &Commands) {
+    if !is_user_facing_command(cmd) {
+        return;
+    }
+    if let Ok(db_path) = db::get_db_path() {
+        if !db_path.exists() {
+            eprintln!();
+            eprintln!("  Welcome to Suvadu!");
+            eprintln!();
+            eprintln!("  Quick setup — add to your shell config:");
+            eprintln!("    echo 'eval \"$(suv init zsh)\"' >> ~/.zshrc && source ~/.zshrc");
+            eprintln!();
+            eprintln!("  Or for Bash:");
+            eprintln!("    echo 'eval \"$(suv init bash)\"' >> ~/.bashrc && source ~/.bashrc");
+            eprintln!();
+            eprintln!("  Track AI agent commands:");
+            eprintln!("    suv init claude-code    Claude Code");
+            eprintln!("    suv init cursor         Cursor");
+            eprintln!("    suv init antigravity    Antigravity");
+            eprintln!();
+        }
+    }
+}
+
+/// Show agent integration tips during `suv init zsh/bash` (first run only).
+/// Prints to stderr so it doesn't interfere with shell hook eval on stdout.
+fn print_first_run_tip() {
+    if let Ok(db_path) = db::get_db_path() {
+        if !db_path.exists() {
+            eprintln!();
+            eprintln!("  Suvadu installed successfully");
+            eprintln!();
+            eprintln!("  Track AI agent commands:");
+            eprintln!("    suv init claude-code    Claude Code");
+            eprintln!("    suv init cursor         Cursor");
+            eprintln!("    suv init antigravity    Antigravity");
+            eprintln!();
+            eprintln!("  Try it: suv search");
+        }
+    }
 }
 
 /// Normalize a timestamp to milliseconds.
