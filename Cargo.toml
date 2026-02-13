@@ -1,7 +1,7 @@
 [package]
 name = "suvadu"
 default-run = "suv"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 description = "Total recall for your terminal. A database-backed shell history with fuzzy search."
 license = "MIT"
