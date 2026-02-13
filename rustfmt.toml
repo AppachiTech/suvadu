@@ -1,0 +1,14 @@
+# Rustfmt configuration for Suvadu
+# See: https://rust-lang.github.io/rustfmt/
+
+# Maximum line width
+max_width = 100
+
+# Use 4 spaces for indentation
+tab_spaces = 4
+
+# Reorder imports
+reorder_imports = true
+
+# Edition
+edition = "2021"

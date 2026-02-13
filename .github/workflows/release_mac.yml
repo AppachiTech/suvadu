@@ -1,0 +1,101 @@
+name: Release macOS
+
+on:
+  push:
+    tags:
+      - 'v*' # Triggers on tags like v0.1.0, v1.0.0
+
+jobs:
+  deploy-mac:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Binary (Release)
+        run: cargo build --release
+
+      - name: Prepare Artifacts
+        run: |
+          # Create directory structure for R2
+          mkdir -p artifacts/macos/archive
+
+          # Prepare binary
+          cp target/release/suv suv
+
+          # Create main tarball (e.g. suv-macos-latest.tar.gz)
+          tar -czf artifacts/macos/suv-macos-latest.tar.gz suv LICENSE scripts/uninstall.sh
+
+          # Generate SHA256 checksums
+          shasum -a 256 artifacts/macos/suv-macos-latest.tar.gz | awk '{print $1}' > artifacts/macos/suv-macos-latest.tar.gz.sha256
+
+          # Create versioned tarball (e.g. suv-macos-v0.1.0.tar.gz)
+          cp artifacts/macos/suv-macos-latest.tar.gz artifacts/macos/archive/suv-macos-${{ github.ref_name }}.tar.gz
+          cp artifacts/macos/suv-macos-latest.tar.gz.sha256 artifacts/macos/archive/suv-macos-${{ github.ref_name }}.tar.gz.sha256
+
+      - name: Upload to Cloudflare R2
+        uses: ryand56/r2-upload-action@latest
+        with:
+          r2-account-id: ${{ secrets.R2_ACCOUNT_ID }}
+          r2-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          r2-bucket: ${{ secrets.R2_BUCKET }}
+          source-dir: artifacts
+          destination-dir: ./ # Destination prefix in bucket
+
+      - name: Purge Cloudflare CDN Cache
+        run: |
+          curl -s -X POST \
+            "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/purge_cache" \
+            -H "Authorization: Bearer ${{ secrets.CF_PURGE_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "files": [
+                "https://downloads.appachi.tech/macos/suv-macos-latest.tar.gz",
+                "https://downloads.appachi.tech/macos/suv-macos-latest.tar.gz.sha256"
+              ]
+            }'
+
+      - name: Checkout Homebrew Tap
+        uses: actions/checkout@v4
+        with:
+          repository: AppachiTech/homebrew-suvadu
+          token: ${{ secrets.GH_PAT }}
+          path: homebrew-tap
+
+      - name: Update Homebrew Tap
+        run: |
+          TAG=${{ github.ref_name }}
+          TARBALL_NAME="suv-macos-${TAG}.tar.gz"
+          TARBALL_PATH="artifacts/macos/archive/${TARBALL_NAME}"
+
+          # Calculate SHA256
+          SHASUM=$(shasum -a 256 "$TARBALL_PATH" | awk '{print $1}')
+          echo "SHA256: $SHASUM"
+
+          cd homebrew-tap
+          FORMULA_PATH="Formula/suvadu.rb"
+
+          # Update version, URL, and SHA256
+          sed -i '' "s/version \".*\"/version \"${TAG#v}\"/" "$FORMULA_PATH"
+          NEW_URL="https://downloads.appachi.tech/macos/archive/${TARBALL_NAME}"
+          sed -i '' "s|url \".*\"|url \"${NEW_URL}\"|" "$FORMULA_PATH"
+          sed -i '' "s/sha256 \".*\"/sha256 \"${SHASUM}\"/" "$FORMULA_PATH"
+
+          # Commit and push
+          git config user.name "Appachi Bot"
+          git config user.email "bot@appachi.tech"
+          git add "$FORMULA_PATH"
+          git commit -m "Update suvadu to $TAG"
+          git push
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/macos/archive/suv-macos-${{ github.ref_name }}.tar.gz
+            artifacts/macos/archive/suv-macos-${{ github.ref_name }}.tar.gz.sha256

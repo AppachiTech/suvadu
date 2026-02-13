@@ -1,0 +1,90 @@
+name: Release Linux
+
+on:
+  push:
+    tags:
+      - 'v*' # Triggers on tags like v0.1.0, v1.0.0
+
+jobs:
+  deploy-linux:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            suffix: ""
+            use_cross: false
+          - target: aarch64-unknown-linux-gnu
+            arch: aarch64
+            suffix: "-aarch64"
+            use_cross: true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build Binary (Release)
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Prepare Artifacts
+        run: |
+          # Create directory structure for R2
+          mkdir -p artifacts/linux/archive
+
+          # Prepare binary
+          cp target/${{ matrix.target }}/release/suv suv
+
+          # Create main tarball (e.g. suv-linux-latest.tar.gz or suv-linux-aarch64-latest.tar.gz)
+          tar -czf artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz suv LICENSE scripts/uninstall.sh
+
+          # Generate SHA256 checksums
+          sha256sum artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz | awk '{print $1}' > artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.sha256
+
+          # Create versioned tarball
+          cp artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz
+          cp artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.sha256 artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.sha256
+
+      - name: Upload to Cloudflare R2
+        uses: ryand56/r2-upload-action@latest
+        with:
+          r2-account-id: ${{ secrets.R2_ACCOUNT_ID }}
+          r2-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          r2-bucket: ${{ secrets.R2_BUCKET }}
+          source-dir: artifacts
+          destination-dir: ./ # Destination prefix in bucket
+
+      - name: Purge Cloudflare CDN Cache
+        run: |
+          curl -s -X POST \
+            "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/purge_cache" \
+            -H "Authorization: Bearer ${{ secrets.CF_PURGE_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "files": [
+                "https://downloads.appachi.tech/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz",
+                "https://downloads.appachi.tech/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.sha256"
+              ]
+            }'
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz
+            artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.sha256
