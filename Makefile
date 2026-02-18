@@ -1,4 +1,4 @@
-.PHONY: dev test lint install help current-version release-patch release-minor release-major check-git-clean bump-version git-push package package-linux package-linux-arm64
+.PHONY: dev test lint install help current-version release-patch release-minor release-major check-git-clean bump-version git-push crates-publish package package-linux package-linux-arm64
 
 EXECUTABLE_NAME := suv
 INSTALL_PATH := /usr/local/bin
@@ -54,6 +54,9 @@ git-push:
 	git push origin HEAD
 	git push origin v$$(make current-version)
 
+crates-publish:
+	cargo publish
+
 bump-version:
 	@current=$$(make current-version); \
 	major=$$(echo $$current | cut -d. -f1); \
@@ -74,17 +77,20 @@ bump-version:
 	echo "\033[32mSuccessfully bumped to $$new_ver\033[0m"
 
 # Public Release Commands
-release-patch: check-git-clean ## Bump patch version (0.1.0 -> 0.1.1) and push
+release-patch: check-git-clean ## Bump patch version (0.1.0 -> 0.1.1), push, and publish to crates.io
 	@$(MAKE) bump-version BUMP=patch
 	@$(MAKE) git-push
+	@$(MAKE) crates-publish
 
-release-minor: check-git-clean ## Bump minor version (0.1.x -> 0.2.0) and push
+release-minor: check-git-clean ## Bump minor version (0.1.x -> 0.2.0), push, and publish to crates.io
 	@$(MAKE) bump-version BUMP=minor
 	@$(MAKE) git-push
+	@$(MAKE) crates-publish
 
-release-major: check-git-clean ## Bump major version (0.x.x -> 1.0.0) and push
+release-major: check-git-clean ## Bump major version (0.x.x -> 1.0.0), push, and publish to crates.io
 	@$(MAKE) bump-version BUMP=major
 	@$(MAKE) git-push
+	@$(MAKE) crates-publish
 
 package: ## Create a macOS release tarball with binary and license
 	cargo build --release

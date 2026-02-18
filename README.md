@@ -11,6 +11,18 @@
 
 Suvadu (Tamil: "Trace" / "Footprint") replaces your shell's built-in history with a SQLite-backed store, giving you structured storage, millisecond-precision timestamps, and a modern interactive search UI — across every terminal, IDE, and AI agent you use.
 
+<p align="center">
+  <img src="demo/suvadu-search.gif" alt="Suvadu search TUI with fuzzy matching, filters, stats heatmap and settings" width="700">
+  <br>
+  <em>Search, stats & settings</em>
+</p>
+
+<p align="center">
+  <img src="demo/suvadu-agent.gif" alt="Suvadu agent monitoring dashboard showing AI command tracking and risk assessment" width="700">
+  <br>
+  <em>Agent stats & dashboard — track what your AI agents execute</em>
+</p>
+
 ---
 
 ## Table of Contents

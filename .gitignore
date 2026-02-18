@@ -4,4 +4,6 @@ bk/
 *.tar.gz
 /tmp/
 
+*.tape
+
 .DS_Store
