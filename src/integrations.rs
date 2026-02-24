@@ -248,7 +248,48 @@ pub fn generate_claude_settings_snippet(hook_path: &str, prompt_hook_path: &str)
     .unwrap_or_default()
 }
 
+/// Remove duplicate suvadu hook entries from both `PostToolUse` and `UserPromptSubmit`.
+/// Returns true if any duplicates were removed.
+fn dedup_suvadu_hooks(settings: &mut serde_json::Value) -> bool {
+    let mut changed = false;
+    for key in ["PostToolUse", "UserPromptSubmit"] {
+        let Some(arr) = settings
+            .get_mut("hooks")
+            .and_then(|h| h.get_mut(key))
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        let mut seen_suvadu = false;
+        let before = arr.len();
+        arr.retain(|group| {
+            let is_suvadu = group
+                .get("hooks")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|hooks| {
+                    hooks.iter().any(|h| {
+                        h.get("command")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|cmd| cmd.contains("suvadu"))
+                    })
+                });
+            if is_suvadu {
+                if seen_suvadu {
+                    return false; // drop duplicate
+                }
+                seen_suvadu = true;
+            }
+            true
+        });
+        if arr.len() != before {
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Try to merge Suvadu hooks into an existing Claude settings file.
+#[allow(clippy::too_many_lines)]
 pub fn try_merge_claude_settings(
     settings_path: &Path,
     hook_path: &str,
@@ -303,7 +344,13 @@ pub fn try_merge_claude_settings(
             });
 
         if already_has_prompt {
-            return Ok(true); // Both hooks already configured
+            // Both hooks present — deduplicate any repeated suvadu entries
+            let changed = dedup_suvadu_hooks(&mut settings);
+            if changed {
+                let updated = serde_json::to_string_pretty(&settings)?;
+                std::fs::write(settings_path, updated)?;
+            }
+            return Ok(true);
         }
 
         // Add only the prompt hook
@@ -621,6 +668,79 @@ mod tests {
             prompt_submit[0].get("matcher").is_none(),
             "UserPromptSubmit should not have a matcher"
         );
+    }
+
+    #[test]
+    fn test_merge_deduplicates_existing_duplicates() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join("settings.json");
+        let hook_path = "/home/user/.config/suvadu/hooks/claude-code-post-tool.sh";
+        let prompt_hook_path = "/home/user/.config/suvadu/hooks/claude-code-prompt.sh";
+
+        // Simulate 4 duplicate UserPromptSubmit entries (as seen in the wild)
+        let settings = serde_json::json!({
+            "hooks": {
+                "PostToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{"type": "command", "command": hook_path}]
+                }],
+                "UserPromptSubmit": [
+                    {"hooks": [{"type": "command", "command": prompt_hook_path}]},
+                    {"hooks": [{"type": "command", "command": prompt_hook_path}]},
+                    {"hooks": [{"type": "command", "command": prompt_hook_path}]},
+                    {"hooks": [{"type": "command", "command": prompt_hook_path}]}
+                ]
+            }
+        });
+        std::fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+
+        // Merge should detect both hooks exist and deduplicate
+        let result =
+            try_merge_claude_settings(&settings_path, hook_path, prompt_hook_path).unwrap();
+        assert!(result);
+
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["hooks"]["PostToolUse"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            parsed["hooks"]["UserPromptSubmit"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_dedup_preserves_non_suvadu_hooks() {
+        let mut settings = serde_json::json!({
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"hooks": [{"type": "command", "command": "/path/to/suvadu/hook.sh"}]},
+                    {"hooks": [{"type": "command", "command": "/other/tool/hook.sh"}]},
+                    {"hooks": [{"type": "command", "command": "/path/to/suvadu/hook.sh"}]}
+                ]
+            }
+        });
+
+        let changed = dedup_suvadu_hooks(&mut settings);
+        assert!(changed);
+
+        let arr = settings["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(arr.len(), 2); // 1 suvadu + 1 other
+        // First entry is suvadu, second is the other tool
+        assert!(arr[0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("suvadu"));
+        assert!(arr[1]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("other"));
     }
 
     #[test]

@@ -185,49 +185,50 @@ pub fn cleanup_claude_settings_at(
     let content = std::fs::read_to_string(settings_path)?;
     let mut settings: serde_json::Value = serde_json::from_str(&content)?;
 
-    let Some(post_tool_use) = settings
-        .get_mut("hooks")
-        .and_then(|h| h.get_mut("PostToolUse"))
-        .and_then(serde_json::Value::as_array_mut)
-    else {
-        return Ok(false);
-    };
+    let mut removed = false;
 
-    let original_len = post_tool_use.len();
+    // Remove suvadu entries from both PostToolUse and UserPromptSubmit
+    for key in ["PostToolUse", "UserPromptSubmit"] {
+        let Some(arr) = settings
+            .get_mut("hooks")
+            .and_then(|h| h.get_mut(key))
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
 
-    // Remove any entry whose hooks array contains a command with "suvadu"
-    post_tool_use.retain(|group| {
-        if let Some(hooks) = group.get("hooks").and_then(serde_json::Value::as_array) {
-            !hooks.iter().any(|h| {
-                h.get("command")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|cmd| cmd.contains("suvadu"))
-            })
-        } else {
-            true // keep entries we don't understand
+        let original_len = arr.len();
+
+        arr.retain(|group| {
+            if let Some(hooks) = group.get("hooks").and_then(serde_json::Value::as_array) {
+                !hooks.iter().any(|h| {
+                    h.get("command")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|cmd| cmd.contains("suvadu"))
+                })
+            } else {
+                true // keep entries we don't understand
+            }
+        });
+
+        if arr.len() != original_len {
+            removed = true;
         }
-    });
+    }
 
-    if post_tool_use.len() == original_len {
-        return Ok(false); // nothing was removed
+    if !removed {
+        return Ok(false);
     }
 
     // Clean up empty containers
-    let should_remove_post_tool_use = settings
-        .get("hooks")
-        .and_then(|h| h.get("PostToolUse"))
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(std::vec::Vec::is_empty);
+    if let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) {
+        hooks.retain(|_, v| {
+            !v.as_array().is_some_and(std::vec::Vec::is_empty)
+        });
 
-    if should_remove_post_tool_use {
-        if let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) {
-            hooks.remove("PostToolUse");
-
-            let should_remove_hooks = hooks.is_empty();
-            if should_remove_hooks {
-                if let Some(root) = settings.as_object_mut() {
-                    root.remove("hooks");
-                }
+        if hooks.is_empty() {
+            if let Some(root) = settings.as_object_mut() {
+                root.remove("hooks");
             }
         }
     }
@@ -396,6 +397,39 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("other-hook"));
+    }
+
+    #[test]
+    fn test_cleanup_claude_settings_removes_both_hook_types() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+
+        let settings = serde_json::json!({
+            "hooks": {
+                "PostToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/home/user/.config/suvadu/hooks/claude-code-post-tool.sh"
+                    }]
+                }],
+                "UserPromptSubmit": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/home/user/.config/suvadu/hooks/claude-code-prompt.sh"
+                    }]
+                }]
+            }
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+
+        let result = cleanup_claude_settings_at(&path).unwrap();
+        assert!(result);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        // Both hook types removed, hooks object cleaned up
+        assert!(parsed.get("hooks").is_none());
     }
 
     #[test]
