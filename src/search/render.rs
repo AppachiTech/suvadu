@@ -277,7 +277,13 @@ impl SearchApp {
 
         // Time (15) + Session/Tag (25) + Executor (12) + Path (20) + Status (6) + Duration (8) = 86
         let fixed_width: u16 = 15 + 25 + 12 + 20 + 6 + 8;
-        let command_col_width = table_area.width.saturating_sub(fixed_width + 6);
+        // When the terminal is too narrow for all columns, show only the Command column
+        let compact = table_area.width < 100;
+        let command_col_width = if compact {
+            table_area.width.saturating_sub(6)
+        } else {
+            table_area.width.saturating_sub(fixed_width + 6)
+        };
 
         let rows: Vec<Row> = self
             .entries
@@ -456,7 +462,7 @@ impl SearchApp {
                     None => bg_style.fg(t.text_muted),
                 };
 
-                if self.unique_mode {
+                if self.unique_mode || compact {
                     Row::new(vec![Cell::from(command_display)])
                         .height(height)
                         .style(bg_style)
@@ -476,7 +482,7 @@ impl SearchApp {
             })
             .collect();
 
-        let widths = if self.unique_mode {
+        let widths = if self.unique_mode || compact {
             vec![Constraint::Percentage(100)]
         } else {
             vec![
@@ -490,7 +496,7 @@ impl SearchApp {
             ]
         };
 
-        let header_row = if self.unique_mode {
+        let header_row = if self.unique_mode || compact {
             Row::new(vec!["Command".to_string()])
         } else {
             Row::new(vec![
