@@ -4,7 +4,7 @@ use crossterm::event::{self, Event, KeyCode};
 use ratatui::{
     backend::Backend,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Terminal,
@@ -15,6 +15,7 @@ use std::io;
 enum InputMode {
     Normal,
     Editing,
+    ConfirmQuit,
 }
 
 struct AppState {
@@ -31,6 +32,7 @@ struct AppState {
     tab_items: Vec<usize>,
     exclusion_list_state: ListState,
     save_status: Option<String>,
+    dirty: bool,
 }
 
 impl AppState {
@@ -48,6 +50,7 @@ impl AppState {
             tab_items: vec![5, 2, 0, 0],
             exclusion_list_state: ListState::default(),
             save_status: None,
+            dirty: false,
         }
     }
 
@@ -108,20 +111,25 @@ impl AppState {
             (0, 1) => {
                 self.config.search.show_unique_by_default =
                     !self.config.search.show_unique_by_default;
+                self.dirty = true;
             }
             (0, 2) => {
                 self.config.search.filter_by_current_session_tag =
                     !self.config.search.filter_by_current_session_tag;
+                self.dirty = true;
             }
             (0, 3) => {
                 self.config.search.context_boost = !self.config.search.context_boost;
+                self.dirty = true;
             }
             (0, 4) => {
                 self.config.search.show_detail_pane = !self.config.search.show_detail_pane;
+                self.dirty = true;
             }
             (1, 0) => {
                 self.config.shell.enable_arrow_navigation =
                     !self.config.shell.enable_arrow_navigation;
+                self.dirty = true;
             }
             _ => {}
         }
@@ -130,13 +138,33 @@ impl AppState {
     #[allow(clippy::too_many_lines)]
     fn handle_input(&mut self, key: event::KeyEvent) -> bool {
         match self.input_mode {
+            InputMode::ConfirmQuit => match key.code {
+                KeyCode::Char('y') => {
+                    if let Err(e) = save_config(&self.config) {
+                        self.save_status = Some(format!("Error saving: {e}"));
+                    } else {
+                        return false;
+                    }
+                    self.input_mode = InputMode::Normal;
+                }
+                KeyCode::Char('n') => return false,
+                KeyCode::Esc => self.input_mode = InputMode::Normal,
+                _ => {}
+            },
             InputMode::Normal => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => return false,
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    if self.dirty {
+                        self.input_mode = InputMode::ConfirmQuit;
+                    } else {
+                        return false;
+                    }
+                }
                 KeyCode::Char('s') => {
                     if let Err(e) = save_config(&self.config) {
                         self.save_status = Some(format!("Error saving: {e}"));
                     } else {
                         self.save_status = Some("Settings saved!".to_string());
+                        self.dirty = false;
                     }
                 }
                 KeyCode::Tab => self.next_tab(),
@@ -156,6 +184,7 @@ impl AppState {
                 KeyCode::Char('d') if self.current_tab == 2 => {
                     if !self.config.exclusions.is_empty() {
                         self.config.exclusions.remove(self.selected_item);
+                        self.dirty = true;
                         if self.selected_item >= self.config.exclusions.len()
                             && !self.config.exclusions.is_empty()
                         {
@@ -173,6 +202,7 @@ impl AppState {
                 }
                 KeyCode::Char('d') if self.current_tab == 3 => {
                     if !self.config.auto_tags.is_empty() {
+                        self.dirty = true;
                         let mut auto_tags: Vec<_> = self.config.auto_tags.keys().cloned().collect();
                         auto_tags.sort();
                         if let Some(key) = auto_tags.get(self.selected_item) {
@@ -212,6 +242,7 @@ impl AppState {
                     if let (0, 0) = (self.current_tab, self.selected_item) {
                         if let Ok(n) = self.input_buffer.parse::<usize>() {
                             self.config.search.page_limit = n.clamp(10, 5000);
+                            self.dirty = true;
                             self.save_status = Some(format!(
                                 "Page limit set to {}",
                                 self.config.search.page_limit
@@ -222,6 +253,7 @@ impl AppState {
                         self.input_mode = InputMode::Normal;
                     } else if self.current_tab == 2 && !self.input_buffer.is_empty() {
                         self.config.exclusions.push(self.input_buffer.clone());
+                        self.dirty = true;
                         self.save_status = Some(format!("Added exclusion: {}", self.input_buffer));
                         // Select the new item
                         self.selected_item = self.config.exclusions.len() - 1;
@@ -241,6 +273,7 @@ impl AppState {
                                     self.auto_tag_path_input.trim().to_string(),
                                     self.auto_tag_name_input.trim().to_string(),
                                 );
+                                self.dirty = true;
                                 self.save_status = Some(format!(
                                     "Added auto-tag: {} -> {}",
                                     self.auto_tag_path_input.trim(),
@@ -354,7 +387,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut AppState) {
         String::new()
     };
 
-    let badge_key = Style::default().bg(Color::Rgb(50, 50, 55)).fg(t.text);
+    let badge_key = Style::default().bg(t.badge_bg).fg(t.text);
     let badge_label = Style::default().fg(t.text_secondary);
 
     let mut help_badges = match app.input_mode {
@@ -369,6 +402,18 @@ fn ui(f: &mut ratatui::Frame, app: &mut AppState) {
         InputMode::Editing => vec![
             Span::styled(" Enter ", badge_key),
             Span::styled(" Confirm  ", badge_label),
+            Span::styled(" Esc ", badge_key),
+            Span::styled(" Cancel  ", badge_label),
+        ],
+        InputMode::ConfirmQuit => vec![
+            Span::styled(
+                " Unsaved changes! ",
+                Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" y ", badge_key),
+            Span::styled(" Save & Quit  ", badge_label),
+            Span::styled(" n ", badge_key),
+            Span::styled(" Discard & Quit  ", badge_label),
             Span::styled(" Esc ", badge_key),
             Span::styled(" Cancel  ", badge_label),
         ],

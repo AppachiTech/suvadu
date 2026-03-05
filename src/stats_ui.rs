@@ -845,7 +845,7 @@ impl StatsApp {
 
     fn render_footer(&self, f: &mut ratatui::Frame, area: Rect) {
         let t = theme();
-        let badge_key = Style::default().bg(Color::Rgb(50, 50, 55)).fg(t.text);
+        let badge_key = Style::default().bg(t.badge_bg).fg(t.text);
         let badge_label = Style::default().fg(t.text_secondary);
 
         let spans = vec![

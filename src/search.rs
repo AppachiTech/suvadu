@@ -706,7 +706,7 @@ impl SearchApp {
             None
         };
 
-        let badge_key_style = Style::default().bg(Color::Rgb(50, 50, 55)).fg(t.text);
+        let badge_key_style = Style::default().bg(t.badge_bg).fg(t.text);
         let badge_label_style = Style::default().fg(t.text_secondary);
 
         let mut help_badges = vec![
@@ -1222,10 +1222,10 @@ impl SearchApp {
                     .map_or(risk::RiskLevel::None, |a| a.level);
                 if risk_level > risk::RiskLevel::None {
                     let risk_color = match risk_level {
-                        risk::RiskLevel::Critical => Color::Red,
-                        risk::RiskLevel::High => Color::Rgb(255, 165, 0), // orange
-                        risk::RiskLevel::Medium => Color::Yellow,
-                        risk::RiskLevel::Low | risk::RiskLevel::None => Color::DarkGray,
+                        risk::RiskLevel::Critical => t.risk_critical,
+                        risk::RiskLevel::High => t.risk_high,
+                        risk::RiskLevel::Medium => t.risk_medium,
+                        risk::RiskLevel::Low | risk::RiskLevel::None => t.risk_low,
                     };
                     let risk_text = format!(
                         "{} {}{}",
@@ -1475,10 +1475,7 @@ impl SearchApp {
             Line::from(vec![
                 Span::styled(" [Y] ", Style::default().bg(t.error).fg(Color::White)),
                 Span::raw(" Yes   "),
-                Span::styled(
-                    " [N] ",
-                    Style::default().bg(Color::Rgb(50, 50, 55)).fg(t.text),
-                ),
+                Span::styled(" [N] ", Style::default().bg(t.badge_bg).fg(t.text)),
                 Span::raw(" No"),
             ]),
         ];

@@ -5,7 +5,7 @@ use chrono::{Local, TimeZone};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::backend::Backend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation,
@@ -408,7 +408,7 @@ impl AgentApp {
         if risk_count > 0 {
             spans.push(Span::styled(
                 format!(" · ⚠ {risk_count}"),
-                Style::default().fg(Color::Rgb(234, 179, 8)),
+                Style::default().fg(t.warning),
             ));
         }
 
@@ -467,7 +467,7 @@ impl AgentApp {
                 Span::styled("  ", Style::default()),
                 Span::styled(
                     format!("⚠ {} critical", self.risk_summary.critical_count),
-                    Style::default().fg(Color::Rgb(239, 68, 68)),
+                    Style::default().fg(t.risk_critical),
                 ),
             ]));
         }
@@ -476,7 +476,7 @@ impl AgentApp {
                 Span::styled("  ", Style::default()),
                 Span::styled(
                     format!("⚠ {} high", self.risk_summary.high_count),
-                    Style::default().fg(Color::Rgb(234, 179, 8)),
+                    Style::default().fg(t.risk_high),
                 ),
             ]));
         }
@@ -485,7 +485,7 @@ impl AgentApp {
                 Span::styled("  ", Style::default()),
                 Span::styled(
                     format!("⚡ {} medium", self.risk_summary.medium_count),
-                    Style::default().fg(Color::Rgb(234, 179, 8)),
+                    Style::default().fg(t.risk_medium),
                 ),
             ]));
         }
@@ -539,9 +539,7 @@ impl AgentApp {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 " [risk-only]",
-                Style::default()
-                    .fg(Color::Rgb(234, 179, 8))
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
             )));
         }
 
@@ -659,6 +657,21 @@ impl AgentApp {
             );
 
         f.render_stateful_widget(table, table_area, &mut self.table_state);
+
+        // Empty state hint
+        if self.visible.is_empty() {
+            let hint = Paragraph::new(Line::from(Span::styled(
+                "  No agent commands found. Try a broader time range or check integration setup.",
+                Style::default().fg(t.text_muted),
+            )));
+            let hint_area = Rect {
+                x: table_area.x + 1,
+                y: table_area.y + 2,
+                width: table_area.width.saturating_sub(2),
+                height: 1,
+            };
+            f.render_widget(hint, hint_area);
+        }
 
         // Scrollbar (page-based)
         let total_pages = self.total_pages();
@@ -787,10 +800,10 @@ impl AgentApp {
         if rl > RiskLevel::None {
             if let Some(a) = risk::assess_risk(&entry.command) {
                 let risk_color = match a.level {
-                    RiskLevel::Critical => Color::Rgb(239, 68, 68),
-                    RiskLevel::High => Color::Rgb(251, 146, 60),
-                    RiskLevel::Medium => Color::Rgb(234, 179, 8),
-                    RiskLevel::Low => Color::Rgb(100, 100, 100),
+                    RiskLevel::Critical => t.risk_critical,
+                    RiskLevel::High => t.risk_high,
+                    RiskLevel::Medium => t.risk_medium,
+                    RiskLevel::Low => t.risk_low,
                     RiskLevel::None => t.text_muted,
                 };
                 lines.push(Line::from(vec![
@@ -1274,7 +1287,7 @@ impl AgentStatsApp {
                     Span::styled(
                         format!("{}", agent.high_risk),
                         if agent.high_risk > 0 {
-                            Style::default().fg(Color::Rgb(234, 179, 8))
+                            Style::default().fg(t.risk_high)
                         } else {
                             Style::default().fg(t.text)
                         },
@@ -1362,11 +1375,7 @@ impl AgentStatsApp {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border_color))
             .title(format!(" High Risk Commands ({}) ", agent.name))
-            .title_style(
-                Style::default()
-                    .fg(Color::Rgb(234, 179, 8))
-                    .add_modifier(Modifier::BOLD),
-            );
+            .title_style(Style::default().fg(t.warning).add_modifier(Modifier::BOLD));
         let risk_inner = risk_block.inner(sections[0]);
         f.render_widget(risk_block, sections[0]);
 
@@ -1397,8 +1406,8 @@ impl AgentStatsApp {
                     base.add_modifier(Modifier::BOLD)
                 } else {
                     match hr.level {
-                        RiskLevel::Critical => Style::default().fg(Color::Rgb(239, 68, 68)),
-                        _ => Style::default().fg(Color::Rgb(234, 179, 8)),
+                        RiskLevel::Critical => Style::default().fg(t.risk_critical),
+                        _ => Style::default().fg(t.risk_high),
                     }
                 };
                 let status = match hr.exit_code {
@@ -1462,8 +1471,8 @@ impl AgentStatsApp {
                 let val = Style::default().fg(t.text);
 
                 let risk_color = match hr.level {
-                    RiskLevel::Critical => Color::Rgb(239, 68, 68),
-                    _ => Color::Rgb(234, 179, 8),
+                    RiskLevel::Critical => t.risk_critical,
+                    _ => t.risk_high,
                 };
 
                 let exit_str = match hr.exit_code {

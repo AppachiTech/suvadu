@@ -15,6 +15,11 @@ pub struct Theme {
     pub info: Color,
     pub selection_bg: Color,
     pub selection_fg: Color,
+    pub badge_bg: Color,
+    pub risk_critical: Color,
+    pub risk_high: Color,
+    pub risk_medium: Color,
+    pub risk_low: Color,
 }
 
 impl Default for Theme {
@@ -34,6 +39,11 @@ impl Default for Theme {
             info: Color::Rgb(96, 165, 250),
             selection_bg: Color::Rgb(30, 64, 110),
             selection_fg: Color::White,
+            badge_bg: Color::Rgb(50, 50, 55),
+            risk_critical: Color::Rgb(239, 68, 68),
+            risk_high: Color::Rgb(251, 146, 60),
+            risk_medium: Color::Rgb(234, 179, 8),
+            risk_low: Color::Rgb(120, 120, 130),
         }
     }
 }
