@@ -1020,15 +1020,9 @@ fn handle_get(
         None
     };
 
-    let results = if boost_cwd.is_some() {
-        repo.get_frecent_entries(1, offset, query_opt, prefix, boost_cwd)?
-    } else {
-        repo.get_unique_entries(
-            1, offset, None, None, None, None, query_opt, prefix, false, None, None,
-        )?
-    };
+    let results = repo.get_recent_entries(1, offset, query_opt, prefix, boost_cwd)?;
 
-    if let Some((entry, _)) = results.first() {
+    if let Some(entry) = results.first() {
         print!("{}", entry.command);
     } // Else print nothing
 

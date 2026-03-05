@@ -459,19 +459,18 @@ impl Repository {
         Ok(results)
     }
 
-    /// Get unique entries ordered by recency with optional CWD boost.
-    /// Most recently executed command appears first. When `boost_cwd` is
-    /// provided, same-directory entries sort before others at the same
-    /// recency tier.
-    #[allow(clippy::too_many_arguments)]
-    pub fn get_frecent_entries(
+    /// Get entries ordered by recency without deduplication.
+    /// Used by arrow-key navigation so that every invocation (including
+    /// failed commands) is accessible. When `boost_cwd` is provided,
+    /// same-directory entries sort before others at the same recency tier.
+    pub fn get_recent_entries(
         &self,
         limit: usize,
         offset: usize,
         query: Option<&str>,
         prefix_match: bool,
         boost_cwd: Option<&str>,
-    ) -> DbResult<Vec<(Entry, i64)>> {
+    ) -> DbResult<Vec<Entry>> {
         let mut fb = FilterBuilder::new().with_query(query, prefix_match);
 
         let cwd_order = if boost_cwd.is_some() {
@@ -481,12 +480,8 @@ impl Repository {
         };
 
         let sql = format!(
-            "SELECT e.id, e.session_id, e.command, e.cwd, e.exit_code,
-                MAX(e.started_at) as recent_start, e.ended_at, e.duration_ms, e.context,
-                COALESCE(et.name, st.name) as name,
-                COUNT(*) as occurrence_count,
-                e.tag_id, e.executor_type, e.executor
-             {ENTRY_JOINS}{} GROUP BY e.command ORDER BY {cwd_order}recent_start DESC LIMIT ? OFFSET ?",
+            "SELECT {ENTRY_COLUMNS}
+             {ENTRY_JOINS}{} ORDER BY {cwd_order}e.started_at DESC LIMIT ? OFFSET ?",
             fb.build_where()
         );
 
@@ -499,11 +494,7 @@ impl Repository {
         let mut stmt = self.conn.prepare(&sql)?;
 
         let results = stmt
-            .query_map(fb.params_refs().as_slice(), |row| {
-                let count: i64 = row.get(10)?;
-                let entry = entry_from_row(row, 11)?;
-                Ok((entry, count))
-            })?
+            .query_map(fb.params_refs().as_slice(), |row| entry_from_row(row, 10))?
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(results)
@@ -1729,6 +1720,115 @@ mod tests {
             .unwrap();
         assert_eq!(page2.len(), 1);
         assert_eq!(page2[0].0.command, "cmd_B");
+    }
+
+    #[test]
+    fn test_recent_entries_shows_failed_commands() {
+        let (_temp, repo) = setup_test_db();
+        let session = Session::new("host".to_string(), 100);
+        repo.insert_session(&session).unwrap();
+
+        // Failed command at T=1000
+        repo.insert_entry(&Entry::new(
+            session.id.clone(),
+            "cargo build".into(),
+            "/project".into(),
+            Some(1), // failed
+            1000,
+            1010,
+        ))
+        .unwrap();
+
+        // Same command succeeds at T=2000
+        repo.insert_entry(&Entry::new(
+            session.id.clone(),
+            "cargo build".into(),
+            "/project".into(),
+            Some(0), // success
+            2000,
+            2010,
+        ))
+        .unwrap();
+
+        // get_recent_entries should return BOTH invocations (no dedup)
+        let results = repo.get_recent_entries(10, 0, None, false, None).unwrap();
+        assert_eq!(results.len(), 2);
+        // Most recent first
+        assert_eq!(results[0].started_at, 2000);
+        assert_eq!(results[0].exit_code, Some(0));
+        assert_eq!(results[1].started_at, 1000);
+        assert_eq!(results[1].exit_code, Some(1));
+    }
+
+    #[test]
+    fn test_recent_entries_with_cwd_boost() {
+        let (_temp, repo) = setup_test_db();
+        let session = Session::new("host".to_string(), 100);
+        repo.insert_session(&session).unwrap();
+
+        // Older command in /project
+        repo.insert_entry(&Entry::new(
+            session.id.clone(),
+            "make test".into(),
+            "/project".into(),
+            Some(0),
+            1000,
+            1010,
+        ))
+        .unwrap();
+
+        // Newer command in /other
+        repo.insert_entry(&Entry::new(
+            session.id.clone(),
+            "ls".into(),
+            "/other".into(),
+            Some(0),
+            2000,
+            2010,
+        ))
+        .unwrap();
+
+        // With boost_cwd=/project, /project commands should come first
+        let results = repo
+            .get_recent_entries(10, 0, None, false, Some("/project"))
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].command, "make test");
+        assert_eq!(results[1].command, "ls");
+    }
+
+    #[test]
+    fn test_recent_entries_prefix_match() {
+        let (_temp, repo) = setup_test_db();
+        let session = Session::new("host".to_string(), 100);
+        repo.insert_session(&session).unwrap();
+
+        repo.insert_entry(&Entry::new(
+            session.id.clone(),
+            "git status".into(),
+            "/".into(),
+            Some(0),
+            1000,
+            1010,
+        ))
+        .unwrap();
+
+        repo.insert_entry(&Entry::new(
+            session.id.clone(),
+            "grep foo".into(),
+            "/".into(),
+            Some(0),
+            2000,
+            2010,
+        ))
+        .unwrap();
+
+        // Prefix match for "git" should only return "git status"
+        let results = repo
+            .get_recent_entries(10, 0, Some("git"), true, None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].command, "git status");
     }
 
     #[test]
