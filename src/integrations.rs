@@ -69,7 +69,7 @@ pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
         ctx
     });
 
-    crate::handle_add_with_context(
+    crate::commands::entry::handle_add_with_context(
         &session_id,
         command.to_string(),
         cwd.to_string(),
@@ -732,7 +732,7 @@ mod tests {
 
         let arr = settings["hooks"]["UserPromptSubmit"].as_array().unwrap();
         assert_eq!(arr.len(), 2); // 1 suvadu + 1 other
-        // First entry is suvadu, second is the other tool
+                                  // First entry is suvadu, second is the other tool
         assert!(arr[0]["hooks"][0]["command"]
             .as_str()
             .unwrap()

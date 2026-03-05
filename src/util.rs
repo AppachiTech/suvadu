@@ -222,9 +222,7 @@ pub fn cleanup_claude_settings_at(
 
     // Clean up empty containers
     if let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) {
-        hooks.retain(|_, v| {
-            !v.as_array().is_some_and(std::vec::Vec::is_empty)
-        });
+        hooks.retain(|_, v| !v.as_array().is_some_and(std::vec::Vec::is_empty));
 
         if hooks.is_empty() {
             if let Some(root) = settings.as_object_mut() {
