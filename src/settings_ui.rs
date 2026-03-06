@@ -328,7 +328,10 @@ impl AppState {
     }
 }
 
-pub fn run_settings_ui<B: Backend>(terminal: &mut Terminal<B>, config: Config) -> io::Result<()> {
+pub fn run_settings_ui<B: Backend>(terminal: &mut Terminal<B>, config: Config) -> io::Result<()>
+where
+    io::Error: From<B::Error>,
+{
     let mut app = AppState::new(config);
 
     loop {

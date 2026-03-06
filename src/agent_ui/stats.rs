@@ -634,7 +634,10 @@ pub fn run_agent_stats_ui<B: Backend>(
     repo: &Repository,
     days: usize,
     executor: Option<&str>,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    io::Error: From<B::Error>,
+{
     let mut app = AgentStatsApp::new(repo, days, executor);
 
     loop {

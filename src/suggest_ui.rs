@@ -42,7 +42,7 @@ impl AppState {
         }
     }
 
-    fn next(&mut self) {
+    const fn next(&mut self) {
         if self.suggestions.is_empty() {
             return;
         }
@@ -50,7 +50,7 @@ impl AppState {
         self.list_state.select(Some(self.selected_idx));
     }
 
-    fn prev(&mut self) {
+    const fn prev(&mut self) {
         if self.suggestions.is_empty() {
             return;
         }
@@ -131,7 +131,10 @@ pub fn run_suggest_ui<B: Backend>(
     terminal: &mut Terminal<B>,
     suggestions: Vec<AliasSuggestion>,
     skipped: Vec<String>,
-) -> io::Result<Option<Vec<AliasSuggestion>>> {
+) -> io::Result<Option<Vec<AliasSuggestion>>>
+where
+    io::Error: From<B::Error>,
+{
     let mut app = AppState::new(suggestions, skipped);
 
     loop {

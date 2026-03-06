@@ -122,6 +122,40 @@ const fn default_false() -> bool {
     false
 }
 
+/// Migrate config from the old `directories` 5.x path to the 6.x path on macOS.
+/// directories 5.x: ~/Library/Preferences/tech.appachi.suvadu/
+/// directories 6.x: ~/Library/Application Support/tech.appachi.suvadu/
+/// Only runs when the old path has a config and the new path does not.
+pub fn migrate_config_macos() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let old_dir = PathBuf::from(&home).join("Library/Preferences/tech.appachi.suvadu");
+    let old_config = old_dir.join("config.toml");
+
+    if !old_config.exists() {
+        return;
+    }
+
+    let Some(proj) = directories::ProjectDirs::from("tech", "appachi", "suvadu") else {
+        return;
+    };
+    let new_dir = proj.config_dir();
+    let new_config = new_dir.join("config.toml");
+
+    if new_config.exists() {
+        return;
+    }
+
+    if std::fs::create_dir_all(new_dir).is_ok() {
+        let _ = std::fs::copy(&old_config, &new_config);
+    }
+}
+
 /// Get the path to the suvadu config file
 pub fn get_config_path() -> ConfigResult<PathBuf> {
     let config_dir = directories::ProjectDirs::from("tech", "appachi", "suvadu")
@@ -135,6 +169,7 @@ pub fn get_config_path() -> ConfigResult<PathBuf> {
 
 /// Load configuration from file (or return default if file doesn't exist)
 pub fn load_config() -> ConfigResult<Config> {
+    migrate_config_macos();
     let path = get_config_path()?;
 
     if !path.exists() {

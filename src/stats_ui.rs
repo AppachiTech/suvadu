@@ -211,7 +211,7 @@ impl StatsApp {
         true
     }
 
-    fn move_selection_up(&mut self) {
+    const fn move_selection_up(&mut self) {
         match self.focus {
             Focus::TopCommands => {
                 if let Some(cur) = self.commands_table_state.selected() {
@@ -553,7 +553,7 @@ impl StatsApp {
 
         let sparkline = Sparkline::default()
             .block(block)
-            .data(&data)
+            .data(data.iter().copied())
             .style(Style::default().fg(t.primary));
 
         f.render_widget(sparkline, area);
@@ -883,7 +883,10 @@ pub fn run_stats_ui<B: Backend>(
     repo: &Repository,
     initial_days: Option<usize>,
     top_n: usize,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    io::Error: From<B::Error>,
+{
     let period = match initial_days {
         Some(d) if d <= 7 => Period::Days7,
         Some(d) if d <= 30 => Period::Days30,

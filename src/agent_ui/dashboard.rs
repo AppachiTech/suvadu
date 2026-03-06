@@ -855,7 +855,10 @@ pub fn run_agent_ui<B: Backend>(
     initial_after_ms: Option<i64>,
     executor: Option<&str>,
     cwd: Option<&str>,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    io::Error: From<B::Error>,
+{
     let mut app = AgentApp::new(repo, initial_after_ms, executor, cwd);
 
     loop {

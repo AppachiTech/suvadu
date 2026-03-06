@@ -16,26 +16,26 @@ name = "suv"
 path = "src/main.rs"
 
 [dependencies]
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = "0.4"
-uuid = { version = "1.6", features = ["v4", "serde"] }
-directories = "5.0"
-thiserror = "1.0"
+uuid = { version = "1.22", features = ["v4", "serde"] }
+directories = "6.0"
+thiserror = "2.0"
 clap = { version = "4.5", features = ["derive"] }
-toml = "0.8"
+toml = "1.0"
 hostname = "0.4"
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = "0.30"
+crossterm = "0.29"
 arboard = "3.6.1"
-regex = "1.12.2"
+regex = "1.12.3"
 nucleo-matcher = "0.3"
 clap_complete = "4"
 clap_mangen = "0.2"
 
 [dev-dependencies]
-tempfile = "3.8"
+tempfile = "3.26"
 
 [build-dependencies]
 chrono = "0.4"

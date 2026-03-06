@@ -35,6 +35,11 @@ impl SearchApp {
         count
     }
 
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     pub(super) fn fuzzy_score(
         entries: Vec<Entry>,
         query: &str,
@@ -57,7 +62,11 @@ impl SearchApp {
                 // Commands ≤80 chars keep full score; longer ones are scaled
                 // down by sqrt(80/len) so a 500-char command gets ~40% score.
                 let cmd_len = entry.command.len().max(1) as f64;
-                let length_factor = if cmd_len <= 80.0 { 1.0 } else { (80.0 / cmd_len).sqrt() };
+                let length_factor = if cmd_len <= 80.0 {
+                    1.0
+                } else {
+                    (80.0 / cmd_len).sqrt()
+                };
                 let mut final_score = (f64::from(score) * length_factor) as u32;
 
                 // Boost human-executed commands over agent commands

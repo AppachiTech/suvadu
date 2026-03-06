@@ -84,7 +84,7 @@ impl Repository {
     }
 
     /// Get entries with optional filters
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
     pub fn get_entries(
         &self,
         limit: usize,
@@ -110,8 +110,8 @@ impl Repository {
             "SELECT {ENTRY_COLUMNS} {ENTRY_JOINS}{} ORDER BY e.started_at DESC LIMIT ? OFFSET ?",
             fb.build_where()
         );
-        fb.push_param(Box::new(limit));
-        fb.push_param(Box::new(offset));
+        fb.push_param(Box::new(limit as i64));
+        fb.push_param(Box::new(offset as i64));
 
         let mut stmt = self.conn.prepare(&sql)?;
         let entries = stmt
@@ -155,7 +155,7 @@ impl Repository {
     }
 
     /// Get entries with unique command deduplication
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
     pub fn get_unique_entries(
         &self,
         limit: usize,
@@ -193,8 +193,8 @@ impl Repository {
              {ENTRY_JOINS}{} GROUP BY e.command ORDER BY {order} LIMIT ? OFFSET ?",
             fb.build_where()
         );
-        fb.push_param(Box::new(limit));
-        fb.push_param(Box::new(offset));
+        fb.push_param(Box::new(limit as i64));
+        fb.push_param(Box::new(offset as i64));
 
         let mut stmt = self.conn.prepare(&sql)?;
 
@@ -213,6 +213,7 @@ impl Repository {
     /// Used by arrow-key navigation so that every invocation (including
     /// failed commands) is accessible. When `boost_cwd` is provided,
     /// same-directory entries sort before others at the same recency tier.
+    #[allow(clippy::cast_possible_wrap)]
     pub fn get_recent_entries(
         &self,
         limit: usize,
@@ -238,8 +239,8 @@ impl Repository {
         if let Some(cwd) = boost_cwd {
             fb.push_param(Box::new(cwd.to_string()));
         }
-        fb.push_param(Box::new(limit));
-        fb.push_param(Box::new(offset));
+        fb.push_param(Box::new(limit as i64));
+        fb.push_param(Box::new(offset as i64));
 
         let mut stmt = self.conn.prepare(&sql)?;
 
