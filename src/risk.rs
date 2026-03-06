@@ -590,6 +590,17 @@ mod tests {
         assert_eq!(risk.packages_installed.len(), 1); // express
     }
 
+    #[test]
+    fn test_all_patterns_compile() {
+        // Verify that all regex patterns compile successfully and none are silently dropped
+        let patterns = &*RISK_PATTERNS;
+        assert!(
+            patterns.len() >= 33,
+            "Expected at least 33 risk patterns, got {}. Some patterns may have failed to compile.",
+            patterns.len()
+        );
+    }
+
     fn make_entry(command: &str, exit_code: Option<i32>) -> Entry {
         Entry {
             id: None,

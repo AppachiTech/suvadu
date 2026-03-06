@@ -173,14 +173,18 @@ pub fn handle_uninstall() -> Result<(), Box<dyn std::error::Error>> {
             Ok(s) if s.success() => println!("✓"),
             _ => {
                 // Fallback: remove binary directly
-                let cargo_bin = std::env::var("HOME")
-                    .map(|h| format!("{h}/.cargo/bin/suv"))
-                    .unwrap_or_default();
-                if std::fs::remove_file(&cargo_bin).is_ok() {
-                    println!("✓ (removed binary directly)");
+                if let Ok(home) = std::env::var("HOME") {
+                    let cargo_bin = format!("{home}/.cargo/bin/suv");
+                    if std::fs::remove_file(&cargo_bin).is_ok() {
+                        println!("✓ (removed binary directly)");
+                    } else {
+                        println!("✘");
+                        eprintln!("  Failed. Run manually: cargo uninstall suvadu");
+                        all_ok = false;
+                    }
                 } else {
                     println!("✘");
-                    eprintln!("  Failed. Run manually: cargo uninstall suvadu");
+                    eprintln!("  Failed (HOME not set). Run manually: cargo uninstall suvadu");
                     all_ok = false;
                 }
             }

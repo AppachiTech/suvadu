@@ -72,7 +72,7 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Download archive
     println!("Downloading {platform_label} build from: {archive_url}");
     let status = std::process::Command::new("curl")
-        .args(["-fsSL", "-o", &tarball_str, &archive_url])
+        .args(["-fsSL", "-m", "300", "-o", &tarball_str, &archive_url])
         .status()?;
 
     if !status.success() {
@@ -83,7 +83,7 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Download and verify checksum
     let checksum_result = std::process::Command::new("curl")
-        .args(["-fsSL", &checksum_url])
+        .args(["-fsSL", "-m", "30", &checksum_url])
         .output();
 
     match checksum_result {

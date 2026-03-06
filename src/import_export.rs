@@ -144,6 +144,11 @@ pub fn handle_import_zsh_history(
     // Read file with lossy UTF-8 conversion (zsh_history may contain binary data)
     let raw = std::fs::read(file)?;
     let text = String::from_utf8_lossy(&raw);
+    if matches!(text, std::borrow::Cow::Owned(_)) {
+        eprintln!(
+            "Warning: {file} contains invalid UTF-8 bytes; those bytes were replaced with \u{FFFD}"
+        );
+    }
 
     // Phase 1: Parse all entries from the zsh_history file
     // Entries are (command, started_at_ms, duration_ms)

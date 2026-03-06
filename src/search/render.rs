@@ -215,18 +215,14 @@ impl SearchApp {
         if self.filter_executor_type.is_some() {
             help_badges.push(Span::styled(
                 " exec ",
-                Style::default()
-                    .bg(Color::Rgb(147, 51, 234))
-                    .fg(Color::White),
+                Style::default().bg(t.badge_executor).fg(Color::White),
             ));
             help_badges.push(Span::raw(" "));
         }
         if self.filter_cwd.is_some() {
             help_badges.push(Span::styled(
                 " dir ",
-                Style::default()
-                    .bg(Color::Rgb(6, 182, 212))
-                    .fg(Color::Black),
+                Style::default().bg(t.badge_path).fg(Color::Black),
             ));
             help_badges.push(Span::raw(" "));
         }
@@ -869,7 +865,7 @@ impl SearchApp {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(t.error))
-            .style(Style::default().bg(Color::Rgb(40, 10, 10)));
+            .style(Style::default().bg(t.error_bg));
 
         // Show command preview
         let cmd_preview = self

@@ -60,6 +60,9 @@ pub struct Theme {
     pub risk_high: Color,
     pub risk_medium: Color,
     pub risk_low: Color,
+    pub badge_executor: Color,
+    pub badge_path: Color,
+    pub error_bg: Color,
 }
 
 impl Theme {
@@ -84,6 +87,9 @@ impl Theme {
             risk_high: Color::Rgb(251, 146, 60),
             risk_medium: Color::Rgb(234, 179, 8),
             risk_low: Color::Rgb(120, 120, 130),
+            badge_executor: Color::Rgb(147, 51, 234),
+            badge_path: Color::Rgb(6, 182, 212),
+            error_bg: Color::Rgb(40, 10, 10),
         }
     }
 
@@ -108,6 +114,9 @@ impl Theme {
             risk_high: Color::Rgb(210, 110, 20),
             risk_medium: Color::Rgb(160, 120, 0),
             risk_low: Color::Rgb(120, 120, 130),
+            badge_executor: Color::Rgb(120, 40, 190),
+            badge_path: Color::Rgb(0, 140, 170),
+            error_bg: Color::Rgb(255, 230, 230),
         }
     }
 
@@ -132,6 +141,9 @@ impl Theme {
             risk_high: Color::LightRed,
             risk_medium: Color::Yellow,
             risk_low: Color::DarkGray,
+            badge_executor: Color::Magenta,
+            badge_path: Color::Cyan,
+            error_bg: Color::Red,
         }
     }
 
