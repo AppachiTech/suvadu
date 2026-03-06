@@ -6,6 +6,15 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Write `data` to `path` atomically: write to a sibling temp file, then rename.
+/// This prevents corruption if the process crashes mid-write.
+fn atomic_write(path: &Path, data: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, data)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 /// Handle `PostToolUse` hook from Claude Code — reads JSON event from stdin and records the command.
 pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Read;
@@ -348,7 +357,7 @@ pub fn try_merge_claude_settings(
             let changed = dedup_suvadu_hooks(&mut settings);
             if changed {
                 let updated = serde_json::to_string_pretty(&settings)?;
-                std::fs::write(settings_path, updated)?;
+                atomic_write(settings_path, &updated)?;
             }
             return Ok(true);
         }
@@ -373,7 +382,7 @@ pub fn try_merge_claude_settings(
             }));
 
         let updated = serde_json::to_string_pretty(&settings)?;
-        std::fs::write(settings_path, updated)?;
+        atomic_write(settings_path, &updated)?;
         return Ok(true);
     }
 
@@ -415,7 +424,7 @@ pub fn try_merge_claude_settings(
 
     // Write back with pretty formatting
     let updated = serde_json::to_string_pretty(&settings)?;
-    std::fs::write(settings_path, updated)?;
+    atomic_write(settings_path, &updated)?;
 
     Ok(true)
 }
