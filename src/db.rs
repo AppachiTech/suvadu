@@ -56,8 +56,27 @@ fn set_schema_version(conn: &Connection, version: i64) -> DbResult<()> {
     Ok(())
 }
 
+/// Allowed table names for `column_exists` -- defense-in-depth against
+/// SQL injection even though all callers use hardcoded literals.
+const ALLOWED_TABLES: &[&str] = &["entries", "sessions", "tags", "bookmarks", "notes"];
+
+/// Allowed column names for `column_exists`.
+const ALLOWED_COLUMNS: &[&str] = &[
+    "tag_id",
+    "executor_type",
+    "executor",
+    "description",
+    "label",
+];
+
 /// Check whether a column exists on a table.
+///
+/// Table and column names are validated against allowlists before
+/// interpolation into SQL to prevent injection (defense-in-depth).
 fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+    if !ALLOWED_TABLES.contains(&table) || !ALLOWED_COLUMNS.contains(&column) {
+        return false;
+    }
     conn.query_row(
         &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name='{column}'"),
         [],
@@ -376,5 +395,37 @@ mod tests {
         assert!(column_exists(&conn, "entries", "executor_type"));
         assert!(column_exists(&conn, "entries", "executor"));
         assert!(column_exists(&conn, "sessions", "tag_id"));
+    }
+
+    #[test]
+    fn test_column_exists_rejects_unlisted_table() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let conn = init_db(&db_path).unwrap();
+
+        assert!(!column_exists(&conn, "evil_table", "tag_id"));
+    }
+
+    #[test]
+    fn test_column_exists_rejects_unlisted_column() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let conn = init_db(&db_path).unwrap();
+
+        assert!(!column_exists(&conn, "entries", "evil_column"));
+    }
+
+    #[test]
+    fn test_column_exists_rejects_sql_injection_attempt() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let conn = init_db(&db_path).unwrap();
+
+        assert!(!column_exists(
+            &conn,
+            "entries'; DROP TABLE entries; --",
+            "tag_id"
+        ));
+        assert!(!column_exists(&conn, "entries", "tag_id' OR '1'='1"));
     }
 }

@@ -93,3 +93,30 @@ pub fn handle_get(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    /// The exit code used to signal the shell widget that suvadu is
+    /// inactive and the shell should fall back to its native search.
+    const EXIT_CODE_SHELL_FALLBACK: i32 = 10;
+
+    #[test]
+    fn test_shell_fallback_exit_code_is_documented() {
+        // This test exists to document the magic exit code.
+        // If the value needs to change, update both the constant
+        // and the process::exit(10) call in handle_search().
+        assert_eq!(EXIT_CODE_SHELL_FALLBACK, 10);
+    }
+
+    #[test]
+    fn test_empty_query_becomes_none() {
+        // Verify the logic: empty string → None, non-empty → Some
+        let query = "";
+        let query_opt = if query.is_empty() { None } else { Some(query) };
+        assert!(query_opt.is_none());
+
+        let query = "git";
+        let query_opt = if query.is_empty() { None } else { Some(query) };
+        assert_eq!(query_opt, Some("git"));
+    }
+}

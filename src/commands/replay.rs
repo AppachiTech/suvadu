@@ -173,7 +173,7 @@ mod tests {
 
     fn test_repo() -> Repository {
         let temp_dir = tempfile::TempDir::new().unwrap();
-        let db_path = temp_dir.into_path().join("test.db");
+        let db_path = temp_dir.keep().join("test.db");
         let conn = db::init_db(&db_path).unwrap();
         Repository::new(conn)
     }

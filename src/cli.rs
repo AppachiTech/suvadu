@@ -453,3 +453,97 @@ pub enum AgentCommands {
         text: bool,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_cli_parses_enable() {
+        let cli = Cli::try_parse_from(["suv", "enable"]).unwrap();
+        assert!(matches!(cli.command, Commands::Enable));
+    }
+
+    #[test]
+    fn test_cli_parses_search_with_args() {
+        let cli = Cli::try_parse_from(["suv", "search", "-q", "git", "--unique"]).unwrap();
+        match cli.command {
+            Commands::Search { query, unique, .. } => {
+                assert_eq!(query, Some("git".to_string()));
+                assert!(unique);
+            }
+            _ => panic!("Expected Search command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_agent_report() {
+        let cli = Cli::try_parse_from([
+            "suv",
+            "agent",
+            "report",
+            "--format",
+            "json",
+            "--executor",
+            "claude-code",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Agent(AgentCommands::Report {
+                format, executor, ..
+            }) => {
+                assert_eq!(format, "json");
+                assert_eq!(executor, Some("claude-code".to_string()));
+            }
+            _ => panic!("Expected Agent Report command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_stats_defaults() {
+        let cli = Cli::try_parse_from(["suv", "stats"]).unwrap();
+        match cli.command {
+            Commands::Stats { days, top, text } => {
+                assert!(days.is_none());
+                assert_eq!(top, 10);
+                assert!(!text);
+            }
+            _ => panic!("Expected Stats command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_rejects_unknown_command() {
+        let result = Cli::try_parse_from(["suv", "nonexistent"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cli_parses_wrap_with_trailing_args() {
+        let cli = Cli::try_parse_from([
+            "suv",
+            "wrap",
+            "--executor-type",
+            "agent",
+            "--executor",
+            "claude-code",
+            "--",
+            "git",
+            "status",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Wrap {
+                command,
+                executor_type,
+                executor,
+            } => {
+                assert_eq!(command, vec!["git".to_string(), "status".to_string()]);
+                assert_eq!(executor_type, "agent");
+                assert_eq!(executor, "claude-code");
+            }
+            _ => panic!("Expected Wrap command"),
+        }
+    }
+}

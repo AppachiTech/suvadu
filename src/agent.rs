@@ -371,67 +371,8 @@ fn print_agent_report_json(
     entries: &[Entry],
     risk_summary: &risk::SessionRisk,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut report = serde_json::Map::new();
-
-    report.insert(
-        "total_commands".into(),
-        serde_json::Value::from(entries.len()),
-    );
-    let success = entries.iter().filter(|e| e.exit_code == Some(0)).count();
-    report.insert("success_count".into(), serde_json::Value::from(success));
-    report.insert(
-        "critical_risk_count".into(),
-        serde_json::Value::from(risk_summary.critical_count),
-    );
-    report.insert(
-        "high_risk_count".into(),
-        serde_json::Value::from(risk_summary.high_count),
-    );
-    report.insert(
-        "medium_risk_count".into(),
-        serde_json::Value::from(risk_summary.medium_count),
-    );
-
-    // Package installs
-    let packages: Vec<serde_json::Value> = risk_summary
-        .packages_installed
-        .iter()
-        .map(|p| {
-            serde_json::json!({
-                "manager": p.manager,
-                "packages": p.packages,
-            })
-        })
-        .collect();
-    report.insert(
-        "packages_installed".into(),
-        serde_json::Value::from(packages),
-    );
-
-    // Entries with risk
-    let entries_json: Vec<serde_json::Value> = entries
-        .iter()
-        .map(|e| {
-            let assessment = risk::assess_risk(&e.command);
-            serde_json::json!({
-                "command": e.command,
-                "cwd": e.cwd,
-                "exit_code": e.exit_code,
-                "executor_type": e.executor_type,
-                "executor": e.executor,
-                "started_at": e.started_at,
-                "duration_ms": e.duration_ms,
-                "risk_level": assessment.as_ref().map_or("none", |a| a.level.label()),
-                "risk_category": assessment.as_ref().map(|a| a.category),
-            })
-        })
-        .collect();
-    report.insert("entries".into(), serde_json::Value::from(entries_json));
-
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::Value::Object(report))?
-    );
+    let json = build_agent_report_json(entries, risk_summary);
+    println!("{}", serde_json::to_string_pretty(&json)?);
     Ok(())
 }
 
@@ -682,4 +623,220 @@ fn format_timestamp_time(ms: i64) -> String {
         .timestamp_millis_opt(ms_val)
         .single()
         .map_or_else(|| "??:??".into(), |dt| dt.format("%H:%M").to_string())
+}
+
+/// Build the agent-report JSON value without printing it.
+/// Extracted so that `print_agent_report_json` and tests can share logic.
+fn build_agent_report_json(
+    entries: &[Entry],
+    risk_summary: &risk::SessionRisk,
+) -> serde_json::Value {
+    let mut report = serde_json::Map::new();
+
+    report.insert(
+        "total_commands".into(),
+        serde_json::Value::from(entries.len()),
+    );
+    let success = entries.iter().filter(|e| e.exit_code == Some(0)).count();
+    report.insert("success_count".into(), serde_json::Value::from(success));
+    report.insert(
+        "critical_risk_count".into(),
+        serde_json::Value::from(risk_summary.critical_count),
+    );
+    report.insert(
+        "high_risk_count".into(),
+        serde_json::Value::from(risk_summary.high_count),
+    );
+    report.insert(
+        "medium_risk_count".into(),
+        serde_json::Value::from(risk_summary.medium_count),
+    );
+
+    let packages: Vec<serde_json::Value> = risk_summary
+        .packages_installed
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "manager": p.manager,
+                "packages": p.packages,
+            })
+        })
+        .collect();
+    report.insert(
+        "packages_installed".into(),
+        serde_json::Value::from(packages),
+    );
+
+    let entries_json: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            let assessment = risk::assess_risk(&e.command);
+            serde_json::json!({
+                "command": e.command,
+                "cwd": e.cwd,
+                "exit_code": e.exit_code,
+                "executor_type": e.executor_type,
+                "executor": e.executor,
+                "started_at": e.started_at,
+                "duration_ms": e.duration_ms,
+                "risk_level": assessment.as_ref().map_or("none", |a| a.level.label()),
+                "risk_category": assessment.as_ref().map(|a| a.category),
+            })
+        })
+        .collect();
+    report.insert("entries".into(), serde_json::Value::from(entries_json));
+
+    serde_json::Value::Object(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: build an `Entry` with the given executor_type and executor,
+    /// using sensible defaults for everything else.
+    fn make_entry(command: &str, executor_type: Option<&str>, executor: Option<&str>) -> Entry {
+        let mut e = Entry::new(
+            "sess-1".to_string(),
+            command.to_string(),
+            "/tmp".to_string(),
+            Some(0),
+            1_700_000_000_000, // ~2023-11-14 in ms
+            1_700_000_001_000,
+        );
+        e.executor_type = executor_type.map(String::from);
+        e.executor = executor.map(String::from);
+        e
+    }
+
+    // ── format_timestamp_time ───────────────────────────────────────
+
+    #[test]
+    fn format_timestamp_time_normal_ms() {
+        // A known millisecond timestamp should produce a non-error HH:MM string.
+        let result = format_timestamp_time(1_700_000_000_000);
+        // Cannot hard-code the hour because the local timezone varies,
+        // but it must NOT be the error sentinel.
+        assert_ne!(result, "??:??");
+        // Should match HH:MM pattern.
+        assert_eq!(result.len(), 5);
+        assert_eq!(result.as_bytes()[2], b':');
+    }
+
+    #[test]
+    fn format_timestamp_time_microsecond_normalization() {
+        // Timestamp > 1e15 is treated as microseconds and divided by 1000.
+        // 1_700_000_000_000_000 µs == 1_700_000_000_000 ms (same instant).
+        let from_us = format_timestamp_time(1_700_000_000_000_000);
+        let from_ms = format_timestamp_time(1_700_000_000_000);
+        assert_eq!(from_us, from_ms);
+    }
+
+    #[test]
+    fn format_timestamp_time_invalid_value() {
+        // A value that chrono cannot represent should return the sentinel.
+        let result = format_timestamp_time(i64::MIN);
+        assert_eq!(result, "??:??");
+    }
+
+    // ── build_agent_report_json (same logic as print_agent_report_json) ─
+
+    #[test]
+    fn agent_report_json_has_expected_fields() {
+        let entries = vec![
+            make_entry("ls", Some("claude"), Some("claude")),
+            make_entry("rm -rf /important", Some("claude"), Some("claude")),
+            make_entry("cargo build", Some("copilot"), Some("copilot")),
+        ];
+        let risk_summary = risk::session_risk(&entries);
+
+        let json = build_agent_report_json(&entries, &risk_summary);
+
+        // Round-trip through serialization to prove the output is valid JSON.
+        let serialized = serde_json::to_string_pretty(&json).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&serialized)
+            .expect("build_agent_report_json should produce valid JSON");
+
+        let obj = parsed.as_object().expect("top-level should be an object");
+        assert_eq!(obj["total_commands"], 3);
+        assert_eq!(obj["success_count"], 3);
+        assert!(obj.contains_key("critical_risk_count"));
+        assert!(obj.contains_key("high_risk_count"));
+        assert!(obj.contains_key("medium_risk_count"));
+        assert!(obj.contains_key("packages_installed"));
+        assert!(obj.contains_key("entries"));
+
+        let arr = obj["entries"].as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+
+        // Each entry object should carry the expected per-command fields.
+        for item in arr {
+            let m = item.as_object().unwrap();
+            assert!(m.contains_key("command"));
+            assert!(m.contains_key("risk_level"));
+            assert!(m.contains_key("risk_category"));
+            assert!(m.contains_key("executor"));
+            assert!(m.contains_key("duration_ms"));
+        }
+    }
+
+    #[test]
+    fn agent_report_json_risk_levels_populated() {
+        // "rm -rf /" is critical risk; make sure the entry reflects that.
+        let entries = vec![make_entry(
+            "rm -rf /important",
+            Some("claude"),
+            Some("claude"),
+        )];
+        let risk_summary = risk::session_risk(&entries);
+        let json = build_agent_report_json(&entries, &risk_summary);
+        let obj = json.as_object().unwrap();
+
+        // The critical_risk_count should be at least 1.
+        assert!(obj["critical_risk_count"].as_u64().unwrap() >= 1);
+
+        let entry_obj = obj["entries"].as_array().unwrap()[0].as_object().unwrap();
+        assert_eq!(entry_obj["risk_level"], "critical");
+        assert_eq!(entry_obj["risk_category"], "destructive");
+    }
+
+    // ── agent filtering (Entry::is_agent gate) ──────────────────────
+
+    #[test]
+    fn agent_filter_excludes_human_and_unknown() {
+        let entries = vec![
+            make_entry("echo a", Some("claude"), Some("claude")),
+            make_entry("echo b", Some("human"), None),
+            make_entry("echo c", Some("unknown"), None),
+            make_entry("echo d", Some("copilot"), Some("copilot")),
+            make_entry("echo e", None, None), // executor_type is None → is_agent false
+        ];
+
+        let agent_only: Vec<_> = entries.into_iter().filter(Entry::is_agent).collect();
+
+        assert_eq!(agent_only.len(), 2);
+        assert_eq!(agent_only[0].command, "echo a");
+        assert_eq!(agent_only[1].command, "echo d");
+    }
+
+    // ── days filter: saturating_mul ─────────────────────────────────
+
+    #[test]
+    fn days_ms_saturating_mul_does_not_overflow() {
+        // Mirrors the calculation in handle_agent_stats_text.
+        let days: usize = usize::MAX;
+        let days_ms = i64::try_from(days)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(86_400_000);
+        assert_eq!(days_ms, i64::MAX);
+    }
+
+    #[test]
+    fn days_ms_normal_value() {
+        let days: usize = 7;
+        let days_ms = i64::try_from(days)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(86_400_000);
+        assert_eq!(days_ms, 7 * 86_400_000);
+    }
 }

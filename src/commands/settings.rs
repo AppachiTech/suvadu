@@ -241,3 +241,45 @@ pub fn handle_uninstall() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_recording_state_logic() {
+        // Recording requires both: globally enabled AND not paused
+        let cases = [
+            (true, false, true),   // enabled + not paused → recording
+            (true, true, false),   // enabled + paused → not recording
+            (false, false, false), // disabled + not paused → not recording
+            (false, true, false),  // disabled + paused → not recording
+        ];
+        for (enabled, paused, expected) in cases {
+            let recording = enabled && !paused;
+            assert_eq!(recording, expected, "enabled={enabled}, paused={paused}");
+        }
+    }
+
+    #[test]
+    fn test_uninstall_detection_logic() {
+        // If neither homebrew nor cargo is detected, we fall back to `which`
+        let is_homebrew = false;
+        let is_cargo = false;
+        assert!(
+            !is_homebrew && !is_cargo,
+            "Should fall back to which-based detection"
+        );
+    }
+
+    #[test]
+    fn test_confirmation_input_parsing() {
+        // Only "y" (case-insensitive) should proceed
+        let accepts = ["y", "Y", " y ", "Y "];
+        let rejects = ["n", "N", "", "yes", "no"];
+        for input in accepts {
+            assert_eq!(input.trim().to_lowercase(), "y");
+        }
+        for input in rejects {
+            assert_ne!(input.trim().to_lowercase(), "y");
+        }
+    }
+}

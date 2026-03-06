@@ -7,10 +7,12 @@ use super::{entry_from_row, FilterBuilder, Repository, ENTRY_COLUMNS, ENTRY_JOIN
 impl Repository {
     /// Insert a new entry
     pub fn insert_entry(&self, entry: &Entry) -> DbResult<i64> {
-        let context_json = entry
-            .context
-            .as_ref()
-            .map(|c| serde_json::to_string(c).unwrap_or_default());
+        let context_json = entry.context.as_ref().map(|c| {
+            serde_json::to_string(c).unwrap_or_else(|e| {
+                eprintln!("suvadu: failed to serialize entry context: {e}");
+                String::new()
+            })
+        });
 
         self.conn.execute(
             "INSERT INTO entries (session_id, command, cwd, exit_code, started_at, ended_at, duration_ms, context, tag_id, executor_type, executor)
