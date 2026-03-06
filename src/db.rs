@@ -1,4 +1,4 @@
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -16,6 +16,9 @@ pub enum DbError {
 
 pub type DbResult<T> = Result<T, DbError>;
 
+/// Current schema version. Increment when adding new migrations.
+const SCHEMA_VERSION: i64 = 1;
+
 /// Get the path to the suvadu database file
 pub fn get_db_path() -> DbResult<PathBuf> {
     let data_dir = directories::ProjectDirs::from("tech", "appachi", "suvadu")
@@ -27,16 +30,50 @@ pub fn get_db_path() -> DbResult<PathBuf> {
     Ok(data_dir.join("history.db"))
 }
 
-/// Initialize the database with proper schema and settings
-#[allow(clippy::too_many_lines)]
-pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
-    let conn = Connection::open(path)?;
+/// Read the current schema version (0 if no version table exists yet).
+fn get_schema_version(conn: &Connection) -> DbResult<i64> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)",
+        [],
+    )?;
 
-    // Enable WAL mode for better concurrency and performance
-    conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    let version: i64 = conn
+        .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap_or(0);
 
-    // Create tags table
+    Ok(version)
+}
+
+/// Set the schema version after a successful migration.
+fn set_schema_version(conn: &Connection, version: i64) -> DbResult<()> {
+    conn.execute("DELETE FROM schema_version", [])?;
+    conn.execute(
+        "INSERT INTO schema_version (version) VALUES (?1)",
+        params![version],
+    )?;
+    Ok(())
+}
+
+/// Check whether a column exists on a table.
+fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+    conn.query_row(
+        &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name='{column}'"),
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|count| count > 0)
+    .unwrap_or(false)
+}
+
+/// Migration v1: full schema as of initial release.
+///
+/// Every statement is idempotent (`IF NOT EXISTS` / column-existence
+/// guards) so it is safe to run against both fresh and pre-existing
+/// databases that were created before schema versioning was added.
+fn migrate_v1(conn: &Connection) -> DbResult<()> {
+    // ── Tags ────────────────────────────────────────────
     conn.execute(
         "CREATE TABLE IF NOT EXISTS tags (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,7 +83,7 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
         [],
     )?;
 
-    // Create sessions table
+    // ── Sessions ────────────────────────────────────────
     conn.execute(
         "CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
@@ -57,27 +94,14 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
         [],
     )?;
 
-    // Migration: Add tag_id to sessions if it doesn't exist (idempotent check hard in simple sqlite,
-    // but ignoring error on duplicate column is a common pattern or checking pragma table_info)
-
-    // Check if tag_id column exists
-    let column_exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='tag_id'",
-            [],
-            |row| row.get(0),
-        )
-        .map(|count: i64| count > 0)
-        .unwrap_or(false);
-
-    if !column_exists {
+    if !column_exists(conn, "sessions", "tag_id") {
         conn.execute(
             "ALTER TABLE sessions ADD COLUMN tag_id INTEGER REFERENCES tags(id)",
             [],
         )?;
     }
 
-    // Create entries table
+    // ── Entries ─────────────────────────────────────────
     conn.execute(
         "CREATE TABLE IF NOT EXISTS entries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,75 +118,30 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
         [],
     )?;
 
-    // Create indexes for common queries
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_entries_session_id ON entries(session_id)",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_entries_started_at ON entries(started_at)",
-        [],
-    )?;
-
-    // Check if command index exists
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_entries_command ON entries(command)",
-        [],
-    )?;
-
-    // Migration: Add tag_id to entries if it doesn't exist
-    let entries_tag_col_exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('entries') WHERE name='tag_id'",
-            [],
-            |row| row.get(0),
-        )
-        .map(|count: i64| count > 0)
-        .unwrap_or(false);
-
-    if !entries_tag_col_exists {
+    if !column_exists(conn, "entries", "tag_id") {
         conn.execute(
             "ALTER TABLE entries ADD COLUMN tag_id INTEGER REFERENCES tags(id)",
             [],
         )?;
-
-        // Create index for fast tag filtering
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_entries_tag_id ON entries(tag_id)",
-            [],
-        )?;
     }
 
-    // Migration: Add executor_type column
-    let executor_type_exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('entries') WHERE name='executor_type'",
-            [],
-            |row| row.get(0),
-        )
-        .map(|count: i64| count > 0)
-        .unwrap_or(false);
-
-    if !executor_type_exists {
+    if !column_exists(conn, "entries", "executor_type") {
         conn.execute("ALTER TABLE entries ADD COLUMN executor_type TEXT", [])?;
     }
 
-    // Migration: Add executor column
-    let executor_exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('entries') WHERE name='executor'",
-            [],
-            |row| row.get(0),
-        )
-        .map(|count: i64| count > 0)
-        .unwrap_or(false);
-
-    if !executor_exists {
+    if !column_exists(conn, "entries", "executor") {
         conn.execute("ALTER TABLE entries ADD COLUMN executor TEXT", [])?;
     }
 
-    // Create bookmarks table
+    // ── Indexes ─────────────────────────────────────────
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_entries_session_id ON entries(session_id);
+         CREATE INDEX IF NOT EXISTS idx_entries_started_at ON entries(started_at);
+         CREATE INDEX IF NOT EXISTS idx_entries_command    ON entries(command);
+         CREATE INDEX IF NOT EXISTS idx_entries_tag_id     ON entries(tag_id);",
+    )?;
+
+    // ── Bookmarks ───────────────────────────────────────
     conn.execute(
         "CREATE TABLE IF NOT EXISTS bookmarks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -177,7 +156,7 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
         [],
     )?;
 
-    // Create notes table
+    // ── Notes ───────────────────────────────────────────
     conn.execute(
         "CREATE TABLE IF NOT EXISTS notes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -192,6 +171,34 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
         "CREATE INDEX IF NOT EXISTS idx_notes_entry_id ON notes(entry_id)",
         [],
     )?;
+
+    Ok(())
+}
+
+/// Initialize the database with proper schema and settings.
+///
+/// Migrations are tracked via a `schema_version` table so each
+/// migration runs exactly once. All migration functions are
+/// idempotent as an extra safety net.
+pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
+    let conn = Connection::open(path)?;
+
+    // Enable WAL mode for better concurrency and performance
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+
+    let version = get_schema_version(&conn)?;
+
+    if version < 1 {
+        migrate_v1(&conn)?;
+        set_schema_version(&conn, SCHEMA_VERSION)?;
+    }
+
+    // Future migrations:
+    // if version < 2 {
+    //     migrate_v2(&conn)?;
+    //     set_schema_version(&conn, 2)?;
+    // }
 
     Ok(conn)
 }
@@ -248,5 +255,117 @@ mod tests {
             path.is_absolute(),
             "DB path should be absolute, got: {path_str}"
         );
+    }
+
+    #[test]
+    fn test_schema_version_tracking() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        let conn = init_db(&db_path).unwrap();
+
+        // After init, version should be SCHEMA_VERSION
+        let version = get_schema_version(&conn).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_schema_version_table_exists() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        let conn = init_db(&db_path).unwrap();
+
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_version'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap();
+        assert!(table_exists);
+    }
+
+    #[test]
+    fn test_init_db_idempotent() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        // First init
+        let conn = init_db(&db_path).unwrap();
+        let v1 = get_schema_version(&conn).unwrap();
+        drop(conn);
+
+        // Second init — should not fail or change version
+        let conn = init_db(&db_path).unwrap();
+        let v2 = get_schema_version(&conn).unwrap();
+
+        assert_eq!(v1, v2);
+        assert_eq!(v2, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_migrate_pre_existing_db_without_version() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        // Simulate a pre-existing database without schema_version table
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, description TEXT);
+             CREATE TABLE sessions (id TEXT PRIMARY KEY, hostname TEXT NOT NULL, created_at INTEGER NOT NULL, tag_id INTEGER REFERENCES tags(id));
+             CREATE TABLE entries (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, command TEXT NOT NULL, cwd TEXT NOT NULL, exit_code INTEGER, started_at INTEGER NOT NULL, ended_at INTEGER NOT NULL, duration_ms INTEGER NOT NULL, context TEXT, tag_id INTEGER, executor_type TEXT, executor TEXT, FOREIGN KEY (session_id) REFERENCES sessions(id));
+             INSERT INTO sessions VALUES ('s1', 'host', 1000, NULL);
+             INSERT INTO entries VALUES (1, 's1', 'ls', '/tmp', 0, 1000, 1100, 100, NULL, NULL, NULL, NULL);",
+        ).unwrap();
+        drop(conn);
+
+        // Now init_db should detect version 0, run migrate_v1 (idempotent), set version
+        let conn = init_db(&db_path).unwrap();
+        let version = get_schema_version(&conn).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+
+        // Existing data should still be there
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_all_tables_created() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        let conn = init_db(&db_path).unwrap();
+
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+
+        assert!(tables.contains(&"tags".to_string()));
+        assert!(tables.contains(&"sessions".to_string()));
+        assert!(tables.contains(&"entries".to_string()));
+        assert!(tables.contains(&"bookmarks".to_string()));
+        assert!(tables.contains(&"notes".to_string()));
+        assert!(tables.contains(&"schema_version".to_string()));
+    }
+
+    #[test]
+    fn test_all_entry_columns_exist() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        let conn = init_db(&db_path).unwrap();
+
+        assert!(column_exists(&conn, "entries", "tag_id"));
+        assert!(column_exists(&conn, "entries", "executor_type"));
+        assert!(column_exists(&conn, "entries", "executor"));
+        assert!(column_exists(&conn, "sessions", "tag_id"));
     }
 }
