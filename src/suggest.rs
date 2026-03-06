@@ -93,15 +93,15 @@ fn generate_alias_name(command: &str, taken: &std::collections::HashSet<String>)
         }
     }
 
-    // Strategy 4: Append digit to strategy 1
-    for i in 2..=99 {
+    // Strategy 4: Append incrementing digit to strategy 1
+    for i in 2.. {
         let s4 = format!("{s1}{i}");
         if !taken.contains(&s4) {
             return s4;
         }
     }
 
-    s1
+    unreachable!("infinite iterator always finds a free suffix")
 }
 
 /// Escape a string for use in a shell alias value (single-quoted).
@@ -320,6 +320,20 @@ mod tests {
         // All 3 strategies taken, falls back to digit suffix
         let name = generate_alias_name("docker compose up", &taken);
         assert_eq!(name, "dcu2");
+    }
+
+    #[test]
+    fn test_generate_alias_name_high_suffix() {
+        let mut taken = std::collections::HashSet::new();
+        taken.insert("dcu".to_string());
+        taken.insert("dco".to_string());
+        taken.insert("docu".to_string());
+        // Take suffixes 2 through 100
+        for i in 2..=100 {
+            taken.insert(format!("dcu{i}"));
+        }
+        let name = generate_alias_name("docker compose up", &taken);
+        assert_eq!(name, "dcu101");
     }
 
     #[test]
