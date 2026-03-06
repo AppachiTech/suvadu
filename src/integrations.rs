@@ -64,6 +64,7 @@ pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
     let session_id = event
         .get("session_id")
         .and_then(serde_json::Value::as_str)
+        .filter(|s| is_valid_session_id(s))
         .map_or_else(
             || format!("claude-{}", uuid::Uuid::new_v4()),
             |s| format!("claude-{s}"),
@@ -104,7 +105,7 @@ pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
         .get("session_id")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
-    if session_id.is_empty() {
+    if !is_valid_session_id(session_id) {
         return Ok(());
     }
 
@@ -129,6 +130,15 @@ pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(prompt_file, truncated)?;
 
     Ok(())
+}
+
+/// Returns `true` if `id` contains only safe characters for use in file names.
+fn is_valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 256
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// Get the directory for cached agent prompts
@@ -547,6 +557,24 @@ mod tests {
             .and_then(|tr| tr.get("exit_code"))
             .and_then(serde_json::Value::as_i64);
         assert!(exit_code.is_none());
+    }
+
+    #[test]
+    fn test_valid_session_ids() {
+        assert!(is_valid_session_id("abc123"));
+        assert!(is_valid_session_id("session-with-dashes"));
+        assert!(is_valid_session_id("session_with_underscores"));
+        assert!(is_valid_session_id("MiXeD-CaSe_123"));
+    }
+
+    #[test]
+    fn test_invalid_session_ids() {
+        assert!(!is_valid_session_id(""));
+        assert!(!is_valid_session_id("../../etc/passwd"));
+        assert!(!is_valid_session_id("session id with spaces"));
+        assert!(!is_valid_session_id("session/slash"));
+        assert!(!is_valid_session_id("session\0null"));
+        assert!(!is_valid_session_id(&"a".repeat(257)));
     }
 
     #[test]

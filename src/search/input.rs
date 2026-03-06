@@ -3,6 +3,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::{SearchAction, SearchApp};
 use crate::util;
 
+/// Maximum length for any text input field (query, filters, notes, etc.).
+const MAX_INPUT_LEN: usize = 2000;
+
 impl SearchApp {
     #[allow(clippy::too_many_lines)]
     pub(super) fn handle_input(&mut self, key: KeyEvent) -> SearchAction {
@@ -112,7 +115,7 @@ impl SearchApp {
                 self.page = 1;
                 return SearchAction::Reload;
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c) if self.query.len() < MAX_INPUT_LEN => {
                 self.query.push(c);
                 return SearchAction::Reload;
             }
@@ -205,7 +208,7 @@ impl SearchApp {
             KeyCode::Backspace => {
                 self.note_input.pop();
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c) if self.note_input.len() < MAX_INPUT_LEN => {
                 self.note_input.push(c);
             }
             _ => {}
@@ -248,7 +251,7 @@ impl SearchApp {
             KeyCode::Backspace => {
                 self.goto_input.pop();
             }
-            KeyCode::Char(c) if c.is_ascii_digit() => {
+            KeyCode::Char(c) if c.is_ascii_digit() && self.goto_input.len() < MAX_INPUT_LEN => {
                 self.goto_input.push(c);
             }
             _ => {}
@@ -334,19 +337,19 @@ impl SearchApp {
                 _ => {}
             },
             KeyCode::Char(c) => match self.focus_index {
-                0 => {
+                0 if self.start_date_input.len() < MAX_INPUT_LEN => {
                     self.start_date_input.push(c);
                 }
-                1 => {
+                1 if self.end_date_input.len() < MAX_INPUT_LEN => {
                     self.end_date_input.push(c);
                 }
-                2 => {
+                2 if self.tag_filter_input.len() < MAX_INPUT_LEN => {
                     self.tag_filter_input.push(c);
                 }
-                3 => {
+                3 if self.exit_code_input.len() < MAX_INPUT_LEN => {
                     self.exit_code_input.push(c);
                 }
-                4 => {
+                4 if self.executor_filter_input.len() < MAX_INPUT_LEN => {
                     self.executor_filter_input.push(c);
                 }
                 _ => {}
