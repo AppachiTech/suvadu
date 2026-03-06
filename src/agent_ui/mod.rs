@@ -70,12 +70,7 @@ pub fn load_entries(
     if executor.is_some() {
         all
     } else {
-        all.into_iter()
-            .filter(|e| {
-                let et = e.executor_type.as_deref().unwrap_or("human");
-                et != "human" && et != "unknown"
-            })
-            .collect()
+        all.into_iter().filter(Entry::is_agent).collect()
     }
 }
 

@@ -5,11 +5,12 @@ use rusqlite::params;
 use super::Repository;
 
 impl Repository {
-    /// Add a bookmark (INSERT OR REPLACE to handle duplicates)
+    /// Add or update a bookmark. Preserves `created_at` if the command is already bookmarked.
     pub fn add_bookmark(&self, command: &str, label: Option<&str>) -> DbResult<i64> {
         let now = chrono::Utc::now().timestamp_millis();
         self.conn.execute(
-            "INSERT OR REPLACE INTO bookmarks (command, label, created_at) VALUES (?1, ?2, ?3)",
+            "INSERT INTO bookmarks (command, label, created_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(command) DO UPDATE SET label = excluded.label",
             params![command, label, now],
         )?;
         Ok(self.conn.last_insert_rowid())

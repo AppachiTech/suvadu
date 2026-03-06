@@ -78,12 +78,7 @@ fn handle_agent_report(
             None,
             cwd_filter.as_deref(),
         )?;
-        all.into_iter()
-            .filter(|e| {
-                let et = e.executor_type.as_deref().unwrap_or("human");
-                et != "human" && et != "unknown"
-            })
-            .collect()
+        all.into_iter().filter(Entry::is_agent).collect()
     };
 
     if entries.is_empty() {
@@ -529,13 +524,7 @@ fn handle_agent_stats_text(
     let entries: Vec<_> = if executor.is_some() {
         all_entries
     } else {
-        all_entries
-            .into_iter()
-            .filter(|e| {
-                let et = e.executor_type.as_deref().unwrap_or("human");
-                et != "human" && et != "unknown"
-            })
-            .collect()
+        all_entries.into_iter().filter(Entry::is_agent).collect()
     };
 
     if entries.is_empty() {

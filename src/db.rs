@@ -17,7 +17,7 @@ pub enum DbError {
 pub type DbResult<T> = Result<T, DbError>;
 
 /// Current schema version. Increment when adding new migrations.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Get the path to the suvadu database file
 pub fn get_db_path() -> DbResult<PathBuf> {
@@ -175,6 +175,16 @@ fn migrate_v1(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Migration v2: composite indexes for stats aggregation queries.
+fn migrate_v2(conn: &Connection) -> DbResult<()> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_entries_exit_code_started ON entries(exit_code, started_at);
+         CREATE INDEX IF NOT EXISTS idx_entries_cwd_started       ON entries(cwd, started_at);
+         CREATE INDEX IF NOT EXISTS idx_entries_executor_type     ON entries(executor_type);",
+    )?;
+    Ok(())
+}
+
 /// Initialize the database with proper schema and settings.
 ///
 /// Migrations are tracked via a `schema_version` table so each
@@ -191,14 +201,13 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
 
     if version < 1 {
         migrate_v1(&conn)?;
-        set_schema_version(&conn, SCHEMA_VERSION)?;
+        set_schema_version(&conn, 1)?;
     }
 
-    // Future migrations:
-    // if version < 2 {
-    //     migrate_v2(&conn)?;
-    //     set_schema_version(&conn, 2)?;
-    // }
+    if version < 2 {
+        migrate_v2(&conn)?;
+        set_schema_version(&conn, SCHEMA_VERSION)?;
+    }
 
     Ok(conn)
 }

@@ -46,6 +46,11 @@ impl Entry {
         }
     }
 
+    /// Returns `true` if this entry was executed by an agent (not human/unknown).
+    pub fn is_agent(&self) -> bool {
+        matches!(self.executor_type.as_deref(), Some(et) if et != "human" && et != "unknown")
+    }
+
     /// Set `tag_id`
     pub const fn with_tag_id(mut self, tag_id: Option<i64>) -> Self {
         self.tag_id = tag_id;
@@ -202,5 +207,32 @@ mod tests {
             selected: false,
         };
         assert!(!unselected.selected);
+    }
+
+    #[test]
+    fn test_entry_is_agent() {
+        let mut entry = Entry::new(
+            "s1".to_string(),
+            "ls".to_string(),
+            "/tmp".to_string(),
+            Some(0),
+            1000,
+            1050,
+        );
+
+        // No executor_type → not agent
+        assert!(!entry.is_agent());
+
+        entry.executor_type = Some("human".to_string());
+        assert!(!entry.is_agent());
+
+        entry.executor_type = Some("unknown".to_string());
+        assert!(!entry.is_agent());
+
+        entry.executor_type = Some("agent".to_string());
+        assert!(entry.is_agent());
+
+        entry.executor_type = Some("claude-code".to_string());
+        assert!(entry.is_agent());
     }
 }

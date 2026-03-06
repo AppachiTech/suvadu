@@ -1023,13 +1023,16 @@ fn test_bookmark_duplicate_upsert() {
     let (_dir, repo) = setup_test_db();
 
     repo.add_bookmark("git push", Some("deploy")).unwrap();
-    // Re-adding same command replaces (INSERT OR REPLACE)
+    let original_created = repo.list_bookmarks().unwrap()[0].created_at;
+
+    // Re-adding same command updates label but preserves created_at
     repo.add_bookmark("git push", Some("updated label"))
         .unwrap();
 
     let bookmarks = repo.list_bookmarks().unwrap();
     assert_eq!(bookmarks.len(), 1);
     assert_eq!(bookmarks[0].label.as_deref(), Some("updated label"));
+    assert_eq!(bookmarks[0].created_at, original_created);
 }
 
 #[test]
