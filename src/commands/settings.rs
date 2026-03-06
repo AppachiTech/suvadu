@@ -1,4 +1,3 @@
-use std::process;
 
 use crate::config;
 use crate::db;
@@ -99,129 +98,143 @@ pub fn handle_status() -> Result<(), Box<dyn std::error::Error>> {
 
 #[allow(clippy::too_many_lines)]
 pub fn handle_uninstall() -> Result<(), Box<dyn std::error::Error>> {
-    // Check if installed via Homebrew
+    // Detect all installation sources
     let is_homebrew = std::process::Command::new("brew")
         .args(["list", "suvadu"])
         .output()
         .is_ok_and(|o| o.status.success());
 
-    if is_homebrew {
-        println!("Suvadu was installed via Homebrew.");
-        println!("To uninstall, run:");
-        println!();
-        println!("  brew uninstall suvadu");
-        println!();
-        println!("Then remove shell hooks:");
-        println!("  - Remove 'eval \"$(suv init zsh)\"' from ~/.zshrc");
-        println!("  - Remove 'eval \"$(suv init bash)\"' from ~/.bashrc (if added)");
-        println!();
-        println!("If you used Claude Code integration:");
-        println!("  - Delete ~/.config/suvadu/hooks/");
-        println!("  - Remove the Suvadu hook entry from ~/.claude/settings.json");
-        println!();
-        println!("Your database and config files will NOT be removed.");
-        println!("To remove them, delete:");
-        println!("  - ~/Library/Application Support/suvadu/ (macOS)");
+    let is_cargo = std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".cargo/bin/suv"))
+        .is_some_and(|p| p.exists());
+
+    if !is_homebrew && !is_cargo {
+        // Fall back to detecting any binary via `which`
+        let which_path = std::process::Command::new("which")
+            .arg("suv")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+
+        if let Some(path) = which_path {
+            println!("Found suv at: {path}");
+            println!("Remove it manually with:");
+            println!("  rm {path}");
+        } else {
+            println!("No Suvadu installation detected.");
+        }
         return Ok(());
     }
 
-    println!("WARNING: This will uninstall Suvadu from your system.");
-
-    // Find all binary locations
-    let mut paths_to_remove = vec![
-        "/usr/local/bin/suv".to_string(),
-        "/usr/local/bin/suvadu".to_string(),
-    ];
-
-    // Also detect the actual binary path
-    if let Ok(output) = std::process::Command::new("which").arg("suv").output() {
-        if output.status.success() {
-            let real_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !paths_to_remove.contains(&real_path) {
-                paths_to_remove.push(real_path);
-            }
-        }
+    // Show what we found
+    println!("Detected Suvadu installation sources:");
+    if is_homebrew {
+        println!("  • Homebrew (brew)");
     }
-
-    println!("The following files will be removed:");
-    for p in &paths_to_remove {
-        println!("  - {p}");
+    if is_cargo {
+        println!("  • Cargo (~/.cargo/bin/suv)");
     }
     println!();
-    print!("Are you sure you want to continue? [y/N] ");
+    print!("Uninstall all? [y/N] ");
     std::io::Write::flush(&mut std::io::stdout())?;
 
     let mut input = String::new();
     std::io::stdin().read_line(&mut input)?;
-
     if input.trim().to_lowercase() != "y" {
         println!("Uninstall cancelled.");
         return Ok(());
     }
 
-    println!("Requesting sudo access to remove files...");
-
     let mut all_ok = true;
-    for path in &paths_to_remove {
-        if std::path::Path::new(path).exists() {
-            let status = std::process::Command::new("sudo")
-                .args(["rm", "-f", path])
-                .status()?;
-            if !status.success() {
-                eprintln!("Warning: Failed to remove {path}");
-                all_ok = false;
-            }
+
+    // Homebrew
+    if is_homebrew {
+        print!("Removing Homebrew package... ");
+        let status = std::process::Command::new("brew")
+            .args(["uninstall", "suvadu"])
+            .status()?;
+        if status.success() {
+            println!("✓");
+        } else {
+            println!("✘");
+            eprintln!("  Failed. Run manually: brew uninstall suvadu");
+            all_ok = false;
         }
     }
 
-    if all_ok {
-        println!("✓ Suvadu has been successfully uninstalled.");
-
-        // Try to cleanup .zshrc
-        if let Err(e) = util::cleanup_zshrc() {
-            eprintln!("Warning: Failed to clean up .zshrc: {e}");
-            println!("Please manually remove 'eval \"$(suv init zsh)\"' from your ~/.zshrc");
-        } else {
-            println!("✓ Removed shell integration from ~/.zshrc");
-        }
-
-        // Try to cleanup .bashrc
-        if let Err(e) = util::cleanup_bashrc() {
-            eprintln!("Warning: Failed to clean up .bashrc: {e}");
-        } else {
-            println!("✓ Removed shell integration from ~/.bashrc");
-        }
-
-        // Remove Claude Code hook scripts
-        if let Ok(home) = std::env::var("HOME") {
-            let hooks_dir = std::path::PathBuf::from(&home)
-                .join(".config")
-                .join("suvadu")
-                .join("hooks");
-            if hooks_dir.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&hooks_dir) {
-                    eprintln!("Warning: Failed to remove hooks directory: {e}");
+    // Cargo
+    if is_cargo {
+        print!("Removing Cargo installation... ");
+        let status = std::process::Command::new("cargo")
+            .args(["uninstall", "suvadu"])
+            .status();
+        match status {
+            Ok(s) if s.success() => println!("✓"),
+            _ => {
+                // Fallback: remove binary directly
+                let cargo_bin = std::env::var("HOME")
+                    .map(|h| format!("{h}/.cargo/bin/suv"))
+                    .unwrap_or_default();
+                if std::fs::remove_file(&cargo_bin).is_ok() {
+                    println!("✓ (removed binary directly)");
                 } else {
-                    println!("✓ Removed Claude Code hook scripts");
+                    println!("✘");
+                    eprintln!("  Failed. Run manually: cargo uninstall suvadu");
+                    all_ok = false;
                 }
             }
         }
-
-        // Remove Suvadu entry from ~/.claude/settings.json
-        match util::cleanup_claude_settings() {
-            Ok(true) => println!("✓ Removed Suvadu hook from ~/.claude/settings.json"),
-            Ok(false) => {}
-            Err(e) => eprintln!("Warning: Failed to clean up Claude settings: {e}"),
-        }
-
-        println!("Note: Your database and config files were NOT removed.");
-        println!("To remove them, delete:");
-        println!("  - ~/.config/suvadu/ (Linux)");
-        println!("  - ~/Library/Application Support/suvadu/ (macOS)");
-    } else {
-        eprintln!("Error: Failed to remove some files. Please try manually.");
-        process::exit(1);
     }
+
+    // Clean up shell hooks and integrations
+    if let Err(e) = util::cleanup_zshrc() {
+        eprintln!("Warning: Failed to clean up .zshrc: {e}");
+    } else {
+        println!("✓ Removed shell integration from ~/.zshrc");
+    }
+
+    if let Err(e) = util::cleanup_bashrc() {
+        eprintln!("Warning: Failed to clean up .bashrc: {e}");
+    } else {
+        println!("✓ Removed shell integration from ~/.bashrc");
+    }
+
+    // Remove Claude Code hook scripts
+    if let Ok(home) = std::env::var("HOME") {
+        let hooks_dir = std::path::PathBuf::from(&home)
+            .join(".config")
+            .join("suvadu")
+            .join("hooks");
+        if hooks_dir.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&hooks_dir) {
+                eprintln!("Warning: Failed to remove hooks directory: {e}");
+            } else {
+                println!("✓ Removed Claude Code hook scripts");
+            }
+        }
+    }
+
+    // Remove Suvadu entry from ~/.claude/settings.json
+    match util::cleanup_claude_settings() {
+        Ok(true) => println!("✓ Removed Suvadu hook from ~/.claude/settings.json"),
+        Ok(false) => {}
+        Err(e) => eprintln!("Warning: Failed to clean up Claude settings: {e}"),
+    }
+
+    println!();
+    if all_ok {
+        println!("Suvadu has been uninstalled.");
+    } else {
+        eprintln!("Some steps failed. See messages above.");
+    }
+
+    println!();
+    println!("Your database and config files were NOT removed.");
+    println!("To remove them, delete:");
+    println!("  - ~/.config/suvadu/ (Linux)");
+    println!("  - ~/Library/Application Support/suvadu/ (macOS)");
 
     Ok(())
 }
