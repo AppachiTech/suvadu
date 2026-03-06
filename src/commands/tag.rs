@@ -106,11 +106,8 @@ fn handle_tag_associate(
     session_id: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Find tag or create it
-    let tags = repo.get_tags()?;
-    let existing_tag = tags.iter().find(|t| t.name == tag_name.to_lowercase());
-
-    let tag_id = if let Some(t) = existing_tag {
-        t.id
+    let tag_id = if let Some(id) = repo.get_tag_id_by_name(tag_name)? {
+        id
     } else {
         // Try to create it
         println!("Tag '{tag_name}' not found. Creating it...");

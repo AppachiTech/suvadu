@@ -19,14 +19,10 @@ pub fn handle_replay(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = repository::Repository::init()?;
 
-    // Resolve tag name → id
-    let tag_id = if let Some(tname) = tag {
-        let tags = repo.get_tags()?;
-        let tname_lower = tname.to_lowercase();
-        tags.iter().find(|t| t.name == tname_lower).map(|t| t.id)
-    } else {
-        None
-    };
+    let tag_id = tag
+        .map(|t| repo.get_tag_id_by_name(t))
+        .transpose()?
+        .flatten();
 
     // Resolve --here flag
     let cwd_filter = if here {

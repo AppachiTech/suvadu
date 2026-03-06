@@ -59,13 +59,10 @@ pub fn handle_add_with_context(
     let mut matched_tag_id: Option<i64> = None;
     if !config.auto_tags.is_empty() {
         if let Some(tag_name) = util::resolve_auto_tag(&cwd, &config.auto_tags) {
-            // Check if tag exists, verify/create it
-            let tags = repo.get_tags()?;
-            if let Some(existing) = tags.iter().find(|t| t.name == tag_name.to_lowercase()) {
-                matched_tag_id = Some(existing.id);
+            if let Some(id) = repo.get_tag_id_by_name(&tag_name)? {
+                matched_tag_id = Some(id);
             } else {
                 // Auto-create tag if configured in config but missing in DB
-                // This is safe because user explicitly put it in auto_tags config
                 if let Ok(id) = repo.create_tag(&tag_name, Some("Auto-created from path config")) {
                     matched_tag_id = Some(id);
                 }

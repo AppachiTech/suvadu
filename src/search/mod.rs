@@ -374,10 +374,11 @@ pub fn run_search(
     // Load Tags
     let tags = repo.get_tags().unwrap_or_default();
 
-    let tag_id = tag.and_then(|tname| {
-        let tname_lower = tname.to_lowercase();
-        tags.iter().find(|t| t.name == tname_lower).map(|t| t.id)
-    });
+    let tag_id = tag
+        .map(|t| repo.get_tag_id_by_name(t))
+        .transpose()
+        .unwrap_or(None)
+        .flatten();
 
     let filter_after = after.and_then(|s| util::parse_date_input(s, false));
     let filter_before = before.and_then(|s| util::parse_date_input(s, true));
