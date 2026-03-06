@@ -213,7 +213,7 @@ fn cleanup_shell_rc(filename: &str, shell: &str) -> Result<(), std::io::Error> {
 
     let filtered_content: Vec<String> = content
         .lines()
-        .filter(|line| !line.contains(&target_line))
+        .filter(|line| line.trim() != target_line)
         .map(String::from)
         .collect();
 

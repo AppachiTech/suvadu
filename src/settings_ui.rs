@@ -291,8 +291,13 @@ impl AppState {
                                     self.auto_tag_path_input.trim(),
                                     self.auto_tag_name_input.trim()
                                 ));
-                                // Select the last item
-                                self.selected_item = self.config.auto_tags.len() - 1;
+                                // Select the newly added item (sorted position)
+                                let path_key = self.auto_tag_path_input.trim().to_string();
+                                let mut sorted_keys: Vec<_> =
+                                    self.config.auto_tags.keys().cloned().collect();
+                                sorted_keys.sort();
+                                self.selected_item =
+                                    sorted_keys.iter().position(|k| k == &path_key).unwrap_or(0);
                                 self.exclusion_list_state.select(Some(self.selected_item));
                                 self.input_mode = InputMode::Normal;
                             } else {

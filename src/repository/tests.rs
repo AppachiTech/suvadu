@@ -2044,8 +2044,8 @@ fn test_get_existing_command_timestamps() {
 
     let timestamps = repo.get_existing_command_timestamps().unwrap();
     assert_eq!(timestamps.len(), 2);
-    assert!(timestamps.contains(&("git status".to_string(), 1000)));
-    assert!(timestamps.contains(&("cargo build".to_string(), 2000)));
+    assert!(timestamps.contains(&("git status".to_string(), 1_000_000)));
+    assert!(timestamps.contains(&("cargo build".to_string(), 2_000_000)));
 }
 
 // ── Transaction Tests ───────────────────────────────────

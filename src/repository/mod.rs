@@ -219,15 +219,16 @@ impl Repository {
         Ok(())
     }
 
-    /// Get all (command, started-at-seconds) pairs for dedup during import.
-    /// Returns `started_at` / 1000 so zsh-history second-precision
-    /// timestamps can be compared directly.
+    /// Get all (command, `started_at_ms`) pairs for dedup during import.
+    /// Uses millisecond precision to avoid collisions between distinct entries
+    /// that happen to share the same second. Callers importing second-precision
+    /// sources (e.g. zsh-history) should round their timestamps before lookup.
     pub fn get_existing_command_timestamps(
         &self,
     ) -> DbResult<std::collections::HashSet<(String, i64)>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT command, started_at / 1000 FROM entries")?;
+            .prepare("SELECT command, started_at FROM entries")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;

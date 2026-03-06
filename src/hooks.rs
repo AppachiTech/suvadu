@@ -413,8 +413,14 @@ __suvadu_search_widget() {{
     fi
 }}
 
-# Install hooks
-trap '__suvadu_preexec' DEBUG
+# Install hooks (preserve any existing DEBUG trap)
+_suvadu_old_debug_trap=$(trap -p DEBUG | sed "s/^trap -- '\\(.*\\)' DEBUG$/\\1/")
+if [[ -n "$_suvadu_old_debug_trap" ]]; then
+    eval "trap '$_suvadu_old_debug_trap; __suvadu_preexec' DEBUG"
+else
+    trap '__suvadu_preexec' DEBUG
+fi
+unset _suvadu_old_debug_trap
 
 # Append to PROMPT_COMMAND (don't overwrite existing)
 if [[ -z "$PROMPT_COMMAND" ]]; then

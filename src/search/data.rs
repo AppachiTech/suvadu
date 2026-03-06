@@ -107,21 +107,26 @@ impl SearchApp {
         scored.into_iter().map(|(e, _)| e).collect()
     }
 
-    /// Stable re-sort: float same-CWD entries to top, preserving recency within each group.
-    fn apply_context_sort(entries: &mut [Entry], current_cwd: &str) {
+    /// Stable re-sort: combined context + human-first ranking in a single pass.
+    /// Primary: same-CWD entries first (if `context_boost` enabled).
+    /// Secondary: human-executed entries above agent entries.
+    /// This avoids the competing-sort problem where two sequential sorts
+    /// could undo each other's grouping.
+    fn apply_combined_sort(entries: &mut [Entry], context_cwd: Option<&str>) {
         entries.sort_by(|a, b| {
-            let a_local = a.cwd == current_cwd;
-            let b_local = b.cwd == current_cwd;
-            b_local.cmp(&a_local) // true > false → locals first
-        });
-    }
-
-    /// Stable re-sort: float human-executed entries above agent entries.
-    fn apply_human_first_sort(entries: &mut [Entry]) {
-        entries.sort_by(|a, b| {
+            // Primary: local directory first (if context boost is active)
+            if let Some(cwd) = context_cwd {
+                let a_local = a.cwd == cwd;
+                let b_local = b.cwd == cwd;
+                let cwd_cmp = b_local.cmp(&a_local);
+                if cwd_cmp != std::cmp::Ordering::Equal {
+                    return cwd_cmp;
+                }
+            }
+            // Secondary: human entries first
             let a_human = a.executor_type.as_deref().unwrap_or("human") == "human";
             let b_human = b.executor_type.as_deref().unwrap_or("human") == "human";
-            b_human.cmp(&a_human) // true > false → humans first
+            b_human.cmp(&a_human)
         });
     }
 
@@ -267,13 +272,13 @@ impl SearchApp {
                 self.entries = new_entries;
             }
 
-            // Apply human-first sort, then context sort for non-fuzzy results
-            Self::apply_human_first_sort(&mut self.entries);
-            if self.context_boost {
-                if let Some(ref cwd) = self.current_cwd {
-                    Self::apply_context_sort(&mut self.entries, cwd);
-                }
-            }
+            // Combined sort: context-first + human-first in one pass
+            let context_cwd = if self.context_boost {
+                self.current_cwd.as_deref()
+            } else {
+                None
+            };
+            Self::apply_combined_sort(&mut self.entries, context_cwd);
         }
 
         self.table_state.select(if self.entries.is_empty() {
@@ -338,13 +343,13 @@ impl SearchApp {
                 self.entries = new_entries;
             }
 
-            // Apply human-first sort, then context sort for non-fuzzy pages
-            Self::apply_human_first_sort(&mut self.entries);
-            if self.context_boost {
-                if let Some(ref cwd) = self.current_cwd {
-                    Self::apply_context_sort(&mut self.entries, cwd);
-                }
-            }
+            // Combined sort: context-first + human-first in one pass
+            let context_cwd = if self.context_boost {
+                self.current_cwd.as_deref()
+            } else {
+                None
+            };
+            Self::apply_combined_sort(&mut self.entries, context_cwd);
         } else {
             // Fuzzy mode: paginate from in-memory scored results
             let end = (offset + self.page_size).min(self.fuzzy_results.len());

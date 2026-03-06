@@ -276,13 +276,17 @@ fn build_patterns() -> Vec<RiskPattern> {
 
     patterns
         .into_iter()
-        .filter_map(|(pat, level, cat, desc)| {
-            Regex::new(pat).ok().map(|regex| RiskPattern {
+        .filter_map(|(pat, level, cat, desc)| match Regex::new(pat) {
+            Ok(regex) => Some(RiskPattern {
                 regex,
                 level,
                 category: cat,
                 description: desc,
-            })
+            }),
+            Err(e) => {
+                eprintln!("suvadu: risk pattern failed to compile: {pat}: {e}");
+                None
+            }
         })
         .collect()
 }

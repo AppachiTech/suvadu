@@ -271,14 +271,21 @@ impl SearchApp {
             ..area
         };
 
-        // Time (12) + Session/Tag (16) + Executor (10) + Path (12) + Status (6) + Duration (8) = 64
-        let fixed_width: u16 = 12 + 16 + 10 + 12 + 6 + 8;
-        // When the terminal is too narrow for all columns, show only the Command column
-        let compact = table_area.width < 100;
+        // Column layout adapts to terminal width:
+        //   < 80:   Command only (compact)
+        //   80-129: Time + Command + Status (semi-compact)
+        //   130+:   All columns (full)
+        // This avoids a jarring width discontinuity at a single threshold.
+        let full_fixed: u16 = 12 + 16 + 10 + 12 + 6 + 8; // 64
+        let semi_fixed: u16 = 12 + 6; // Time + Status
+        let compact = table_area.width < 80;
+        let semi_compact = !compact && table_area.width < 130;
         let command_col_width = if compact {
             table_area.width.saturating_sub(6)
+        } else if semi_compact {
+            table_area.width.saturating_sub(semi_fixed + 6)
         } else {
-            table_area.width.saturating_sub(fixed_width + 6)
+            table_area.width.saturating_sub(full_fixed + 6)
         };
 
         let rows: Vec<Row> = self
@@ -445,6 +452,14 @@ impl SearchApp {
                     Row::new(vec![Cell::from(command_display)])
                         .height(height)
                         .style(bg_style)
+                } else if semi_compact {
+                    Row::new(vec![
+                        Cell::from(time_str).style(time_style),
+                        Cell::from(command_display),
+                        Cell::from(exit_display).style(exit_style_item),
+                    ])
+                    .height(height)
+                    .style(bg_style)
                 } else {
                     Row::new(vec![
                         Cell::from(time_str).style(time_style),
@@ -463,6 +478,12 @@ impl SearchApp {
 
         let widths = if self.unique_mode || compact {
             vec![Constraint::Percentage(100)]
+        } else if semi_compact {
+            vec![
+                Constraint::Length(12), // Time
+                Constraint::Min(10),    // Command
+                Constraint::Length(6),  // Status
+            ]
         } else {
             vec![
                 Constraint::Length(12), // Time
@@ -477,6 +498,12 @@ impl SearchApp {
 
         let header_row = if self.unique_mode || compact {
             Row::new(vec!["Command".to_string()])
+        } else if semi_compact {
+            Row::new(vec![
+                "Time".to_string(),
+                "Command".to_string(),
+                "Status".to_string(),
+            ])
         } else {
             Row::new(vec![
                 "Time".to_string(),

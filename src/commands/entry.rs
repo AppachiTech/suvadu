@@ -63,8 +63,9 @@ pub fn handle_add_with_context(
                 matched_tag_id = Some(id);
             } else {
                 // Auto-create tag if configured in config but missing in DB
-                if let Ok(id) = repo.create_tag(&tag_name, Some("Auto-created from path config")) {
-                    matched_tag_id = Some(id);
+                match repo.create_tag(&tag_name, Some("Auto-created from path config")) {
+                    Ok(id) => matched_tag_id = Some(id),
+                    Err(e) => eprintln!("suvadu: failed to auto-create tag '{tag_name}': {e}"),
                 }
             }
         }

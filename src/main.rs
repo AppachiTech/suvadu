@@ -25,6 +25,15 @@ mod util;
 use cli::{Cli, Commands};
 
 fn main() {
+    // Install a panic handler that restores the terminal from raw mode.
+    // Without this, a panic in a TUI screen leaves the terminal unusable.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(std::io::stderr(), crossterm::terminal::LeaveAlternateScreen);
+        default_hook(info);
+    }));
+
     let cli = Cli::parse();
 
     if let Err(e) = run(cli) {

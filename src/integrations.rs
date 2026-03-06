@@ -154,6 +154,17 @@ fn get_cached_prompt(session_id: &str) -> Option<String> {
     std::fs::read_to_string(prompt_file).ok()
 }
 
+/// Check if a hook command path belongs to suvadu. Uses path-separator-aware
+/// matching to avoid false positives on paths like `/usr/bin/not-suvadu-tool`.
+fn is_suvadu_hook_command(cmd: &str) -> bool {
+    // Match /suvadu/ as a path component, or the binary names "suv"/"suvadu" at end of path
+    cmd.contains("/suvadu/")
+        || cmd.ends_with("/suv")
+        || cmd.ends_with("/suvadu")
+        || cmd.starts_with("suv ")
+        || cmd.starts_with("suvadu ")
+}
+
 /// Shell-escape a string for embedding inside single quotes.
 /// Replaces `'` with `'\''` (end quote, literal quote, restart quote).
 fn shell_escape(s: &str) -> String {
@@ -293,7 +304,7 @@ fn dedup_suvadu_hooks(settings: &mut serde_json::Value) -> bool {
                     hooks.iter().any(|h| {
                         h.get("command")
                             .and_then(serde_json::Value::as_str)
-                            .is_some_and(|cmd| cmd.contains("suvadu"))
+                            .is_some_and(is_suvadu_hook_command)
                     })
                 });
             if is_suvadu {
@@ -339,7 +350,7 @@ pub fn try_merge_claude_settings(
                         hooks.iter().any(|h| {
                             h.get("command")
                                 .and_then(serde_json::Value::as_str)
-                                .is_some_and(|cmd| cmd.contains("suvadu"))
+                                .is_some_and(is_suvadu_hook_command)
                         })
                     })
             })
@@ -360,7 +371,7 @@ pub fn try_merge_claude_settings(
                             hooks.iter().any(|h| {
                                 h.get("command")
                                     .and_then(serde_json::Value::as_str)
-                                    .is_some_and(|cmd| cmd.contains("suvadu"))
+                                    .is_some_and(is_suvadu_hook_command)
                             })
                         })
                 })

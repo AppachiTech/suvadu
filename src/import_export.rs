@@ -312,8 +312,10 @@ fn import_entries_batch(
             continue;
         }
 
-        // Dedup: skip if (command, timestamp_seconds) already exists
-        if *ts > 0 && existing.contains(&(cmd.clone(), *ts / 1000)) {
+        // Dedup: skip if (command, timestamp_ms) already exists.
+        // Zsh-history timestamps are second-precision (ts * 1000), so they
+        // match exactly against entries stored with the same granularity.
+        if *ts > 0 && existing.contains(&(cmd.clone(), *ts)) {
             skipped += 1;
             continue;
         }
