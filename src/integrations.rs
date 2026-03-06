@@ -122,11 +122,7 @@ pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&prompts_dir)?;
     let prompt_file = prompts_dir.join(format!("claude-{session_id}.prompt"));
     // Truncate to 500 chars to keep cache lightweight
-    let truncated = if prompt.len() > 500 {
-        format!("{}...", &prompt[..497])
-    } else {
-        prompt.to_string()
-    };
+    let truncated = crate::util::truncate_str(prompt, 500, "...");
     std::fs::write(prompt_file, truncated)?;
 
     Ok(())

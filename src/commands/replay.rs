@@ -164,3 +164,133 @@ pub fn handle_replay(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::db;
+    use crate::models::{Entry, Session};
+    use crate::repository::Repository;
+
+    fn test_repo() -> Repository {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.into_path().join("test.db");
+        let conn = db::init_db(&db_path).unwrap();
+        Repository::new(conn)
+    }
+
+    fn seed_session(repo: &Repository, session_id: &str) {
+        let session = Session {
+            id: session_id.to_string(),
+            hostname: "test-host".to_string(),
+            created_at: 1_700_000_000_000,
+            tag_id: None,
+        };
+        repo.insert_session(&session).unwrap();
+    }
+
+    fn seed_entry(repo: &Repository, session_id: &str, cmd: &str, exit_code: i32, started_at: i64) {
+        let entry = Entry::new(
+            session_id.to_string(),
+            cmd.to_string(),
+            "/home/user".to_string(),
+            Some(exit_code),
+            started_at,
+            started_at + 500,
+        );
+        repo.insert_entry(&entry).unwrap();
+    }
+
+    #[test]
+    fn test_replay_entries_by_session() {
+        let repo = test_repo();
+        seed_session(&repo, "sess-abc");
+        seed_entry(&repo, "sess-abc", "git status", 0, 1_700_000_001_000);
+        seed_entry(&repo, "sess-abc", "cargo build", 0, 1_700_000_002_000);
+        seed_entry(&repo, "sess-abc", "cargo test", 1, 1_700_000_003_000);
+
+        let entries = repo
+            .get_replay_entries(Some("sess-abc"), None, None, None, None, None, None)
+            .unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].command, "git status");
+        assert_eq!(entries[2].command, "cargo test");
+    }
+
+    #[test]
+    fn test_replay_entries_exit_code_filter() {
+        let repo = test_repo();
+        seed_session(&repo, "sess-def");
+        seed_entry(&repo, "sess-def", "ls", 0, 1_700_000_001_000);
+        seed_entry(&repo, "sess-def", "bad", 1, 1_700_000_002_000);
+        seed_entry(&repo, "sess-def", "ok", 0, 1_700_000_003_000);
+
+        // Only failures
+        let entries = repo
+            .get_replay_entries(Some("sess-def"), None, None, None, Some(1), None, None)
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].command, "bad");
+    }
+
+    #[test]
+    fn test_replay_entries_time_filter() {
+        let repo = test_repo();
+        seed_session(&repo, "sess-time");
+        seed_entry(&repo, "sess-time", "early", 0, 1_700_000_000_000);
+        seed_entry(&repo, "sess-time", "late", 0, 1_700_000_100_000);
+
+        // Only after the first entry
+        let entries = repo
+            .get_replay_entries(None, Some(1_700_000_050_000), None, None, None, None, None)
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].command, "late");
+    }
+
+    #[test]
+    fn test_replay_empty_session() {
+        let repo = test_repo();
+        seed_session(&repo, "empty-sess");
+
+        let entries = repo
+            .get_replay_entries(Some("empty-sess"), None, None, None, None, None, None)
+            .unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_replay_entries_cwd_filter() {
+        let repo = test_repo();
+        seed_session(&repo, "sess-cwd");
+
+        let mut e1 = Entry::new(
+            "sess-cwd".to_string(),
+            "make".to_string(),
+            "/home/user/project".to_string(),
+            Some(0),
+            1_700_000_001_000,
+            1_700_000_001_500,
+        );
+        repo.insert_entry(&e1).unwrap();
+
+        e1.command = "ls".to_string();
+        e1.cwd = "/tmp".to_string();
+        e1.started_at = 1_700_000_002_000;
+        e1.ended_at = 1_700_000_002_500;
+        repo.insert_entry(&e1).unwrap();
+
+        let entries = repo
+            .get_replay_entries(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("/home/user/project"),
+            )
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].command, "make");
+    }
+}

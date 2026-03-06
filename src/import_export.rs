@@ -219,11 +219,7 @@ pub fn handle_import_zsh_history(
                 "no timestamp".to_string()
             };
             let display = cmd.replace('\n', "\\n");
-            let truncated = if display.len() > 60 {
-                format!("{}…", &display[..59])
-            } else {
-                display
-            };
+            let truncated = crate::util::truncate_str(&display, 60, "…");
             println!("  {:>2}. [{date}] {truncated}", i + 1);
         }
         if parsed.len() > 10 {

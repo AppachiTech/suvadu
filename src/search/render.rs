@@ -875,8 +875,8 @@ impl SearchApp {
         let cmd_preview = self
             .get_selected_entry()
             .map(|e| {
-                if e.command.len() > 50 {
-                    format!("{}...", &e.command[..47])
+                if e.command.chars().count() > 50 {
+                    crate::util::truncate_str(&e.command, 50, "...")
                 } else {
                     e.command.clone()
                 }

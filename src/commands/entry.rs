@@ -209,11 +209,7 @@ pub fn handle_bookmark(
                         .map(|dt| dt.format("%Y-%m-%d").to_string())
                         .unwrap_or_default();
                     let label_str = bm.label.as_deref().unwrap_or("-");
-                    let cmd_display = if bm.command.len() > 48 {
-                        format!("{}…", &bm.command[..47])
-                    } else {
-                        bm.command.clone()
-                    };
+                    let cmd_display = crate::util::truncate_str(&bm.command, 48, "…");
                     println!("{cmd_display:<50} {label_str:<20} {date}");
                 }
                 println!("\n{} bookmark(s)", bookmarks.len());

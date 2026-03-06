@@ -308,6 +308,47 @@ pub fn cleanup_claude_settings_at(
     Ok(true)
 }
 
+/// Truncate a string to `max_chars` characters, appending `suffix` if truncated.
+/// Safe for multi-byte UTF-8 strings — operates on char boundaries.
+pub fn truncate_str(s: &str, max_chars: usize, suffix: &str) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        return s.to_string();
+    }
+    let suffix_len = suffix.chars().count();
+    if max_chars <= suffix_len {
+        return s.chars().take(max_chars).collect();
+    }
+    let take = max_chars - suffix_len;
+    let mut truncated: String = s.chars().take(take).collect();
+    truncated.push_str(suffix);
+    truncated
+}
+
+/// Truncate from the start, keeping the end of the string.
+/// Prepends `prefix` if truncated. Safe for multi-byte UTF-8.
+pub fn truncate_str_start(s: &str, max_chars: usize, prefix: &str) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        return s.to_string();
+    }
+    let prefix_len = prefix.chars().count();
+    if max_chars <= prefix_len {
+        return s
+            .chars()
+            .rev()
+            .take(max_chars)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+    }
+    let keep = max_chars - prefix_len;
+    let mut result = String::from(prefix);
+    result.extend(s.chars().skip(char_count - keep));
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,5 +614,63 @@ mod tests {
             home.starts_with('/'),
             "Home directory should be an absolute path, got: {home}"
         );
+    }
+
+    #[test]
+    fn test_truncate_str_short() {
+        assert_eq!(truncate_str("hello", 10, "…"), "hello");
+    }
+
+    #[test]
+    fn test_truncate_str_exact() {
+        assert_eq!(truncate_str("hello", 5, "…"), "hello");
+    }
+
+    #[test]
+    fn test_truncate_str_truncated() {
+        assert_eq!(truncate_str("hello world", 8, "…"), "hello w…");
+    }
+
+    #[test]
+    fn test_truncate_str_unicode() {
+        // Japanese characters are multi-byte UTF-8
+        let s = "こんにちは世界テスト";
+        assert_eq!(truncate_str(s, 6, "…"), "こんにちは…");
+    }
+
+    #[test]
+    fn test_truncate_str_emoji() {
+        let s = "hello 🌍🌎🌏 world";
+        let result = truncate_str(s, 10, "…");
+        assert_eq!(result.chars().count(), 10);
+        assert!(result.ends_with('…'));
+    }
+
+    #[test]
+    fn test_truncate_str_tiny_max() {
+        assert_eq!(truncate_str("hello world", 1, "…"), "h");
+        assert_eq!(truncate_str("hello world", 0, "…"), "");
+    }
+
+    #[test]
+    fn test_truncate_str_start_short() {
+        assert_eq!(truncate_str_start("hello", 10, "…"), "hello");
+    }
+
+    #[test]
+    fn test_truncate_str_start_truncated() {
+        assert_eq!(
+            truncate_str_start("/very/long/path/to/dir", 15, "…"),
+            "…ng/path/to/dir"
+        );
+    }
+
+    #[test]
+    fn test_truncate_str_start_unicode() {
+        let s = "あいうえおかきくけこ";
+        let result = truncate_str_start(s, 6, "…");
+        assert_eq!(result.chars().count(), 6);
+        assert!(result.starts_with('…'));
+        assert!(result.ends_with('こ'));
     }
 }

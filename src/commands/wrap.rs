@@ -29,8 +29,8 @@ pub fn handle_wrap(
 
     let exit_code = status.map_or(127, exit_code_from_status);
 
-    // Record in history
-    let _ = super::entry::handle_add(
+    // Record in history (log failure to stderr; don't block the wrapped command's exit)
+    if let Err(e) = super::entry::handle_add(
         &session_id,
         cmd_str,
         cwd,
@@ -39,7 +39,9 @@ pub fn handle_wrap(
         ended_at,
         Some(executor_type.to_string()),
         Some(executor.to_string()),
-    );
+    ) {
+        eprintln!("suvadu: failed to record command: {e}");
+    }
 
     // Exit with the command's exit code
     process::exit(exit_code);

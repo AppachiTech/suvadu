@@ -1,5 +1,5 @@
 use crate::models::Entry;
-use crate::util::{dirs_home, format_duration_ms, shorten_path};
+use crate::util::{dirs_home, format_duration_ms, shorten_path, truncate_str};
 use crate::{agent_ui, cli, repository, risk, util};
 
 pub fn handle_agent(cmd: cli::AgentCommands) -> Result<(), Box<dyn std::error::Error>> {
@@ -252,11 +252,7 @@ fn print_agent_report_text(entries: &[Entry], risk_summary: &risk::SessionRisk, 
         println!("\x1b[1m───────────────────────────────────────────────────────\x1b[0m");
         for fc in risk_summary.failed_commands.iter().take(15) {
             let time_str = format_timestamp_time(fc.timestamp);
-            let cmd_trunc = if fc.command.len() > 40 {
-                format!("{}…", &fc.command[..39])
-            } else {
-                fc.command.clone()
-            };
+            let cmd_trunc = truncate_str(&fc.command, 40, "…");
             println!(
                 "  \x1b[31m[{}]\x1b[0m  {:<42} exit {}  {time_str}",
                 fc.executor, cmd_trunc, fc.exit_code
@@ -515,7 +511,10 @@ fn handle_agent_stats_text(
     let repo = repository::Repository::init()?;
 
     let now = chrono::Utc::now().timestamp_millis();
-    let after_ms = Some(now - (i64::try_from(days).unwrap_or(i64::MAX) * 24 * 60 * 60 * 1000));
+    let days_ms = i64::try_from(days)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(86_400_000);
+    let after_ms = Some(now.saturating_sub(days_ms));
 
     // Fetch all entries in the period
     let all_entries = repo.get_replay_entries(None, after_ms, None, None, None, executor, None)?;
