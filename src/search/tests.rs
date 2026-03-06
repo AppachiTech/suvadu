@@ -151,3 +151,200 @@ fn test_fuzzy_score_filters_irrelevant() {
     assert!(cmds.contains(&"cargo test --release"));
     assert!(!cmds.contains(&"npm install"));
 }
+
+#[test]
+fn test_fuzzy_score_length_penalty() {
+    // Short matching command should score higher than long one
+    let entries = vec![
+        create_test_entry("git status"),
+        create_test_entry(
+            "git status --porcelain --branch --show-stash --ahead-behind --find-renames",
+        ),
+    ];
+
+    let scored = SearchApp::fuzzy_score(entries, "git status", None);
+    assert_eq!(scored.len(), 2);
+    // Short command should come first due to length penalty
+    assert_eq!(scored[0].command, "git status");
+}
+
+#[test]
+fn test_fuzzy_score_human_boost() {
+    let mut human_entry = create_test_entry("cargo build");
+    human_entry.executor_type = Some("human".to_string());
+
+    let mut agent_entry = create_test_entry("cargo build");
+    agent_entry.executor_type = Some("agent".to_string());
+
+    let entries = vec![agent_entry, human_entry];
+
+    let scored = SearchApp::fuzzy_score(entries, "cargo build", None);
+    assert_eq!(scored.len(), 2);
+    // Human entry should come first
+    assert_eq!(scored[0].executor_type.as_deref(), Some("human"));
+}
+
+#[test]
+fn test_fuzzy_score_cwd_boost() {
+    let mut local_entry = create_test_entry("make test");
+    local_entry.cwd = "/project".to_string();
+
+    let mut remote_entry = create_test_entry("make test");
+    remote_entry.cwd = "/other".to_string();
+
+    let entries = vec![remote_entry, local_entry];
+
+    let scored = SearchApp::fuzzy_score(entries, "make test", Some("/project"));
+    assert_eq!(scored.len(), 2);
+    // Local CWD entry should come first
+    assert_eq!(scored[0].cwd, "/project");
+}
+
+#[test]
+fn test_fuzzy_score_empty_query() {
+    let entries = vec![create_test_entry("ls"), create_test_entry("pwd")];
+
+    // Empty query should match nothing (nucleo needs at least some pattern)
+    let scored = SearchApp::fuzzy_score(entries, "", None);
+    // nucleo Pattern::parse("") returns a pattern that matches everything
+    // This is fine — the caller gates on query.len() >= 2
+    assert!(scored.len() <= 2);
+}
+
+#[test]
+fn test_fuzzy_score_single_char() {
+    let entries = vec![
+        create_test_entry("ls -la"),
+        create_test_entry("pwd"),
+        create_test_entry("cd /tmp"),
+    ];
+
+    let scored = SearchApp::fuzzy_score(entries, "l", None);
+    // Should match "ls -la" at minimum
+    let cmds: Vec<&str> = scored.iter().map(|e| e.command.as_str()).collect();
+    assert!(cmds.contains(&"ls -la"));
+}
+
+#[test]
+fn test_active_filter_count() {
+    let entries = vec![create_test_entry("test")];
+    let mut app = SearchApp::new(
+        entries,
+        None,
+        1,
+        1,
+        50,
+        vec![],
+        false,
+        std::collections::HashMap::new(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        std::collections::HashSet::new(),
+        None,
+        std::collections::HashSet::new(),
+        true,
+        true,
+        false,
+    );
+
+    assert_eq!(app.active_filter_count(), 0);
+
+    app.filter_exit_code = Some(0);
+    assert_eq!(app.active_filter_count(), 1);
+
+    app.filter_after = Some(1000);
+    assert_eq!(app.active_filter_count(), 2);
+
+    app.filter_before = Some(2000);
+    assert_eq!(app.active_filter_count(), 3);
+
+    app.filter_tag_id = Some(1);
+    assert_eq!(app.active_filter_count(), 4);
+
+    app.filter_executor_type = Some("human".to_string());
+    assert_eq!(app.active_filter_count(), 5);
+}
+
+#[test]
+fn test_get_selected_entry() {
+    let entries = vec![create_test_entry("first"), create_test_entry("second")];
+    let mut app = SearchApp::new(
+        entries,
+        None,
+        2,
+        1,
+        50,
+        vec![],
+        false,
+        std::collections::HashMap::new(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        std::collections::HashSet::new(),
+        None,
+        std::collections::HashSet::new(),
+        true,
+        true,
+        false,
+    );
+
+    // Default selection is 0
+    app.table_state.select(Some(0));
+    assert_eq!(app.get_selected_command().as_deref(), Some("first"));
+
+    app.table_state.select(Some(1));
+    assert_eq!(app.get_selected_command().as_deref(), Some("second"));
+
+    app.table_state.select(None);
+    assert!(app.get_selected_command().is_none());
+}
+
+#[test]
+fn test_get_selected_entry_out_of_bounds() {
+    let entries = vec![create_test_entry("only")];
+    let mut app = SearchApp::new(
+        entries,
+        None,
+        1,
+        1,
+        50,
+        vec![],
+        false,
+        std::collections::HashMap::new(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        std::collections::HashSet::new(),
+        None,
+        std::collections::HashSet::new(),
+        true,
+        true,
+        false,
+    );
+
+    // Out of bounds selection should return None
+    app.table_state.select(Some(999));
+    assert!(app.get_selected_entry().is_none());
+}

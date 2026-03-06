@@ -297,4 +297,46 @@ mod tests {
     fn test_normalize_timestamp_zero() {
         assert_eq!(normalize_timestamp(0), 0);
     }
+
+    #[test]
+    fn test_normalize_timestamp_negative() {
+        // Negative values are returned as-is
+        assert_eq!(normalize_timestamp(-1), -1);
+        assert_eq!(normalize_timestamp(-1000), -1000);
+    }
+
+    #[test]
+    fn test_normalize_timestamp_boundary_seconds_ms() {
+        // 99_999_999_999 is seconds (10 digits) → multiply by 1000
+        assert_eq!(normalize_timestamp(99_999_999_999), 99_999_999_999 * 1000);
+        // 100_000_000_000 is milliseconds (12 digits) → no change
+        assert_eq!(normalize_timestamp(100_000_000_000), 100_000_000_000);
+    }
+
+    #[test]
+    fn test_normalize_timestamp_boundary_ms_us() {
+        // 9_999_999_999_999 is milliseconds → no change
+        assert_eq!(normalize_timestamp(9_999_999_999_999), 9_999_999_999_999);
+        // 10_000_000_000_000 is microseconds → divide by 1000
+        assert_eq!(normalize_timestamp(10_000_000_000_000), 10_000_000_000);
+    }
+
+    #[test]
+    fn test_normalize_timestamp_nanoseconds() {
+        // Nanoseconds (19 digits) → divide by 1000 (becomes microseconds)
+        // This is a known limitation — only one level of conversion
+        let ts_ns = 1_770_574_211_585_923_456;
+        assert_eq!(normalize_timestamp(ts_ns), ts_ns / 1000);
+    }
+
+    #[test]
+    fn test_normalize_timestamp_current_epoch() {
+        // Current epoch in seconds (~1.7 billion)
+        let ts_s = 1_709_683_200; // 2024-03-06 in seconds
+        assert_eq!(normalize_timestamp(ts_s), ts_s * 1000);
+
+        // Same in milliseconds
+        let ts_ms = 1_709_683_200_000;
+        assert_eq!(normalize_timestamp(ts_ms), ts_ms);
+    }
 }

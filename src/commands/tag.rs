@@ -168,3 +168,142 @@ fn handle_tag_update(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::init_db;
+    use crate::models::Session;
+    use tempfile::TempDir;
+
+    fn setup_test_db() -> (TempDir, Repository) {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let conn = init_db(&db_path).unwrap();
+        let repo = Repository::new(conn);
+        (temp_dir, repo)
+    }
+
+    #[test]
+    fn test_tag_create_with_name() {
+        let (_dir, repo) = setup_test_db();
+        handle_tag_create(&repo, Some("work".to_string()), None).unwrap();
+
+        let tags = repo.get_tags().unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].name, "work");
+    }
+
+    #[test]
+    fn test_tag_create_with_description() {
+        let (_dir, repo) = setup_test_db();
+        handle_tag_create(&repo, Some("work".to_string()), Some("Work tasks")).unwrap();
+
+        let tags = repo.get_tags().unwrap();
+        assert_eq!(tags[0].description.as_deref(), Some("Work tasks"));
+    }
+
+    #[test]
+    fn test_tag_create_empty_name() {
+        let (_dir, repo) = setup_test_db();
+        // Empty string name — should not create a tag
+        handle_tag_create(&repo, Some(String::new()), None).unwrap();
+        let tags = repo.get_tags().unwrap();
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn test_tag_create_duplicate() {
+        let (_dir, repo) = setup_test_db();
+        handle_tag_create(&repo, Some("work".to_string()), None).unwrap();
+        // Creating again with same name (case insensitive) should not panic
+        handle_tag_create(&repo, Some("WORK".to_string()), None).unwrap();
+
+        let tags = repo.get_tags().unwrap();
+        assert_eq!(tags.len(), 1); // Still only one
+    }
+
+    #[test]
+    fn test_tag_list_empty() {
+        let (_dir, repo) = setup_test_db();
+        // Should not error on empty list
+        handle_tag_list(&repo).unwrap();
+    }
+
+    #[test]
+    fn test_tag_list_with_tags() {
+        let (_dir, repo) = setup_test_db();
+        repo.create_tag("alpha", None).unwrap();
+        repo.create_tag("beta", Some("Beta tag")).unwrap();
+        // Should not error when listing tags
+        handle_tag_list(&repo).unwrap();
+    }
+
+    #[test]
+    fn test_tag_associate_existing_tag() {
+        let (_dir, repo) = setup_test_db();
+        let tag_id = repo.create_tag("work", None).unwrap();
+        let session = Session::new("host".to_string(), 100);
+        repo.insert_session(&session).unwrap();
+
+        handle_tag_associate(&repo, "work", Some(session.id.clone())).unwrap();
+
+        let s = repo.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(s.tag_id, Some(tag_id));
+    }
+
+    #[test]
+    fn test_tag_associate_auto_creates_tag() {
+        let (_dir, repo) = setup_test_db();
+        let session = Session::new("host".to_string(), 100);
+        repo.insert_session(&session).unwrap();
+
+        // Tag doesn't exist yet — should auto-create
+        handle_tag_associate(&repo, "newtag", Some(session.id.clone())).unwrap();
+
+        let tags = repo.get_tags().unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].name, "newtag");
+
+        let s = repo.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(s.tag_id, Some(tags[0].id));
+    }
+
+    #[test]
+    fn test_tag_associate_no_session_id() {
+        let (_dir, repo) = setup_test_db();
+        repo.create_tag("work", None).unwrap();
+        // No session ID provided and env var not set — should not error
+        std::env::remove_var("SUVADU_SESSION_ID");
+        handle_tag_associate(&repo, "work", None).unwrap();
+    }
+
+    #[test]
+    fn test_tag_update_name() {
+        let (_dir, repo) = setup_test_db();
+        repo.create_tag("old", None).unwrap();
+
+        handle_tag_update(&repo, "old", Some("new"), None).unwrap();
+
+        let tags = repo.get_tags().unwrap();
+        assert_eq!(tags[0].name, "new");
+    }
+
+    #[test]
+    fn test_tag_update_description() {
+        let (_dir, repo) = setup_test_db();
+        repo.create_tag("work", None).unwrap();
+
+        handle_tag_update(&repo, "work", None, Some("Updated desc")).unwrap();
+
+        let tags = repo.get_tags().unwrap();
+        assert_eq!(tags[0].description.as_deref(), Some("Updated desc"));
+    }
+
+    #[test]
+    fn test_tag_update_not_found() {
+        let (_dir, repo) = setup_test_db();
+        // Should not error when updating nonexistent tag
+        handle_tag_update(&repo, "nonexistent", Some("new"), None).unwrap();
+    }
+}

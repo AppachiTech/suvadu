@@ -1464,3 +1464,606 @@ fn test_get_frequent_commands_dir_diversity_ranking() {
     assert_eq!(results[1].1, 10);
     assert_eq!(results[1].2, 1);
 }
+
+// ── Delete Tests ────────────────────────────────────────
+
+#[test]
+fn test_delete_entries_by_pattern() {
+    let (_dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "git status".into(),
+        "/tmp".into(),
+        Some(0),
+        1000,
+        1100,
+    ))
+    .unwrap();
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "git commit".into(),
+        "/tmp".into(),
+        Some(0),
+        2000,
+        2100,
+    ))
+    .unwrap();
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "cargo build".into(),
+        "/tmp".into(),
+        Some(0),
+        3000,
+        3100,
+    ))
+    .unwrap();
+
+    // Delete entries matching "git"
+    let deleted = repo.delete_entries("git", false, None).unwrap();
+    assert_eq!(deleted, 2);
+    assert_eq!(repo.count_entries().unwrap(), 1);
+}
+
+#[test]
+fn test_delete_entries_by_regex() {
+    let (_dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "git status".into(),
+        "/tmp".into(),
+        Some(0),
+        1000,
+        1100,
+    ))
+    .unwrap();
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "git commit -m 'fix'".into(),
+        "/tmp".into(),
+        Some(0),
+        2000,
+        2100,
+    ))
+    .unwrap();
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "cargo build".into(),
+        "/tmp".into(),
+        Some(0),
+        3000,
+        3100,
+    ))
+    .unwrap();
+
+    // Regex: delete commands starting with "git"
+    let deleted = repo.delete_entries("^git", true, None).unwrap();
+    assert_eq!(deleted, 2);
+    assert_eq!(repo.count_entries().unwrap(), 1);
+}
+
+#[test]
+fn test_delete_entries_with_before_timestamp() {
+    let (_dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "git status".into(),
+        "/tmp".into(),
+        Some(0),
+        1000,
+        1100,
+    ))
+    .unwrap();
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "git commit".into(),
+        "/tmp".into(),
+        Some(0),
+        5000,
+        5100,
+    ))
+    .unwrap();
+
+    // Delete "git" entries older than 3000
+    let deleted = repo.delete_entries("git", false, Some(3000)).unwrap();
+    assert_eq!(deleted, 1);
+    assert_eq!(repo.count_entries().unwrap(), 1);
+}
+
+#[test]
+fn test_delete_entries_regex_with_before() {
+    let (_dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "git status".into(),
+        "/tmp".into(),
+        Some(0),
+        1000,
+        1100,
+    ))
+    .unwrap();
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "git push".into(),
+        "/tmp".into(),
+        Some(0),
+        5000,
+        5100,
+    ))
+    .unwrap();
+
+    // Regex delete "^git" before 3000 — should only delete the old one
+    let deleted = repo.delete_entries("^git", true, Some(3000)).unwrap();
+    assert_eq!(deleted, 1);
+    assert_eq!(repo.count_entries().unwrap(), 1);
+}
+
+#[test]
+fn test_delete_entries_no_match() {
+    let (_dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "ls -la".into(),
+        "/tmp".into(),
+        Some(0),
+        1000,
+        1100,
+    ))
+    .unwrap();
+
+    let deleted = repo.delete_entries("nonexistent", false, None).unwrap();
+    assert_eq!(deleted, 0);
+    assert_eq!(repo.count_entries().unwrap(), 1);
+
+    let deleted = repo.delete_entries("^zzz", true, None).unwrap();
+    assert_eq!(deleted, 0);
+    assert_eq!(repo.count_entries().unwrap(), 1);
+}
+
+#[test]
+fn test_count_entries_by_pattern() {
+    let (_dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "git status".into(),
+        "/tmp".into(),
+        Some(0),
+        1000,
+        1100,
+    ))
+    .unwrap();
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "git commit".into(),
+        "/tmp".into(),
+        Some(0),
+        2000,
+        2100,
+    ))
+    .unwrap();
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "cargo build".into(),
+        "/tmp".into(),
+        Some(0),
+        3000,
+        3100,
+    ))
+    .unwrap();
+
+    // LIKE pattern count
+    assert_eq!(
+        repo.count_entries_by_pattern("git", false, None).unwrap(),
+        2
+    );
+    assert_eq!(
+        repo.count_entries_by_pattern("cargo", false, None).unwrap(),
+        1
+    );
+    assert_eq!(
+        repo.count_entries_by_pattern("nonexistent", false, None)
+            .unwrap(),
+        0
+    );
+
+    // Regex count
+    assert_eq!(
+        repo.count_entries_by_pattern("^git", true, None).unwrap(),
+        2
+    );
+    assert_eq!(
+        repo.count_entries_by_pattern("commit$", true, None)
+            .unwrap(),
+        1
+    );
+
+    // With before timestamp
+    assert_eq!(
+        repo.count_entries_by_pattern("git", false, Some(1500))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn test_delete_entry_by_id() {
+    let (_dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    let id = repo
+        .insert_entry(&Entry::new(
+            session.id.clone(),
+            "ls".into(),
+            "/tmp".into(),
+            Some(0),
+            1000,
+            1100,
+        ))
+        .unwrap();
+
+    assert_eq!(repo.count_entries().unwrap(), 1);
+    repo.delete_entry(id).unwrap();
+    assert_eq!(repo.count_entries().unwrap(), 0);
+}
+
+// ── Replay Tests ────────────────────────────────────────
+
+#[test]
+fn test_get_replay_entries_by_session() {
+    let (_dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    let other_session = Session::new("host".to_string(), 200);
+    repo.insert_session(&other_session).unwrap();
+
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "cmd1".into(),
+        "/tmp".into(),
+        Some(0),
+        1000,
+        1100,
+    ))
+    .unwrap();
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "cmd2".into(),
+        "/tmp".into(),
+        Some(0),
+        2000,
+        2100,
+    ))
+    .unwrap();
+    repo.insert_entry(&Entry::new(
+        other_session.id.clone(),
+        "other_cmd".into(),
+        "/tmp".into(),
+        Some(0),
+        3000,
+        3100,
+    ))
+    .unwrap();
+
+    // Replay for session — should be chronological (ASC)
+    let entries = repo
+        .get_replay_entries(Some(&session.id), None, None, None, None, None, None)
+        .unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].command, "cmd1"); // ASC order
+    assert_eq!(entries[1].command, "cmd2");
+}
+
+#[test]
+fn test_get_replay_entries_with_date_filter() {
+    let (_dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "old_cmd".into(),
+        "/tmp".into(),
+        Some(0),
+        1000,
+        1100,
+    ))
+    .unwrap();
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "new_cmd".into(),
+        "/tmp".into(),
+        Some(0),
+        5000,
+        5100,
+    ))
+    .unwrap();
+
+    // After 3000
+    let entries = repo
+        .get_replay_entries(None, Some(3000), None, None, None, None, None)
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].command, "new_cmd");
+
+    // Before 3000
+    let entries = repo
+        .get_replay_entries(None, None, Some(3000), None, None, None, None)
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].command, "old_cmd");
+}
+
+#[test]
+fn test_get_replay_entries_with_exit_code_filter() {
+    let (_dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "ok_cmd".into(),
+        "/tmp".into(),
+        Some(0),
+        1000,
+        1100,
+    ))
+    .unwrap();
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "fail_cmd".into(),
+        "/tmp".into(),
+        Some(1),
+        2000,
+        2100,
+    ))
+    .unwrap();
+
+    let entries = repo
+        .get_replay_entries(None, None, None, None, Some(1), None, None)
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].command, "fail_cmd");
+}
+
+#[test]
+fn test_get_replay_entries_with_cwd_filter() {
+    let (_dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "cmd_a".into(),
+        "/project".into(),
+        Some(0),
+        1000,
+        1100,
+    ))
+    .unwrap();
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "cmd_b".into(),
+        "/other".into(),
+        Some(0),
+        2000,
+        2100,
+    ))
+    .unwrap();
+
+    let entries = repo
+        .get_replay_entries(None, None, None, None, None, None, Some("/project"))
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].command, "cmd_a");
+}
+
+#[test]
+fn test_get_replay_entries_with_executor_filter() {
+    let (_dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    let mut entry1 = Entry::new(
+        session.id.clone(),
+        "human_cmd".into(),
+        "/tmp".into(),
+        Some(0),
+        1000,
+        1100,
+    );
+    entry1.executor_type = Some("human".to_string());
+    repo.insert_entry(&entry1).unwrap();
+
+    let mut entry2 = Entry::new(
+        session.id.clone(),
+        "agent_cmd".into(),
+        "/tmp".into(),
+        Some(0),
+        2000,
+        2100,
+    );
+    entry2.executor_type = Some("agent".to_string());
+    entry2.executor = Some("claude".to_string());
+    repo.insert_entry(&entry2).unwrap();
+
+    let entries = repo
+        .get_replay_entries(None, None, None, None, None, Some("agent"), None)
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].command, "agent_cmd");
+}
+
+// ── Export Tests ─────────────────────────────────────────
+
+#[test]
+fn test_export_entries_all() {
+    let (_dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "cmd1".into(),
+        "/tmp".into(),
+        Some(0),
+        1000,
+        1100,
+    ))
+    .unwrap();
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "cmd2".into(),
+        "/tmp".into(),
+        Some(0),
+        2000,
+        2100,
+    ))
+    .unwrap();
+
+    let entries = repo.export_entries(None, None).unwrap();
+    assert_eq!(entries.len(), 2);
+    // Export is ASC order
+    assert_eq!(entries[0].command, "cmd1");
+    assert_eq!(entries[1].command, "cmd2");
+}
+
+#[test]
+fn test_export_entries_with_date_filter() {
+    let (_dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "old".into(),
+        "/tmp".into(),
+        Some(0),
+        1000,
+        1100,
+    ))
+    .unwrap();
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "new".into(),
+        "/tmp".into(),
+        Some(0),
+        5000,
+        5100,
+    ))
+    .unwrap();
+
+    let entries = repo.export_entries(Some(3000), None).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].command, "new");
+
+    let entries = repo.export_entries(None, Some(3000)).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].command, "old");
+}
+
+// ── Tag-Session Lookup Tests ────────────────────────────
+
+#[test]
+fn test_get_tag_by_session() {
+    let (_dir, repo) = setup_test_db();
+
+    let tag_id = repo.create_tag("work", Some("Work tasks")).unwrap();
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    // No tag initially
+    let tag_name = repo.get_tag_by_session(&session.id).unwrap();
+    assert!(tag_name.is_none());
+
+    // Associate tag
+    repo.tag_session(&session.id, Some(tag_id)).unwrap();
+    let tag_name = repo.get_tag_by_session(&session.id).unwrap();
+    assert_eq!(tag_name.as_deref(), Some("work"));
+
+    // Clear tag
+    repo.tag_session(&session.id, None).unwrap();
+    let tag_name = repo.get_tag_by_session(&session.id).unwrap();
+    assert!(tag_name.is_none());
+}
+
+#[test]
+fn test_get_tag_by_nonexistent_session() {
+    let (_dir, repo) = setup_test_db();
+    let tag_name = repo.get_tag_by_session("nonexistent").unwrap();
+    assert!(tag_name.is_none());
+}
+
+// ── Existing Command Timestamps (import dedup) ─────────
+
+#[test]
+fn test_get_existing_command_timestamps() {
+    let (_dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "git status".into(),
+        "/tmp".into(),
+        Some(0),
+        1_000_000, // 1000 seconds
+        1_001_000,
+    ))
+    .unwrap();
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "cargo build".into(),
+        "/tmp".into(),
+        Some(0),
+        2_000_000,
+        2_001_000,
+    ))
+    .unwrap();
+
+    let timestamps = repo.get_existing_command_timestamps().unwrap();
+    assert_eq!(timestamps.len(), 2);
+    assert!(timestamps.contains(&("git status".to_string(), 1000)));
+    assert!(timestamps.contains(&("cargo build".to_string(), 2000)));
+}
+
+// ── Transaction Tests ───────────────────────────────────
+
+#[test]
+fn test_begin_and_commit_transaction() {
+    let (_dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    repo.begin_transaction().unwrap();
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "in_transaction".into(),
+        "/tmp".into(),
+        Some(0),
+        1000,
+        1100,
+    ))
+    .unwrap();
+    repo.commit().unwrap();
+
+    assert_eq!(repo.count_entries().unwrap(), 1);
+}
