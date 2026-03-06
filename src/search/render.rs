@@ -457,10 +457,10 @@ impl SearchApp {
                 } else {
                     Row::new(vec![
                         Cell::from(time_str).style(time_style),
+                        Cell::from(command_display),
                         Cell::from(st_display).style(session_style),
                         Cell::from(executor_display).style(executor_style),
                         Cell::from(path_display).style(path_style),
-                        Cell::from(command_display),
                         Cell::from(exit_display).style(exit_style_item),
                         Cell::from(duration_str).style(duration_style),
                     ])
@@ -475,10 +475,10 @@ impl SearchApp {
         } else {
             vec![
                 Constraint::Length(12), // Time
+                Constraint::Min(10),    // Command
                 Constraint::Length(16), // Session/Tag
                 Constraint::Length(10), // Executor
                 Constraint::Length(12), // Path (../folder)
-                Constraint::Min(10),    // Command
                 Constraint::Length(6),  // Status
                 Constraint::Length(8),  // Duration
             ]
@@ -489,10 +489,10 @@ impl SearchApp {
         } else {
             Row::new(vec![
                 "Time".to_string(),
+                "Command".to_string(),
                 "Session/Tag".to_string(),
                 "Executor".to_string(),
                 "Path".to_string(),
-                "Command".to_string(),
                 "Status".to_string(),
                 "Duration".to_string(),
             ])
@@ -989,72 +989,6 @@ impl SearchApp {
         _is_selected: bool,
         width: usize,
     ) -> ratatui::text::Text<'static> {
-        let t = theme();
-        let mut lines = Vec::new();
-        let mut current_line_spans = Vec::new();
-        let mut current_line_width = 0;
-
-        let parts: Vec<&str> = command.split_whitespace().collect();
-        for (idx, part) in parts.iter().enumerate() {
-            // Heuristic syntax highlighting
-            let (color, modifier) = if idx == 0 {
-                // First word = command (green, bold)
-                (t.primary, Modifier::BOLD)
-            } else if part.starts_with('-') {
-                // Flags (yellow)
-                (t.warning, Modifier::empty())
-            } else if (part.starts_with('"') && part.ends_with('"'))
-                || (part.starts_with('\'') && part.ends_with('\''))
-            {
-                // Strings (cyan)
-                (Color::Cyan, Modifier::empty())
-            } else if part.starts_with('$') {
-                // Variables (magenta)
-                (Color::Magenta, Modifier::empty())
-            } else if part.contains('/') || part.starts_with('.') || part.starts_with('~') {
-                // Paths
-                (t.text_secondary, Modifier::empty())
-            } else if *part == "|"
-                || *part == "&&"
-                || *part == "||"
-                || *part == ";"
-                || *part == ">"
-                || *part == ">>"
-                || *part == "<"
-            {
-                // Operators / pipes
-                (t.info, Modifier::BOLD)
-            } else {
-                // Default (light text)
-                (t.text, Modifier::empty())
-            };
-
-            let style = Style::default().fg(color).add_modifier(modifier);
-            let part_len = part.chars().count();
-
-            // Check wrap
-            if width > 0
-                && current_line_width + part_len + 1 > width
-                && !current_line_spans.is_empty()
-            {
-                lines.push(Line::from(current_line_spans.clone()));
-                current_line_spans.clear();
-                current_line_width = 0;
-            }
-
-            current_line_spans.push(Span::styled(part.to_string(), style));
-            current_line_spans.push(Span::raw(" "));
-            current_line_width += part_len + 1;
-        }
-
-        if !current_line_spans.is_empty() {
-            lines.push(Line::from(current_line_spans));
-        }
-
-        if lines.is_empty() {
-            return ratatui::text::Text::from(command.to_string());
-        }
-
-        ratatui::text::Text::from(lines)
+        crate::util::highlight_command(command, width)
     }
 }

@@ -519,9 +519,9 @@ impl AgentApp {
 
         let header = Row::new(vec![
             Cell::from("Time"),
+            Cell::from("Command"),
             Cell::from("Executor"),
             Cell::from("Path"),
-            Cell::from("Command"),
             Cell::from("Status"),
             Cell::from("Duration"),
         ])
@@ -550,8 +550,7 @@ impl AgentApp {
                     path_full
                 };
 
-                let cmd_w = table_area.width.saturating_sub(65) as usize;
-                let cmd = truncate(&entry.command, cmd_w.max(10));
+                let command_display = crate::util::highlight_command(&entry.command, 0);
 
                 let risk_icon = rl.icon();
                 let exit_display = match entry.exit_code {
@@ -572,9 +571,9 @@ impl AgentApp {
 
                 Row::new(vec![
                     Cell::from(time).style(Style::default().fg(t.text_muted)),
+                    Cell::from(command_display),
                     Cell::from(executor).style(Style::default().fg(t.warning)),
                     Cell::from(path_display).style(Style::default().fg(t.text_secondary)),
-                    Cell::from(cmd).style(Style::default().fg(t.text)),
                     Cell::from(exit_display).style(exit_style),
                     Cell::from(dur_str).style(Style::default().fg(t.text_muted)),
                 ])
@@ -583,9 +582,9 @@ impl AgentApp {
 
         let widths = [
             Constraint::Length(12), // Time (MM-DD HH:MM)
+            Constraint::Min(10),    // Command
             Constraint::Length(12), // Executor
             Constraint::Length(20), // Path
-            Constraint::Min(10),    // Command
             Constraint::Length(8),  // Status + risk icon
             Constraint::Length(8),  // Duration
         ];
