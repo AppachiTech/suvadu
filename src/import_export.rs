@@ -62,16 +62,36 @@ pub fn handle_import(file: &str, dry_run: bool) -> Result<(), Box<dyn std::error
     let f = std::fs::File::open(file)?;
     let reader = std::io::BufReader::new(f);
 
-    let repo = if dry_run {
-        None
-    } else {
-        let db_path = db::get_db_path()?;
-        let conn = db::init_db(&db_path)?;
-        Some(Repository::new(conn))
-    };
+    if dry_run {
+        let mut count = 0u64;
+        for (line_num, line) in reader.lines().enumerate() {
+            let line = line?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let entry: Entry = match serde_json::from_str(trimmed) {
+                Ok(e) => e,
+                Err(err) => {
+                    eprintln!("Line {}: parse error: {err}", line_num + 1);
+                    continue;
+                }
+            };
+            println!("[dry-run] Would import: {} ({})", entry.command, entry.cwd);
+            count += 1;
+        }
+        println!("Dry run complete. {count} entries would be imported.");
+        return Ok(());
+    }
 
-    let mut imported = 0u64;
-    let mut skipped = 0u64;
+    let db_path = db::get_db_path()?;
+    let conn = db::init_db(&db_path)?;
+    let repo = Repository::new(conn);
+
+    // Collect and parse all entries first so parse errors
+    // don't leave partial data in a committed transaction.
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut parse_errors = 0u64;
 
     for (line_num, line) in reader.lines().enumerate() {
         let line = line?;
@@ -79,34 +99,32 @@ pub fn handle_import(file: &str, dry_run: bool) -> Result<(), Box<dyn std::error
         if trimmed.is_empty() {
             continue;
         }
-
-        let entry: Entry = match serde_json::from_str(trimmed) {
-            Ok(e) => e,
+        match serde_json::from_str(trimmed) {
+            Ok(e) => entries.push(e),
             Err(err) => {
                 eprintln!("Line {}: parse error: {err}", line_num + 1);
-                skipped += 1;
-                continue;
-            }
-        };
-
-        if dry_run {
-            println!("[dry-run] Would import: {} ({})", entry.command, entry.cwd);
-        } else if let Some(ref repo) = repo {
-            match repo.insert_entry(&entry) {
-                Ok(_) => imported += 1,
-                Err(e) => {
-                    eprintln!("Line {}: insert error: {e}", line_num + 1);
-                    skipped += 1;
-                }
+                parse_errors += 1;
             }
         }
     }
 
-    if dry_run {
-        println!("Dry run complete. No entries were written.");
-    } else {
-        println!("Imported {imported} entries ({skipped} skipped).");
+    repo.begin_transaction()?;
+
+    let mut imported = 0u64;
+    for entry in &entries {
+        match repo.insert_entry(entry) {
+            Ok(_) => imported += 1,
+            Err(e) => {
+                eprintln!("Insert failed: {e}");
+                eprintln!("Rolling back — no entries were written.");
+                let _ = repo.rollback();
+                return Err(e.into());
+            }
+        }
     }
+
+    repo.commit()?;
+    println!("Imported {imported} entries ({parse_errors} skipped).");
     Ok(())
 }
 
@@ -244,9 +262,39 @@ pub fn handle_import_zsh_history(
     };
     repo.insert_session(&session)?;
 
-    // Phase 3: Insert in a transaction for performance
+    // Phase 3: Insert in a transaction for performance + atomicity
     repo.begin_transaction()?;
 
+    let result = import_entries_batch(&repo, &parsed, &existing, &session_id, now);
+
+    match result {
+        Ok((imported, skipped)) => {
+            repo.commit()?;
+            println!("\n✓ Import complete:");
+            println!("  Imported: {imported}");
+            println!("  Skipped:  {skipped} (duplicates/empty)");
+            println!("  Session:  {session_id}");
+        }
+        Err(e) => {
+            eprintln!("\nImport failed: {e}");
+            eprintln!("Rolling back — no entries were written.");
+            let _ = repo.rollback();
+            return Err(e);
+        }
+    }
+
+    Ok(())
+}
+
+/// Insert parsed entries in a batch. Returns (imported, skipped) counts.
+/// Errors are fatal — the caller is responsible for rolling back the transaction.
+fn import_entries_batch(
+    repo: &Repository,
+    parsed: &[(String, i64, i64)],
+    existing: &std::collections::HashSet<(String, i64)>,
+    session_id: &str,
+    now: i64,
+) -> Result<(u64, u64), Box<dyn std::error::Error>> {
     let mut imported = 0u64;
     let mut skipped = 0u64;
     let total = parsed.len();
@@ -268,7 +316,7 @@ pub fn handle_import_zsh_history(
         let ended_at = started_at + dur;
 
         let entry = Entry::new(
-            session_id.clone(),
+            session_id.to_string(),
             cmd.clone(),
             String::new(), // CWD unknown for imported entries
             None,          // exit code unknown
@@ -276,13 +324,8 @@ pub fn handle_import_zsh_history(
             ended_at,
         );
 
-        match repo.insert_entry(&entry) {
-            Ok(_) => imported += 1,
-            Err(e) => {
-                eprintln!("Error at entry {}: {e}", i + 1);
-                skipped += 1;
-            }
-        }
+        repo.insert_entry(&entry)?;
+        imported += 1;
 
         // Progress every 2000 entries
         if (i + 1) % 2000 == 0 {
@@ -290,18 +333,11 @@ pub fn handle_import_zsh_history(
         }
     }
 
-    repo.commit()?;
-
     if total >= 2000 {
         eprintln!(); // Clear progress line
     }
 
-    println!("\n✓ Import complete:");
-    println!("  Imported: {imported}");
-    println!("  Skipped:  {skipped} (duplicates/empty)");
-    println!("  Session:  {session_id}");
-
-    Ok(())
+    Ok((imported, skipped))
 }
 
 #[cfg(test)]

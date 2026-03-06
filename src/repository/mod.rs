@@ -200,6 +200,12 @@ impl Repository {
         Ok(())
     }
 
+    /// Roll back a transaction (undo all changes since `begin_transaction`)
+    pub fn rollback(&self) -> DbResult<()> {
+        self.conn.execute_batch("ROLLBACK")?;
+        Ok(())
+    }
+
     /// Get all (command, started-at-seconds) pairs for dedup during import.
     /// Returns `started_at` / 1000 so zsh-history second-precision
     /// timestamps can be compared directly.
