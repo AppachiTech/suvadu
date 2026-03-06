@@ -270,7 +270,7 @@ fi
 # Legacy alias support
 alias suvadu="suv"
 
-export SUVADU_SESSION_ID="${{SUVADU_SESSION_ID:-$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null || echo "bash-$$-$RANDOM")}}"
+export SUVADU_SESSION_ID="${{SUVADU_SESSION_ID:-$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null || head -c16 /dev/urandom 2>/dev/null | od -A n -t x1 | tr -d ' \n' || echo "bash-$$-$RANDOM")}}"
 _SUVADU_START_TIME=0
 _SUVADU_CMD=""
 _SUVADU_BIN="{bin_path}"

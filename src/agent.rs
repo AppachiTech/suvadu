@@ -560,7 +560,9 @@ fn handle_agent_stats_text(
         };
         #[allow(clippy::cast_precision_loss)]
         let avg_dur = if total > 0 {
-            cmds.iter().map(|e| e.duration_ms).sum::<i64>() as f64 / total as f64
+            cmds.iter()
+                .fold(0i64, |acc, e| acc.saturating_add(e.duration_ms)) as f64
+                / total as f64
         } else {
             0.0
         };

@@ -84,7 +84,9 @@ impl AgentStatsApp {
                 let success = cmds.iter().filter(|e| e.exit_code == Some(0)).count();
                 #[allow(clippy::cast_precision_loss, clippy::cast_possible_wrap)]
                 let avg_duration_ms = if total > 0 {
-                    cmds.iter().map(|e| e.duration_ms).sum::<i64>() / total as i64
+                    cmds.iter()
+                        .fold(0i64, |acc, e| acc.saturating_add(e.duration_ms))
+                        / total as i64
                 } else {
                     0
                 };

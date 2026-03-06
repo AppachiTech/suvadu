@@ -48,6 +48,16 @@ impl SearchApp {
         use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
         use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
 
+        // Scoring constants:
+        // LENGTH_THRESHOLD: commands up to this length keep full score.
+        // HUMAN_BOOST_FRACTION: human commands get +33% score (1/3) to
+        //   surface interactive history over agent-generated commands.
+        // CWD_BOOST_FRACTION: same-directory commands get +50% score (1/2)
+        //   because working-directory locality is a strong relevance signal.
+        const LENGTH_THRESHOLD: f64 = 80.0;
+        const HUMAN_BOOST_FRACTION: u32 = 3;
+        const CWD_BOOST_FRACTION: u32 = 2;
+
         let mut matcher = Matcher::new(MatcherConfig::DEFAULT);
         let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
 
@@ -59,24 +69,25 @@ impl SearchApp {
             let haystack = Utf32Str::new(&entry.command, &mut buf);
             if let Some(score) = pattern.score(haystack, &mut matcher) {
                 // Penalise long commands — short matches are more relevant.
-                // Commands ≤80 chars keep full score; longer ones are scaled
-                // down by sqrt(80/len) so a 500-char command gets ~40% score.
+                // Commands ≤ LENGTH_THRESHOLD chars keep full score; longer
+                // ones are scaled down by sqrt(threshold/len) so a 500-char
+                // command gets ~40% score.
                 let cmd_len = entry.command.len().max(1) as f64;
-                let length_factor = if cmd_len <= 80.0 {
+                let length_factor = if cmd_len <= LENGTH_THRESHOLD {
                     1.0
                 } else {
-                    (80.0 / cmd_len).sqrt()
+                    (LENGTH_THRESHOLD / cmd_len).sqrt()
                 };
                 let mut final_score = (f64::from(score) * length_factor) as u32;
 
                 // Boost human-executed commands over agent commands
                 let is_human = entry.executor_type.as_deref().unwrap_or("human") == "human";
                 if is_human {
-                    final_score = final_score.saturating_add(final_score / 3);
+                    final_score = final_score.saturating_add(final_score / HUMAN_BOOST_FRACTION);
                 }
                 // Boost same-CWD commands
                 if boost_cwd.is_some_and(|cwd| entry.cwd == cwd) {
-                    final_score = final_score.saturating_add(final_score / 2);
+                    final_score = final_score.saturating_add(final_score / CWD_BOOST_FRACTION);
                 }
                 scored.push((entry, final_score));
             }
