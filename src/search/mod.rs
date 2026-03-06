@@ -229,13 +229,25 @@ impl SearchApp {
                         SearchAction::SetPage(page) => {
                             self.set_page(repo, page)?;
                         }
-                        SearchAction::Copy(cmd) => {
-                            let mut clipboard = Clipboard::new()?;
-                            if clipboard.set_text(cmd.clone()).is_ok() {
-                                self.status_message =
-                                    Some(("Copied!".to_string(), std::time::Instant::now()));
+                        SearchAction::Copy(cmd) => match Clipboard::new() {
+                            Ok(mut clipboard) => {
+                                if clipboard.set_text(cmd.clone()).is_ok() {
+                                    self.status_message =
+                                        Some(("Copied!".to_string(), std::time::Instant::now()));
+                                } else {
+                                    self.status_message = Some((
+                                        "Copy failed".to_string(),
+                                        std::time::Instant::now(),
+                                    ));
+                                }
                             }
-                        }
+                            Err(_) => {
+                                self.status_message = Some((
+                                    "Clipboard unavailable".to_string(),
+                                    std::time::Instant::now(),
+                                ));
+                            }
+                        },
                         SearchAction::Delete(id) => {
                             if repo.delete_entry(id).is_ok() {
                                 self.reload_entries(repo)?;

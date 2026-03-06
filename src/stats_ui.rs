@@ -453,7 +453,7 @@ impl StatsApp {
             day_counts.insert(date.clone(), *count);
         }
 
-        let max_count = day_counts.values().copied().max().unwrap_or(0);
+        let max_count = day_counts.values().copied().max().unwrap_or(0).max(1);
 
         // Calculate grid dimensions
         let label_width: u16 = 5;

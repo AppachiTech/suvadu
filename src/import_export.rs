@@ -4,6 +4,18 @@ use crate::models::{Entry, Session};
 use crate::repository::Repository;
 use crate::util;
 
+/// Escape a string for CSV: double internal quotes and prefix with `'` if the
+/// field starts with a formula-triggering character (`=`, `+`, `-`, `@`, tab, CR).
+/// This prevents formula injection in Excel / Google Sheets.
+fn csv_safe(s: &str) -> String {
+    let escaped = s.replace('"', "\"\"");
+    if escaped.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        format!("'{escaped}")
+    } else {
+        escaped
+    }
+}
+
 pub fn handle_export(
     format: &str,
     after: Option<&str>,
@@ -30,9 +42,9 @@ pub fn handle_export(
         "csv" => {
             println!("command,cwd,exit_code,started_at,ended_at,duration_ms,session_id,executor_type,executor");
             for entry in &entries {
-                // Escape command for CSV (double-quote fields containing commas/quotes)
-                let cmd = entry.command.replace('"', "\"\"");
-                let cwd = entry.cwd.replace('"', "\"\"");
+                // Escape command for CSV and guard against formula injection
+                let cmd = csv_safe(&entry.command);
+                let cwd = csv_safe(&entry.cwd);
                 println!(
                     "\"{cmd}\",\"{cwd}\",{},{},{},{},{},{},{}",
                     entry.exit_code.map_or(String::new(), |c| c.to_string()),

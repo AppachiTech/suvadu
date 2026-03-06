@@ -155,7 +155,12 @@ pub fn migrate_config_macos() {
     }
 
     if std::fs::create_dir_all(new_dir).is_ok() {
-        let _ = std::fs::copy(&old_config, &new_config);
+        if let Err(e) = std::fs::copy(&old_config, &new_config) {
+            eprintln!(
+                "suvadu: failed to migrate config from {}: {e}",
+                old_config.display()
+            );
+        }
     }
 }
 

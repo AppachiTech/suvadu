@@ -119,11 +119,5 @@ pub fn format_full_datetime(ms: i64) -> String {
 }
 
 pub fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else if max > 3 {
-        format!("{}...", &s[..max - 3])
-    } else {
-        s[..max].to_string()
-    }
+    crate::util::truncate_str(s, max, "...")
 }

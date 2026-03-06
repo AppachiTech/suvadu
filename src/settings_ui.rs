@@ -312,13 +312,16 @@ impl AppState {
                     self.auto_tag_focus = 1 - self.auto_tag_focus;
                 }
                 KeyCode::Char(c) => {
+                    const MAX_SETTINGS_INPUT: usize = 500;
                     if self.current_tab == 3 {
                         if self.auto_tag_focus == 0 {
-                            self.auto_tag_path_input.push(c);
-                        } else {
+                            if self.auto_tag_path_input.len() < MAX_SETTINGS_INPUT {
+                                self.auto_tag_path_input.push(c);
+                            }
+                        } else if self.auto_tag_name_input.len() < MAX_SETTINGS_INPUT {
                             self.auto_tag_name_input.push(c);
                         }
-                    } else {
+                    } else if self.input_buffer.len() < MAX_SETTINGS_INPUT {
                         self.input_buffer.push(c);
                     }
                 }

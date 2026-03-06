@@ -544,11 +544,7 @@ impl AgentApp {
                 let executor = entry.executor.as_deref().unwrap_or("unknown");
 
                 let path_full = shorten_path(&entry.cwd, &self.home);
-                let path_display = if path_full.len() > 18 {
-                    format!("...{}", &path_full[path_full.len().saturating_sub(15)..])
-                } else {
-                    path_full
-                };
+                let path_display = crate::util::truncate_str_start(&path_full, 18, "...");
 
                 let command_display = crate::util::highlight_command(&entry.command, 0);
 
@@ -680,16 +676,13 @@ impl AgentApp {
 
         let mut lines = Vec::new();
 
-        // Command (wraps)
+        // Command (wraps by chars, not bytes, for UTF-8 safety)
         lines.push(Line::from(Span::styled("Command", label)));
-        for chunk in entry
-            .command
-            .as_bytes()
-            .chunks(max_w.max(1))
-            .map(|c| std::str::from_utf8(c).unwrap_or(""))
-        {
+        let cmd_chars: Vec<char> = entry.command.chars().collect();
+        for chunk in cmd_chars.chunks(max_w.max(1)) {
+            let chunk_str: String = chunk.iter().collect();
             lines.push(Line::from(Span::styled(
-                format!(" {chunk}"),
+                format!(" {chunk_str}"),
                 Style::default().fg(t.primary),
             )));
         }
@@ -746,7 +739,7 @@ impl AgentApp {
         ]));
 
         // Session
-        let session = &entry.session_id[..8.min(entry.session_id.len())];
+        let session: String = entry.session_id.chars().take(8).collect();
         lines.push(Line::from(vec![
             Span::styled("Session  ", label),
             Span::styled(session, val),
@@ -784,17 +777,15 @@ impl AgentApp {
             }
         }
 
-        // Prompt
+        // Prompt (wraps by chars, not bytes, for UTF-8 safety)
         if let Some(ctx) = &entry.context {
             if let Some(prompt) = ctx.get("agent_prompt") {
                 lines.push(Line::from(Span::styled("Prompt", label)));
-                for chunk in prompt
-                    .as_bytes()
-                    .chunks(max_w.max(1))
-                    .map(|c| std::str::from_utf8(c).unwrap_or(""))
-                {
+                let prompt_chars: Vec<char> = prompt.chars().collect();
+                for chunk in prompt_chars.chunks(max_w.max(1)) {
+                    let chunk_str: String = chunk.iter().collect();
                     lines.push(Line::from(Span::styled(
-                        format!(" {chunk}"),
+                        format!(" {chunk_str}"),
                         Style::default().fg(t.info),
                     )));
                 }

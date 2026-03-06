@@ -9,7 +9,9 @@ impl Repository {
     pub fn get_stats(&self, days: Option<usize>, top_n: usize) -> DbResult<Stats> {
         let time_filter = days.map(|d| {
             let now = chrono::Utc::now().timestamp_millis();
-            now - (i64::try_from(d).unwrap_or(i64::MAX) * 24 * 60 * 60 * 1000)
+            now - i64::try_from(d)
+                .unwrap_or(i64::MAX)
+                .saturating_mul(86_400_000)
         });
         let where_clause = match time_filter {
             Some(_) => " WHERE e.started_at >= ?1",
@@ -178,7 +180,10 @@ impl Repository {
     /// Returns `(date_string, day_of_week 0=Sun..6=Sat, count)`.
     pub fn get_daily_activity(&self, days: usize) -> DbResult<Vec<(String, u32, i64)>> {
         let now = chrono::Utc::now().timestamp_millis();
-        let since = now - (i64::try_from(days).unwrap_or(i64::MAX) * 24 * 60 * 60 * 1000);
+        let since = now
+            - i64::try_from(days)
+                .unwrap_or(i64::MAX)
+                .saturating_mul(86_400_000);
         let sql = "SELECT \
                 date(e.started_at/1000, 'unixepoch', 'localtime') as day, \
                 CAST(strftime('%w', datetime(e.started_at/1000, 'unixepoch', 'localtime')) AS INTEGER) as dow, \

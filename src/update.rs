@@ -51,23 +51,15 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
     let archive_url = format!("{base_url}/{archive_name}");
     let checksum_url = format!("{base_url}/{archive_name}.sha256");
 
-    // Create a unique temp directory to avoid TOCTOU attacks.
-    // Using a per-invocation UUID prevents other processes from predicting
-    // and replacing files during the race window between download and install.
-    let update_dir = std::env::temp_dir().join(format!("suv-update-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&update_dir)?;
+    // Use tempfile::TempDir for secure temp directory (0700 permissions, auto-cleanup on drop).
+    let update_dir = tempfile::TempDir::new()?;
 
-    let tarball_path = update_dir.join("suv-update.tar.gz");
-    let binary_path = update_dir.join("suv");
+    let tarball_path = update_dir.path().join("suv-update.tar.gz");
+    let binary_path = update_dir.path().join("suv");
 
     let tarball_str = tarball_path.to_string_lossy().to_string();
     let binary_str = binary_path.to_string_lossy().to_string();
-    let update_dir_str = update_dir.to_string_lossy().to_string();
-
-    // Helper closure to clean up the temp directory on any exit path
-    let cleanup = || {
-        let _ = std::fs::remove_dir_all(&update_dir);
-    };
+    let update_dir_str = update_dir.path().to_string_lossy().to_string();
 
     // 1. Download archive
     println!("Downloading {platform_label} build from: {archive_url}");
@@ -76,7 +68,6 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
         .status()?;
 
     if !status.success() {
-        cleanup();
         eprintln!("Error: Failed to download update. Please check your internet connection.");
         process::exit(1);
     }
@@ -116,24 +107,43 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!(
                     "Aborting update for security. The download may be corrupted or tampered with."
                 );
-                cleanup();
                 process::exit(1);
             }
             println!("✓ SHA256 checksum verified: {}", &actual[..16]);
         }
         _ => {
-            println!("⚠ No checksum available — skipping verification");
+            eprintln!(
+                "Error: Could not fetch checksum for verification. Aborting update for security."
+            );
+            process::exit(1);
         }
     }
 
-    // 3. Extract
+    // 3. Extract (--no-same-owner prevents ownership issues)
     let status = std::process::Command::new("tar")
-        .args(["-xzf", &tarball_str, "-C", &update_dir_str])
+        .args([
+            "--no-same-owner",
+            "-xzf",
+            &tarball_str,
+            "-C",
+            &update_dir_str,
+        ])
         .status()?;
 
     if !status.success() {
         eprintln!("Error: Failed to extract update archive.");
-        cleanup();
+        process::exit(1);
+    }
+
+    // Validate extracted binary is within temp dir (defense against tar path traversal)
+    if !binary_path.exists() {
+        eprintln!("Error: Expected binary not found after extraction.");
+        process::exit(1);
+    }
+    let canonical_binary = binary_path.canonicalize()?;
+    let canonical_dir = update_dir.path().canonicalize()?;
+    if !canonical_binary.starts_with(&canonical_dir) {
+        eprintln!("Error: Extracted binary is outside temp directory. Aborting for security.");
         process::exit(1);
     }
 
@@ -147,7 +157,6 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
 
     if input.trim().to_lowercase() != "y" {
         println!("Update cancelled.");
-        cleanup();
         return Ok(());
     }
 
@@ -163,8 +172,7 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
         .args(["ln", "-sf", "/usr/local/bin/suv", "/usr/local/bin/suvadu"])
         .status()?;
 
-    // Clean up temp directory
-    cleanup();
+    // TempDir auto-cleans on drop
 
     if status_bin.success() && status_link.success() {
         println!("✓ Update successful!");

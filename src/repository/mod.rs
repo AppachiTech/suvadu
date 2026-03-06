@@ -24,7 +24,13 @@ pub const ENTRY_JOINS: &str = "FROM entries e
 /// (10 for standard queries, 11 for unique queries where COUNT(*) is at position 10).
 pub fn entry_from_row(row: &rusqlite::Row, tag_id_col: usize) -> rusqlite::Result<Entry> {
     let context_str: Option<String> = row.get(8)?;
-    let context = context_str.and_then(|s| serde_json::from_str(&s).ok());
+    let context = context_str.and_then(|s| match serde_json::from_str(&s) {
+        Ok(ctx) => Some(ctx),
+        Err(e) => {
+            eprintln!("suvadu: malformed context JSON: {e}");
+            None
+        }
+    });
     let tag_name: Option<String> = row.get(9)?;
 
     Ok(Entry {

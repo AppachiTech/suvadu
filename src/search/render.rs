@@ -297,22 +297,17 @@ impl SearchApp {
                 } else {
                     entry.started_at
                 };
-                let start_time = Local
-                    .timestamp_millis_opt(ts_ms)
-                    .single()
-                    .unwrap_or_else(|| {
-                        chrono::DateTime::from_timestamp_millis(0)
-                            .unwrap()
-                            .with_timezone(&Local)
-                    });
-                let time_str = start_time.format("%m-%d %H:%M").to_string();
+                let time_str = Local.timestamp_millis_opt(ts_ms).single().map_or_else(
+                    || "??-?? ??:??".into(),
+                    |dt| dt.format("%m-%d %H:%M").to_string(),
+                );
                 let duration_str = format!("{duration_secs:.1}s");
 
                 // Combine session and tag
-                let session_short = &entry.session_id[..8];
+                let session_short: String = entry.session_id.chars().take(8).collect();
 
                 let session_tag_display = entry.tag_name.as_ref().map_or_else(
-                    || session_short.to_string(),
+                    || session_short.clone(),
                     |tag| format!("{session_short} ({tag})"),
                 );
 
@@ -560,15 +555,10 @@ impl SearchApp {
             } else {
                 entry.started_at
             };
-            let start_time = Local
-                .timestamp_millis_opt(ts_ms)
-                .single()
-                .unwrap_or_else(|| {
-                    chrono::DateTime::from_timestamp_millis(0)
-                        .unwrap()
-                        .with_timezone(&Local)
-                });
-            let time_str = start_time.format("%Y-%m-%d %H:%M:%S").to_string();
+            let time_str = Local.timestamp_millis_opt(ts_ms).single().map_or_else(
+                || "????-??-?? ??:??:??".into(),
+                |dt| dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+            );
 
             #[allow(clippy::cast_precision_loss)]
             let duration_secs = entry.duration_ms as f64 / 1000.0;
@@ -585,7 +575,7 @@ impl SearchApp {
                 _ => "unknown".to_string(),
             };
 
-            let session_str = &entry.session_id[..8.min(entry.session_id.len())];
+            let session_str: String = entry.session_id.chars().take(8).collect();
             let tag_str = entry.tag_name.as_deref().unwrap_or("none");
 
             let is_bookmarked = self.bookmarked_commands.contains(&entry.command);
@@ -618,7 +608,7 @@ impl SearchApp {
                 ]),
                 Line::from(vec![
                     Span::styled("Session  ", label_style),
-                    Span::styled(session_str.to_string(), value_style),
+                    Span::styled(session_str, value_style),
                 ]),
                 Line::from(vec![
                     Span::styled("Tag      ", label_style),

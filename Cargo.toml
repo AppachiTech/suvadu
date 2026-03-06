@@ -33,9 +33,9 @@ regex = "1.12.3"
 nucleo-matcher = "0.3"
 clap_complete = "4"
 clap_mangen = "0.2"
+tempfile = "3.26"
 
 [dev-dependencies]
-tempfile = "3.26"
 
 [build-dependencies]
 chrono = "0.4"
