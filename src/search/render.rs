@@ -275,8 +275,8 @@ impl SearchApp {
             ..area
         };
 
-        // Time (15) + Session/Tag (25) + Executor (12) + Path (20) + Status (6) + Duration (8) = 86
-        let fixed_width: u16 = 15 + 25 + 12 + 20 + 6 + 8;
+        // Time (12) + Session/Tag (16) + Executor (10) + Path (12) + Status (6) + Duration (8) = 64
+        let fixed_width: u16 = 12 + 16 + 10 + 12 + 6 + 8;
         // When the terminal is too narrow for all columns, show only the Command column
         let compact = table_area.width < 100;
         let command_col_width = if compact {
@@ -327,18 +327,11 @@ impl SearchApp {
                     session_tag_display
                 };
 
-                // Shorten path - replace home directory with ~
-                let path_full = std::env::var("HOME")
-                    .map_or_else(|_| entry.cwd.clone(), |home| entry.cwd.replace(&home, "~"));
-
-                // For selected items, show full path; for others, truncate
-                let path_display = if is_selected {
-                    path_full
-                } else if path_full.len() > 18 {
-                    format!("...{}", &path_full[path_full.len() - 15..])
-                } else {
-                    path_full
-                };
+                // Shorten path to ../last_folder (full path shown in detail pane)
+                let path_display = std::path::Path::new(&entry.cwd)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map_or_else(|| entry.cwd.clone(), |last| format!("../{last}"));
 
                 // Format executor with icon
                 let executor_icon = match entry.executor_type.as_deref() {
@@ -481,10 +474,10 @@ impl SearchApp {
             vec![Constraint::Percentage(100)]
         } else {
             vec![
-                Constraint::Length(15), // Time
-                Constraint::Length(25), // Session/Tag
-                Constraint::Length(12), // Executor
-                Constraint::Length(20), // Path
+                Constraint::Length(12), // Time
+                Constraint::Length(16), // Session/Tag
+                Constraint::Length(10), // Executor
+                Constraint::Length(12), // Path (../folder)
                 Constraint::Min(10),    // Command
                 Constraint::Length(6),  // Status
                 Constraint::Length(8),  // Duration

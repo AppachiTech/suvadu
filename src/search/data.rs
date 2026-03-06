@@ -53,16 +53,37 @@ impl SearchApp {
             buf.clear();
             let haystack = Utf32Str::new(&entry.command, &mut buf);
             if let Some(score) = pattern.score(haystack, &mut matcher) {
-                let final_score = if boost_cwd.is_some_and(|cwd| entry.cwd == cwd) {
-                    score.saturating_add(score / 2)
-                } else {
-                    score
-                };
+                // Penalise long commands — short matches are more relevant.
+                // Commands ≤80 chars keep full score; longer ones are scaled
+                // down by sqrt(80/len) so a 500-char command gets ~40% score.
+                let cmd_len = entry.command.len().max(1) as f64;
+                let length_factor = if cmd_len <= 80.0 { 1.0 } else { (80.0 / cmd_len).sqrt() };
+                let mut final_score = (f64::from(score) * length_factor) as u32;
+
+                // Boost human-executed commands over agent commands
+                let is_human = entry.executor_type.as_deref().unwrap_or("human") == "human";
+                if is_human {
+                    final_score = final_score.saturating_add(final_score / 3);
+                }
+                // Boost same-CWD commands
+                if boost_cwd.is_some_and(|cwd| entry.cwd == cwd) {
+                    final_score = final_score.saturating_add(final_score / 2);
+                }
                 scored.push((entry, final_score));
             }
         }
 
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
+        scored.sort_by(|a, b| {
+            // Primary: fuzzy score (descending)
+            let score_cmp = b.1.cmp(&a.1);
+            if score_cmp != std::cmp::Ordering::Equal {
+                return score_cmp;
+            }
+            // Tiebreaker: human entries first
+            let a_human = a.0.executor_type.as_deref().unwrap_or("human") == "human";
+            let b_human = b.0.executor_type.as_deref().unwrap_or("human") == "human";
+            b_human.cmp(&a_human)
+        });
         scored.into_iter().map(|(e, _)| e).collect()
     }
 
@@ -72,6 +93,15 @@ impl SearchApp {
             let a_local = a.cwd == current_cwd;
             let b_local = b.cwd == current_cwd;
             b_local.cmp(&a_local) // true > false → locals first
+        });
+    }
+
+    /// Stable re-sort: float human-executed entries above agent entries.
+    fn apply_human_first_sort(entries: &mut [Entry]) {
+        entries.sort_by(|a, b| {
+            let a_human = a.executor_type.as_deref().unwrap_or("human") == "human";
+            let b_human = b.executor_type.as_deref().unwrap_or("human") == "human";
+            b_human.cmp(&a_human) // true > false → humans first
         });
     }
 
@@ -217,7 +247,8 @@ impl SearchApp {
                 self.entries = new_entries;
             }
 
-            // Apply context sort for non-fuzzy results
+            // Apply human-first sort, then context sort for non-fuzzy results
+            Self::apply_human_first_sort(&mut self.entries);
             if self.context_boost {
                 if let Some(ref cwd) = self.current_cwd {
                     Self::apply_context_sort(&mut self.entries, cwd);
@@ -287,7 +318,8 @@ impl SearchApp {
                 self.entries = new_entries;
             }
 
-            // Apply context sort for non-fuzzy pages
+            // Apply human-first sort, then context sort for non-fuzzy pages
+            Self::apply_human_first_sort(&mut self.entries);
             if self.context_boost {
                 if let Some(ref cwd) = self.current_cwd {
                     Self::apply_context_sort(&mut self.entries, cwd);
