@@ -21,7 +21,7 @@ pub struct Entry {
 
 impl Entry {
     /// Create a new entry
-    pub fn new(
+    pub const fn new(
         session_id: String,
         command: String,
         cwd: String,
@@ -47,7 +47,7 @@ impl Entry {
     }
 
     /// Set `tag_id`
-    pub fn with_tag_id(mut self, tag_id: Option<i64>) -> Self {
+    pub const fn with_tag_id(mut self, tag_id: Option<i64>) -> Self {
         self.tag_id = tag_id;
         self
     }

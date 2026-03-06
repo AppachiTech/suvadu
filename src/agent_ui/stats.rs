@@ -6,9 +6,7 @@ use ratatui::backend::Backend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, BorderType, Borders, Cell, Paragraph, Row, Table, Wrap,
-};
+use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table, Wrap};
 use ratatui::Terminal;
 
 use crate::models::Entry;
@@ -225,7 +223,6 @@ impl AgentStatsApp {
         true
     }
 
-    #[allow(clippy::too_many_lines)]
     fn render(&self, f: &mut ratatui::Frame) {
         let t = theme();
         let size = f.area();

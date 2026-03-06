@@ -906,7 +906,7 @@ pub fn run_stats_ui<B: Backend>(
 
 // ── Helpers ──────────────────────────────────────────────────
 
-fn heatmap_colors(t: &crate::theme::Theme) -> [Color; 5] {
+const fn heatmap_colors(t: &crate::theme::Theme) -> [Color; 5] {
     [
         t.bg_elevated,
         Color::Rgb(10, 50, 32),
@@ -933,7 +933,7 @@ fn intensity_level(count: i64, max: i64) -> usize {
     }
 }
 
-fn month_abbrev(month: u32) -> &'static str {
+const fn month_abbrev(month: u32) -> &'static str {
     match month {
         1 => "Ja",
         2 => "Fe",

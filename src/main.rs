@@ -247,7 +247,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Check if a command should show the setup hint (skip internal/setup commands).
-fn is_user_facing_command(cmd: &Commands) -> bool {
+const fn is_user_facing_command(cmd: &Commands) -> bool {
     !matches!(
         cmd,
         Commands::Init { .. }

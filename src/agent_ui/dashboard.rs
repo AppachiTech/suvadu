@@ -18,8 +18,8 @@ use crate::theme::theme;
 use crate::util::{dirs_home, shorten_path};
 
 use super::{
-    compute_agent_counts, compute_risk_levels, format_datetime, format_full_datetime,
-    load_entries, truncate, Period,
+    compute_agent_counts, compute_risk_levels, format_datetime, format_full_datetime, load_entries,
+    truncate, Period,
 };
 
 const PAGE_SIZE: usize = 50;
@@ -325,7 +325,7 @@ impl AgentApp {
         let agent_label = self
             .agent_filter
             .and_then(|i| self.agent_names.get(i))
-            .map_or("All agents".to_string(), Clone::clone);
+            .map_or_else(|| "All agents".to_string(), Clone::clone);
 
         let mut spans = vec![
             Span::styled(

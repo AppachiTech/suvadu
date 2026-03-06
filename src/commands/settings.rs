@@ -75,16 +75,17 @@ pub fn handle_status() -> Result<(), Box<dyn std::error::Error>> {
             if let Ok(conn) = db::init_db(&db_path) {
                 let repo = Repository::new(conn);
                 if let Ok(Some(session)) = repo.get_session(&session_id) {
-                    let tag_display = if let Some(tag_id) = session.tag_id {
-                        repo.get_tags()
-                            .ok()
-                            .and_then(|tags| {
-                                tags.into_iter().find(|t| t.id == tag_id).map(|t| t.name)
-                            })
-                            .unwrap_or_else(|| format!("ID: {tag_id} (Unknown)"))
-                    } else {
-                        "None".to_string()
-                    };
+                    let tag_display = session.tag_id.map_or_else(
+                        || "None".to_string(),
+                        |tag_id| {
+                            repo.get_tags()
+                                .ok()
+                                .and_then(|tags| {
+                                    tags.into_iter().find(|t| t.id == tag_id).map(|t| t.name)
+                                })
+                                .unwrap_or_else(|| format!("ID: {tag_id} (Unknown)"))
+                        },
+                    );
                     println!("  Tag: {tag_display}");
                 }
             }

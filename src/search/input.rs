@@ -4,6 +4,7 @@ use super::{SearchAction, SearchApp};
 use crate::util;
 
 impl SearchApp {
+    #[allow(clippy::too_many_lines)]
     pub(super) fn handle_input(&mut self, key: KeyEvent) -> SearchAction {
         if self.delete_dialog_open {
             return self.handle_delete_dialog_input(key);
@@ -212,7 +213,7 @@ impl SearchApp {
         SearchAction::Continue
     }
 
-    fn handle_delete_dialog_input(&mut self, key: KeyEvent) -> SearchAction {
+    const fn handle_delete_dialog_input(&mut self, key: KeyEvent) -> SearchAction {
         match key.code {
             KeyCode::Char('y') | KeyCode::Enter => {
                 if let Some(id) = self.pending_delete_id {

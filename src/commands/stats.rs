@@ -43,10 +43,9 @@ pub fn handle_stats_text(
     let home = dirs_home();
 
     // Header
-    let period = match stats.period_days {
-        Some(d) => format!("last {d} days"),
-        None => "all time".to_string(),
-    };
+    let period = stats
+        .period_days
+        .map_or_else(|| "all time".to_string(), |d| format!("last {d} days"));
     println!("\n\x1b[1m── Suvadu Stats ({period}) ─────────────────────\x1b[0m");
     println!(
         "  Total commands    {:<10}  Unique commands  {}",

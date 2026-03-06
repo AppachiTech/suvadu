@@ -112,7 +112,7 @@ pub fn handle_import(file: &str, dry_run: bool) -> Result<(), Box<dyn std::error
 
 /// Parse a single extended-history line: `: timestamp:duration;command`
 /// Returns (`timestamp_seconds`, `duration_seconds`, command)
-pub(crate) fn parse_extended_history_line(line: &str) -> Option<(i64, i64, String)> {
+pub fn parse_extended_history_line(line: &str) -> Option<(i64, i64, String)> {
     let rest = line.strip_prefix(": ")?;
     let colon_pos = rest.find(':')?;
     let ts: i64 = rest[..colon_pos].parse().ok()?;
@@ -143,11 +143,10 @@ pub fn handle_import_zsh_history(
     for line in text.lines() {
         if in_multiline {
             // Continuation of previous command
+            current_cmd.push('\n');
             if let Some(stripped) = line.strip_suffix('\\') {
-                current_cmd.push('\n');
                 current_cmd.push_str(stripped);
             } else {
-                current_cmd.push('\n');
                 current_cmd.push_str(line);
                 let trimmed = current_cmd.trim_end().to_string();
                 parsed.push((trimmed, current_ts, current_dur));

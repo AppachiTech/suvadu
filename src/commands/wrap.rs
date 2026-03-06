@@ -27,10 +27,7 @@ pub fn handle_wrap(
 
     let ended_at = chrono::Utc::now().timestamp_millis();
 
-    let exit_code = match &status {
-        Ok(s) => s.code().unwrap_or(1),
-        Err(_) => 127,
-    };
+    let exit_code = status.as_ref().map_or(127, |s| s.code().unwrap_or(1));
 
     // Record in history
     let _ = super::entry::handle_add(

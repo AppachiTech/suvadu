@@ -18,7 +18,7 @@ pub enum RiskLevel {
 }
 
 impl RiskLevel {
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::None => "safe",
             Self::Low => "low",
@@ -28,7 +28,7 @@ impl RiskLevel {
         }
     }
 
-    pub fn icon(self) -> &'static str {
+    pub const fn icon(self) -> &'static str {
         match self {
             Self::None | Self::Low => "·",
             Self::Medium => "⚡",
@@ -36,7 +36,7 @@ impl RiskLevel {
         }
     }
 
-    pub fn ansi_color(self) -> &'static str {
+    pub const fn ansi_color(self) -> &'static str {
         match self {
             Self::None => "\x1b[0m",
             Self::Low => "\x1b[90m",        // dim

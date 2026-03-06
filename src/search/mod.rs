@@ -146,7 +146,7 @@ impl SearchApp {
         let end_default = end_date_input.unwrap_or_else(|| "today".to_string());
 
         let mut app = Self {
-            query: query.clone(),
+            query,
             entries,
             table_state: TableState::default(),
 

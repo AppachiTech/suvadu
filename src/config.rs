@@ -33,7 +33,7 @@ pub struct Config {
     pub auto_tags: std::collections::HashMap<String, String>,
 }
 
-fn default_enabled() -> bool {
+const fn default_enabled() -> bool {
     true
 }
 
@@ -77,7 +77,7 @@ impl Default for SearchConfig {
     }
 }
 
-fn default_page_limit() -> usize {
+const fn default_page_limit() -> usize {
     50
 }
 
@@ -114,11 +114,11 @@ impl Default for AgentConfig {
     }
 }
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 
-fn default_false() -> bool {
+const fn default_false() -> bool {
     false
 }
 

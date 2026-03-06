@@ -36,7 +36,6 @@ pub fn handle_agent(cmd: cli::AgentCommands) -> Result<(), Box<dyn std::error::E
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn handle_agent_report(
     after: &str,
     before: Option<&str>,
@@ -346,7 +345,9 @@ fn print_agent_report_markdown(entries: &[Entry], risk_summary: &risk::SessionRi
             let assessment = risk::assess_risk(&entry.command);
             let cat = assessment.as_ref().map_or("", |a| a.category);
             let path = shorten_path(&entry.cwd, home);
-            let exit = entry.exit_code.map_or(String::from("-"), |c| c.to_string());
+            let exit = entry
+                .exit_code
+                .map_or_else(|| String::from("-"), |c| c.to_string());
             let cmd = entry.command.replace('|', "\\|");
             println!("| {executor} | `{cmd}` | {path} | {exit} | {cat} |");
         }

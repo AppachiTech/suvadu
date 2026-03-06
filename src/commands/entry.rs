@@ -8,7 +8,7 @@ use crate::util;
 /// Detects microsecond timestamps (16+ digits) and converts them.
 /// Detects second timestamps (10 digits) and converts them.
 /// Returns 0 unchanged (handled separately).
-pub fn normalize_timestamp(ts: i64) -> i64 {
+pub const fn normalize_timestamp(ts: i64) -> i64 {
     if ts <= 0 {
         return ts;
     }

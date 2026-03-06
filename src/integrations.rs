@@ -202,7 +202,7 @@ pub fn handle_init_claude_code() -> Result<(), Box<dyn std::error::Error>> {
     println!("  {prompt_hook_path_str}");
     println!();
 
-    if let Ok(true) = auto_configured {
+    if matches!(auto_configured, Ok(true)) {
         println!(
             "\x1b[32m✓\x1b[0m Settings auto-configured: {}",
             settings_path.display()

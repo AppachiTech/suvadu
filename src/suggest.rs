@@ -170,10 +170,7 @@ pub fn handle_suggest_aliases_text(
     let (suggestions, skipped) = build_suggestions(min_count, min_length, days, top)?;
 
     if suggestions.is_empty() {
-        let period = match days {
-            Some(d) => format!("last {d} days"),
-            None => "all time".to_string(),
-        };
+        let period = days.map_or_else(|| "all time".to_string(), |d| format!("last {d} days"));
         println!("No alias suggestions found.");
         println!("  Criteria: min {min_count} uses, min {min_length} chars, {period}");
         return Ok(());
@@ -218,10 +215,7 @@ pub fn handle_suggest_aliases_tui(
     let (suggestions, skipped) = build_suggestions(min_count, min_length, days, top)?;
 
     if suggestions.is_empty() {
-        let period = match days {
-            Some(d) => format!("last {d} days"),
-            None => "all time".to_string(),
-        };
+        let period = days.map_or_else(|| "all time".to_string(), |d| format!("last {d} days"));
         println!("No alias suggestions found.");
         println!("  Criteria: min {min_count} uses, min {min_length} chars, {period}");
         return Ok(());

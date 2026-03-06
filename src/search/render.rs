@@ -315,11 +315,10 @@ impl SearchApp {
                 // Combine session and tag
                 let session_short = &entry.session_id[..8];
 
-                let session_tag_display = if let Some(tag) = &entry.tag_name {
-                    format!("{session_short} ({tag})")
-                } else {
-                    session_short.to_string()
-                };
+                let session_tag_display = entry.tag_name.as_ref().map_or_else(
+                    || session_short.to_string(),
+                    |tag| format!("{session_short} ({tag})"),
+                );
 
                 // Wrap session/tag if selected
                 let st_display = if is_selected {
@@ -329,15 +328,12 @@ impl SearchApp {
                 };
 
                 // Shorten path - replace home directory with ~
-                let path_full = if let Ok(home) = std::env::var("HOME") {
-                    entry.cwd.replace(&home, "~")
-                } else {
-                    entry.cwd.clone()
-                };
+                let path_full = std::env::var("HOME")
+                    .map_or_else(|_| entry.cwd.clone(), |home| entry.cwd.replace(&home, "~"));
 
                 // For selected items, show full path; for others, truncate
                 let path_display = if is_selected {
-                    path_full.clone()
+                    path_full
                 } else if path_full.len() > 18 {
                     format!("...{}", &path_full[path_full.len() - 15..])
                 } else {
@@ -353,11 +349,10 @@ impl SearchApp {
                     Some("programmatic") => "⚡",
                     _ => "❓",
                 };
-                let executor_display = if let Some(exec_name) = &entry.executor {
-                    format!("{executor_icon} {exec_name}")
-                } else {
-                    executor_icon.to_string()
-                };
+                let executor_display = entry.executor.as_ref().map_or_else(
+                    || executor_icon.to_string(),
+                    |exec_name| format!("{executor_icon} {exec_name}"),
+                );
 
                 // Get occurrence count if in unique mode
                 let count_display = if self.unique_mode {

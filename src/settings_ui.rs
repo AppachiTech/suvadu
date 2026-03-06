@@ -54,12 +54,12 @@ impl AppState {
         }
     }
 
-    fn next_tab(&mut self) {
+    const fn next_tab(&mut self) {
         self.current_tab = (self.current_tab + 1) % self.tab_items.len();
         self.selected_item = 0;
     }
 
-    fn prev_tab(&mut self) {
+    const fn prev_tab(&mut self) {
         if self.current_tab > 0 {
             self.current_tab -= 1;
         } else {
@@ -106,7 +106,7 @@ impl AppState {
         }
     }
 
-    fn toggle_bool(&mut self) {
+    const fn toggle_bool(&mut self) {
         match (self.current_tab, self.selected_item) {
             (0, 1) => {
                 self.config.search.show_unique_by_default =
@@ -239,7 +239,7 @@ impl AppState {
             },
             InputMode::Editing => match key.code {
                 KeyCode::Enter => {
-                    if let (0, 0) = (self.current_tab, self.selected_item) {
+                    if (self.current_tab, self.selected_item) == (0, 0) {
                         if let Ok(n) = self.input_buffer.parse::<usize>() {
                             self.config.search.page_limit = n.clamp(10, 5000);
                             self.dirty = true;
@@ -381,11 +381,10 @@ fn ui(f: &mut ratatui::Frame, app: &mut AppState) {
     render_content_panel(f, app, horizontal_chunks[1]);
 
     // Badge-style Footer
-    let status_text = if let Some(msg) = &app.save_status {
-        format!("{msg}  ")
-    } else {
-        String::new()
-    };
+    let status_text = app
+        .save_status
+        .as_ref()
+        .map_or_else(String::new, |msg| format!("{msg}  "));
 
     let badge_key = Style::default().bg(t.badge_bg).fg(t.text);
     let badge_label = Style::default().fg(t.text_secondary);
@@ -446,7 +445,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut AppState) {
     f.render_widget(status, main_chunks[2]);
 
     // Render input popup if editing
-    if let InputMode::Editing = app.input_mode {
+    if app.input_mode == InputMode::Editing {
         if app.current_tab == 3 {
             render_auto_tag_popup(f, app);
         } else {
@@ -556,7 +555,7 @@ fn render_content_panel(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) 
     f.render_widget(desc_paragraph, content_chunks[1]);
 }
 
-fn get_setting_description(tab: usize, item: usize) -> &'static str {
+const fn get_setting_description(tab: usize, item: usize) -> &'static str {
     match (tab, item) {
         (0, 0) => "Number of results to show per page in search (10-5000)",
         (0, 1) => "Show only unique commands by default (deduplicate history)",

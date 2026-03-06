@@ -12,17 +12,17 @@ use crate::models::{Entry, Session};
 use rusqlite::{params, Connection};
 
 /// Shared entry column list for SELECT queries
-pub(super) const ENTRY_COLUMNS: &str = "e.id, e.session_id, e.command, e.cwd, e.exit_code, e.started_at, e.ended_at, e.duration_ms, e.context, COALESCE(et.name, st.name) as tag_name, e.tag_id, e.executor_type, e.executor";
+pub const ENTRY_COLUMNS: &str = "e.id, e.session_id, e.command, e.cwd, e.exit_code, e.started_at, e.ended_at, e.duration_ms, e.context, COALESCE(et.name, st.name) as tag_name, e.tag_id, e.executor_type, e.executor";
 
 /// Shared FROM/JOIN clause for entry queries
-pub(super) const ENTRY_JOINS: &str = "FROM entries e
+pub const ENTRY_JOINS: &str = "FROM entries e
              JOIN sessions s ON e.session_id = s.id
              LEFT JOIN tags st ON s.tag_id = st.id
              LEFT JOIN tags et ON e.tag_id = et.id";
 
 /// Maps a `SQLite` row to an `Entry`. `tag_id_col` is the column index where `tag_id` starts
 /// (10 for standard queries, 11 for unique queries where COUNT(*) is at position 10).
-pub(super) fn entry_from_row(row: &rusqlite::Row, tag_id_col: usize) -> rusqlite::Result<Entry> {
+pub fn entry_from_row(row: &rusqlite::Row, tag_id_col: usize) -> rusqlite::Result<Entry> {
     let context_str: Option<String> = row.get(8)?;
     let context = context_str.and_then(|s| serde_json::from_str(&s).ok());
     let tag_name: Option<String> = row.get(9)?;
@@ -45,7 +45,7 @@ pub(super) fn entry_from_row(row: &rusqlite::Row, tag_id_col: usize) -> rusqlite
 }
 
 /// Builds WHERE clauses and collects parameters for filtered queries.
-pub(super) struct FilterBuilder {
+pub struct FilterBuilder {
     clauses: Vec<String>,
     params: Vec<Box<dyn rusqlite::ToSql>>,
 }
@@ -155,7 +155,7 @@ pub struct Repository {
 
 impl Repository {
     /// Create a new repository with the given connection
-    pub fn new(conn: Connection) -> Self {
+    pub const fn new(conn: Connection) -> Self {
         Self { conn }
     }
 

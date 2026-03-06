@@ -16,7 +16,7 @@ use crate::risk::RiskLevel;
 // ── Period selector ──────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Period {
+pub enum Period {
     Today,
     Days7,
     Days30,
@@ -57,7 +57,7 @@ impl Period {
 
 // ── Helpers ──────────────────────────────────────────────────
 
-pub(super) fn load_entries(
+pub fn load_entries(
     repo: &Repository,
     after_ms: Option<i64>,
     executor: Option<&str>,
@@ -79,14 +79,14 @@ pub(super) fn load_entries(
     }
 }
 
-pub(super) fn compute_risk_levels(entries: &[Entry]) -> Vec<RiskLevel> {
+pub fn compute_risk_levels(entries: &[Entry]) -> Vec<RiskLevel> {
     entries
         .iter()
         .map(|e| risk::risk_level(&e.command))
         .collect()
 }
 
-pub(super) fn compute_agent_counts(entries: &[Entry]) -> Vec<(String, usize)> {
+pub fn compute_agent_counts(entries: &[Entry]) -> Vec<(String, usize)> {
     let mut counts: HashMap<String, usize> = HashMap::new();
     for e in entries {
         let name = e.executor.as_deref().unwrap_or("unknown");
@@ -98,7 +98,7 @@ pub(super) fn compute_agent_counts(entries: &[Entry]) -> Vec<(String, usize)> {
 }
 
 /// Short time for table columns: "MM-DD HH:MM"
-pub(super) fn format_datetime(ms: i64) -> String {
+pub fn format_datetime(ms: i64) -> String {
     let ms_val = if ms > 1_000_000_000_000_000 {
         ms / 1000
     } else {
@@ -111,7 +111,7 @@ pub(super) fn format_datetime(ms: i64) -> String {
 }
 
 /// Full datetime for detail pane: "YYYY-MM-DD HH:MM:SS"
-pub(super) fn format_full_datetime(ms: i64) -> String {
+pub fn format_full_datetime(ms: i64) -> String {
     let ms_val = if ms > 1_000_000_000_000_000 {
         ms / 1000
     } else {
@@ -123,7 +123,7 @@ pub(super) fn format_full_datetime(ms: i64) -> String {
     )
 }
 
-pub(super) fn truncate(s: &str, max: usize) -> String {
+pub fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else if max > 3 {

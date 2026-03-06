@@ -306,11 +306,7 @@ impl Repository {
                 .filter_map(Result::ok)
                 .filter(|(_, cmd, started_at)| {
                     let match_regex = regex.is_match(cmd);
-                    let match_date = if let Some(ts) = before_timestamp {
-                        *started_at < ts
-                    } else {
-                        true
-                    };
+                    let match_date = before_timestamp.is_none_or(|ts| *started_at < ts);
                     match_regex && match_date
                 })
                 .map(|(id, _, _)| id)
@@ -370,11 +366,7 @@ impl Repository {
                 .filter_map(Result::ok)
                 .filter(|(cmd, started_at)| {
                     let match_regex = regex.is_match(cmd);
-                    let match_date = if let Some(ts) = before_timestamp {
-                        *started_at < ts
-                    } else {
-                        true
-                    };
+                    let match_date = before_timestamp.is_none_or(|ts| *started_at < ts);
                     match_regex && match_date
                 })
                 .count();

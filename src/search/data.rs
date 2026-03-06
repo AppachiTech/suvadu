@@ -15,7 +15,7 @@ impl SearchApp {
     }
 
     /// Count active filters for badge display
-    pub(super) fn active_filter_count(&self) -> usize {
+    pub(super) const fn active_filter_count(&self) -> usize {
         let mut count = 0;
         if self.filter_after.is_some() {
             count += 1;
@@ -35,7 +35,6 @@ impl SearchApp {
         count
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(super) fn fuzzy_score(
         entries: Vec<Entry>,
         query: &str,

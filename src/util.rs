@@ -200,15 +200,16 @@ pub fn cleanup_claude_settings_at(
         let original_len = arr.len();
 
         arr.retain(|group| {
-            if let Some(hooks) = group.get("hooks").and_then(serde_json::Value::as_array) {
-                !hooks.iter().any(|h| {
-                    h.get("command")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|cmd| cmd.contains("suvadu"))
+            group
+                .get("hooks")
+                .and_then(serde_json::Value::as_array)
+                .is_none_or(|hooks| {
+                    !hooks.iter().any(|h| {
+                        h.get("command")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|cmd| cmd.contains("suvadu"))
+                    })
                 })
-            } else {
-                true // keep entries we don't understand
-            }
         });
 
         if arr.len() != original_len {
