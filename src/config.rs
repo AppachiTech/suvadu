@@ -22,6 +22,8 @@ pub struct Config {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     #[serde(default)]
+    pub theme: crate::theme::ThemeName,
+    #[serde(default)]
     pub search: SearchConfig,
     #[serde(default)]
     pub shell: ShellConfig,
@@ -41,6 +43,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             enabled: true,
+            theme: crate::theme::ThemeName::default(),
             search: SearchConfig::default(),
             shell: ShellConfig::default(),
             agent: AgentConfig::default(),
@@ -231,11 +234,7 @@ mod tests {
     fn test_config_serialization() {
         let config = Config {
             enabled: false,
-            search: SearchConfig::default(),
-            shell: ShellConfig::default(),
-            agent: AgentConfig::default(),
-            exclusions: Vec::new(),
-            auto_tags: std::collections::HashMap::new(),
+            ..Config::default()
         };
         let toml_str = toml::to_string(&config).unwrap();
         assert!(toml_str.contains("enabled = false"));
@@ -251,11 +250,8 @@ mod tests {
 
         let config = Config {
             enabled: false,
-            search: SearchConfig::default(),
-            shell: ShellConfig::default(),
-            agent: AgentConfig::default(),
             exclusions: vec!["ls".to_string()],
-            auto_tags: std::collections::HashMap::new(),
+            ..Config::default()
         };
         let contents = toml::to_string_pretty(&config).unwrap();
         std::fs::write(&config_path, contents).unwrap();

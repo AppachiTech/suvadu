@@ -46,8 +46,8 @@ impl AppState {
             auto_tag_path_input: String::new(),
             auto_tag_name_input: String::new(),
             auto_tag_focus: 0,
-            // Tab 0: Search (5 items), Tab 1: Shell (2 items), Tab 2: Exclusions (Dynamic), Tab 3: Auto Tags (Dynamic)
-            tab_items: vec![5, 2, 0, 0],
+            // Tab 0: Search (5 items), Tab 1: Shell (2 + theme), Tab 2: Exclusions (Dynamic), Tab 3: Auto Tags (Dynamic)
+            tab_items: vec![5, 3, 0, 0],
             exclusion_list_state: ListState::default(),
             save_status: None,
             dirty: false,
@@ -106,7 +106,7 @@ impl AppState {
         }
     }
 
-    const fn toggle_bool(&mut self) {
+    fn toggle_bool(&mut self) {
         match (self.current_tab, self.selected_item) {
             (0, 1) => {
                 self.config.search.show_unique_by_default =
@@ -130,6 +130,18 @@ impl AppState {
                 self.config.shell.enable_arrow_navigation =
                     !self.config.shell.enable_arrow_navigation;
                 self.dirty = true;
+            }
+            (1, 1) => {
+                self.config.agent.show_risk_in_search = !self.config.agent.show_risk_in_search;
+                self.dirty = true;
+            }
+            (1, 2) => {
+                self.config.theme = self.config.theme.next();
+                self.dirty = true;
+                self.save_status = Some(format!(
+                    "Theme set to '{}' — save & restart to apply",
+                    self.config.theme
+                ));
             }
             _ => {}
         }
@@ -566,6 +578,8 @@ const fn get_setting_description(tab: usize, item: usize) -> &'static str {
         (0, 3) => "Boost results from the current directory higher in search (toggle with ^S)",
         (0, 4) => "Show the detail preview pane when opening search (toggle with Tab)",
         (1, 0) => "Bind Up/Down arrow keys to cycle through command history",
+        (1, 1) => "Show risk assessment badges in the search detail pane for agent commands",
+        (1, 2) => "Color theme: dark (RGB for dark terminals), light (RGB for light terminals), terminal (ANSI 16 — adapts to your scheme). Save & restart to apply.",
         _ => "Use [a] to add new items, [d] to delete selected items",
     }
 }
@@ -616,11 +630,24 @@ fn render_search_tab(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
 
 fn render_shell_tab(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     let t = theme();
-    let items: Vec<ListItem> = vec![setting_toggle(
-        "Enable Arrow Key Navigation",
-        app.config.shell.enable_arrow_navigation,
-        app.selected_item == 0,
-    )];
+    let items: Vec<ListItem> = vec![
+        setting_toggle(
+            "Enable Arrow Key Navigation",
+            app.config.shell.enable_arrow_navigation,
+            app.selected_item == 0,
+        ),
+        setting_toggle(
+            "Show Risk in Search Detail",
+            app.config.agent.show_risk_in_search,
+            app.selected_item == 1,
+        ),
+        setting_item(
+            "Theme",
+            app.config.theme.as_str(),
+            app.selected_item == 2,
+            false,
+        ),
+    ];
 
     let list = List::new(items)
         .block(
@@ -628,7 +655,7 @@ fn render_shell_tab(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(t.border))
-                .title(" Shell Integration "),
+                .title(" Shell & Display "),
         )
         .highlight_style(Style::default().add_modifier(Modifier::BOLD).fg(t.primary))
         .highlight_symbol(" > ");
@@ -937,5 +964,29 @@ mod tests {
         app.selected_item = 0;
         app.toggle_bool();
         assert!(!app.config.shell.enable_arrow_navigation);
+    }
+
+    #[test]
+    fn test_theme_cycle_in_settings() {
+        use crate::theme::ThemeName;
+
+        let config = Config::default();
+        let mut app = AppState::new(config);
+
+        // Theme is Tab 1, Item 2
+        app.current_tab = 1;
+        app.selected_item = 2;
+
+        assert_eq!(app.config.theme, ThemeName::Dark);
+
+        app.toggle_bool();
+        assert_eq!(app.config.theme, ThemeName::Light);
+        assert!(app.dirty);
+
+        app.toggle_bool();
+        assert_eq!(app.config.theme, ThemeName::Terminal);
+
+        app.toggle_bool();
+        assert_eq!(app.config.theme, ThemeName::Dark);
     }
 }
