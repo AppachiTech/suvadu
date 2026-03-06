@@ -159,6 +159,13 @@ impl Repository {
         Self { conn }
     }
 
+    /// Open the database and return a ready-to-use repository.
+    pub fn init() -> crate::db::DbResult<Self> {
+        let db_path = crate::db::get_db_path()?;
+        let conn = crate::db::init_db(&db_path)?;
+        Ok(Self::new(conn))
+    }
+
     /// Insert a new session
     pub fn insert_session(&self, session: &Session) -> DbResult<()> {
         self.conn.execute(

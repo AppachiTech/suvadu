@@ -1,5 +1,4 @@
 use crate::config;
-use crate::db;
 use crate::models::{Entry, Session};
 use crate::repository::Repository;
 use crate::util;
@@ -54,9 +53,7 @@ pub fn handle_add_with_context(
     }
 
     // Initialize database
-    let db_path = db::get_db_path()?;
-    let conn = db::init_db(&db_path)?;
-    let repo = Repository::new(conn);
+    let repo = Repository::init()?;
 
     // Auto-Tagging Logic (Path-based)
     let mut matched_tag_id: Option<i64> = None;
@@ -155,9 +152,7 @@ pub fn handle_delete(
     dry_run: bool,
     before: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = db::get_db_path()?;
-    let conn = db::init_db(&db_path)?;
-    let repo = Repository::new(conn);
+    let repo = Repository::init()?;
 
     let before_timestamp: Option<i64> = if let Some(date_str) = before {
         Some(util::parse_date_input(date_str, false).ok_or_else(|| {
@@ -199,9 +194,7 @@ pub fn handle_delete(
 pub fn handle_bookmark(
     cmd: crate::cli::BookmarkCommands,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = db::get_db_path()?;
-    let conn = db::init_db(&db_path)?;
-    let repo = Repository::new(conn);
+    let repo = Repository::init()?;
 
     match cmd {
         crate::cli::BookmarkCommands::Add { command, label } => {
@@ -245,9 +238,7 @@ pub fn handle_note(
     content: Option<String>,
     delete: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = db::get_db_path()?;
-    let conn = db::init_db(&db_path)?;
-    let repo = Repository::new(conn);
+    let repo = Repository::init()?;
 
     if delete {
         if repo.delete_note(entry_id)? {

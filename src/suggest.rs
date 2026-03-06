@@ -1,5 +1,5 @@
 use crate::models::AliasSuggestion;
-use crate::{db, repository, suggest_ui};
+use crate::{repository, suggest_ui};
 
 /// Run the user's shell to get current alias definitions.
 fn get_shell_aliases() -> String {
@@ -117,9 +117,7 @@ fn build_suggestions(
     days: Option<usize>,
     top: usize,
 ) -> Result<(Vec<AliasSuggestion>, Vec<String>), Box<dyn std::error::Error>> {
-    let db_path = db::get_db_path()?;
-    let conn = db::init_db(&db_path)?;
-    let repo = repository::Repository::new(conn);
+    let repo = repository::Repository::init()?;
 
     let frequent = repo.get_frequent_commands(days, min_count, min_length, top * 3)?;
 

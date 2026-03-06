@@ -1,4 +1,3 @@
-use crate::db;
 use crate::repository;
 use crate::util::{self, dirs_home, format_duration_ms, shorten_path};
 
@@ -18,9 +17,7 @@ pub fn handle_replay(
     here: bool,
     cwd: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = db::get_db_path()?;
-    let conn = db::init_db(&db_path)?;
-    let repo = repository::Repository::new(conn);
+    let repo = repository::Repository::init()?;
 
     // Resolve tag name → id
     let tag_id = if let Some(tname) = tag {

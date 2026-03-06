@@ -1,7 +1,6 @@
 use std::process;
 
 use crate::config;
-use crate::db;
 use crate::repository::Repository;
 use crate::search;
 
@@ -24,9 +23,7 @@ pub fn handle_search(
     }
 
     // Initialize database
-    let db_path = db::get_db_path()?;
-    let conn = db::init_db(&db_path)?;
-    let repo = Repository::new(conn);
+    let repo = Repository::init()?;
     let app_config = config::load_config()?;
 
     // Auto-filter by session tag if enabled and no explicit tag provided
@@ -74,9 +71,7 @@ pub fn handle_get(
     prefix: bool,
     cwd: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = db::get_db_path()?;
-    let conn = db::init_db(&db_path)?;
-    let repo = Repository::new(conn);
+    let repo = Repository::init()?;
 
     let query_opt = if query.is_empty() { None } else { Some(query) };
 

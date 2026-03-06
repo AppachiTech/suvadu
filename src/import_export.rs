@@ -1,6 +1,5 @@
 use std::io::BufRead;
 
-use crate::db;
 use crate::models::{Entry, Session};
 use crate::repository::Repository;
 use crate::util;
@@ -10,9 +9,7 @@ pub fn handle_export(
     after: Option<&str>,
     before: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = db::get_db_path()?;
-    let conn = db::init_db(&db_path)?;
-    let repo = Repository::new(conn);
+    let repo = Repository::init()?;
 
     let after_ms = after.and_then(|d| util::parse_date_input(d, false));
     let before_ms = before.and_then(|d| util::parse_date_input(d, true));
@@ -84,9 +81,7 @@ pub fn handle_import(file: &str, dry_run: bool) -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let db_path = db::get_db_path()?;
-    let conn = db::init_db(&db_path)?;
-    let repo = Repository::new(conn);
+    let repo = Repository::init()?;
 
     // Collect and parse all entries first so parse errors
     // don't leave partial data in a committed transaction.
@@ -238,9 +233,7 @@ pub fn handle_import_zsh_history(
     }
 
     // Phase 2: Open DB and deduplicate
-    let db_path = db::get_db_path()?;
-    let conn = db::init_db(&db_path)?;
-    let repo = Repository::new(conn);
+    let repo = Repository::init()?;
 
     // Load existing (command, started_at_seconds) for dedup
     let existing = repo.get_existing_command_timestamps()?;

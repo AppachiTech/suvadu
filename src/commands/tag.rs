@@ -3,9 +3,7 @@ use crate::db;
 use crate::repository::Repository;
 
 pub fn handle_tag(cmd: cli::TagCommands) -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = db::get_db_path()?;
-    let conn = db::init_db(&db_path)?;
-    let repo = Repository::new(conn);
+    let repo = Repository::init()?;
 
     match cmd {
         cli::TagCommands::Create { name, description } => {

@@ -1,6 +1,6 @@
 use crate::models::Entry;
 use crate::util::{dirs_home, format_duration_ms, shorten_path};
-use crate::{agent_ui, cli, db, repository, risk, util};
+use crate::{agent_ui, cli, repository, risk, util};
 
 pub fn handle_agent(cmd: cli::AgentCommands) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
@@ -43,9 +43,7 @@ fn handle_agent_report(
     format: &str,
     here: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = db::get_db_path()?;
-    let conn = db::init_db(&db_path)?;
-    let repo = repository::Repository::new(conn);
+    let repo = repository::Repository::init()?;
 
     let after_ms = util::parse_date_input(after, false);
     let before_ms = before.and_then(|d| util::parse_date_input(d, true));
@@ -451,9 +449,7 @@ fn handle_agent_dashboard(
     executor: Option<&str>,
     here: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = db::get_db_path()?;
-    let conn = db::init_db(&db_path)?;
-    let repo = repository::Repository::new(conn);
+    let repo = repository::Repository::init()?;
 
     let after_ms = util::parse_date_input(after, false);
     let cwd_filter = if here {
@@ -493,9 +489,7 @@ fn handle_agent_stats_tui(
     days: usize,
     executor: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = db::get_db_path()?;
-    let conn = db::init_db(&db_path)?;
-    let repo = repository::Repository::new(conn);
+    let repo = repository::Repository::init()?;
 
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -523,9 +517,7 @@ fn handle_agent_stats_text(
     days: usize,
     executor: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = db::get_db_path()?;
-    let conn = db::init_db(&db_path)?;
-    let repo = repository::Repository::new(conn);
+    let repo = repository::Repository::init()?;
 
     let now = chrono::Utc::now().timestamp_millis();
     let after_ms = Some(now - (i64::try_from(days).unwrap_or(i64::MAX) * 24 * 60 * 60 * 1000));

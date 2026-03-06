@@ -1,12 +1,9 @@
-use crate::db;
 use crate::repository;
 use crate::stats_ui;
 use crate::util::{dirs_home, format_count, format_duration_ms, shorten_path};
 
 pub fn handle_stats_tui(days: Option<usize>, top: usize) -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = db::get_db_path()?;
-    let conn = db::init_db(&db_path)?;
-    let repo = repository::Repository::new(conn);
+    let repo = repository::Repository::init()?;
 
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -35,9 +32,7 @@ pub fn handle_stats_text(
     days: Option<usize>,
     top: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = db::get_db_path()?;
-    let conn = db::init_db(&db_path)?;
-    let repo = repository::Repository::new(conn);
+    let repo = repository::Repository::init()?;
     let stats = repo.get_stats(days, top)?;
 
     let home = dirs_home();
