@@ -245,9 +245,11 @@ impl SearchApp {
             KeyCode::Enter => {
                 if let Ok(page_num) = self.goto_input.parse::<usize>() {
                     let total_pages = self.total_items.div_ceil(self.page_size);
-                    let page_num = page_num.max(1).min(total_pages); // Clamp
-                    self.goto_dialog_open = false;
-                    return SearchAction::SetPage(page_num);
+                    if total_pages > 0 {
+                        let page_num = page_num.max(1).min(total_pages);
+                        self.goto_dialog_open = false;
+                        return SearchAction::SetPage(page_num);
+                    }
                 }
                 self.goto_dialog_open = false;
             }

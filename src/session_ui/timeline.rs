@@ -238,7 +238,7 @@ impl SessionApp {
         let id_short: String = self.session.id.chars().take(8).collect();
 
         let session_time = Local
-            .timestamp_millis_opt(self.session.created_at)
+            .timestamp_millis_opt(crate::util::normalize_display_ms(self.session.created_at))
             .single()
             .map_or_else(
                 || "??".to_string(),

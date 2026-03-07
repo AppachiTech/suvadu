@@ -153,6 +153,7 @@ pub fn handle_delete(
     pattern: &str,
     is_regex: bool,
     dry_run: bool,
+    skip_confirm: bool,
     before: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if pattern.is_empty() {
@@ -171,31 +172,38 @@ pub fn handle_delete(
         None
     };
 
+    let count = repo.count_entries_by_pattern(pattern, is_regex, before_timestamp)?;
+
+    if count == 0 {
+        println!("No entries matched the pattern '{pattern}'");
+        return Ok(());
+    }
+
     if dry_run {
-        let count = repo.count_entries_by_pattern(pattern, is_regex, before_timestamp)?;
-        if count == 0 {
-            println!("No entries matched the pattern '{pattern}'");
-        } else {
-            println!("Dry Run: {count} entries match the pattern '{pattern}'.");
-            if let Some(ts) = before_timestamp {
-                let date = chrono::DateTime::from_timestamp_millis(ts)
-                    .ok_or_else(|| format!("Invalid timestamp: {ts}"))?;
-                println!(
-                    "(Filtered entries older than: {})",
-                    date.format("%Y-%m-%d %H:%M:%S")
-                );
-            }
-        }
-    } else {
-        println!("Deleting entries matching pattern '{pattern}'...");
+        println!("Dry Run: {count} entries match the pattern '{pattern}'.");
         if let Some(ts) = before_timestamp {
             let date = chrono::DateTime::from_timestamp_millis(ts)
                 .ok_or_else(|| format!("Invalid timestamp: {ts}"))?;
-            println!("  and older than: {}", date.format("%Y-%m-%d %H:%M:%S"));
+            println!(
+                "(Filtered entries older than: {})",
+                date.format("%Y-%m-%d %H:%M:%S")
+            );
         }
-        let deleted = repo.delete_entries(pattern, is_regex, before_timestamp)?;
-        println!("✓ Deleted {deleted} entries.");
+        return Ok(());
     }
+
+    if !skip_confirm {
+        eprint!("Delete {count} entries matching '{pattern}'? [y/N] ");
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    let deleted = repo.delete_entries(pattern, is_regex, before_timestamp)?;
+    println!("✓ Deleted {deleted} entries.");
 
     Ok(())
 }

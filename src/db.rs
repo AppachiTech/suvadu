@@ -178,10 +178,8 @@ fn migrate_v1(conn: &Connection) -> DbResult<()> {
         )",
         [],
     )?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_bookmarks_command ON bookmarks(command)",
-        [],
-    )?;
+    // Note: bookmarks.command has UNIQUE constraint which creates an implicit index.
+    // No separate idx_bookmarks_command needed.
 
     // ── Notes ───────────────────────────────────────────
     conn.execute(
@@ -194,10 +192,8 @@ fn migrate_v1(conn: &Connection) -> DbResult<()> {
         )",
         [],
     )?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_notes_entry_id ON notes(entry_id)",
-        [],
-    )?;
+    // Note: notes.entry_id has UNIQUE constraint which creates an implicit index.
+    // No separate idx_notes_entry_id needed.
 
     Ok(())
 }
@@ -223,10 +219,8 @@ fn migrate_v3(conn: &Connection) -> DbResult<()> {
         )",
         [],
     )?;
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_aliases_name ON aliases(name)",
-        [],
-    )?;
+    // Note: aliases.name has UNIQUE constraint which creates an implicit index.
+    // No separate idx_aliases_name needed.
     Ok(())
 }
 
@@ -236,7 +230,7 @@ fn migrate_v3(conn: &Connection) -> DbResult<()> {
 /// migration runs exactly once. All migration functions are
 /// idempotent as an extra safety net.
 pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
-    let conn = Connection::open(path)?;
+    let mut conn = Connection::open(path)?;
 
     // Retry on SQLITE_BUSY for up to 5 seconds (concurrent shell sessions)
     conn.busy_timeout(std::time::Duration::from_millis(5000))?;
@@ -256,32 +250,22 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
         return Ok(conn);
     }
 
-    if version < 1 {
-        conn.execute_batch("BEGIN")?;
-        migrate_v1(&conn)?;
-        set_schema_version(&conn, 1)?;
-        conn.execute_batch("COMMIT")?;
-    }
+    // Each migration runs in an RAII transaction that auto-rolls-back on error.
+    #[allow(clippy::type_complexity)]
+    let migrations: &[(i64, fn(&Connection) -> DbResult<()>)] = &[
+        (1, migrate_v1),
+        (2, migrate_v2),
+        (3, migrate_v3),
+        (4, migrate_v4),
+    ];
 
-    if version < 2 {
-        conn.execute_batch("BEGIN")?;
-        migrate_v2(&conn)?;
-        set_schema_version(&conn, 2)?;
-        conn.execute_batch("COMMIT")?;
-    }
-
-    if version < 3 {
-        conn.execute_batch("BEGIN")?;
-        migrate_v3(&conn)?;
-        set_schema_version(&conn, 3)?;
-        conn.execute_batch("COMMIT")?;
-    }
-
-    if version < 4 {
-        conn.execute_batch("BEGIN")?;
-        migrate_v4(&conn)?;
-        set_schema_version(&conn, SCHEMA_VERSION)?;
-        conn.execute_batch("COMMIT")?;
+    for &(target_version, migrate_fn) in migrations {
+        if version < target_version {
+            let tx = conn.transaction()?;
+            migrate_fn(&tx)?;
+            set_schema_version(&tx, target_version)?;
+            tx.commit()?;
+        }
     }
 
     Ok(conn)

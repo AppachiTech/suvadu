@@ -6,21 +6,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Write `data` to `path` atomically: write to a unique temp file, then rename.
-/// This prevents corruption if the process crashes mid-write and avoids collisions
-/// when multiple processes write to the same path concurrently.
+/// Write `data` to `path` atomically using `tempfile::NamedTempFile` + persist.
+/// The temp file is created in the same directory as `path` to ensure the
+/// rename is atomic (same filesystem). On error the temp file is auto-cleaned.
 fn atomic_write(path: &Path, data: &str) -> std::io::Result<()> {
-    // Use PID + timestamp to avoid collisions from PID recycling
-    let unique = format!(
-        "tmp.{}.{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
-    );
-    let tmp = path.with_extension(unique);
-    std::fs::write(&tmp, data)?;
-    std::fs::rename(&tmp, path)?;
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = tempfile::NamedTempFile::new_in(dir)?;
+    std::fs::write(tmp.path(), data)?;
+    tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
 

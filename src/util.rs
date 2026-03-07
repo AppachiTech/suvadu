@@ -492,44 +492,89 @@ pub fn cleanup_claude_settings_at(
     Ok(true)
 }
 
-/// Truncate a string to `max_chars` characters, appending `suffix` if truncated.
-/// Safe for multi-byte UTF-8 strings — operates on char boundaries.
-pub fn truncate_str(s: &str, max_chars: usize, suffix: &str) -> String {
-    let char_count = s.chars().count();
-    if char_count <= max_chars {
+/// Truncate a string to `max_cols` display columns, appending `suffix` if truncated.
+/// Uses unicode display width so CJK and other wide characters are measured correctly.
+pub fn truncate_str(s: &str, max_cols: usize, suffix: &str) -> String {
+    use unicode_width::UnicodeWidthChar;
+
+    let width: usize = s.chars().filter_map(UnicodeWidthChar::width).sum();
+    if width <= max_cols {
         return s.to_string();
     }
-    let suffix_len = suffix.chars().count();
-    if max_chars <= suffix_len {
-        return s.chars().take(max_chars).collect();
+    let suffix_width: usize = suffix.chars().filter_map(UnicodeWidthChar::width).sum();
+    if max_cols <= suffix_width {
+        // Not enough room for suffix — just take what fits
+        let mut result = String::new();
+        let mut used = 0;
+        for c in s.chars() {
+            let w = UnicodeWidthChar::width(c).unwrap_or(0);
+            if used + w > max_cols {
+                break;
+            }
+            result.push(c);
+            used += w;
+        }
+        return result;
     }
-    let take = max_chars - suffix_len;
-    let mut truncated: String = s.chars().take(take).collect();
-    truncated.push_str(suffix);
-    truncated
+    let budget = max_cols - suffix_width;
+    let mut result = String::new();
+    let mut used = 0;
+    for c in s.chars() {
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + w > budget {
+            break;
+        }
+        result.push(c);
+        used += w;
+    }
+    result.push_str(suffix);
+    result
 }
 
 /// Truncate from the start, keeping the end of the string.
-/// Prepends `prefix` if truncated. Safe for multi-byte UTF-8.
-pub fn truncate_str_start(s: &str, max_chars: usize, prefix: &str) -> String {
-    let char_count = s.chars().count();
-    if char_count <= max_chars {
+/// Prepends `prefix` if truncated. Uses unicode display width.
+pub fn truncate_str_start(s: &str, max_cols: usize, prefix: &str) -> String {
+    use unicode_width::UnicodeWidthChar;
+
+    let width: usize = s.chars().filter_map(UnicodeWidthChar::width).sum();
+    if width <= max_cols {
         return s.to_string();
     }
-    let prefix_len = prefix.chars().count();
-    if max_chars <= prefix_len {
-        return s
-            .chars()
-            .rev()
-            .take(max_chars)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
+    let prefix_width: usize = prefix.chars().filter_map(UnicodeWidthChar::width).sum();
+    if max_cols <= prefix_width {
+        // Not enough room for prefix — take from the end
+        let mut chars: Vec<char> = Vec::new();
+        let mut used = 0;
+        for c in s.chars().rev() {
+            let w = UnicodeWidthChar::width(c).unwrap_or(0);
+            if used + w > max_cols {
+                break;
+            }
+            chars.push(c);
+            used += w;
+        }
+        chars.reverse();
+        return chars.into_iter().collect();
     }
-    let keep = max_chars - prefix_len;
+    let budget = max_cols - prefix_width;
+    // Collect chars with widths from the end
+    let chars_vec: Vec<(char, usize)> = s
+        .chars()
+        .map(|c| (c, UnicodeWidthChar::width(c).unwrap_or(0)))
+        .collect();
+    let mut used = 0;
+    let mut start_idx = chars_vec.len();
+    for i in (0..chars_vec.len()).rev() {
+        if used + chars_vec[i].1 > budget {
+            break;
+        }
+        used += chars_vec[i].1;
+        start_idx = i;
+    }
     let mut result = String::from(prefix);
-    result.extend(s.chars().skip(char_count - keep));
+    for &(c, _) in &chars_vec[start_idx..] {
+        result.push(c);
+    }
     result
 }
 
@@ -817,17 +862,21 @@ mod tests {
 
     #[test]
     fn test_truncate_str_unicode() {
-        // Japanese characters are multi-byte UTF-8
+        // Japanese characters are 2 display columns each, "…" is 1 column.
+        // Budget 7 cols: suffix "…" = 1 col, so 6 cols for content = 3 CJK chars.
         let s = "こんにちは世界テスト";
-        assert_eq!(truncate_str(s, 6, "…"), "こんにちは…");
+        assert_eq!(truncate_str(s, 7, "…"), "こんに…");
     }
 
     #[test]
     fn test_truncate_str_emoji() {
+        // 🌍🌎🌏 are 2 display columns each.
+        // "hello " = 6 cols, then we need to fit within 10 cols total with "…" suffix.
         let s = "hello 🌍🌎🌏 world";
         let result = truncate_str(s, 10, "…");
-        assert_eq!(result.chars().count(), 10);
         assert!(result.ends_with('…'));
+        // "hello 🌍…" = 6 + 2 + 1 = 9 cols (fits). Adding 🌎 would be 11.
+        assert_eq!(result, "hello 🌍…");
     }
 
     #[test]
@@ -851,10 +900,12 @@ mod tests {
 
     #[test]
     fn test_truncate_str_start_unicode() {
+        // Each CJK char = 2 cols, "…" = 1 col.
+        // Budget 7 cols: prefix = 1 col, 6 cols left = 3 CJK chars from end.
         let s = "あいうえおかきくけこ";
-        let result = truncate_str_start(s, 6, "…");
-        assert_eq!(result.chars().count(), 6);
+        let result = truncate_str_start(s, 7, "…");
         assert!(result.starts_with('…'));
         assert!(result.ends_with('こ'));
+        assert_eq!(result, "…くけこ");
     }
 }

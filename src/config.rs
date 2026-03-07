@@ -201,11 +201,16 @@ pub fn load_config() -> ConfigResult<Config> {
     Ok(config)
 }
 
-/// Save configuration to file
+/// Save configuration to file atomically (temp file + rename).
 pub fn save_config(config: &Config) -> ConfigResult<()> {
     let path = get_config_path()?;
     let contents = toml::to_string_pretty(config)?;
-    std::fs::write(path, contents)?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| ConfigError::Path("config path has no parent directory".into()))?;
+    let tmp = tempfile::NamedTempFile::new_in(dir)?;
+    std::fs::write(tmp.path(), contents)?;
+    tmp.persist(&path).map_err(std::io::Error::from)?;
     Ok(())
 }
 

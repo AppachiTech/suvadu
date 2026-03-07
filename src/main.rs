@@ -57,6 +57,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     run_command(cli.command)
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Commands::Enable => run_toggle(true),
@@ -90,16 +91,27 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
             pattern,
             regex,
             dry_run,
+            yes,
             before,
-        } => commands::entry::handle_delete(&pattern, regex, dry_run, before.as_deref()),
+        } => commands::entry::handle_delete(&pattern, regex, dry_run, yes, before.as_deref()),
         Commands::Gc { dry_run, vacuum } => commands::entry::handle_gc(dry_run, vacuum),
         Commands::Uninstall => commands::settings::handle_uninstall(),
         Commands::Version => {
-            println!(
-                "suvadu v{} ({})",
-                env!("CARGO_PKG_VERSION"),
-                env!("BUILD_DATE")
-            );
+            let hash = env!("BUILD_HASH");
+            if hash.is_empty() {
+                println!(
+                    "suvadu v{} ({})",
+                    env!("CARGO_PKG_VERSION"),
+                    env!("BUILD_DATE")
+                );
+            } else {
+                println!(
+                    "suvadu v{} ({} {})",
+                    env!("CARGO_PKG_VERSION"),
+                    env!("BUILD_DATE"),
+                    hash
+                );
+            }
             Ok(())
         }
         Commands::Man => cli::generate_man_page(),

@@ -195,6 +195,10 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
 
+        /// Skip confirmation prompt
+        #[arg(long, short)]
+        yes: bool,
+
         /// Delete entries older than this date (YYYY-MM-DD)
         #[arg(long)]
         before: Option<String>,

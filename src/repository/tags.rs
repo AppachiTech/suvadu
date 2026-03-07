@@ -4,24 +4,24 @@ use rusqlite::params;
 use super::Repository;
 
 impl Repository {
-    /// Create a new tag
+    /// Create a new tag.
+    /// Uses a single atomic INSERT with a subquery guard to enforce the
+    /// 20-tag limit without a TOCTOU race between CHECK and INSERT.
     pub fn create_tag(&self, name: &str, description: Option<&str>) -> DbResult<i64> {
-        let count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM tags", [], |row| row.get(0))?;
+        let name_lower = name.to_lowercase();
 
-        if count >= 20 {
+        let rows = self.conn.execute(
+            "INSERT INTO tags (name, description)
+             SELECT ?1, ?2
+             WHERE (SELECT COUNT(*) FROM tags) < 20",
+            params![name_lower, description],
+        )?;
+
+        if rows == 0 {
             return Err(crate::db::DbError::Validation(
                 "Maximum number of tags (20) reached".into(),
             ));
         }
-
-        let name_lower = name.to_lowercase();
-
-        self.conn.execute(
-            "INSERT INTO tags (name, description) VALUES (?1, ?2)",
-            params![name_lower, description],
-        )?;
 
         Ok(self.conn.last_insert_rowid())
     }

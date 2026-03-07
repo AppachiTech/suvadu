@@ -87,7 +87,7 @@ fn print_session_list(sessions: &[crate::models::SessionSummary]) {
 
     for s in sessions {
         let time = Local
-            .timestamp_millis_opt(s.created_at)
+            .timestamp_millis_opt(util::normalize_display_ms(s.created_at))
             .single()
             .map_or_else(
                 || "????-??-?? ??:??".into(),

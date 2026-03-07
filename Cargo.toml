@@ -34,6 +34,7 @@ nucleo-matcher = "0.3"
 clap_complete = "4"
 clap_mangen = "0.2"
 tempfile = "3.26"
+unicode-width = "0.2"
 
 [dev-dependencies]
 

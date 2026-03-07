@@ -157,3 +157,68 @@ fn handle_add_suggested(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::repository::Repository;
+
+    fn test_repo() -> (tempfile::TempDir, Repository) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = crate::db::init_db(&dir.path().join("test.db")).unwrap();
+        (dir, Repository::new(conn))
+    }
+
+    #[test]
+    fn test_alias_add_and_list() {
+        let (_dir, repo) = test_repo();
+        repo.add_alias("gst", "git status").unwrap();
+        repo.add_alias("gco", "git checkout").unwrap();
+        let aliases = repo.list_aliases().unwrap();
+        assert_eq!(aliases.len(), 2);
+        assert_eq!(aliases[0].name, "gco"); // ordered by name
+        assert_eq!(aliases[1].name, "gst");
+    }
+
+    #[test]
+    fn test_alias_upsert() {
+        let (_dir, repo) = test_repo();
+        repo.add_alias("gst", "git status").unwrap();
+        repo.add_alias("gst", "git status --short").unwrap();
+        let aliases = repo.list_aliases().unwrap();
+        assert_eq!(aliases.len(), 1);
+        assert_eq!(aliases[0].command, "git status --short");
+    }
+
+    #[test]
+    fn test_alias_remove() {
+        let (_dir, repo) = test_repo();
+        repo.add_alias("gst", "git status").unwrap();
+        assert!(repo.remove_alias("gst").unwrap());
+        assert!(!repo.remove_alias("gst").unwrap()); // already gone
+        assert!(repo.list_aliases().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_alias_name_validation() {
+        // Valid names
+        for name in &["gst", "my-alias", "my_alias", "abc123"] {
+            assert!(
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '-' || c == '_'),
+                "{name} should be valid"
+            );
+        }
+        // Invalid names
+        for name in &["", "has space", "has!bang", "a/b"] {
+            assert!(
+                name.is_empty()
+                    || !name
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '-' || c == '_'),
+                "{name} should be invalid"
+            );
+        }
+    }
+}
