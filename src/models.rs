@@ -37,7 +37,11 @@ impl Entry {
             exit_code,
             started_at,
             ended_at,
-            duration_ms: ended_at - started_at,
+            duration_ms: if ended_at > started_at {
+                ended_at - started_at
+            } else {
+                0
+            },
             context: None,
             tag_name: None,
             tag_id: None,

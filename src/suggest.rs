@@ -76,7 +76,7 @@ fn generate_alias_name(command: &str, taken: &std::collections::HashSet<String>)
         let s2 = format!(
             "{}{}",
             &words[0].chars().next().unwrap_or('x'),
-            &words[1].get(..2.min(words[1].len())).unwrap_or("x")
+            &words[1].chars().take(2).collect::<String>()
         );
         if !taken.contains(&s2) {
             return s2;
