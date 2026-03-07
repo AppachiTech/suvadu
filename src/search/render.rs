@@ -112,7 +112,8 @@ impl SearchApp {
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)]
+    // --- render_footer (decomposed) ---
+
     pub(super) fn render_footer(&self, f: &mut ratatui::Frame, area: Rect) {
         let t = theme();
         let total_pages = self.total_items.div_ceil(self.page_size).max(1);
@@ -132,10 +133,36 @@ impl SearchApp {
             None
         };
 
+        let mut help_badges = self.build_help_badges();
+        self.append_active_filter_badges(&mut help_badges);
+
+        // Page progress
+        let page_info = format!(" {}/{} ({progress_pct}%) ", self.page, total_pages);
+        help_badges.push(Span::styled(page_info, Style::default().fg(t.text_muted)));
+
+        if let Some(msg) = status_text {
+            help_badges.push(Span::styled(
+                format!(" {msg} "),
+                Style::default().fg(t.success).add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        let help_line = Line::from(help_badges);
+        let help_paragraph = Paragraph::new(help_line).block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(t.border)),
+        );
+        f.render_widget(help_paragraph, area);
+    }
+
+    fn build_help_badges(&self) -> Vec<Span<'static>> {
+        let t = theme();
         let badge_key_style = Style::default().bg(t.badge_bg).fg(t.text);
         let badge_label_style = Style::default().fg(t.text_secondary);
 
-        let mut help_badges = vec![
+        vec![
             Span::styled(" Esc ", badge_key_style),
             Span::styled(" Quit  ", badge_label_style),
             Span::styled(" ^F ", badge_key_style),
@@ -188,75 +215,58 @@ impl SearchApp {
                 },
                 badge_label_style,
             ),
-        ];
+        ]
+    }
 
-        // Active filter badges
+    fn append_active_filter_badges(&self, badges: &mut Vec<Span<'static>>) {
+        let t = theme();
+
         if self.filter_after.is_some() || self.filter_before.is_some() {
-            help_badges.push(Span::styled(
+            badges.push(Span::styled(
                 " date ",
                 Style::default().bg(t.info).fg(Color::Black),
             ));
-            help_badges.push(Span::raw(" "));
+            badges.push(Span::raw(" "));
         }
         if self.filter_tag_id.is_some() {
-            help_badges.push(Span::styled(
+            badges.push(Span::styled(
                 " tag ",
                 Style::default().bg(t.warning).fg(Color::Black),
             ));
-            help_badges.push(Span::raw(" "));
+            badges.push(Span::raw(" "));
         }
         if self.filter_exit_code.is_some() {
-            help_badges.push(Span::styled(
+            badges.push(Span::styled(
                 " exit ",
                 Style::default().bg(t.error).fg(Color::White),
             ));
-            help_badges.push(Span::raw(" "));
+            badges.push(Span::raw(" "));
         }
         if self.filter_executor_type.is_some() {
-            help_badges.push(Span::styled(
+            badges.push(Span::styled(
                 " exec ",
                 Style::default().bg(t.badge_executor).fg(Color::White),
             ));
-            help_badges.push(Span::raw(" "));
+            badges.push(Span::raw(" "));
         }
         if self.filter_cwd.is_some() {
-            help_badges.push(Span::styled(
+            badges.push(Span::styled(
                 " dir ",
                 Style::default().bg(t.badge_path).fg(Color::Black),
             ));
-            help_badges.push(Span::raw(" "));
+            badges.push(Span::raw(" "));
         }
         if self.context_boost {
-            help_badges.push(Span::styled(
+            badges.push(Span::styled(
                 " smart ",
                 Style::default().bg(t.success).fg(Color::Black),
             ));
-            help_badges.push(Span::raw(" "));
+            badges.push(Span::raw(" "));
         }
-
-        // Page progress
-        let page_info = format!(" {}/{} ({progress_pct}%) ", self.page, total_pages);
-        help_badges.push(Span::styled(page_info, Style::default().fg(t.text_muted)));
-
-        if let Some(msg) = status_text {
-            help_badges.push(Span::styled(
-                format!(" {msg} "),
-                Style::default().fg(t.success).add_modifier(Modifier::BOLD),
-            ));
-        }
-
-        let help_line = Line::from(help_badges);
-        let help_paragraph = Paragraph::new(help_line).block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(t.border)),
-        );
-        f.render_widget(help_paragraph, area);
     }
 
-    #[allow(clippy::cast_precision_loss)]
-    #[allow(clippy::too_many_lines)]
+    // --- render_results_table (decomposed) ---
+
     pub(super) fn render_results_table(&mut self, f: &mut ratatui::Frame, area: Rect) {
         let t = theme();
 
@@ -271,245 +281,26 @@ impl SearchApp {
             ..area
         };
 
-        // Column layout adapts to terminal width:
-        //   < 80:   Command only (compact)
-        //   80-129: Time + Command + Status (semi-compact)
-        //   130+:   All columns (full)
-        // This avoids a jarring width discontinuity at a single threshold.
-        let full_fixed: u16 = 12 + 16 + 10 + 12 + 6 + 8; // 64
-        let semi_fixed: u16 = 12 + 6; // Time + Status
-        let compact = table_area.width < 80;
-        let semi_compact = !compact && table_area.width < 130;
-        let command_col_width = if compact {
-            table_area.width.saturating_sub(6)
-        } else if semi_compact {
-            table_area.width.saturating_sub(semi_fixed + 6)
+        let layout = if self.unique_mode {
+            ColumnLayout::Compact
         } else {
-            table_area.width.saturating_sub(full_fixed + 6)
+            ColumnLayout::from_width(table_area.width)
         };
+        let command_col_width = layout.command_col_width(table_area.width);
+        let selected = self.table_state.selected();
 
         let rows: Vec<Row> = self
             .entries
             .iter()
             .enumerate()
             .map(|(i, entry)| {
-                let is_selected = self.table_state.selected() == Some(i);
-
-                #[allow(clippy::cast_precision_loss)]
-                let duration_secs = entry.duration_ms as f64 / 1000.0;
-
-                let ts_ms = crate::util::normalize_display_ms(entry.started_at);
-                let time_str = Local.timestamp_millis_opt(ts_ms).single().map_or_else(
-                    || "??-?? ??:??".into(),
-                    |dt| dt.format("%m-%d %H:%M").to_string(),
-                );
-                let duration_str = format!("{duration_secs:.1}s");
-
-                // Combine session and tag
-                let session_short: String = entry.session_id.chars().take(8).collect();
-
-                let session_tag_display = entry.tag_name.as_ref().map_or_else(
-                    || session_short.clone(),
-                    |tag| format!("{session_short} ({tag})"),
-                );
-
-                // Wrap session/tag if selected
-                let st_display = if is_selected {
-                    fill_text(&session_tag_display, 25)
-                } else {
-                    session_tag_display
-                };
-
-                // Shorten path to ../last_folder (full path shown in detail pane)
-                let path_display = std::path::Path::new(&entry.cwd)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map_or_else(|| entry.cwd.clone(), |last| format!("../{last}"));
-
-                // Format executor with icon
-                let executor_icon = match entry.executor_type.as_deref() {
-                    Some("human") => "👤",
-                    Some("bot" | "agent") => "🤖",
-                    Some("ide") => "💻",
-                    Some("ci") => "⚙️",
-                    Some("programmatic") => "⚡",
-                    _ => "❓",
-                };
-                let executor_display = entry.executor.as_ref().map_or_else(
-                    || executor_icon.to_string(),
-                    |exec_name| format!("{executor_icon} {exec_name}"),
-                );
-
-                // Get occurrence count if in unique mode
-                let count_display = if self.unique_mode {
-                    format!(
-                        "({}) ",
-                        self.unique_counts.get(&entry.id.unwrap_or(0)).unwrap_or(&1)
-                    )
-                } else {
-                    String::new()
-                };
-
-                // Bookmark and note indicators
-                let bookmark_prefix = if self.bookmarked_commands.contains(&entry.command) {
-                    "★ "
-                } else {
-                    ""
-                };
-                let note_prefix = if entry
-                    .id
-                    .is_some_and(|id| self.noted_entry_ids.contains(&id))
-                {
-                    "📝"
-                } else {
-                    ""
-                };
-
-                // Command text
-                let cmd_text = format!(
-                    "{}{}{}{}",
-                    note_prefix, bookmark_prefix, count_display, entry.command
-                );
-
-                // Syntax highlighting for ALL rows
-                let command_display = if is_selected {
-                    Self::highlight_command(&cmd_text, true, command_col_width as usize)
-                } else {
-                    Self::highlight_command(&cmd_text, false, 0)
-                };
-
-                let cmd_height = u16::try_from(command_display.lines.len())
-                    .unwrap_or(1)
-                    .max(1);
-                let st_height = u16::try_from(st_display.lines().count())
-                    .unwrap_or(1)
-                    .max(1);
-
-                let height = cmd_height.max(st_height);
-
-                // Check if this entry is from the current directory (for context boost highlight)
-                let is_local = self.context_boost
-                    && self
-                        .current_cwd
-                        .as_deref()
-                        .is_some_and(|cwd| entry.cwd == cwd);
-
-                // Styles: prominent selection with blue background
-                let (
-                    bg_style,
-                    time_style,
-                    session_style,
-                    executor_style,
-                    path_style,
-                    duration_style,
-                ) = if is_selected {
-                    let sel = Style::default().bg(t.selection_bg);
-                    (
-                        sel,
-                        sel.fg(t.selection_fg).add_modifier(Modifier::BOLD),
-                        sel.fg(t.info).add_modifier(Modifier::BOLD),
-                        sel.fg(t.warning).add_modifier(Modifier::BOLD),
-                        if is_local {
-                            sel.fg(t.primary).add_modifier(Modifier::BOLD)
-                        } else {
-                            sel.fg(t.selection_fg)
-                        },
-                        sel.fg(t.text_secondary),
-                    )
-                } else {
-                    let base = Style::default();
-                    (
-                        base,
-                        base.fg(t.text_muted),
-                        base.fg(t.info),
-                        base.fg(t.warning),
-                        if is_local {
-                            base.fg(t.primary)
-                        } else {
-                            base.fg(t.text_secondary)
-                        },
-                        base.fg(t.text_muted),
-                    )
-                };
-
-                let exit_display = match entry.exit_code {
-                    Some(0) => "✔".to_string(),
-                    Some(code) => format!("✘ {code}"),
-                    None => "○".to_string(),
-                };
-                let exit_style_item = match entry.exit_code {
-                    Some(0) => bg_style.fg(t.success),
-                    Some(_) => bg_style.fg(t.error),
-                    None => bg_style.fg(t.text_muted),
-                };
-
-                if self.unique_mode || compact {
-                    Row::new(vec![Cell::from(command_display)])
-                        .height(height)
-                        .style(bg_style)
-                } else if semi_compact {
-                    Row::new(vec![
-                        Cell::from(time_str).style(time_style),
-                        Cell::from(command_display),
-                        Cell::from(exit_display).style(exit_style_item),
-                    ])
-                    .height(height)
-                    .style(bg_style)
-                } else {
-                    Row::new(vec![
-                        Cell::from(time_str).style(time_style),
-                        Cell::from(command_display),
-                        Cell::from(st_display).style(session_style),
-                        Cell::from(executor_display).style(executor_style),
-                        Cell::from(path_display).style(path_style),
-                        Cell::from(exit_display).style(exit_style_item),
-                        Cell::from(duration_str).style(duration_style),
-                    ])
-                    .height(height)
-                    .style(bg_style)
-                }
+                self.build_entry_row(entry, selected == Some(i), &layout, command_col_width)
             })
             .collect();
 
-        let widths = if self.unique_mode || compact {
-            vec![Constraint::Percentage(100)]
-        } else if semi_compact {
-            vec![
-                Constraint::Length(12), // Time
-                Constraint::Min(10),    // Command
-                Constraint::Length(6),  // Status
-            ]
-        } else {
-            vec![
-                Constraint::Length(12), // Time
-                Constraint::Min(10),    // Command
-                Constraint::Length(16), // Session/Tag
-                Constraint::Length(10), // Executor
-                Constraint::Length(12), // Path (../folder)
-                Constraint::Length(6),  // Status
-                Constraint::Length(8),  // Duration
-            ]
-        };
-
-        let header_row = if self.unique_mode || compact {
-            Row::new(vec!["Command".to_string()])
-        } else if semi_compact {
-            Row::new(vec![
-                "Time".to_string(),
-                "Command".to_string(),
-                "Status".to_string(),
-            ])
-        } else {
-            Row::new(vec![
-                "Time".to_string(),
-                "Command".to_string(),
-                "Session/Tag".to_string(),
-                "Executor".to_string(),
-                "Path".to_string(),
-                "Status".to_string(),
-                "Duration".to_string(),
-            ])
-        };
+        let widths = layout.constraints();
+        let header_row = layout.header_row();
+        let title = self.build_table_title();
 
         let table = Table::new(rows, widths)
             .header(
@@ -526,18 +317,7 @@ impl SearchApp {
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(t.border))
-                    .title({
-                        if self.total_items == 0 {
-                            "History (0/0)".to_string()
-                        } else {
-                            let start_index = (self.page - 1) * self.page_size + 1;
-                            let end_index = start_index + self.entries.len().saturating_sub(1);
-                            format!(
-                                "History ({}-{} / {})",
-                                start_index, end_index, self.total_items
-                            )
-                        }
-                    }),
+                    .title(title),
             )
             .highlight_symbol(" > ");
 
@@ -553,7 +333,105 @@ impl SearchApp {
         f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::cast_precision_loss)]
+    fn build_entry_row(
+        &self,
+        entry: &crate::models::Entry,
+        is_selected: bool,
+        layout: &ColumnLayout,
+        command_col_width: u16,
+    ) -> Row<'static> {
+        let t = theme();
+
+        let duration_secs = entry.duration_ms as f64 / 1000.0;
+        let ts_ms = crate::util::normalize_display_ms(entry.started_at);
+        let time_str = Local.timestamp_millis_opt(ts_ms).single().map_or_else(
+            || "??-?? ??:??".into(),
+            |dt| dt.format("%m-%d %H:%M").to_string(),
+        );
+        let duration_str = format!("{duration_secs:.1}s");
+
+        let session_short: String = entry.session_id.chars().take(8).collect();
+        let session_tag_display = entry.tag_name.as_ref().map_or_else(
+            || session_short.clone(),
+            |tag| format!("{session_short} ({tag})"),
+        );
+        let st_display = if is_selected {
+            fill_text(&session_tag_display, 25)
+        } else {
+            session_tag_display
+        };
+
+        let path_display = std::path::Path::new(&entry.cwd)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map_or_else(|| entry.cwd.clone(), |last| format!("../{last}"));
+
+        let executor_display = format_executor(entry);
+        let cmd_text = build_command_text(self, entry);
+        let command_display = if is_selected {
+            Self::highlight_command(&cmd_text, true, command_col_width as usize)
+        } else {
+            Self::highlight_command(&cmd_text, false, 0)
+        };
+
+        let cmd_height = u16::try_from(command_display.lines.len())
+            .unwrap_or(1)
+            .max(1);
+        let st_height = u16::try_from(st_display.lines().count())
+            .unwrap_or(1)
+            .max(1);
+        let height = cmd_height.max(st_height);
+
+        let is_local = self.context_boost
+            && self
+                .current_cwd
+                .as_deref()
+                .is_some_and(|cwd| entry.cwd == cwd);
+
+        let styles = entry_row_styles(t, is_selected, is_local);
+        let (exit_display, exit_style_item) = format_exit_code(entry, styles.bg);
+
+        match *layout {
+            ColumnLayout::Compact => Row::new(vec![Cell::from(command_display)])
+                .height(height)
+                .style(styles.bg),
+            ColumnLayout::SemiCompact => Row::new(vec![
+                Cell::from(time_str).style(styles.time),
+                Cell::from(command_display),
+                Cell::from(exit_display).style(exit_style_item),
+            ])
+            .height(height)
+            .style(styles.bg),
+            ColumnLayout::Full => Row::new(vec![
+                Cell::from(time_str).style(styles.time),
+                Cell::from(command_display),
+                Cell::from(st_display).style(styles.session),
+                Cell::from(executor_display).style(styles.executor),
+                Cell::from(path_display).style(styles.path),
+                Cell::from(exit_display).style(exit_style_item),
+                Cell::from(duration_str).style(styles.duration),
+            ])
+            .height(height)
+            .style(styles.bg),
+        }
+    }
+
+    fn build_table_title(&self) -> String {
+        if self.total_items == 0 {
+            "History (0/0)".to_string()
+        } else {
+            let start_index = (self.page - 1) * self.page_size + 1;
+            let end_index = start_index + self.entries.len().saturating_sub(1);
+            format!(
+                "History ({}-{} / {})",
+                start_index, end_index, self.total_items
+            )
+        }
+    }
+
+    // --- render_detail_pane (decomposed) ---
+
     pub(super) fn render_detail_pane(&self, f: &mut ratatui::Frame, area: Rect) {
         let t = theme();
 
@@ -566,121 +444,7 @@ impl SearchApp {
             .border_style(Style::default().fg(t.border));
 
         if let Some(entry) = entry {
-            let label_style = Style::default()
-                .fg(t.text_secondary)
-                .add_modifier(Modifier::BOLD);
-            let value_style = Style::default().fg(t.text);
-
-            let ts_ms = crate::util::normalize_display_ms(entry.started_at);
-            let time_str = Local.timestamp_millis_opt(ts_ms).single().map_or_else(
-                || "????-??-?? ??:??:??".into(),
-                |dt| dt.format("%Y-%m-%d %H:%M:%S").to_string(),
-            );
-
-            #[allow(clippy::cast_precision_loss)]
-            let duration_secs = entry.duration_ms as f64 / 1000.0;
-
-            let exit_str = match entry.exit_code {
-                Some(0) => "✔ 0 (success)".to_string(),
-                Some(code) => format!("✘ {code} (failed)"),
-                None => "○ (unknown)".to_string(),
-            };
-
-            let executor_str = match (&entry.executor_type, &entry.executor) {
-                (Some(t), Some(n)) => format!("{t}: {n}"),
-                (Some(t), None) => t.clone(),
-                _ => "unknown".to_string(),
-            };
-
-            let session_str: String = entry.session_id.chars().take(8).collect();
-            let tag_str = entry.tag_name.as_deref().unwrap_or("none");
-
-            let is_bookmarked = self.bookmarked_commands.contains(&entry.command);
-            let has_note = entry
-                .id
-                .is_some_and(|id| self.noted_entry_ids.contains(&id));
-
-            let mut lines = vec![
-                Line::from(vec![Span::styled("Command  ", label_style)]),
-                Line::from(vec![Span::styled(
-                    entry.command.clone(),
-                    Style::default().fg(t.primary),
-                )]),
-                Line::from(""),
-                Line::from(vec![
-                    Span::styled("Path     ", label_style),
-                    Span::styled(entry.cwd.clone(), value_style),
-                ]),
-                Line::from(vec![
-                    Span::styled("Time     ", label_style),
-                    Span::styled(time_str, value_style),
-                ]),
-                Line::from(vec![
-                    Span::styled("Duration ", label_style),
-                    Span::styled(format!("{duration_secs:.2}s"), value_style),
-                ]),
-                Line::from(vec![
-                    Span::styled("Exit     ", label_style),
-                    Span::styled(exit_str, value_style),
-                ]),
-                Line::from(vec![
-                    Span::styled("Session  ", label_style),
-                    Span::styled(session_str, value_style),
-                ]),
-                Line::from(vec![
-                    Span::styled("Tag      ", label_style),
-                    Span::styled(tag_str.to_string(), value_style),
-                ]),
-                Line::from(vec![
-                    Span::styled("Executor ", label_style),
-                    Span::styled(executor_str, value_style),
-                ]),
-            ];
-
-            // Risk assessment
-            if self.show_risk_in_search {
-                let assessment = risk::assess_risk(&entry.command);
-                let risk_level = assessment
-                    .as_ref()
-                    .map_or(risk::RiskLevel::None, |a| a.level);
-                if risk_level > risk::RiskLevel::None {
-                    let risk_color = match risk_level {
-                        risk::RiskLevel::Critical => t.risk_critical,
-                        risk::RiskLevel::High => t.risk_high,
-                        risk::RiskLevel::Medium => t.risk_medium,
-                        risk::RiskLevel::Low | risk::RiskLevel::None => t.risk_low,
-                    };
-                    let risk_text = format!(
-                        "{} {}{}",
-                        risk_level.icon(),
-                        risk_level.label(),
-                        assessment
-                            .as_ref()
-                            .map_or(String::new(), |a| format!(" ({})", a.category))
-                    );
-                    lines.push(Line::from(vec![
-                        Span::styled("Risk     ", label_style),
-                        Span::styled(risk_text, Style::default().fg(risk_color)),
-                    ]));
-                }
-            }
-
-            if is_bookmarked || has_note {
-                lines.push(Line::from(""));
-                if is_bookmarked {
-                    lines.push(Line::from(vec![
-                        Span::styled("★ ", Style::default().fg(t.warning)),
-                        Span::styled("Bookmarked", value_style),
-                    ]));
-                }
-                if has_note {
-                    lines.push(Line::from(vec![
-                        Span::styled("📝 ", Style::default()),
-                        Span::styled("Has note", value_style),
-                    ]));
-                }
-            }
-
+            let lines = self.build_detail_lines(entry);
             let paragraph = Paragraph::new(lines)
                 .block(block)
                 .wrap(ratatui::widgets::Wrap { trim: false });
@@ -694,7 +458,147 @@ impl SearchApp {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::cast_precision_loss)]
+    fn build_detail_lines(&self, entry: &crate::models::Entry) -> Vec<Line<'static>> {
+        let t = theme();
+        let label_style = Style::default()
+            .fg(t.text_secondary)
+            .add_modifier(Modifier::BOLD);
+        let value_style = Style::default().fg(t.text);
+
+        let ts_ms = crate::util::normalize_display_ms(entry.started_at);
+        let time_str = Local.timestamp_millis_opt(ts_ms).single().map_or_else(
+            || "????-??-?? ??:??:??".into(),
+            |dt| dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+        );
+
+        let duration_secs = entry.duration_ms as f64 / 1000.0;
+
+        let exit_str = match entry.exit_code {
+            Some(0) => "✔ 0 (success)".to_string(),
+            Some(code) => format!("✘ {code} (failed)"),
+            None => "○ (unknown)".to_string(),
+        };
+
+        let executor_str = match (&entry.executor_type, &entry.executor) {
+            (Some(et), Some(n)) => format!("{et}: {n}"),
+            (Some(et), None) => et.clone(),
+            _ => "unknown".to_string(),
+        };
+
+        let session_str: String = entry.session_id.chars().take(8).collect();
+        let tag_str = entry.tag_name.as_deref().unwrap_or("none").to_string();
+
+        let mut lines = vec![
+            Line::from(vec![Span::styled("Command  ", label_style)]),
+            Line::from(vec![Span::styled(
+                entry.command.clone(),
+                Style::default().fg(t.primary),
+            )]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Path     ", label_style),
+                Span::styled(entry.cwd.clone(), value_style),
+            ]),
+            Line::from(vec![
+                Span::styled("Time     ", label_style),
+                Span::styled(time_str, value_style),
+            ]),
+            Line::from(vec![
+                Span::styled("Duration ", label_style),
+                Span::styled(format!("{duration_secs:.2}s"), value_style),
+            ]),
+            Line::from(vec![
+                Span::styled("Exit     ", label_style),
+                Span::styled(exit_str, value_style),
+            ]),
+            Line::from(vec![
+                Span::styled("Session  ", label_style),
+                Span::styled(session_str, value_style),
+            ]),
+            Line::from(vec![
+                Span::styled("Tag      ", label_style),
+                Span::styled(tag_str, value_style),
+            ]),
+            Line::from(vec![
+                Span::styled("Executor ", label_style),
+                Span::styled(executor_str, value_style),
+            ]),
+        ];
+
+        self.append_risk_line(&mut lines, entry, label_style);
+        self.append_bookmark_note_lines(&mut lines, entry, value_style);
+
+        lines
+    }
+
+    fn append_risk_line(
+        &self,
+        lines: &mut Vec<Line<'static>>,
+        entry: &crate::models::Entry,
+        label_style: Style,
+    ) {
+        if !self.show_risk_in_search {
+            return;
+        }
+        let t = theme();
+        let assessment = risk::assess_risk(&entry.command);
+        let risk_level = assessment
+            .as_ref()
+            .map_or(risk::RiskLevel::None, |a| a.level);
+        if risk_level > risk::RiskLevel::None {
+            let risk_color = match risk_level {
+                risk::RiskLevel::Critical => t.risk_critical,
+                risk::RiskLevel::High => t.risk_high,
+                risk::RiskLevel::Medium => t.risk_medium,
+                risk::RiskLevel::Low | risk::RiskLevel::None => t.risk_low,
+            };
+            let risk_text = format!(
+                "{} {}{}",
+                risk_level.icon(),
+                risk_level.label(),
+                assessment
+                    .as_ref()
+                    .map_or(String::new(), |a| format!(" ({})", a.category))
+            );
+            lines.push(Line::from(vec![
+                Span::styled("Risk     ", label_style),
+                Span::styled(risk_text, Style::default().fg(risk_color)),
+            ]));
+        }
+    }
+
+    fn append_bookmark_note_lines(
+        &self,
+        lines: &mut Vec<Line<'static>>,
+        entry: &crate::models::Entry,
+        value_style: Style,
+    ) {
+        let t = theme();
+        let is_bookmarked = self.bookmarked_commands.contains(&entry.command);
+        let has_note = entry
+            .id
+            .is_some_and(|id| self.noted_entry_ids.contains(&id));
+
+        if is_bookmarked || has_note {
+            lines.push(Line::from(""));
+            if is_bookmarked {
+                lines.push(Line::from(vec![
+                    Span::styled("★ ", Style::default().fg(t.warning)),
+                    Span::styled("Bookmarked", value_style),
+                ]));
+            }
+            if has_note {
+                lines.push(Line::from(vec![
+                    Span::styled("📝 ", Style::default()),
+                    Span::styled("Has note", value_style),
+                ]));
+            }
+        }
+    }
+
+    // --- render_filter_popup (decomposed) ---
+
     pub(super) fn render_filter_popup(&self, f: &mut ratatui::Frame, area: Rect) {
         let t = theme();
 
@@ -726,8 +630,18 @@ impl SearchApp {
             )
             .split(popup_area);
 
-        // Field progress indicator
-        let progress_blocks: Vec<Span> = (0..5)
+        self.render_filter_progress(f, chunks[0]);
+        self.render_filter_fields(f, &chunks);
+
+        let help_text = Paragraph::new("Tab/S-Tab: switch fields  |  Enter: apply  |  Esc: cancel")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(t.text_muted));
+        f.render_widget(help_text, chunks[6]);
+    }
+
+    fn render_filter_progress(&self, f: &mut ratatui::Frame, area: Rect) {
+        let t = theme();
+        let mut progress_line: Vec<Span> = (0..5)
             .map(|i| {
                 if i == self.focus_index {
                     Span::styled(" ■ ", Style::default().fg(t.primary))
@@ -737,7 +651,6 @@ impl SearchApp {
             })
             .collect();
         let field_names = ["Start Date", "End Date", "Tag", "Exit Code", "Executor"];
-        let mut progress_line = progress_blocks;
         progress_line.push(Span::styled(
             format!(
                 "  Field {} of 5: {}",
@@ -748,9 +661,12 @@ impl SearchApp {
         ));
         f.render_widget(
             Paragraph::new(Line::from(progress_line)).alignment(Alignment::Center),
-            chunks[0],
+            area,
         );
+    }
 
+    fn render_filter_fields(&self, f: &mut ratatui::Frame, chunks: &[Rect]) {
+        let t = theme();
         let fields: Vec<(&str, &str, &str)> = vec![
             (
                 "Start Date (After)",
@@ -803,12 +719,9 @@ impl SearchApp {
                 .style(text_style);
             f.render_widget(input, chunks[i + 1]);
         }
-
-        let help_text = Paragraph::new("Tab/S-Tab: switch fields  |  Enter: apply  |  Esc: cancel")
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(t.text_muted));
-        f.render_widget(help_text, chunks[6]);
     }
+
+    // --- Unchanged dialog functions ---
 
     pub(super) fn render_tag_dialog(&mut self, f: &mut ratatui::Frame, area: Rect) {
         let t = theme();
@@ -994,4 +907,174 @@ impl SearchApp {
     ) -> ratatui::text::Text<'static> {
         crate::util::highlight_command(command, width)
     }
+}
+
+// --- Free helper types and functions ---
+
+/// Describes the column layout mode based on terminal width.
+enum ColumnLayout {
+    Compact,     // < 80 cols: command only
+    SemiCompact, // 80-129 cols: time + command + status
+    Full,        // 130+ cols: all columns
+}
+
+impl ColumnLayout {
+    const fn from_width(width: u16) -> Self {
+        if width < 80 {
+            Self::Compact
+        } else if width < 130 {
+            Self::SemiCompact
+        } else {
+            Self::Full
+        }
+    }
+
+    const fn command_col_width(&self, table_width: u16) -> u16 {
+        const FULL_FIXED: u16 = 12 + 16 + 10 + 12 + 6 + 8; // 64
+        const SEMI_FIXED: u16 = 12 + 6; // Time + Status
+        match self {
+            Self::Compact => table_width.saturating_sub(6),
+            Self::SemiCompact => table_width.saturating_sub(SEMI_FIXED + 6),
+            Self::Full => table_width.saturating_sub(FULL_FIXED + 6),
+        }
+    }
+
+    fn constraints(&self) -> Vec<Constraint> {
+        match self {
+            Self::Compact => vec![Constraint::Percentage(100)],
+            Self::SemiCompact => vec![
+                Constraint::Length(12),
+                Constraint::Min(10),
+                Constraint::Length(6),
+            ],
+            Self::Full => vec![
+                Constraint::Length(12),
+                Constraint::Min(10),
+                Constraint::Length(16),
+                Constraint::Length(10),
+                Constraint::Length(12),
+                Constraint::Length(6),
+                Constraint::Length(8),
+            ],
+        }
+    }
+
+    fn header_row(&self) -> Row<'static> {
+        match self {
+            Self::Compact => Row::new(vec!["Command".to_string()]),
+            Self::SemiCompact => Row::new(vec![
+                "Time".to_string(),
+                "Command".to_string(),
+                "Status".to_string(),
+            ]),
+            Self::Full => Row::new(vec![
+                "Time".to_string(),
+                "Command".to_string(),
+                "Session/Tag".to_string(),
+                "Executor".to_string(),
+                "Path".to_string(),
+                "Status".to_string(),
+                "Duration".to_string(),
+            ]),
+        }
+    }
+}
+
+/// Holds the pre-computed styles for a single entry row.
+struct EntryRowStyles {
+    bg: Style,
+    time: Style,
+    session: Style,
+    executor: Style,
+    path: Style,
+    duration: Style,
+}
+
+fn entry_row_styles(t: &crate::theme::Theme, is_selected: bool, is_local: bool) -> EntryRowStyles {
+    if is_selected {
+        let sel = Style::default().bg(t.selection_bg);
+        EntryRowStyles {
+            bg: sel,
+            time: sel.fg(t.selection_fg).add_modifier(Modifier::BOLD),
+            session: sel.fg(t.info).add_modifier(Modifier::BOLD),
+            executor: sel.fg(t.warning).add_modifier(Modifier::BOLD),
+            path: if is_local {
+                sel.fg(t.primary).add_modifier(Modifier::BOLD)
+            } else {
+                sel.fg(t.selection_fg)
+            },
+            duration: sel.fg(t.text_secondary),
+        }
+    } else {
+        let base = Style::default();
+        EntryRowStyles {
+            bg: base,
+            time: base.fg(t.text_muted),
+            session: base.fg(t.info),
+            executor: base.fg(t.warning),
+            path: if is_local {
+                base.fg(t.primary)
+            } else {
+                base.fg(t.text_secondary)
+            },
+            duration: base.fg(t.text_muted),
+        }
+    }
+}
+
+fn format_executor(entry: &crate::models::Entry) -> String {
+    let icon = match entry.executor_type.as_deref() {
+        Some("human") => "👤",
+        Some("bot" | "agent") => "🤖",
+        Some("ide") => "💻",
+        Some("ci") => "⚙️",
+        Some("programmatic") => "⚡",
+        _ => "❓",
+    };
+    entry
+        .executor
+        .as_ref()
+        .map_or_else(|| icon.to_string(), |name| format!("{icon} {name}"))
+}
+
+fn format_exit_code(entry: &crate::models::Entry, bg_style: Style) -> (String, Style) {
+    let t = theme();
+    let display = match entry.exit_code {
+        Some(0) => "✔".to_string(),
+        Some(code) => format!("✘ {code}"),
+        None => "○".to_string(),
+    };
+    let style = match entry.exit_code {
+        Some(0) => bg_style.fg(t.success),
+        Some(_) => bg_style.fg(t.error),
+        None => bg_style.fg(t.text_muted),
+    };
+    (display, style)
+}
+
+fn build_command_text(app: &SearchApp, entry: &crate::models::Entry) -> String {
+    let count_display = if app.unique_mode {
+        format!(
+            "({}) ",
+            app.unique_counts.get(&entry.id.unwrap_or(0)).unwrap_or(&1)
+        )
+    } else {
+        String::new()
+    };
+
+    let bookmark_prefix = if app.bookmarked_commands.contains(&entry.command) {
+        "★ "
+    } else {
+        ""
+    };
+    let note_prefix = if entry.id.is_some_and(|id| app.noted_entry_ids.contains(&id)) {
+        "📝"
+    } else {
+        ""
+    };
+
+    format!(
+        "{}{}{}{}",
+        note_prefix, bookmark_prefix, count_display, entry.command
+    )
 }

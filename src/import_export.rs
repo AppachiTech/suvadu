@@ -168,7 +168,6 @@ pub fn parse_extended_history_line(line: &str) -> Option<(i64, i64, String)> {
     Some((ts, dur, cmd))
 }
 
-#[allow(clippy::too_many_lines)]
 pub fn handle_import_zsh_history(
     file: &str,
     dry_run: bool,
@@ -182,8 +181,59 @@ pub fn handle_import_zsh_history(
         );
     }
 
-    // Phase 1: Parse all entries from the zsh_history file
-    // Entries are (command, started_at_ms, duration_ms)
+    let parsed = parse_zsh_history(&text);
+
+    println!("Parsed {} commands from {file}", parsed.len());
+
+    if dry_run {
+        print_zsh_import_preview(&parsed);
+        return Ok(());
+    }
+
+    // Phase 2: Open DB and deduplicate
+    let repo = Repository::init()?;
+
+    println!("Checking for duplicates against existing entries...");
+
+    // Create a dedicated import session
+    let session_id = format!("import-zsh-{}", uuid::Uuid::new_v4());
+    let hostname = hostname::get()?.to_string_lossy().to_string();
+    let now = chrono::Utc::now().timestamp_millis();
+
+    let session = Session {
+        id: session_id.clone(),
+        hostname,
+        created_at: now,
+        tag_id: None,
+    };
+    repo.insert_session(&session)?;
+
+    // Phase 3: Insert in a transaction for performance + atomicity
+    repo.begin_transaction()?;
+
+    let result = import_entries_batch(&repo, &parsed, &session_id, now);
+
+    match result {
+        Ok((imported, skipped)) => {
+            repo.commit()?;
+            println!("\n✓ Import complete:");
+            println!("  Imported: {imported}");
+            println!("  Skipped:  {skipped} (duplicates/empty)");
+            println!("  Session:  {session_id}");
+        }
+        Err(e) => {
+            eprintln!("\nImport failed: {e}");
+            eprintln!("Rolling back — no entries were written.");
+            let _ = repo.rollback();
+            return Err(e);
+        }
+    }
+
+    Ok(())
+}
+
+/// Parse zsh history text into a list of (command, `started_at_ms`, `duration_ms`) tuples.
+fn parse_zsh_history(text: &str) -> Vec<(String, i64, i64)> {
     let mut parsed: Vec<(String, i64, i64)> = Vec::new();
     let mut current_cmd = String::new();
     let mut current_ts: i64 = 0;
@@ -239,72 +289,31 @@ pub fn handle_import_zsh_history(
         parsed.push((trimmed, current_ts, current_dur));
     }
 
-    println!("Parsed {} commands from {file}", parsed.len());
+    parsed
+}
 
-    if dry_run {
-        println!("\nDry run — no entries written. Sample:");
-        for (i, (cmd, ts, _dur)) in parsed.iter().take(10).enumerate() {
-            let date = if *ts > 0 {
-                chrono::DateTime::from_timestamp_millis(*ts)
-                    .map(|dt| {
-                        dt.with_timezone(&chrono::Local)
-                            .format("%Y-%m-%d %H:%M")
-                            .to_string()
-                    })
-                    .unwrap_or_default()
-            } else {
-                "no timestamp".to_string()
-            };
-            let display = cmd.replace('\n', "\\n");
-            let truncated = crate::util::truncate_str(&display, 60, "…");
-            println!("  {:>2}. [{date}] {truncated}", i + 1);
-        }
-        if parsed.len() > 10 {
-            println!("  ... and {} more", parsed.len() - 10);
-        }
-        return Ok(());
+/// Print a preview of parsed zsh history entries (for dry-run mode).
+fn print_zsh_import_preview(parsed: &[(String, i64, i64)]) {
+    println!("\nDry run — no entries written. Sample:");
+    for (i, (cmd, ts, _dur)) in parsed.iter().take(10).enumerate() {
+        let date = if *ts > 0 {
+            chrono::DateTime::from_timestamp_millis(*ts)
+                .map(|dt| {
+                    dt.with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string()
+                })
+                .unwrap_or_default()
+        } else {
+            "no timestamp".to_string()
+        };
+        let display = cmd.replace('\n', "\\n");
+        let truncated = crate::util::truncate_str(&display, 60, "…");
+        println!("  {:>2}. [{date}] {truncated}", i + 1);
     }
-
-    // Phase 2: Open DB and deduplicate
-    let repo = Repository::init()?;
-
-    println!("Checking for duplicates against existing entries...");
-
-    // Create a dedicated import session
-    let session_id = format!("import-zsh-{}", uuid::Uuid::new_v4());
-    let hostname = hostname::get()?.to_string_lossy().to_string();
-    let now = chrono::Utc::now().timestamp_millis();
-
-    let session = Session {
-        id: session_id.clone(),
-        hostname,
-        created_at: now,
-        tag_id: None,
-    };
-    repo.insert_session(&session)?;
-
-    // Phase 3: Insert in a transaction for performance + atomicity
-    repo.begin_transaction()?;
-
-    let result = import_entries_batch(&repo, &parsed, &session_id, now);
-
-    match result {
-        Ok((imported, skipped)) => {
-            repo.commit()?;
-            println!("\n✓ Import complete:");
-            println!("  Imported: {imported}");
-            println!("  Skipped:  {skipped} (duplicates/empty)");
-            println!("  Session:  {session_id}");
-        }
-        Err(e) => {
-            eprintln!("\nImport failed: {e}");
-            eprintln!("Rolling back — no entries were written.");
-            let _ = repo.rollback();
-            return Err(e);
-        }
+    if parsed.len() > 10 {
+        println!("  ... and {} more", parsed.len() - 10);
     }
-
-    Ok(())
 }
 
 /// Insert parsed entries in a batch. Returns (imported, skipped) counts.

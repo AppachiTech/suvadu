@@ -374,7 +374,6 @@ impl AgentApp {
         f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
-    #[allow(clippy::too_many_lines)]
     fn render_summary(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
         let block = Block::default()
             .borders(Borders::RIGHT)
@@ -389,8 +388,30 @@ impl AgentApp {
         let value_style = Style::default().fg(t.text);
 
         let mut lines = Vec::new();
+        self.build_summary_agents(&mut lines, label_style, value_style, t);
+        lines.push(Line::from(""));
+        self.build_summary_risk(&mut lines, label_style, t);
+        lines.push(Line::from(""));
+        self.build_summary_stats(&mut lines, label_style, value_style, t);
 
-        // Agents section
+        if self.risk_filter {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                " [risk-only]",
+                Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+            )));
+        }
+
+        f.render_widget(Paragraph::new(lines), inner);
+    }
+
+    fn build_summary_agents(
+        &self,
+        lines: &mut Vec<Line>,
+        label_style: Style,
+        value_style: Style,
+        t: &crate::theme::Theme,
+    ) {
         lines.push(Line::from(Span::styled(" Agents", label_style)));
         for (name, count) in &self.agent_counts {
             let is_filtered = self
@@ -416,10 +437,14 @@ impl AgentApp {
                 Span::styled(format!("  {count}"), Style::default().fg(t.text_muted)),
             ]));
         }
+    }
 
-        lines.push(Line::from(""));
-
-        // Risk section
+    fn build_summary_risk(
+        &self,
+        lines: &mut Vec<Line>,
+        label_style: Style,
+        t: &crate::theme::Theme,
+    ) {
         lines.push(Line::from(Span::styled(" Risk", label_style)));
         if self.risk_summary.critical_count > 0 {
             lines.push(Line::from(vec![
@@ -453,10 +478,15 @@ impl AgentApp {
             Span::styled("  ", Style::default()),
             Span::styled(format!("✔ {safe} safe"), Style::default().fg(t.success)),
         ]));
+    }
 
-        lines.push(Line::from(""));
-
-        // Stats section
+    fn build_summary_stats(
+        &self,
+        lines: &mut Vec<Line>,
+        label_style: Style,
+        value_style: Style,
+        t: &crate::theme::Theme,
+    ) {
         lines.push(Line::from(Span::styled(" Stats", label_style)));
         let total = self.entries.len();
         let success = self
@@ -493,19 +523,8 @@ impl AgentApp {
                 Span::styled(format!("{failures}"), Style::default().fg(t.error)),
             ]));
         }
-
-        if self.risk_filter {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                " [risk-only]",
-                Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
-            )));
-        }
-
-        f.render_widget(Paragraph::new(lines), inner);
     }
 
-    #[allow(clippy::too_many_lines)]
     fn render_table(&mut self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
         let scrollbar_area = Rect {
             x: area.x + area.width.saturating_sub(1),
@@ -516,6 +535,11 @@ impl AgentApp {
             width: area.width.saturating_sub(1),
             ..area
         };
+
+        let page_items: Vec<usize> = self.page_slice().to_vec();
+        let rows =
+            Self::build_table_rows(&self.entries, &self.risk_levels, &self.home, &page_items, t);
+        let title = self.build_table_title(&page_items);
 
         let header = Row::new(vec![
             Cell::from("Time"),
@@ -532,20 +556,77 @@ impl AgentApp {
         )
         .bottom_margin(1);
 
-        let page_items = self.page_slice();
+        let widths = [
+            Constraint::Length(12),
+            Constraint::Min(10),
+            Constraint::Length(12),
+            Constraint::Length(20),
+            Constraint::Length(8),
+            Constraint::Length(8),
+        ];
 
-        let rows: Vec<Row> = page_items
+        let table = Table::new(rows, widths)
+            .header(header)
+            .row_highlight_style(
+                Style::default()
+                    .bg(t.selection_bg)
+                    .fg(t.selection_fg)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol(" > ")
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(t.border))
+                    .title(title),
+            );
+
+        f.render_stateful_widget(table, table_area, &mut self.table_state);
+
+        if self.visible.is_empty() {
+            let hint = Paragraph::new(Line::from(Span::styled(
+                "  No agent commands found. Try a broader time range or check integration setup.",
+                Style::default().fg(t.text_muted),
+            )));
+            let hint_area = Rect {
+                x: table_area.x + 1,
+                y: table_area.y + 2,
+                width: table_area.width.saturating_sub(2),
+                height: 1,
+            };
+            f.render_widget(hint, hint_area);
+        }
+
+        let total_pages = self.total_pages();
+        let mut scrollbar_state =
+            ScrollbarState::new(total_pages).position(self.page.saturating_sub(1));
+        f.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .thumb_style(Style::default().fg(t.primary_dim))
+                .track_style(Style::default().fg(t.border)),
+            scrollbar_area,
+            &mut scrollbar_state,
+        );
+    }
+
+    fn build_table_rows<'a>(
+        entries: &'a [Entry],
+        risk_levels: &[RiskLevel],
+        home: &str,
+        page_items: &[usize],
+        t: &crate::theme::Theme,
+    ) -> Vec<Row<'a>> {
+        page_items
             .iter()
             .map(|&idx| {
-                let entry = &self.entries[idx];
-                let rl = self.risk_levels[idx];
+                let entry = &entries[idx];
+                let rl = risk_levels[idx];
 
                 let time = format_datetime(entry.started_at);
                 let executor = entry.executor.as_deref().unwrap_or("unknown");
-
-                let path_full = shorten_path(&entry.cwd, &self.home);
+                let path_full = shorten_path(&entry.cwd, home);
                 let path_display = crate::util::truncate_str_start(&path_full, 18, "...");
-
                 let command_display = crate::util::highlight_command(&entry.command, 0);
 
                 let risk_icon = rl.icon();
@@ -574,73 +655,19 @@ impl AgentApp {
                     Cell::from(dur_str).style(Style::default().fg(t.text_muted)),
                 ])
             })
-            .collect();
+            .collect()
+    }
 
-        let widths = [
-            Constraint::Length(12), // Time (MM-DD HH:MM)
-            Constraint::Min(10),    // Command
-            Constraint::Length(12), // Executor
-            Constraint::Length(20), // Path
-            Constraint::Length(8),  // Status + risk icon
-            Constraint::Length(8),  // Duration
-        ];
-
-        let title = if self.visible.is_empty() {
+    fn build_table_title(&self, page_items: &[usize]) -> String {
+        if self.visible.is_empty() {
             "Agent Commands (0/0)".to_string()
         } else {
             let start = (self.page - 1) * self.page_size + 1;
             let end = start + page_items.len().saturating_sub(1);
             format!("Agent Commands ({start}-{end} / {})", self.visible.len())
-        };
-
-        let table = Table::new(rows, widths)
-            .header(header)
-            .row_highlight_style(
-                Style::default()
-                    .bg(t.selection_bg)
-                    .fg(t.selection_fg)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol(" > ")
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(t.border))
-                    .title(title),
-            );
-
-        f.render_stateful_widget(table, table_area, &mut self.table_state);
-
-        // Empty state hint
-        if self.visible.is_empty() {
-            let hint = Paragraph::new(Line::from(Span::styled(
-                "  No agent commands found. Try a broader time range or check integration setup.",
-                Style::default().fg(t.text_muted),
-            )));
-            let hint_area = Rect {
-                x: table_area.x + 1,
-                y: table_area.y + 2,
-                width: table_area.width.saturating_sub(2),
-                height: 1,
-            };
-            f.render_widget(hint, hint_area);
         }
-
-        // Scrollbar (page-based)
-        let total_pages = self.total_pages();
-        let mut scrollbar_state =
-            ScrollbarState::new(total_pages).position(self.page.saturating_sub(1));
-        f.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .thumb_style(Style::default().fg(t.primary_dim))
-                .track_style(Style::default().fg(t.border)),
-            scrollbar_area,
-            &mut scrollbar_state,
-        );
     }
 
-    #[allow(clippy::too_many_lines)]
     fn render_detail(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
         let block = Block::default()
             .borders(Borders::ALL)
@@ -675,8 +702,22 @@ impl AgentApp {
         let max_w = inner.width.saturating_sub(2) as usize;
 
         let mut lines = Vec::new();
+        Self::build_detail_command(&mut lines, entry, max_w, label, t);
+        Self::build_detail_metadata(&mut lines, entry, &self.home, label, val, t);
+        lines.push(Line::from(""));
+        Self::build_detail_risk(&mut lines, entry, rl, label, t);
+        Self::build_detail_prompt(&mut lines, entry, max_w, label, t);
 
-        // Command (wraps by chars, not bytes, for UTF-8 safety)
+        f.render_widget(Paragraph::new(lines), inner);
+    }
+
+    fn build_detail_command(
+        lines: &mut Vec<Line>,
+        entry: &Entry,
+        max_w: usize,
+        label: Style,
+        t: &crate::theme::Theme,
+    ) {
         lines.push(Line::from(Span::styled("Command", label)));
         let cmd_chars: Vec<char> = entry.command.chars().collect();
         for chunk in cmd_chars.chunks(max_w.max(1)) {
@@ -687,22 +728,28 @@ impl AgentApp {
             )));
         }
         lines.push(Line::from(""));
+    }
 
-        // Path
-        let path = shorten_path(&entry.cwd, &self.home);
+    fn build_detail_metadata(
+        lines: &mut Vec<Line>,
+        entry: &Entry,
+        home: &str,
+        label: Style,
+        val: Style,
+        t: &crate::theme::Theme,
+    ) {
+        let path = shorten_path(&entry.cwd, home);
         lines.push(Line::from(vec![
             Span::styled("Path     ", label),
             Span::styled(path, val),
         ]));
 
-        // Time
         let time_str = format_full_datetime(entry.started_at);
         lines.push(Line::from(vec![
             Span::styled("Time     ", label),
             Span::styled(time_str, val),
         ]));
 
-        // Duration
         #[allow(clippy::cast_precision_loss)]
         let dur_secs = entry.duration_ms as f64 / 1000.0;
         lines.push(Line::from(vec![
@@ -710,7 +757,6 @@ impl AgentApp {
             Span::styled(format!("{dur_secs:.2}s"), val),
         ]));
 
-        // Exit
         let exit_str = match entry.exit_code {
             Some(0) => "✔ 0 (success)".to_string(),
             Some(c) => format!("✘ {c} (failed)"),
@@ -726,7 +772,6 @@ impl AgentApp {
             Span::styled(exit_str, exit_style),
         ]));
 
-        // Executor
         let executor = match (&entry.executor_type, &entry.executor) {
             (Some(et), Some(n)) => format!("{et}: {n}"),
             (Some(et), None) => et.clone(),
@@ -738,16 +783,20 @@ impl AgentApp {
             Span::styled(executor, val),
         ]));
 
-        // Session
         let session: String = entry.session_id.chars().take(8).collect();
         lines.push(Line::from(vec![
             Span::styled("Session  ", label),
             Span::styled(session, val),
         ]));
+    }
 
-        lines.push(Line::from(""));
-
-        // Risk
+    fn build_detail_risk(
+        lines: &mut Vec<Line>,
+        entry: &Entry,
+        rl: RiskLevel,
+        label: Style,
+        t: &crate::theme::Theme,
+    ) {
         if rl > RiskLevel::None {
             if let Some(a) = risk::assess_risk(&entry.command) {
                 let risk_color = match a.level {
@@ -776,8 +825,15 @@ impl AgentApp {
                 lines.push(Line::from(""));
             }
         }
+    }
 
-        // Prompt (wraps by chars, not bytes, for UTF-8 safety)
+    fn build_detail_prompt(
+        lines: &mut Vec<Line>,
+        entry: &Entry,
+        max_w: usize,
+        label: Style,
+        t: &crate::theme::Theme,
+    ) {
         if let Some(ctx) = &entry.context {
             if let Some(prompt) = ctx.get("agent_prompt") {
                 lines.push(Line::from(Span::styled("Prompt", label)));
@@ -791,8 +847,6 @@ impl AgentApp {
                 }
             }
         }
-
-        f.render_widget(Paragraph::new(lines), inner);
     }
 
     fn render_footer(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {

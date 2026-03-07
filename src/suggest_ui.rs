@@ -3,7 +3,7 @@ use crate::theme::theme;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{
     backend::Backend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap},
@@ -156,7 +156,6 @@ where
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn ui(f: &mut ratatui::Frame, app: &mut AppState) {
     let t = theme();
     let size = f.area();
@@ -174,7 +173,22 @@ fn ui(f: &mut ratatui::Frame, app: &mut AppState) {
         ])
         .split(size);
 
-    // ── Suggestions list ──
+    render_suggestion_list(f, app, chunks[0], size.width, t);
+
+    if has_skipped {
+        render_skipped_section(f, app, chunks[1], t);
+    }
+
+    render_suggest_footer(f, app, chunks[2], t);
+}
+
+fn render_suggestion_list(
+    f: &mut ratatui::Frame,
+    app: &mut AppState,
+    area: Rect,
+    total_width: u16,
+    t: &crate::theme::Theme,
+) {
     let items: Vec<ListItem> = app
         .suggestions
         .iter()
@@ -209,7 +223,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut AppState) {
             let name_span = Span::styled(name_padded, name_style);
 
             // Command text — truncate if needed
-            let max_cmd_len = size.width.saturating_sub(40) as usize;
+            let max_cmd_len = total_width.saturating_sub(40) as usize;
             let cmd_display = crate::util::truncate_str(&s.command, max_cmd_len, "...");
             let cmd_span = Span::styled(cmd_display, Style::default().fg(t.text));
 
@@ -262,29 +276,39 @@ fn ui(f: &mut ratatui::Frame, app: &mut AppState) {
         )
         .highlight_style(Style::default().bg(t.selection_bg).fg(t.selection_fg));
 
-    f.render_stateful_widget(list, chunks[0], &mut app.list_state);
+    f.render_stateful_widget(list, area, &mut app.list_state);
+}
 
-    // ── Skipped section ──
-    if has_skipped {
-        let skipped_text = app
-            .skipped
-            .iter()
-            .map(|s| format!(" {s} "))
-            .collect::<Vec<_>>()
-            .join("  ");
-        let skipped_para = Paragraph::new(Line::from(vec![
-            Span::styled("  Already aliased: ", Style::default().fg(t.text_muted)),
-            Span::styled(skipped_text, Style::default().fg(t.text_secondary)),
-        ]))
-        .block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(t.border)),
-        );
-        f.render_widget(skipped_para, chunks[1]);
-    }
+fn render_skipped_section(
+    f: &mut ratatui::Frame,
+    app: &AppState,
+    area: Rect,
+    t: &crate::theme::Theme,
+) {
+    let skipped_text = app
+        .skipped
+        .iter()
+        .map(|s| format!(" {s} "))
+        .collect::<Vec<_>>()
+        .join("  ");
+    let skipped_para = Paragraph::new(Line::from(vec![
+        Span::styled("  Already aliased: ", Style::default().fg(t.text_muted)),
+        Span::styled(skipped_text, Style::default().fg(t.text_secondary)),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(t.border)),
+    );
+    f.render_widget(skipped_para, area);
+}
 
-    // ── Footer ──
+fn render_suggest_footer(
+    f: &mut ratatui::Frame,
+    app: &AppState,
+    area: Rect,
+    t: &crate::theme::Theme,
+) {
     let footer_spans = if app.input_mode == InputMode::EditingName {
         vec![
             Span::styled(" Type ", Style::default().fg(t.text_muted)),
@@ -314,7 +338,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut AppState) {
     };
 
     let footer = Paragraph::new(Line::from(footer_spans)).wrap(Wrap { trim: false });
-    f.render_widget(footer, chunks[2]);
+    f.render_widget(footer, area);
 }
 
 #[cfg(test)]

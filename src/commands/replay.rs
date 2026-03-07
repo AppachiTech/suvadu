@@ -1,12 +1,8 @@
+use crate::models::Entry;
 use crate::repository;
 use crate::util::{self, dirs_home, format_duration_ms, shorten_path};
 
-#[allow(
-    clippy::too_many_arguments,
-    clippy::too_many_lines,
-    clippy::cast_precision_loss,
-    clippy::cast_possible_wrap
-)]
+#[allow(clippy::too_many_arguments)]
 pub fn handle_replay(
     session: Option<&str>,
     after: Option<&str>,
@@ -35,44 +31,8 @@ pub fn handle_replay(
     let after_ms = after.and_then(|d| util::parse_date_input(d, false));
     let before_ms = before.and_then(|d| util::parse_date_input(d, true));
 
-    // Determine session filter: explicit --session, or fallback to env var, or fallback to last 24h
-    let session_filter;
-    let mut effective_after = after_ms;
-    let label: String;
-
-    if let Some(sid) = session {
-        session_filter = Some(sid.to_string());
-        label = format!("session {}", &sid[..sid.len().min(8)]);
-    } else if after_ms.is_some() || before_ms.is_some() || tag.is_some() || here || cwd.is_some() {
-        // User specified time/filter flags — don't scope to session
-        session_filter = None;
-        let parts: Vec<String> = [
-            after.map(|d| format!("after {d}")),
-            before.map(|d| format!("before {d}")),
-            tag.map(|t| format!("tag:{t}")),
-            if here {
-                Some("current dir".into())
-            } else {
-                cwd.map(|d| format!("dir:{d}"))
-            },
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        label = if parts.is_empty() {
-            "all time".into()
-        } else {
-            parts.join(", ")
-        };
-    } else if let Ok(sid) = std::env::var("SUVADU_SESSION_ID") {
-        session_filter = Some(sid.clone());
-        label = format!("current session ({})", &sid[..sid.len().min(8)]);
-    } else {
-        // No session env, no flags → last 24h
-        session_filter = None;
-        effective_after = Some(chrono::Utc::now().timestamp_millis() - 24 * 60 * 60 * 1000);
-        label = "last 24 hours".into();
-    }
+    let (session_filter, effective_after, label) =
+        resolve_replay_scope(session, after, after_ms, before, before_ms, tag, here, cwd);
 
     let entries = repo.get_replay_entries(
         session_filter.as_deref(),
@@ -88,8 +48,6 @@ pub fn handle_replay(
         println!("\n  No commands found for: {label}");
         return Ok(());
     }
-
-    let home = dirs_home();
 
     // Header
     let total = entries.len();
@@ -113,11 +71,70 @@ pub fn handle_replay(
     }
     println!();
 
-    // Entries
+    print_replay_entries(&entries);
+
+    Ok(())
+}
+
+/// Resolve the session filter, effective `after` timestamp, and display label
+/// based on the combination of CLI flags and environment.
+#[allow(clippy::too_many_arguments)]
+fn resolve_replay_scope(
+    session: Option<&str>,
+    after: Option<&str>,
+    after_ms: Option<i64>,
+    before: Option<&str>,
+    before_ms: Option<i64>,
+    tag: Option<&str>,
+    here: bool,
+    cwd: Option<&str>,
+) -> (Option<String>, Option<i64>, String) {
+    if let Some(sid) = session {
+        let label = format!("session {}", &sid[..sid.len().min(8)]);
+        return (Some(sid.to_string()), after_ms, label);
+    }
+
+    if after_ms.is_some() || before_ms.is_some() || tag.is_some() || here || cwd.is_some() {
+        // User specified time/filter flags — don't scope to session
+        let parts: Vec<String> = [
+            after.map(|d| format!("after {d}")),
+            before.map(|d| format!("before {d}")),
+            tag.map(|t| format!("tag:{t}")),
+            if here {
+                Some("current dir".into())
+            } else {
+                cwd.map(|d| format!("dir:{d}"))
+            },
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let label = if parts.is_empty() {
+            "all time".into()
+        } else {
+            parts.join(", ")
+        };
+        return (None, after_ms, label);
+    }
+
+    if let Ok(sid) = std::env::var("SUVADU_SESSION_ID") {
+        let label = format!("current session ({})", &sid[..sid.len().min(8)]);
+        return (Some(sid), after_ms, label);
+    }
+
+    // No session env, no flags → last 24h
+    let effective_after = Some(chrono::Utc::now().timestamp_millis() - 24 * 60 * 60 * 1000);
+    (None, effective_after, "last 24 hours".into())
+}
+
+/// Print replay entries with status indicators and a footer summary.
+fn print_replay_entries(entries: &[Entry]) {
+    let home = dirs_home();
+    let total = entries.len();
     let mut success_count: usize = 0;
     let mut total_duration: i64 = 0;
 
-    for entry in &entries {
+    for entry in entries {
         let time = chrono::DateTime::from_timestamp_millis(entry.started_at).map_or_else(
             || "??:??:??".into(),
             |dt| {
@@ -149,6 +166,7 @@ pub fn handle_replay(
 
     // Footer summary
     let failed = total - success_count;
+    #[allow(clippy::cast_possible_wrap)]
     let avg_duration = if total > 0 {
         total_duration / total as i64
     } else {
@@ -161,8 +179,6 @@ pub fn handle_replay(
         failed,
         format_duration_ms(avg_duration)
     );
-
-    Ok(())
 }
 
 #[cfg(test)]

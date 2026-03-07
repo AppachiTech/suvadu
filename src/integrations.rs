@@ -328,24 +328,11 @@ fn dedup_suvadu_hooks(settings: &mut serde_json::Value) -> bool {
     changed
 }
 
-/// Try to merge Suvadu hooks into an existing Claude settings file.
-#[allow(clippy::too_many_lines)]
-pub fn try_merge_claude_settings(
-    settings_path: &Path,
-    hook_path: &str,
-    prompt_hook_path: &str,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    if !settings_path.exists() {
-        return Ok(false);
-    }
-
-    let content = std::fs::read_to_string(settings_path)?;
-    let mut settings: serde_json::Value = serde_json::from_str(&content)?;
-
-    // Check if a suvadu hook already exists in PostToolUse
-    let already_has_post_tool = settings
+/// Check if a suvadu hook already exists for a given hook type (e.g. `PostToolUse`, `UserPromptSubmit`).
+fn has_suvadu_hook(settings: &serde_json::Value, hook_type: &str) -> bool {
+    settings
         .get("hooks")
-        .and_then(|h| h.get("PostToolUse"))
+        .and_then(|h| h.get(hook_type))
         .and_then(serde_json::Value::as_array)
         .is_some_and(|arr| {
             arr.iter().any(|group| {
@@ -360,28 +347,41 @@ pub fn try_merge_claude_settings(
                         })
                     })
             })
-        });
+        })
+}
+
+/// Add a hook entry to the settings object under the given hook type.
+fn add_hook_entry(
+    hooks_obj: &mut serde_json::Map<String, serde_json::Value>,
+    hook_type: &str,
+    hook_json: serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let arr = hooks_obj
+        .entry(hook_type)
+        .or_insert_with(|| serde_json::json!([]));
+    arr.as_array_mut()
+        .ok_or_else(|| format!("{hook_type} is not an array"))?
+        .push(hook_json);
+    Ok(())
+}
+
+/// Try to merge Suvadu hooks into an existing Claude settings file.
+pub fn try_merge_claude_settings(
+    settings_path: &Path,
+    hook_path: &str,
+    prompt_hook_path: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    if !settings_path.exists() {
+        return Ok(false);
+    }
+
+    let content = std::fs::read_to_string(settings_path)?;
+    let mut settings: serde_json::Value = serde_json::from_str(&content)?;
+
+    let already_has_post_tool = has_suvadu_hook(&settings, "PostToolUse");
 
     if already_has_post_tool {
-        // Check if we also have the prompt hook
-        let already_has_prompt = settings
-            .get("hooks")
-            .and_then(|h| h.get("UserPromptSubmit"))
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|arr| {
-                arr.iter().any(|group| {
-                    group
-                        .get("hooks")
-                        .and_then(serde_json::Value::as_array)
-                        .is_some_and(|hooks| {
-                            hooks.iter().any(|h| {
-                                h.get("command")
-                                    .and_then(serde_json::Value::as_str)
-                                    .is_some_and(is_suvadu_hook_command)
-                            })
-                        })
-                })
-            });
+        let already_has_prompt = has_suvadu_hook(&settings, "UserPromptSubmit");
 
         if already_has_prompt {
             // Both hooks present — deduplicate any repeated suvadu entries
@@ -399,18 +399,16 @@ pub fn try_merge_claude_settings(
             .ok_or("settings.json root is not an object")?;
         let hooks = obj.entry("hooks").or_insert_with(|| serde_json::json!({}));
         let hooks_obj = hooks.as_object_mut().ok_or("hooks is not an object")?;
-        let prompt_submit = hooks_obj
-            .entry("UserPromptSubmit")
-            .or_insert_with(|| serde_json::json!([]));
-        prompt_submit
-            .as_array_mut()
-            .ok_or("UserPromptSubmit is not an array")?
-            .push(serde_json::json!({
+        add_hook_entry(
+            hooks_obj,
+            "UserPromptSubmit",
+            serde_json::json!({
                 "hooks": [{
                     "type": "command",
                     "command": prompt_hook_path
                 }]
-            }));
+            }),
+        )?;
 
         let updated = serde_json::to_string_pretty(&settings)?;
         atomic_write(settings_path, &updated)?;
@@ -424,34 +422,28 @@ pub fn try_merge_claude_settings(
     let hooks = obj.entry("hooks").or_insert_with(|| serde_json::json!({}));
     let hooks_obj = hooks.as_object_mut().ok_or("hooks is not an object")?;
 
-    // PostToolUse
-    let post_tool_use = hooks_obj
-        .entry("PostToolUse")
-        .or_insert_with(|| serde_json::json!([]));
-    post_tool_use
-        .as_array_mut()
-        .ok_or("PostToolUse is not an array")?
-        .push(serde_json::json!({
+    add_hook_entry(
+        hooks_obj,
+        "PostToolUse",
+        serde_json::json!({
             "matcher": "Bash",
             "hooks": [{
                 "type": "command",
                 "command": hook_path
             }]
-        }));
+        }),
+    )?;
 
-    // UserPromptSubmit
-    let prompt_submit = hooks_obj
-        .entry("UserPromptSubmit")
-        .or_insert_with(|| serde_json::json!([]));
-    prompt_submit
-        .as_array_mut()
-        .ok_or("UserPromptSubmit is not an array")?
-        .push(serde_json::json!({
+    add_hook_entry(
+        hooks_obj,
+        "UserPromptSubmit",
+        serde_json::json!({
             "hooks": [{
                 "type": "command",
                 "command": prompt_hook_path
             }]
-        }));
+        }),
+    )?;
 
     // Write back with pretty formatting
     let updated = serde_json::to_string_pretty(&settings)?;

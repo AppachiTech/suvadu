@@ -344,7 +344,33 @@ fn fill_text(text: &str, width: usize) -> String {
 
 use crate::util::centered_rect;
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+type SearchEntries = (Vec<Entry>, usize, std::collections::HashMap<i64, i64>);
+
+fn load_search_entries(
+    repo: &Repository,
+    qf: &QueryFilter,
+    page_size: usize,
+    unique: bool,
+) -> Result<SearchEntries, Box<dyn std::error::Error>> {
+    if unique {
+        let count = usize::try_from(repo.count_unique_filtered(qf)?)?;
+        let unique_res = repo.get_unique_entries_filtered(page_size, 0, qf, true)?;
+        let (entries, counts): (Vec<Entry>, Vec<i64>) = unique_res.into_iter().unzip();
+        let mut count_map = std::collections::HashMap::new();
+        for (entry, cnt) in entries.iter().zip(counts.iter()) {
+            if let Some(id) = entry.id {
+                count_map.insert(id, *cnt);
+            }
+        }
+        Ok((entries, count, count_map))
+    } else {
+        let count = usize::try_from(repo.count_filtered(qf)?)?;
+        let entries = repo.get_entries_filtered(page_size, 0, qf)?;
+        Ok((entries, count, std::collections::HashMap::new()))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn run_search(
     repo: &Repository,
     initial_query: Option<&str>,
@@ -358,13 +384,9 @@ pub fn run_search(
     cwd: Option<&str>,
     field: &str,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    // Load config
     let config = crate::config::load_config().unwrap_or_default();
     let page_size = config.search.page_limit;
-
     let effective_unique = unique_mode || config.search.show_unique_by_default;
-
-    // Load Tags
     let tags = repo.get_tags().unwrap_or_default();
 
     let tag_id = tag
@@ -388,41 +410,20 @@ pub fn run_search(
         field,
     };
 
-    let (entries, total_count, unique_counts) = if effective_unique {
-        let count = usize::try_from(repo.count_unique_filtered(&qf)?)?;
-        let unique_res = repo.get_unique_entries_filtered(page_size, 0, &qf, true)?;
-        let (entries, counts): (Vec<Entry>, Vec<i64>) = unique_res.into_iter().unzip();
-        let mut count_map = std::collections::HashMap::new();
-        for (entry, cnt) in entries.iter().zip(counts.iter()) {
-            if let Some(id) = entry.id {
-                count_map.insert(id, *cnt);
-            }
-        }
-        (entries, count, count_map)
-    } else {
-        let count = usize::try_from(repo.count_filtered(&qf)?)?;
-        let entries = repo.get_entries_filtered(page_size, 0, &qf)?;
-        (entries, count, std::collections::HashMap::new())
-    };
+    let (entries, total_count, unique_counts) =
+        load_search_entries(repo, &qf, page_size, effective_unique)?;
 
     if entries.is_empty() && total_count == 0 {
         eprintln!("No history entries found matching filters.");
         return Ok(None);
     }
 
-    // Load bookmarks and notes
     let bookmarked_commands = repo.get_bookmarked_commands().unwrap_or_default();
     let noted_entry_ids = repo.get_noted_entry_ids().unwrap_or_default();
 
-    // Setup terminal (uses stderr so stdout is free for returning selected command)
-    // RAII guard ensures terminal is restored even on panic
     let _guard = crate::util::TerminalGuardStderr::new()?;
     let backend = CrosstermBackend::new(io::stderr());
     let mut terminal = Terminal::new(backend)?;
-
-    let context_boost = config.search.context_boost;
-    let show_detail_pane = config.search.show_detail_pane;
-    let show_risk_in_search = config.agent.show_risk_in_search;
 
     let mut app = SearchApp::new(SearchConfig {
         entries,
@@ -446,15 +447,13 @@ pub fn run_search(
         bookmarked_commands,
         filter_cwd: cwd.map(String::from),
         noted_entry_ids,
-        context_boost,
-        show_detail_pane,
-        show_risk_in_search,
+        context_boost: config.search.context_boost,
+        show_detail_pane: config.search.show_detail_pane,
+        show_risk_in_search: config.agent.show_risk_in_search,
         search_field: field.to_string(),
     });
 
     let result = app.run(&mut terminal, repo);
     terminal.show_cursor()?;
-    // _guard drops here, restoring terminal
-
     result
 }

@@ -153,204 +153,216 @@ impl AppState {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     fn handle_input(&mut self, key: event::KeyEvent) -> bool {
         match self.input_mode {
-            InputMode::ConfirmQuit => match key.code {
-                KeyCode::Char('y') => {
-                    if let Err(e) = save_config(&self.config) {
-                        self.save_status = Some(format!("Error saving: {e}"));
-                    } else {
-                        return false;
-                    }
-                    self.input_mode = InputMode::Normal;
-                }
-                KeyCode::Char('n') => return false,
-                KeyCode::Esc => self.input_mode = InputMode::Normal,
-                _ => {}
-            },
-            InputMode::Normal => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => {
-                    if self.dirty {
-                        self.input_mode = InputMode::ConfirmQuit;
-                    } else {
-                        return false;
-                    }
-                }
-                KeyCode::Char('s') => {
-                    if let Err(e) = save_config(&self.config) {
-                        self.save_status = Some(format!("Error saving: {e}"));
-                    } else {
-                        self.save_status = Some("Settings saved!".to_string());
-                        self.dirty = false;
-                    }
-                }
-                KeyCode::Tab => self.next_tab(),
-                KeyCode::BackTab => self.prev_tab(),
-                KeyCode::Down | KeyCode::Char('j') => self.next_item(),
-                KeyCode::Up | KeyCode::Char('k') => self.prev_item(),
-                KeyCode::Char('a') if self.current_tab == 2 => {
-                    self.input_mode = InputMode::Editing;
-                    self.input_buffer.clear();
-                }
-                KeyCode::Char('a') if self.current_tab == 3 => {
-                    self.input_mode = InputMode::Editing;
-                    self.auto_tag_path_input.clear();
-                    self.auto_tag_name_input.clear();
-                    self.auto_tag_focus = 0;
-                }
-                KeyCode::Char('d') if self.current_tab == 2 => {
-                    if !self.config.exclusions.is_empty() {
-                        self.config.exclusions.remove(self.selected_item);
-                        self.dirty = true;
-                        if self.selected_item >= self.config.exclusions.len()
-                            && !self.config.exclusions.is_empty()
-                        {
-                            self.selected_item = self.config.exclusions.len() - 1;
-                        } else if self.config.exclusions.is_empty() {
-                            self.selected_item = 0;
-                        }
-                        self.exclusion_list_state
-                            .select(if self.config.exclusions.is_empty() {
-                                None
-                            } else {
-                                Some(self.selected_item)
-                            });
-                    }
-                }
-                KeyCode::Char('d') if self.current_tab == 3 => {
-                    if !self.config.auto_tags.is_empty() {
-                        self.dirty = true;
-                        let mut auto_tags: Vec<_> = self.config.auto_tags.keys().cloned().collect();
-                        auto_tags.sort();
-                        if let Some(key) = auto_tags.get(self.selected_item) {
-                            self.config.auto_tags.remove(key);
-                        }
-
-                        if self.selected_item >= self.config.auto_tags.len()
-                            && !self.config.auto_tags.is_empty()
-                        {
-                            self.selected_item = self.config.auto_tags.len() - 1;
-                        } else if self.config.auto_tags.is_empty() {
-                            self.selected_item = 0;
-                        }
-                        self.auto_tag_list_state
-                            .select(if self.config.auto_tags.is_empty() {
-                                None
-                            } else {
-                                Some(self.selected_item)
-                            });
-                    }
-                }
-                KeyCode::Enter | KeyCode::Char(' ') => {
-                    // Enter/Space toggles bools or enters edit mode for numbers/text
-                    match (self.current_tab, self.selected_item) {
-                        (0, 0) => {
-                            // Page Limit
-                            self.input_mode = InputMode::Editing;
-                            self.input_buffer = self.config.search.page_limit.to_string();
-                        }
-                        _ => self.toggle_bool(),
-                    }
-                }
-                _ => {}
-            },
-            InputMode::Editing => match key.code {
-                KeyCode::Enter => {
-                    if (self.current_tab, self.selected_item) == (0, 0) {
-                        if let Ok(n) = self.input_buffer.parse::<usize>() {
-                            self.config.search.page_limit = n.clamp(10, 5000);
-                            self.dirty = true;
-                            self.save_status = Some(format!(
-                                "Page limit set to {}",
-                                self.config.search.page_limit
-                            ));
-                        } else {
-                            self.save_status = Some("Invalid number".to_string());
-                        }
-                        self.input_mode = InputMode::Normal;
-                    } else if self.current_tab == 2 && !self.input_buffer.is_empty() {
-                        self.config.exclusions.push(self.input_buffer.clone());
-                        self.dirty = true;
-                        self.save_status = Some(format!("Added exclusion: {}", self.input_buffer));
-                        // Select the new item
-                        self.selected_item = self.config.exclusions.len() - 1;
-                        self.exclusion_list_state.select(Some(self.selected_item));
-                        self.input_mode = InputMode::Normal;
-                    } else if self.current_tab == 3 {
-                        // Auto-tag dual-field form
-                        if self.auto_tag_focus == 0 {
-                            // Move from Path to Tag
-                            self.auto_tag_focus = 1;
-                        } else {
-                            // Submit
-                            if !self.auto_tag_path_input.is_empty()
-                                && !self.auto_tag_name_input.is_empty()
-                            {
-                                self.config.auto_tags.insert(
-                                    self.auto_tag_path_input.trim().to_string(),
-                                    self.auto_tag_name_input.trim().to_string(),
-                                );
-                                self.dirty = true;
-                                self.save_status = Some(format!(
-                                    "Added auto-tag: {} -> {}",
-                                    self.auto_tag_path_input.trim(),
-                                    self.auto_tag_name_input.trim()
-                                ));
-                                // Select the newly added item (sorted position)
-                                let path_key = self.auto_tag_path_input.trim().to_string();
-                                let mut sorted_keys: Vec<_> =
-                                    self.config.auto_tags.keys().cloned().collect();
-                                sorted_keys.sort();
-                                self.selected_item =
-                                    sorted_keys.iter().position(|k| k == &path_key).unwrap_or(0);
-                                self.auto_tag_list_state.select(Some(self.selected_item));
-                                self.input_mode = InputMode::Normal;
-                            } else {
-                                self.save_status =
-                                    Some("Both Path and Tag are required".to_string());
-                            }
-                        }
-                    } else {
-                        self.input_mode = InputMode::Normal;
-                    }
-                }
-                KeyCode::Esc => {
-                    self.input_mode = InputMode::Normal;
-                }
-                KeyCode::Tab if self.current_tab == 3 => {
-                    // Toggle focus between path and tag
-                    self.auto_tag_focus = 1 - self.auto_tag_focus;
-                }
-                KeyCode::Char(c) => {
-                    const MAX_SETTINGS_INPUT: usize = 500;
-                    if self.current_tab == 3 {
-                        if self.auto_tag_focus == 0 {
-                            if self.auto_tag_path_input.len() < MAX_SETTINGS_INPUT {
-                                self.auto_tag_path_input.push(c);
-                            }
-                        } else if self.auto_tag_name_input.len() < MAX_SETTINGS_INPUT {
-                            self.auto_tag_name_input.push(c);
-                        }
-                    } else if self.input_buffer.len() < MAX_SETTINGS_INPUT {
-                        self.input_buffer.push(c);
-                    }
-                }
-                KeyCode::Backspace => {
-                    if self.current_tab == 3 {
-                        if self.auto_tag_focus == 0 {
-                            self.auto_tag_path_input.pop();
-                        } else {
-                            self.auto_tag_name_input.pop();
-                        }
-                    } else {
-                        self.input_buffer.pop();
-                    }
-                }
-                _ => {}
-            },
+            InputMode::ConfirmQuit => return self.handle_confirm_quit(key),
+            InputMode::Normal => return self.handle_normal_input(key),
+            InputMode::Editing => self.handle_editing_input(key),
         }
         true
+    }
+
+    fn handle_confirm_quit(&mut self, key: event::KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Char('y') => {
+                if let Err(e) = save_config(&self.config) {
+                    self.save_status = Some(format!("Error saving: {e}"));
+                } else {
+                    return false;
+                }
+                self.input_mode = InputMode::Normal;
+            }
+            KeyCode::Char('n') => return false,
+            KeyCode::Esc => self.input_mode = InputMode::Normal,
+            _ => {}
+        }
+        true
+    }
+
+    fn handle_normal_input(&mut self, key: event::KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => {
+                if self.dirty {
+                    self.input_mode = InputMode::ConfirmQuit;
+                } else {
+                    return false;
+                }
+            }
+            KeyCode::Char('s') => {
+                if let Err(e) = save_config(&self.config) {
+                    self.save_status = Some(format!("Error saving: {e}"));
+                } else {
+                    self.save_status = Some("Settings saved!".to_string());
+                    self.dirty = false;
+                }
+            }
+            KeyCode::Tab => self.next_tab(),
+            KeyCode::BackTab => self.prev_tab(),
+            KeyCode::Down | KeyCode::Char('j') => self.next_item(),
+            KeyCode::Up | KeyCode::Char('k') => self.prev_item(),
+            KeyCode::Char('a') if self.current_tab == 2 => {
+                self.input_mode = InputMode::Editing;
+                self.input_buffer.clear();
+            }
+            KeyCode::Char('a') if self.current_tab == 3 => {
+                self.input_mode = InputMode::Editing;
+                self.auto_tag_path_input.clear();
+                self.auto_tag_name_input.clear();
+                self.auto_tag_focus = 0;
+            }
+            KeyCode::Char('d') if self.current_tab == 2 => {
+                if !self.config.exclusions.is_empty() {
+                    self.config.exclusions.remove(self.selected_item);
+                    self.dirty = true;
+                    if self.selected_item >= self.config.exclusions.len()
+                        && !self.config.exclusions.is_empty()
+                    {
+                        self.selected_item = self.config.exclusions.len() - 1;
+                    } else if self.config.exclusions.is_empty() {
+                        self.selected_item = 0;
+                    }
+                    self.exclusion_list_state
+                        .select(if self.config.exclusions.is_empty() {
+                            None
+                        } else {
+                            Some(self.selected_item)
+                        });
+                }
+            }
+            KeyCode::Char('d') if self.current_tab == 3 => {
+                if !self.config.auto_tags.is_empty() {
+                    self.dirty = true;
+                    let mut auto_tags: Vec<_> = self.config.auto_tags.keys().cloned().collect();
+                    auto_tags.sort();
+                    if let Some(key) = auto_tags.get(self.selected_item) {
+                        self.config.auto_tags.remove(key);
+                    }
+
+                    if self.selected_item >= self.config.auto_tags.len()
+                        && !self.config.auto_tags.is_empty()
+                    {
+                        self.selected_item = self.config.auto_tags.len() - 1;
+                    } else if self.config.auto_tags.is_empty() {
+                        self.selected_item = 0;
+                    }
+                    self.auto_tag_list_state
+                        .select(if self.config.auto_tags.is_empty() {
+                            None
+                        } else {
+                            Some(self.selected_item)
+                        });
+                }
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                // Enter/Space toggles bools or enters edit mode for numbers/text
+                match (self.current_tab, self.selected_item) {
+                    (0, 0) => {
+                        // Page Limit
+                        self.input_mode = InputMode::Editing;
+                        self.input_buffer = self.config.search.page_limit.to_string();
+                    }
+                    _ => self.toggle_bool(),
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn handle_editing_input(&mut self, key: event::KeyEvent) {
+        match key.code {
+            KeyCode::Enter => {
+                if (self.current_tab, self.selected_item) == (0, 0) {
+                    if let Ok(n) = self.input_buffer.parse::<usize>() {
+                        self.config.search.page_limit = n.clamp(10, 5000);
+                        self.dirty = true;
+                        self.save_status = Some(format!(
+                            "Page limit set to {}",
+                            self.config.search.page_limit
+                        ));
+                    } else {
+                        self.save_status = Some("Invalid number".to_string());
+                    }
+                    self.input_mode = InputMode::Normal;
+                } else if self.current_tab == 2 && !self.input_buffer.is_empty() {
+                    self.config.exclusions.push(self.input_buffer.clone());
+                    self.dirty = true;
+                    self.save_status = Some(format!("Added exclusion: {}", self.input_buffer));
+                    // Select the new item
+                    self.selected_item = self.config.exclusions.len() - 1;
+                    self.exclusion_list_state.select(Some(self.selected_item));
+                    self.input_mode = InputMode::Normal;
+                } else if self.current_tab == 3 {
+                    // Auto-tag dual-field form
+                    if self.auto_tag_focus == 0 {
+                        // Move from Path to Tag
+                        self.auto_tag_focus = 1;
+                    } else {
+                        // Submit
+                        if !self.auto_tag_path_input.is_empty()
+                            && !self.auto_tag_name_input.is_empty()
+                        {
+                            self.config.auto_tags.insert(
+                                self.auto_tag_path_input.trim().to_string(),
+                                self.auto_tag_name_input.trim().to_string(),
+                            );
+                            self.dirty = true;
+                            self.save_status = Some(format!(
+                                "Added auto-tag: {} -> {}",
+                                self.auto_tag_path_input.trim(),
+                                self.auto_tag_name_input.trim()
+                            ));
+                            // Select the newly added item (sorted position)
+                            let path_key = self.auto_tag_path_input.trim().to_string();
+                            let mut sorted_keys: Vec<_> =
+                                self.config.auto_tags.keys().cloned().collect();
+                            sorted_keys.sort();
+                            self.selected_item =
+                                sorted_keys.iter().position(|k| k == &path_key).unwrap_or(0);
+                            self.auto_tag_list_state.select(Some(self.selected_item));
+                            self.input_mode = InputMode::Normal;
+                        } else {
+                            self.save_status = Some("Both Path and Tag are required".to_string());
+                        }
+                    }
+                } else {
+                    self.input_mode = InputMode::Normal;
+                }
+            }
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+            }
+            KeyCode::Tab if self.current_tab == 3 => {
+                // Toggle focus between path and tag
+                self.auto_tag_focus = 1 - self.auto_tag_focus;
+            }
+            KeyCode::Char(c) => {
+                const MAX_SETTINGS_INPUT: usize = 500;
+                if self.current_tab == 3 {
+                    if self.auto_tag_focus == 0 {
+                        if self.auto_tag_path_input.len() < MAX_SETTINGS_INPUT {
+                            self.auto_tag_path_input.push(c);
+                        }
+                    } else if self.auto_tag_name_input.len() < MAX_SETTINGS_INPUT {
+                        self.auto_tag_name_input.push(c);
+                    }
+                } else if self.input_buffer.len() < MAX_SETTINGS_INPUT {
+                    self.input_buffer.push(c);
+                }
+            }
+            KeyCode::Backspace => {
+                if self.current_tab == 3 {
+                    if self.auto_tag_focus == 0 {
+                        self.auto_tag_path_input.pop();
+                    } else {
+                        self.auto_tag_name_input.pop();
+                    }
+                } else {
+                    self.input_buffer.pop();
+                }
+            }
+            _ => {}
+        }
     }
 }
 

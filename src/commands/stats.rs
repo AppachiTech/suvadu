@@ -1,3 +1,4 @@
+use crate::models::Stats;
 use crate::repository;
 use crate::stats_ui;
 use crate::util::{
@@ -38,7 +39,7 @@ fn resolve_tag(
     Ok(tag_id)
 }
 
-#[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
+#[allow(clippy::cast_precision_loss)]
 pub fn handle_stats_text(
     days: Option<usize>,
     top: usize,
@@ -48,8 +49,6 @@ pub fn handle_stats_text(
 
     let tag_id = resolve_tag(&repo, tag)?;
     let stats = repo.get_stats(days, top, tag_id)?;
-
-    let home = dirs_home();
 
     // Header
     let period = stats
@@ -79,68 +78,85 @@ pub fn handle_stats_text(
         );
     }
 
-    // Top commands
-    if !stats.top_commands.is_empty() && stats.total_commands > 0 {
-        println!("\n\x1b[1m── Top Commands ──────────────────────────────────\x1b[0m");
-        for (i, (cmd, count)) in stats.top_commands.iter().enumerate() {
-            let pct = *count as f64 / stats.total_commands as f64 * 100.0;
-            let truncated = truncate_str(cmd, 40, "…");
-            println!(
-                "  {:>2}. {:<42} {:>6}  ({pct:>4.1}%)",
-                i + 1,
-                truncated,
-                format_count(*count)
-            );
-        }
-    }
-
-    // Busiest hours
-    if !stats.hourly_distribution.is_empty() {
-        let max_count = stats
-            .hourly_distribution
-            .iter()
-            .map(|(_, c)| *c)
-            .max()
-            .unwrap_or(1);
-        println!("\n\x1b[1m── Busiest Hours ─────────────────────────────────\x1b[0m");
-        for (hour, count) in &stats.hourly_distribution {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let bar_len = (*count as f64 / max_count as f64 * 30.0) as usize;
-            let bar: String = "█".repeat(bar_len);
-            println!("  {hour:02}:00  \x1b[32m{bar:<30}\x1b[0m  {count}");
-        }
-    }
-
-    // Top directories
-    if !stats.top_directories.is_empty() {
-        println!("\n\x1b[1m── Top Directories ───────────────────────────────\x1b[0m");
-        for (i, (dir, count)) in stats.top_directories.iter().enumerate() {
-            let short = shorten_path(dir, &home);
-            let truncated = truncate_str_start(&short, 45, "…");
-            println!(
-                "  {:>2}. {:<47} {:>6}",
-                i + 1,
-                truncated,
-                format_count(*count)
-            );
-        }
-    }
-
-    // Executor breakdown
-    if !stats.executor_breakdown.is_empty() && stats.total_commands > 0 {
-        println!("\n\x1b[1m── Executor Breakdown ────────────────────────────\x1b[0m");
-        for (exec_type, count) in &stats.executor_breakdown {
-            let pct = *count as f64 / stats.total_commands as f64 * 100.0;
-            println!(
-                "  {:<15} {:>6}  ({pct:>4.1}%)",
-                exec_type,
-                format_count(*count)
-            );
-        }
-    }
+    print_top_commands(&stats);
+    print_hourly_distribution(&stats);
+    print_top_directories(&stats);
+    print_executor_breakdown(&stats);
 
     println!();
     Ok(())
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn print_top_commands(stats: &Stats) {
+    if stats.top_commands.is_empty() || stats.total_commands == 0 {
+        return;
+    }
+    println!("\n\x1b[1m── Top Commands ──────────────────────────────────\x1b[0m");
+    for (i, (cmd, count)) in stats.top_commands.iter().enumerate() {
+        let pct = *count as f64 / stats.total_commands as f64 * 100.0;
+        let truncated = truncate_str(cmd, 40, "…");
+        println!(
+            "  {:>2}. {:<42} {:>6}  ({pct:>4.1}%)",
+            i + 1,
+            truncated,
+            format_count(*count)
+        );
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn print_hourly_distribution(stats: &Stats) {
+    if stats.hourly_distribution.is_empty() {
+        return;
+    }
+    let max_count = stats
+        .hourly_distribution
+        .iter()
+        .map(|(_, c)| *c)
+        .max()
+        .unwrap_or(1);
+    println!("\n\x1b[1m── Busiest Hours ─────────────────────────────────\x1b[0m");
+    for (hour, count) in &stats.hourly_distribution {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let bar_len = (*count as f64 / max_count as f64 * 30.0) as usize;
+        let bar: String = "█".repeat(bar_len);
+        println!("  {hour:02}:00  \x1b[32m{bar:<30}\x1b[0m  {count}");
+    }
+}
+
+fn print_top_directories(stats: &Stats) {
+    if stats.top_directories.is_empty() {
+        return;
+    }
+    let home = dirs_home();
+    println!("\n\x1b[1m── Top Directories ───────────────────────────────\x1b[0m");
+    for (i, (dir, count)) in stats.top_directories.iter().enumerate() {
+        let short = shorten_path(dir, &home);
+        let truncated = truncate_str_start(&short, 45, "…");
+        println!(
+            "  {:>2}. {:<47} {:>6}",
+            i + 1,
+            truncated,
+            format_count(*count)
+        );
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn print_executor_breakdown(stats: &Stats) {
+    if stats.executor_breakdown.is_empty() || stats.total_commands == 0 {
+        return;
+    }
+    println!("\n\x1b[1m── Executor Breakdown ────────────────────────────\x1b[0m");
+    for (exec_type, count) in &stats.executor_breakdown {
+        let pct = *count as f64 / stats.total_commands as f64 * 100.0;
+        println!(
+            "  {:<15} {:>6}  ({pct:>4.1}%)",
+            exec_type,
+            format_count(*count)
+        );
+    }
 }
 
 #[cfg(test)]

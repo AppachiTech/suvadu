@@ -78,7 +78,6 @@ pub fn handle_status() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
 pub fn handle_uninstall() -> Result<(), Box<dyn std::error::Error>> {
     // Detect all installation sources
     let is_homebrew = std::process::Command::new("brew")
@@ -92,21 +91,7 @@ pub fn handle_uninstall() -> Result<(), Box<dyn std::error::Error>> {
         .is_some_and(|p| p.exists());
 
     if !is_homebrew && !is_cargo {
-        // Fall back to detecting any binary via `which`
-        let which_path = std::process::Command::new("which")
-            .arg("suv")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-
-        if let Some(path) = which_path {
-            println!("Found suv at: {path}");
-            println!("Remove it manually with:");
-            println!("  rm {path}");
-        } else {
-            println!("No Suvadu installation detected.");
-        }
+        detect_fallback_binary();
         return Ok(());
     }
 
@@ -131,50 +116,98 @@ pub fn handle_uninstall() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut all_ok = true;
 
-    // Homebrew
     if is_homebrew {
-        print!("Removing Homebrew package... ");
-        let status = std::process::Command::new("brew")
-            .args(["uninstall", "suvadu"])
-            .status()?;
-        if status.success() {
+        all_ok &= uninstall_homebrew();
+    }
+
+    if is_cargo {
+        all_ok &= uninstall_cargo();
+    }
+
+    cleanup_integrations();
+
+    println!();
+    if all_ok {
+        println!("Suvadu has been uninstalled.");
+    } else {
+        eprintln!("Some steps failed. See messages above.");
+    }
+
+    println!();
+    println!("Your database and config files were NOT removed.");
+    println!("To remove them, delete:");
+    println!("  - ~/.config/suvadu/ (Linux)");
+    println!("  - ~/Library/Application Support/suvadu/ (macOS)");
+
+    Ok(())
+}
+
+/// Detect a `suv` binary via `which` when neither Homebrew nor Cargo installs are found.
+fn detect_fallback_binary() {
+    let which_path = std::process::Command::new("which")
+        .arg("suv")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+
+    if let Some(path) = which_path {
+        println!("Found suv at: {path}");
+        println!("Remove it manually with:");
+        println!("  rm {path}");
+    } else {
+        println!("No Suvadu installation detected.");
+    }
+}
+
+/// Uninstall via Homebrew. Returns `true` on success.
+fn uninstall_homebrew() -> bool {
+    print!("Removing Homebrew package... ");
+    match std::process::Command::new("brew")
+        .args(["uninstall", "suvadu"])
+        .status()
+    {
+        Ok(s) if s.success() => {
             println!("✓");
-        } else {
+            true
+        }
+        _ => {
             println!("✘");
             eprintln!("  Failed. Run manually: brew uninstall suvadu");
-            all_ok = false;
+            false
         }
     }
+}
 
-    // Cargo
-    if is_cargo {
-        print!("Removing Cargo installation... ");
-        let status = std::process::Command::new("cargo")
-            .args(["uninstall", "suvadu"])
-            .status();
-        match status {
-            Ok(s) if s.success() => println!("✓"),
-            _ => {
-                // Fallback: remove binary directly
-                if let Ok(home) = std::env::var("HOME") {
-                    let cargo_bin = format!("{home}/.cargo/bin/suv");
-                    if std::fs::remove_file(&cargo_bin).is_ok() {
-                        println!("✓ (removed binary directly)");
-                    } else {
-                        println!("✘");
-                        eprintln!("  Failed. Run manually: cargo uninstall suvadu");
-                        all_ok = false;
-                    }
-                } else {
-                    println!("✘");
-                    eprintln!("  Failed (HOME not set). Run manually: cargo uninstall suvadu");
-                    all_ok = false;
+/// Uninstall via Cargo, falling back to direct binary removal. Returns `true` on success.
+fn uninstall_cargo() -> bool {
+    print!("Removing Cargo installation... ");
+    let status = std::process::Command::new("cargo")
+        .args(["uninstall", "suvadu"])
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            println!("✓");
+            true
+        }
+        _ => {
+            // Fallback: remove binary directly
+            if let Ok(home) = std::env::var("HOME") {
+                let cargo_bin = format!("{home}/.cargo/bin/suv");
+                if std::fs::remove_file(&cargo_bin).is_ok() {
+                    println!("✓ (removed binary directly)");
+                    return true;
                 }
             }
+            println!("✘");
+            eprintln!("  Failed. Run manually: cargo uninstall suvadu");
+            false
         }
     }
+}
 
-    // Clean up shell hooks and integrations
+/// Clean up shell hooks and Claude Code integrations.
+fn cleanup_integrations() {
     if let Err(e) = util::cleanup_zshrc() {
         eprintln!("Warning: Failed to clean up .zshrc: {e}");
     } else {
@@ -208,21 +241,6 @@ pub fn handle_uninstall() -> Result<(), Box<dyn std::error::Error>> {
         Ok(false) => {}
         Err(e) => eprintln!("Warning: Failed to clean up Claude settings: {e}"),
     }
-
-    println!();
-    if all_ok {
-        println!("Suvadu has been uninstalled.");
-    } else {
-        eprintln!("Some steps failed. See messages above.");
-    }
-
-    println!();
-    println!("Your database and config files were NOT removed.");
-    println!("To remove them, delete:");
-    println!("  - ~/.config/suvadu/ (Linux)");
-    println!("  - ~/Library/Application Support/suvadu/ (macOS)");
-
-    Ok(())
 }
 
 #[cfg(test)]

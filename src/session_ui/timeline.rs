@@ -299,7 +299,6 @@ impl SessionApp {
         f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
-    #[allow(clippy::too_many_lines)]
     fn render_table(&mut self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
         let scrollbar_area = Rect {
             x: area.x + area.width.saturating_sub(1),
@@ -325,89 +324,6 @@ impl SessionApp {
         )
         .bottom_margin(1);
 
-        let page_items = self.page_slice();
-        let mut prev_cwd: Option<&str> = None;
-
-        // Determine the cwd of the entry just before this page to detect initial dir change
-        let page_offset = (self.page - 1) * self.page_size;
-        if page_offset > 0 {
-            // Walk backwards to find the last Entry before this page
-            for row in self.timeline[..page_offset].iter().rev() {
-                if let TimelineRow::Entry(idx) = row {
-                    prev_cwd = Some(&self.entries[*idx].cwd);
-                    break;
-                }
-            }
-        }
-
-        let rows: Vec<Row> = page_items
-            .iter()
-            .map(|row| match row {
-                TimelineRow::Gap(gap_ms) => {
-                    let label = format!("── {} idle ──", format_duration_ms(*gap_ms));
-                    Row::new(vec![
-                        Cell::from(""),
-                        Cell::from(label).style(Style::default().fg(t.text_muted)),
-                        Cell::from(""),
-                        Cell::from(""),
-                        Cell::from(""),
-                    ])
-                    .style(Style::default().fg(t.text_muted))
-                }
-                TimelineRow::Entry(idx) => {
-                    let entry = &self.entries[*idx];
-
-                    let time = Local
-                        .timestamp_millis_opt(entry.started_at)
-                        .single()
-                        .map_or_else(|| "??:??:??".into(), |dt| dt.format("%H:%M:%S").to_string());
-
-                    let dir_full = shorten_path(&entry.cwd, &self.home);
-                    let dir_changed = prev_cwd.is_some_and(|p| p != entry.cwd);
-                    let dir_style = if dir_changed {
-                        Style::default().fg(t.info).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(t.text_secondary)
-                    };
-                    let dir_display = crate::util::truncate_str_start(&dir_full, 20, "..");
-
-                    prev_cwd = Some(&entry.cwd);
-
-                    let command_display = crate::util::highlight_command(&entry.command, 0);
-
-                    let has_note = entry.id.is_some_and(|id| self.noted_ids.contains(&id));
-                    let (status, status_style) = match entry.exit_code {
-                        Some(0) => (
-                            if has_note { "✓📝" } else { "✓" }.to_string(),
-                            Style::default().fg(t.success),
-                        ),
-                        Some(code) => (
-                            if has_note {
-                                format!("✗{code}📝")
-                            } else {
-                                format!("✗{code}")
-                            },
-                            Style::default().fg(t.error),
-                        ),
-                        None => (
-                            if has_note { "•📝" } else { "•" }.to_string(),
-                            Style::default().fg(t.text_muted),
-                        ),
-                    };
-
-                    let dur = format_duration_ms(entry.duration_ms);
-
-                    Row::new(vec![
-                        Cell::from(time).style(Style::default().fg(t.text_muted)),
-                        Cell::from(command_display),
-                        Cell::from(dir_display).style(dir_style),
-                        Cell::from(status).style(status_style),
-                        Cell::from(dur).style(Style::default().fg(t.text_muted)),
-                    ])
-                }
-            })
-            .collect();
-
         let widths = [
             Constraint::Length(9),  // Time HH:MM:SS
             Constraint::Min(10),    // Command
@@ -424,6 +340,16 @@ impl SessionApp {
             let tp = self.total_pages();
             format!(" Timeline ({entry_count} commands) {pg}/{tp} ")
         };
+
+        let rows = build_table_rows(
+            &self.timeline,
+            &self.entries,
+            self.page,
+            self.page_size,
+            &self.home,
+            &self.noted_ids,
+            t,
+        );
 
         let table = Table::new(rows, widths)
             .header(header)
@@ -444,8 +370,17 @@ impl SessionApp {
 
         f.render_stateful_widget(table, table_area, &mut self.table_state);
 
-        // Empty state
-        if self.entries.is_empty() {
+        Self::render_empty_state(f, &self.entries, table_area, t);
+        self.render_scrollbar(f, scrollbar_area, t);
+    }
+
+    fn render_empty_state(
+        f: &mut ratatui::Frame,
+        entries: &[Entry],
+        table_area: Rect,
+        t: &crate::theme::Theme,
+    ) {
+        if entries.is_empty() {
             let hint = Paragraph::new(Line::from(Span::styled(
                 "  No commands in this session.",
                 Style::default().fg(t.text_muted),
@@ -458,8 +393,14 @@ impl SessionApp {
             };
             f.render_widget(hint, hint_area);
         }
+    }
 
-        // Scrollbar
+    fn render_scrollbar(
+        &self,
+        f: &mut ratatui::Frame,
+        scrollbar_area: Rect,
+        t: &crate::theme::Theme,
+    ) {
         let total_pages = self.total_pages();
         let mut scrollbar_state =
             ScrollbarState::new(total_pages).position(self.page.saturating_sub(1));
@@ -472,7 +413,6 @@ impl SessionApp {
         );
     }
 
-    #[allow(clippy::too_many_lines)]
     fn render_detail(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
         let block = Block::default()
             .borders(Borders::ALL)
@@ -499,11 +439,21 @@ impl SessionApp {
             return;
         };
 
+        let lines = self.render_detail_fields(entry, inner.width, t);
+        f.render_widget(Paragraph::new(lines), inner);
+    }
+
+    fn render_detail_fields<'a>(
+        &self,
+        entry: &Entry,
+        width: u16,
+        t: &crate::theme::Theme,
+    ) -> Vec<Line<'a>> {
         let label = Style::default()
             .fg(t.text_secondary)
             .add_modifier(Modifier::BOLD);
         let val = Style::default().fg(t.text);
-        let max_w = inner.width.saturating_sub(2) as usize;
+        let max_w = width.saturating_sub(2) as usize;
 
         let mut lines = Vec::new();
 
@@ -584,7 +534,7 @@ impl SessionApp {
             }
         }
 
-        f.render_widget(Paragraph::new(lines), inner);
+        lines
     }
 
     fn render_footer(f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
@@ -611,6 +561,115 @@ impl SessionApp {
 
         f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
+}
+
+// ── Free functions for table row building (avoids &self borrow conflicts) ──
+
+fn build_table_rows(
+    timeline: &[TimelineRow],
+    entries: &[Entry],
+    page: usize,
+    page_size: usize,
+    home: &str,
+    noted_ids: &HashSet<i64>,
+    t: &crate::theme::Theme,
+) -> Vec<Row<'static>> {
+    let start = (page - 1) * page_size;
+    let end = (start + page_size).min(timeline.len());
+    let page_items = if start >= timeline.len() {
+        &[][..]
+    } else {
+        &timeline[start..end]
+    };
+
+    let mut prev_cwd: Option<&str> = None;
+    if start > 0 {
+        for row in timeline[..start].iter().rev() {
+            if let TimelineRow::Entry(idx) = row {
+                prev_cwd = Some(&entries[*idx].cwd);
+                break;
+            }
+        }
+    }
+
+    page_items
+        .iter()
+        .map(|row| match row {
+            TimelineRow::Gap(gap_ms) => render_gap_row(*gap_ms, t),
+            TimelineRow::Entry(idx) => {
+                let entry = &entries[*idx];
+                let row = render_entry_row(entry, prev_cwd, home, noted_ids, t);
+                prev_cwd = Some(&entry.cwd);
+                row
+            }
+        })
+        .collect()
+}
+
+fn render_gap_row(gap_ms: i64, t: &crate::theme::Theme) -> Row<'static> {
+    let label = format!("── {} idle ──", format_duration_ms(gap_ms));
+    Row::new(vec![
+        Cell::from(""),
+        Cell::from(label).style(Style::default().fg(t.text_muted)),
+        Cell::from(""),
+        Cell::from(""),
+        Cell::from(""),
+    ])
+    .style(Style::default().fg(t.text_muted))
+}
+
+fn render_entry_row(
+    entry: &Entry,
+    prev_cwd: Option<&str>,
+    home: &str,
+    noted_ids: &HashSet<i64>,
+    t: &crate::theme::Theme,
+) -> Row<'static> {
+    let time = Local
+        .timestamp_millis_opt(entry.started_at)
+        .single()
+        .map_or_else(|| "??:??:??".into(), |dt| dt.format("%H:%M:%S").to_string());
+
+    let dir_full = shorten_path(&entry.cwd, home);
+    let dir_changed = prev_cwd.is_some_and(|p| p != entry.cwd);
+    let dir_style = if dir_changed {
+        Style::default().fg(t.info).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(t.text_secondary)
+    };
+    let dir_display = crate::util::truncate_str_start(&dir_full, 20, "..");
+
+    let command_display = crate::util::highlight_command(&entry.command, 0);
+
+    let has_note = entry.id.is_some_and(|id| noted_ids.contains(&id));
+    let (status, status_style) = match entry.exit_code {
+        Some(0) => (
+            if has_note { "✓📝" } else { "✓" }.to_string(),
+            Style::default().fg(t.success),
+        ),
+        Some(code) => (
+            if has_note {
+                format!("✗{code}📝")
+            } else {
+                format!("✗{code}")
+            },
+            Style::default().fg(t.error),
+        ),
+        None => (
+            if has_note { "•📝" } else { "•" }.to_string(),
+            Style::default().fg(t.text_muted),
+        ),
+    };
+
+    let dur = format_duration_ms(entry.duration_ms);
+
+    Row::new(vec![
+        Cell::from(time).style(Style::default().fg(t.text_muted)),
+        Cell::from(command_display),
+        Cell::from(dir_display).style(dir_style),
+        Cell::from(status).style(status_style),
+        Cell::from(dur).style(Style::default().fg(t.text_muted)),
+    ])
 }
 
 // ── Public entry ────────────────────────────────────────────

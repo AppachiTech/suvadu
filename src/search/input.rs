@@ -7,30 +7,34 @@ use crate::util;
 const MAX_INPUT_LEN: usize = 2000;
 
 impl SearchApp {
-    #[allow(clippy::too_many_lines)]
     pub(super) fn handle_input(&mut self, key: KeyEvent) -> SearchAction {
         if self.delete_dialog_open {
             return self.handle_delete_dialog_input(key);
         }
-
         if self.goto_dialog_open {
             return self.handle_goto_dialog_input(key);
         }
-
         if self.tag_dialog_open {
             return self.handle_tag_dialog_input(key);
         }
-
         if self.note_dialog_open {
             return self.handle_note_dialog_input(key);
         }
-
         if self.filter_mode {
             return self.handle_filter_input(key);
         }
+        self.handle_normal_input(key)
+    }
+
+    fn handle_normal_input(&mut self, key: KeyEvent) -> SearchAction {
+        // Handle Ctrl+key shortcuts first
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let Some(action) = self.handle_ctrl_shortcut(key.code) {
+                return action;
+            }
+        }
 
         match key.code {
-            // Pagination Controls
             KeyCode::Left => {
                 if self.page > 1 {
                     return SearchAction::SetPage(self.page - 1);
@@ -42,78 +46,8 @@ impl SearchApp {
                     return SearchAction::SetPage(self.page + 1);
                 }
             }
-            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.goto_dialog_open = true;
-                self.goto_input.clear();
-            }
-            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.tag_dialog_open = true;
-                if !self.tags.is_empty() {
-                    self.tag_list_state.select(Some(0));
-                }
-            }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.unique_mode = !self.unique_mode;
-                self.page = 1;
-                return SearchAction::Reload;
-            }
-
-            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.filter_mode = true;
-                self.focus_index = 0;
-            }
-            KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(cmd) = self.get_selected_command() {
-                    return SearchAction::Copy(cmd);
-                }
-            }
-            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(entry) = self.get_selected_entry() {
-                    if let Some(id) = entry.id {
-                        self.pending_delete_id = Some(id);
-                        self.delete_dialog_open = true;
-                    }
-                }
-            }
-            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(cmd) = self.get_selected_command() {
-                    return SearchAction::ToggleBookmark(cmd);
-                }
-            }
-            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(entry) = self.get_selected_entry() {
-                    if let Some(id) = entry.id {
-                        self.note_entry_id = Some(id);
-                        // Pre-populate with existing note text if any
-                        // (we'll load from repo in the action handler instead)
-                        self.note_input.clear();
-                        self.note_dialog_open = true;
-                    }
-                }
-            }
-            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.context_boost = !self.context_boost;
-                self.status_message = Some((
-                    if self.context_boost {
-                        "Smart mode ON".into()
-                    } else {
-                        "Smart mode OFF".into()
-                    },
-                    std::time::Instant::now(),
-                ));
-                return SearchAction::Reload;
-            }
             KeyCode::Tab => {
                 self.detail_pane_open = !self.detail_pane_open;
-            }
-            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if self.filter_cwd.is_some() {
-                    self.filter_cwd = None;
-                } else if let Ok(cwd) = std::env::current_dir() {
-                    self.filter_cwd = Some(cwd.to_string_lossy().to_string());
-                }
-                self.page = 1;
-                return SearchAction::Reload;
             }
             KeyCode::Char(c) if self.query.len() < MAX_INPUT_LEN => {
                 self.query.push(c);
@@ -144,12 +78,84 @@ impl SearchApp {
                     return SearchAction::Select(cmd);
                 }
             }
-            KeyCode::Esc => {
-                return SearchAction::Exit;
-            }
+            KeyCode::Esc => return SearchAction::Exit,
             _ => {}
         }
         SearchAction::Continue
+    }
+
+    fn handle_ctrl_shortcut(&mut self, code: KeyCode) -> Option<SearchAction> {
+        match code {
+            KeyCode::Char('g') => {
+                self.goto_dialog_open = true;
+                self.goto_input.clear();
+            }
+            KeyCode::Char('t') => {
+                self.tag_dialog_open = true;
+                if !self.tags.is_empty() {
+                    self.tag_list_state.select(Some(0));
+                }
+            }
+            KeyCode::Char('u') => {
+                self.unique_mode = !self.unique_mode;
+                self.page = 1;
+                return Some(SearchAction::Reload);
+            }
+            KeyCode::Char('f') => {
+                self.filter_mode = true;
+                self.focus_index = 0;
+            }
+            KeyCode::Char('y') => {
+                if let Some(cmd) = self.get_selected_command() {
+                    return Some(SearchAction::Copy(cmd));
+                }
+            }
+            KeyCode::Char('d') => {
+                if let Some(entry) = self.get_selected_entry() {
+                    if let Some(id) = entry.id {
+                        self.pending_delete_id = Some(id);
+                        self.delete_dialog_open = true;
+                    }
+                }
+            }
+            KeyCode::Char('b') => {
+                if let Some(cmd) = self.get_selected_command() {
+                    return Some(SearchAction::ToggleBookmark(cmd));
+                }
+            }
+            KeyCode::Char('n') => {
+                if let Some(entry) = self.get_selected_entry() {
+                    if let Some(id) = entry.id {
+                        self.note_entry_id = Some(id);
+                        self.note_input.clear();
+                        self.note_dialog_open = true;
+                    }
+                }
+            }
+            KeyCode::Char('s') => {
+                self.context_boost = !self.context_boost;
+                self.status_message = Some((
+                    if self.context_boost {
+                        "Smart mode ON".into()
+                    } else {
+                        "Smart mode OFF".into()
+                    },
+                    std::time::Instant::now(),
+                ));
+                return Some(SearchAction::Reload);
+            }
+            KeyCode::Char('l') => {
+                if self.filter_cwd.is_some() {
+                    self.filter_cwd = None;
+                } else if let Ok(cwd) = std::env::current_dir() {
+                    self.filter_cwd = Some(cwd.to_string_lossy().to_string());
+                }
+                self.page = 1;
+                return Some(SearchAction::Reload);
+            }
+            _ => return None,
+        }
+        Some(SearchAction::Continue)
     }
 
     fn handle_tag_dialog_input(&mut self, key: KeyEvent) -> SearchAction {

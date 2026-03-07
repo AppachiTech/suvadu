@@ -447,7 +447,6 @@ impl AgentStatsApp {
         f.render_widget(Table::new(dir_rows, dir_widths), dir_inner);
     }
 
-    #[allow(clippy::too_many_lines)]
     fn render_high_risk_section(
         &self,
         f: &mut ratatui::Frame,
@@ -459,7 +458,6 @@ impl AgentStatsApp {
         let in_focus = self.focus == StatsFocus::HighRisk;
         let has_selection = in_focus && !agent.high_risk_cmds.is_empty();
 
-        // Horizontal split: table (left) | detail (right) — like search.rs
         let sections = if has_selection {
             Layout::default()
                 .direction(Direction::Horizontal)
@@ -493,7 +491,27 @@ impl AgentStatsApp {
             return;
         }
 
-        let risk_rows: Vec<Row> = agent
+        let risk_rows = self.build_high_risk_rows(agent, in_focus, t);
+        let risk_widths = [
+            Constraint::Length(9),
+            Constraint::Min(15),
+            Constraint::Length(12),
+            Constraint::Length(2),
+        ];
+        f.render_widget(Table::new(risk_rows, risk_widths), risk_inner);
+
+        if has_selection {
+            self.render_high_risk_detail(f, sections[1], t, agent, home);
+        }
+    }
+
+    fn build_high_risk_rows(
+        &self,
+        agent: &AgentStat,
+        in_focus: bool,
+        t: &crate::theme::Theme,
+    ) -> Vec<Row<'_>> {
+        agent
             .high_risk_cmds
             .iter()
             .enumerate()
@@ -542,92 +560,92 @@ impl AgentStatsApp {
                     }),
                 ])
             })
-            .collect();
+            .collect()
+    }
 
-        let risk_widths = [
-            Constraint::Length(9),
-            Constraint::Min(15),
-            Constraint::Length(12),
-            Constraint::Length(2),
-        ];
-        f.render_widget(Table::new(risk_rows, risk_widths), risk_inner);
+    fn render_high_risk_detail(
+        &self,
+        f: &mut ratatui::Frame,
+        area: Rect,
+        t: &crate::theme::Theme,
+        agent: &AgentStat,
+        home: &str,
+    ) {
+        let Some(hr) = agent.high_risk_cmds.get(self.risk_selected) else {
+            return;
+        };
 
-        // Detail pane on the right (like search.rs)
-        if has_selection {
-            if let Some(hr) = agent.high_risk_cmds.get(self.risk_selected) {
-                let detail_block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(t.primary))
-                    .title(" Command Detail ")
-                    .title_style(
-                        Style::default()
-                            .fg(t.text_secondary)
-                            .add_modifier(Modifier::BOLD),
-                    );
-                let detail_inner = detail_block.inner(sections[1]);
-                f.render_widget(detail_block, sections[1]);
-
-                let label = Style::default()
+        let detail_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(t.primary))
+            .title(" Command Detail ")
+            .title_style(
+                Style::default()
                     .fg(t.text_secondary)
-                    .add_modifier(Modifier::BOLD);
-                let val = Style::default().fg(t.text);
+                    .add_modifier(Modifier::BOLD),
+            );
+        let detail_inner = detail_block.inner(area);
+        f.render_widget(detail_block, area);
 
-                let risk_color = match hr.level {
-                    RiskLevel::Critical => t.risk_critical,
-                    _ => t.risk_high,
-                };
+        let label = Style::default()
+            .fg(t.text_secondary)
+            .add_modifier(Modifier::BOLD);
+        let val = Style::default().fg(t.text);
 
-                let exit_str = match hr.exit_code {
-                    Some(0) => "✔ success".to_string(),
-                    Some(c) => format!("✘ {c} (failed)"),
-                    None => "○ unknown".to_string(),
-                };
-                let exit_style = match hr.exit_code {
-                    Some(0) => Style::default().fg(t.success),
-                    Some(_) => Style::default().fg(t.error),
-                    None => Style::default().fg(t.text_muted),
-                };
+        let risk_color = match hr.level {
+            RiskLevel::Critical => t.risk_critical,
+            _ => t.risk_high,
+        };
 
-                let lines = vec![
-                    Line::from(Span::styled("Command", label)),
-                    Line::from(Span::styled(
-                        hr.command.clone(),
-                        Style::default().fg(t.primary),
-                    )),
-                    Line::from(""),
-                    Line::from(vec![
-                        Span::styled("Path  ", label),
-                        Span::styled(shorten_path(&hr.cwd, home), val),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("Time  ", label),
-                        Span::styled(format_full_datetime(hr.started_at), val),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("Exit  ", label),
-                        Span::styled(exit_str, exit_style),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("Risk  ", label),
-                        Span::styled(
-                            format!("{} {}", hr.level.icon(), hr.level),
-                            Style::default().fg(risk_color),
-                        ),
-                    ]),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "^Y Copy command",
-                        Style::default().fg(t.text_muted),
-                    )),
-                ];
+        let exit_str = match hr.exit_code {
+            Some(0) => "✔ success".to_string(),
+            Some(c) => format!("✘ {c} (failed)"),
+            None => "○ unknown".to_string(),
+        };
+        let exit_style = match hr.exit_code {
+            Some(0) => Style::default().fg(t.success),
+            Some(_) => Style::default().fg(t.error),
+            None => Style::default().fg(t.text_muted),
+        };
 
-                f.render_widget(
-                    Paragraph::new(lines).wrap(Wrap { trim: false }),
-                    detail_inner,
-                );
-            }
-        }
+        let lines = vec![
+            Line::from(Span::styled("Command", label)),
+            Line::from(Span::styled(
+                hr.command.clone(),
+                Style::default().fg(t.primary),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Path  ", label),
+                Span::styled(shorten_path(&hr.cwd, home), val),
+            ]),
+            Line::from(vec![
+                Span::styled("Time  ", label),
+                Span::styled(format_full_datetime(hr.started_at), val),
+            ]),
+            Line::from(vec![
+                Span::styled("Exit  ", label),
+                Span::styled(exit_str, exit_style),
+            ]),
+            Line::from(vec![
+                Span::styled("Risk  ", label),
+                Span::styled(
+                    format!("{} {}", hr.level.icon(), hr.level),
+                    Style::default().fg(risk_color),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "^Y Copy command",
+                Style::default().fg(t.text_muted),
+            )),
+        ];
+
+        f.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            detail_inner,
+        );
     }
 }
 

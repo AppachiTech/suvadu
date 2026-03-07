@@ -1,43 +1,15 @@
-use std::fmt::Write;
-
 use crate::config;
 
-#[allow(clippy::too_many_lines)]
-pub fn get_zsh_hook(config: &config::Config) -> Result<String, Box<dyn std::error::Error>> {
-    let current_exe = std::env::current_exe()?;
-    let bin_path = current_exe.to_string_lossy();
-
-    let mut script = format!(
-        r#"# Suvadu - Shell History Integration
-# Add this to your ~/.zshrc:
-# eval "$(suv init zsh)"
-
-# Require Zsh 5.1+ for EPOCHREALTIME support
-autoload -Uz is-at-least
-if ! is-at-least 5.1 "$ZSH_VERSION"; then
-    echo "[suvadu] Warning: Zsh 5.1+ required (you have $ZSH_VERSION). Shell hooks disabled." >&2
-    return 0 2>/dev/null || true
-fi
-
-# Load zsh/datetime for $EPOCHREALTIME (not auto-loaded on all systems)
-zmodload zsh/datetime
-
-# Use add-zsh-hook for proper hook registration (cooperates with oh-my-zsh, plugins)
-autoload -Uz add-zsh-hook
-
-# Legacy alias support
-alias suvadu="suv"
-
-export SUVADU_SESSION_ID="${{SUVADU_SESSION_ID:-$(uuidgen)}}"
-_SUVADU_START_TIME=0
-_SUVADU_OFFSET=-1
-_SUVADU_BIN="{bin_path}"
-
-# Detect executor type and name
+/// Executor-detection function for **zsh** shell scripts.
+///
+/// Returns the body of `__suvadu_detect_executor()` ready for embedding inside
+/// a `format!()` string (literal braces are doubled).
+const fn zsh_executor_detection_script() -> &'static str {
+    r#"# Detect executor type and name
 __suvadu_detect_executor() {{
     local executor_type="unknown"
     local executor="unknown"
-    
+
     # CI/CD Detection
     if [[ -n "$CI" ]]; then
         executor_type="ci"
@@ -94,11 +66,104 @@ __suvadu_detect_executor() {{
         executor_type="programmatic"
         executor="subprocess"
     fi
-    
+
     echo "$executor_type:$executor"
 }}
+"#
+}
 
-# Capture command start time (registered via add-zsh-hook)
+/// Executor-detection function for **bash** shell scripts.
+///
+/// The bash variant has a slightly different set of detections compared to zsh.
+const fn bash_executor_detection_script() -> &'static str {
+    r#"# Detect executor type and name
+__suvadu_detect_executor() {{
+    local executor_type="unknown"
+    local executor="unknown"
+
+    # CI/CD Detection
+    if [[ -n "$CI" ]]; then
+        executor_type="ci"
+        if [[ -n "$GITHUB_ACTIONS" ]]; then
+            executor="github-actions"
+        elif [[ -n "$GITLAB_CI" ]]; then
+            executor="gitlab"
+        elif [[ -n "$CIRCLECI" ]]; then
+            executor="circleci"
+        else
+            executor="ci-unknown"
+        fi
+    # AI Agent Detection
+    elif [[ -n "$CLAUDE_CODE" ]] || [[ "$TERM_PROGRAM" == "claude" ]]; then
+        executor_type="agent"
+        executor="claude-code"
+    elif [[ -n "$CODEX_CLI" ]]; then
+        executor_type="agent"
+        executor="openai-codex"
+    elif [[ -n "$AIDER" ]] || [[ -n "$AIDER_SESSION" ]]; then
+        executor_type="agent"
+        executor="aider"
+    # IDE Detection
+    elif [[ "$TERM_PROGRAM" == "vscode" ]] || [[ -n "$VSCODE_INJECTION" ]]; then
+        executor_type="ide"
+        executor="vscode"
+    elif [[ -n "$CURSOR_INJECTION" ]] || [[ -n "$CURSOR_TRACE_ID" ]]; then
+        executor_type="ide"
+        executor="cursor"
+    elif [[ -n "$ANTIGRAVITY_AGENT" ]]; then
+        executor_type="ide"
+        executor="antigravity"
+    # Human Detection
+    elif [[ -t 0 ]]; then
+        executor_type="human"
+        executor="terminal"
+    else
+        executor_type="programmatic"
+        executor="subprocess"
+    fi
+
+    echo "$executor_type:$executor"
+}}
+"#
+}
+
+/// Zsh-specific preamble, preexec/precmd hooks, and hook registration.
+///
+/// `bin_path` is interpolated into the script via `format!()`.
+fn zsh_preexec_script(bin_path: &str) -> String {
+    format!(
+        r#"# Suvadu - Shell History Integration
+# Add this to your ~/.zshrc:
+# eval "$(suv init zsh)"
+
+# Require Zsh 5.1+ for EPOCHREALTIME support
+autoload -Uz is-at-least
+if ! is-at-least 5.1 "$ZSH_VERSION"; then
+    echo "[suvadu] Warning: Zsh 5.1+ required (you have $ZSH_VERSION). Shell hooks disabled." >&2
+    return 0 2>/dev/null || true
+fi
+
+# Load zsh/datetime for $EPOCHREALTIME (not auto-loaded on all systems)
+zmodload zsh/datetime
+
+# Use add-zsh-hook for proper hook registration (cooperates with oh-my-zsh, plugins)
+autoload -Uz add-zsh-hook
+
+# Legacy alias support
+alias suvadu="suv"
+
+export SUVADU_SESSION_ID="${{SUVADU_SESSION_ID:-$(uuidgen)}}"
+_SUVADU_START_TIME=0
+_SUVADU_OFFSET=-1
+_SUVADU_BIN="{bin_path}"
+
+"#
+    )
+}
+
+/// Zsh preexec/precmd function bodies and hook registration.
+const fn zsh_hook_functions() -> &'static str {
+    r#"# Capture command start time (registered via add-zsh-hook)
 _suvadu_preexec() {{
     _SUVADU_CMD="$1"
     _SUVADU_START_TIME=$(( ${{EPOCHREALTIME%.*}} * 1000 + ${{${{EPOCHREALTIME#*.}}:0:3}} ))
@@ -141,7 +206,13 @@ _suvadu_precmd() {{
 add-zsh-hook preexec _suvadu_preexec
 add-zsh-hook precmd _suvadu_precmd
 
-# Interactive Search Widget
+"#
+}
+
+/// Zsh interactive search widget and arrow-key cycling widgets, plus widget
+/// registration and the Ctrl+R binding.
+const fn zsh_widgets_script() -> &'static str {
+    r#"# Interactive Search Widget
 _suvadu_search_widget() {{
     local selected tty_dev
 
@@ -237,39 +308,14 @@ zle -N suvadu-up-arrow _suvadu_up_arrow_widget
 zle -N suvadu-down-arrow _suvadu_down_arrow_widget
 
 "#
-    );
-
-    if config.shell.enable_arrow_navigation {
-        script.push_str(
-            r"
-bindkey '^[[A' suvadu-up-arrow
-bindkey '^[OA' suvadu-up-arrow
-bindkey '^[[B' suvadu-down-arrow
-bindkey '^[OB' suvadu-down-arrow
-",
-        );
-    }
-
-    // Auto-source managed aliases file if it exists
-    if let Some(proj) = directories::ProjectDirs::from("tech", "appachi", "suvadu") {
-        let aliases_path = proj.data_dir().join("aliases.sh");
-        let _ = write!(
-            script,
-            "\n# Suvadu managed aliases\n[ -f \"{}\" ] && source \"{}\"\n",
-            aliases_path.display(),
-            aliases_path.display()
-        );
-    }
-
-    Ok(script)
 }
 
-#[allow(clippy::too_many_lines)]
-pub fn get_bash_hook(config: &config::Config) -> Result<String, Box<dyn std::error::Error>> {
-    let current_exe = std::env::current_exe()?;
-    let bin_path = current_exe.to_string_lossy();
-
-    let mut script = format!(
+/// Bash-specific preamble, time helper, preexec/precmd hooks, and hook
+/// installation (DEBUG trap + `PROMPT_COMMAND`).
+///
+/// `bin_path` is interpolated into the script via `format!()`.
+fn bash_preexec_script(bin_path: &str) -> String {
+    format!(
         r#"# Suvadu - Bash Shell History Integration
 # Add this to your ~/.bashrc:
 # eval "$(suv init bash)"
@@ -288,56 +334,14 @@ _SUVADU_START_TIME=0
 _SUVADU_CMD=""
 _SUVADU_BIN="{bin_path}"
 
-# Detect executor type and name
-__suvadu_detect_executor() {{
-    local executor_type="unknown"
-    local executor="unknown"
+"#
+    )
+}
 
-    # CI/CD Detection
-    if [[ -n "$CI" ]]; then
-        executor_type="ci"
-        if [[ -n "$GITHUB_ACTIONS" ]]; then
-            executor="github-actions"
-        elif [[ -n "$GITLAB_CI" ]]; then
-            executor="gitlab"
-        elif [[ -n "$CIRCLECI" ]]; then
-            executor="circleci"
-        else
-            executor="ci-unknown"
-        fi
-    # AI Agent Detection
-    elif [[ -n "$CLAUDE_CODE" ]] || [[ "$TERM_PROGRAM" == "claude" ]]; then
-        executor_type="agent"
-        executor="claude-code"
-    elif [[ -n "$CODEX_CLI" ]]; then
-        executor_type="agent"
-        executor="openai-codex"
-    elif [[ -n "$AIDER" ]] || [[ -n "$AIDER_SESSION" ]]; then
-        executor_type="agent"
-        executor="aider"
-    # IDE Detection
-    elif [[ "$TERM_PROGRAM" == "vscode" ]] || [[ -n "$VSCODE_INJECTION" ]]; then
-        executor_type="ide"
-        executor="vscode"
-    elif [[ -n "$CURSOR_INJECTION" ]] || [[ -n "$CURSOR_TRACE_ID" ]]; then
-        executor_type="ide"
-        executor="cursor"
-    elif [[ -n "$ANTIGRAVITY_AGENT" ]]; then
-        executor_type="ide"
-        executor="antigravity"
-    # Human Detection
-    elif [[ -t 0 ]]; then
-        executor_type="human"
-        executor="terminal"
-    else
-        executor_type="programmatic"
-        executor="subprocess"
-    fi
-
-    echo "$executor_type:$executor"
-}}
-
-# Get current time in milliseconds (Bash 5+ has EPOCHREALTIME, fallback to date)
+/// Bash time-helper, preexec via DEBUG trap, precmd via `PROMPT_COMMAND`, and
+/// hook installation.
+const fn bash_hook_functions() -> &'static str {
+    r#"# Get current time in milliseconds (Bash 5+ has EPOCHREALTIME, fallback to date)
 __suvadu_time_ms() {{
     if [[ -n "$EPOCHREALTIME" ]]; then
         local secs="${{EPOCHREALTIME%%.*}}"
@@ -396,7 +400,28 @@ __suvadu_precmd() {{
     _SUVADU_CMD=""
 }}
 
-# Interactive Search Widget (Ctrl+R replacement)
+# Install hooks (preserve any existing DEBUG trap)
+_suvadu_old_debug_trap=$(trap -p DEBUG | sed "s/^trap -- '\\(.*\\)' DEBUG$/\\1/")
+if [[ -n "$_suvadu_old_debug_trap" ]]; then
+    eval "trap '$_suvadu_old_debug_trap; __suvadu_preexec' DEBUG"
+else
+    trap '__suvadu_preexec' DEBUG
+fi
+unset _suvadu_old_debug_trap
+
+# Append to PROMPT_COMMAND (don't overwrite existing)
+if [[ -z "$PROMPT_COMMAND" ]]; then
+    PROMPT_COMMAND="__suvadu_precmd"
+elif [[ "$PROMPT_COMMAND" != *"__suvadu_precmd"* ]]; then
+    PROMPT_COMMAND="__suvadu_precmd;$PROMPT_COMMAND"
+fi
+
+"#
+}
+
+/// Bash interactive search widget and Ctrl+R binding.
+const fn bash_search_widget() -> &'static str {
+    r#"# Interactive Search Widget (Ctrl+R replacement)
 __suvadu_search_widget() {{
     local selected tty_dev
 
@@ -426,41 +451,68 @@ __suvadu_search_widget() {{
     fi
 }}
 
-# Install hooks (preserve any existing DEBUG trap)
-_suvadu_old_debug_trap=$(trap -p DEBUG | sed "s/^trap -- '\\(.*\\)' DEBUG$/\\1/")
-if [[ -n "$_suvadu_old_debug_trap" ]]; then
-    eval "trap '$_suvadu_old_debug_trap; __suvadu_preexec' DEBUG"
-else
-    trap '__suvadu_preexec' DEBUG
-fi
-unset _suvadu_old_debug_trap
-
-# Append to PROMPT_COMMAND (don't overwrite existing)
-if [[ -z "$PROMPT_COMMAND" ]]; then
-    PROMPT_COMMAND="__suvadu_precmd"
-elif [[ "$PROMPT_COMMAND" != *"__suvadu_precmd"* ]]; then
-    PROMPT_COMMAND="__suvadu_precmd;$PROMPT_COMMAND"
-fi
-
 # Bind Ctrl+R to suvadu search
 bind -x '"\C-r": __suvadu_search_widget'
 
 "#
-    );
+}
+
+/// Auto-source section for managed aliases (shared between zsh and bash).
+///
+/// Returns `Some(snippet)` when the project directory can be resolved, `None`
+/// otherwise.
+fn aliases_source_script() -> Option<String> {
+    let proj = directories::ProjectDirs::from("tech", "appachi", "suvadu")?;
+    let aliases_path = proj.data_dir().join("aliases.sh");
+    Some(format!(
+        "\n# Suvadu managed aliases\n[ -f \"{}\" ] && source \"{}\"\n",
+        aliases_path.display(),
+        aliases_path.display()
+    ))
+}
+
+pub fn get_zsh_hook(config: &config::Config) -> Result<String, Box<dyn std::error::Error>> {
+    let current_exe = std::env::current_exe()?;
+    let bin_path = current_exe.to_string_lossy();
+
+    let mut script = zsh_preexec_script(&bin_path);
+    script.push_str(zsh_executor_detection_script());
+    script.push_str(zsh_hook_functions());
+    script.push_str(zsh_widgets_script());
+
+    if config.shell.enable_arrow_navigation {
+        script.push_str(
+            r"
+bindkey '^[[A' suvadu-up-arrow
+bindkey '^[OA' suvadu-up-arrow
+bindkey '^[[B' suvadu-down-arrow
+bindkey '^[OB' suvadu-down-arrow
+",
+        );
+    }
+
+    if let Some(aliases) = aliases_source_script() {
+        script.push_str(&aliases);
+    }
+
+    Ok(script)
+}
+
+pub fn get_bash_hook(config: &config::Config) -> Result<String, Box<dyn std::error::Error>> {
+    let current_exe = std::env::current_exe()?;
+    let bin_path = current_exe.to_string_lossy();
+
+    let mut script = bash_preexec_script(&bin_path);
+    script.push_str(bash_executor_detection_script());
+    script.push_str(bash_hook_functions());
+    script.push_str(bash_search_widget());
 
     // Note: Bash doesn't have zsh's zle widgets for arrow key override,
     // so arrow-based history navigation is not supported in Bash.
     let _ = config; // Config reserved for future Bash-specific settings
 
-    // Auto-source managed aliases file if it exists
-    if let Some(proj) = directories::ProjectDirs::from("tech", "appachi", "suvadu") {
-        let aliases_path = proj.data_dir().join("aliases.sh");
-        let _ = write!(
-            script,
-            "\n# Suvadu managed aliases\n[ -f \"{}\" ] && source \"{}\"\n",
-            aliases_path.display(),
-            aliases_path.display()
-        );
+    if let Some(aliases) = aliases_source_script() {
+        script.push_str(&aliases);
     }
 
     Ok(script)

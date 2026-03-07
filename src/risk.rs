@@ -96,10 +96,33 @@ pub struct FailedCommand {
 }
 
 /// Build the default risk pattern set (compiled once, reused)
-#[allow(clippy::too_many_lines)]
 fn build_patterns() -> Vec<RiskPattern> {
-    let patterns: Vec<(&str, RiskLevel, &'static str, &'static str)> = vec![
-        // --- Critical: destructive / irreversible ---
+    let mut defs = Vec::with_capacity(40);
+    defs.extend(critical_pattern_defs());
+    defs.extend(high_pattern_defs());
+    defs.extend(medium_pattern_defs());
+    defs.extend(low_pattern_defs());
+
+    defs.into_iter()
+        .filter_map(|(pat, level, cat, desc)| match Regex::new(pat) {
+            Ok(regex) => Some(RiskPattern {
+                regex,
+                level,
+                category: cat,
+                description: desc,
+            }),
+            Err(e) => {
+                eprintln!("suvadu: risk pattern failed to compile: {pat}: {e}");
+                None
+            }
+        })
+        .collect()
+}
+
+type PatternDef = (&'static str, RiskLevel, &'static str, &'static str);
+
+fn critical_pattern_defs() -> Vec<PatternDef> {
+    vec![
         (
             r"(^|\s)rm\s+.*(-rf|--recursive|-r\s+-f|-f\s+-r)",
             RiskLevel::Critical,
@@ -142,7 +165,11 @@ fn build_patterns() -> Vec<RiskPattern> {
             "destructive",
             "Raw disk write",
         ),
-        // --- High: installs code or changes permissions ---
+    ]
+}
+
+fn high_pattern_defs() -> Vec<PatternDef> {
+    vec![
         (
             r"^(npm|yarn|pnpm)\s+(install|add|i)\b",
             RiskLevel::High,
@@ -221,7 +248,11 @@ fn build_patterns() -> Vec<RiskPattern> {
             "script-exec",
             "Execute shell script via sh",
         ),
-        // --- Medium: modifies system state ---
+    ]
+}
+
+fn medium_pattern_defs() -> Vec<PatternDef> {
+    vec![
         (
             r"^sudo\s+",
             RiskLevel::Medium,
@@ -265,30 +296,18 @@ fn build_patterns() -> Vec<RiskPattern> {
             "git",
             "Delete git branch",
         ),
-        // --- Low: network access, config changes ---
+    ]
+}
+
+fn low_pattern_defs() -> Vec<PatternDef> {
+    vec![
         (r"^curl\s+", RiskLevel::Low, "network", "HTTP request"),
         (r"^wget\s+", RiskLevel::Low, "network", "HTTP download"),
         (r"^ssh\s+", RiskLevel::Low, "network", "SSH connection"),
         (r"^scp\s+", RiskLevel::Low, "network", "Remote file copy"),
         (r"^rsync\s+", RiskLevel::Low, "network", "File sync"),
         (r"^git\s+push\s+", RiskLevel::Low, "git", "Push to remote"),
-    ];
-
-    patterns
-        .into_iter()
-        .filter_map(|(pat, level, cat, desc)| match Regex::new(pat) {
-            Ok(regex) => Some(RiskPattern {
-                regex,
-                level,
-                category: cat,
-                description: desc,
-            }),
-            Err(e) => {
-                eprintln!("suvadu: risk pattern failed to compile: {pat}: {e}");
-                None
-            }
-        })
-        .collect()
+    ]
 }
 
 /// Assess the risk level of a single command

@@ -57,7 +57,110 @@ impl PickerApp {
     }
 }
 
-#[allow(clippy::too_many_lines)]
+impl PickerApp {
+    fn build_session_item<'a>(s: &SessionSummary, t: &crate::theme::Theme) -> ListItem<'a> {
+        let time = Local
+            .timestamp_millis_opt(crate::util::normalize_display_ms(s.created_at))
+            .single()
+            .map_or_else(
+                || "????-??-?? ??:??".into(),
+                |dt| dt.format("%Y-%m-%d %H:%M").to_string(),
+            );
+
+        let tag_str = s
+            .tag_name
+            .as_deref()
+            .map_or_else(|| "—".to_string(), std::string::ToString::to_string);
+
+        #[allow(clippy::cast_precision_loss)]
+        let rate = if s.cmd_count > 0 {
+            s.success_count as f64 / s.cmd_count as f64 * 100.0
+        } else {
+            0.0
+        };
+
+        let duration = if s.last_cmd_at > s.first_cmd_at {
+            format_duration_ms(s.last_cmd_at - s.first_cmd_at)
+        } else {
+            "—".into()
+        };
+
+        let id_short: String = s.id.chars().take(8).collect();
+
+        ListItem::new(Line::from(vec![
+            Span::styled(format!("  {time}  "), Style::default().fg(t.text_muted)),
+            Span::styled(
+                format!("{id_short}  "),
+                Style::default().fg(t.info).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("{:<12}", s.hostname), Style::default().fg(t.text)),
+            Span::styled(format!("{tag_str:<10}"), Style::default().fg(t.primary)),
+            Span::styled(
+                format!("{:>4} cmds  ", s.cmd_count),
+                Style::default().fg(t.text_secondary),
+            ),
+            Span::styled(
+                format!("{rate:>3.0}%  "),
+                if rate >= 90.0 {
+                    Style::default().fg(t.success)
+                } else if rate >= 70.0 {
+                    Style::default().fg(t.warning)
+                } else {
+                    Style::default().fg(t.error)
+                },
+            ),
+            Span::styled(format!("{duration:>7}"), Style::default().fg(t.text_muted)),
+        ]))
+    }
+
+    fn render_picker(&mut self, f: &mut ratatui::Frame) {
+        let t = theme();
+        let size = f.area();
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(5), Constraint::Length(2)])
+            .split(size);
+
+        let items: Vec<ListItem> = self
+            .sessions
+            .iter()
+            .map(|s| Self::build_session_item(s, t))
+            .collect();
+
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(t.border_focus))
+                    .title(Span::styled(
+                        format!(" Sessions ({}) ", self.sessions.len()),
+                        Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+                    )),
+            )
+            .highlight_style(
+                Style::default()
+                    .bg(t.selection_bg)
+                    .fg(t.selection_fg)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol(" > ");
+
+        f.render_stateful_widget(list, chunks[0], &mut self.list_state);
+
+        let footer = Paragraph::new(Line::from(vec![
+            Span::styled(" ↑↓", Style::default().fg(t.info)),
+            Span::styled(" Navigate  ", Style::default().fg(t.text_muted)),
+            Span::styled("Enter", Style::default().fg(t.success)),
+            Span::styled(" Select  ", Style::default().fg(t.text_muted)),
+            Span::styled("q", Style::default().fg(t.error)),
+            Span::styled(" Quit", Style::default().fg(t.text_muted)),
+        ]));
+        f.render_widget(footer, chunks[1]);
+    }
+}
+
 pub fn run_session_picker<B: Backend>(
     terminal: &mut Terminal<B>,
     sessions: Vec<SessionSummary>,
@@ -68,106 +171,7 @@ where
     let mut app = PickerApp::new(sessions);
 
     loop {
-        terminal.draw(|f| {
-            let t = theme();
-            let size = f.area();
-
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(5), Constraint::Length(2)])
-                .split(size);
-
-            let items: Vec<ListItem> = app
-                .sessions
-                .iter()
-                .map(|s| {
-                    let time = Local
-                        .timestamp_millis_opt(crate::util::normalize_display_ms(s.created_at))
-                        .single()
-                        .map_or_else(
-                            || "????-??-?? ??:??".into(),
-                            |dt| dt.format("%Y-%m-%d %H:%M").to_string(),
-                        );
-
-                    let tag_str = s
-                        .tag_name
-                        .as_deref()
-                        .map_or_else(|| "—".to_string(), std::string::ToString::to_string);
-
-                    #[allow(clippy::cast_precision_loss)]
-                    let rate = if s.cmd_count > 0 {
-                        s.success_count as f64 / s.cmd_count as f64 * 100.0
-                    } else {
-                        0.0
-                    };
-
-                    let duration = if s.last_cmd_at > s.first_cmd_at {
-                        format_duration_ms(s.last_cmd_at - s.first_cmd_at)
-                    } else {
-                        "—".into()
-                    };
-
-                    let id_short: String = s.id.chars().take(8).collect();
-
-                    Line::from(vec![
-                        Span::styled(format!("  {time}  "), Style::default().fg(t.text_muted)),
-                        Span::styled(
-                            format!("{id_short}  "),
-                            Style::default().fg(t.info).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(format!("{:<12}", s.hostname), Style::default().fg(t.text)),
-                        Span::styled(format!("{tag_str:<10}"), Style::default().fg(t.primary)),
-                        Span::styled(
-                            format!("{:>4} cmds  ", s.cmd_count),
-                            Style::default().fg(t.text_secondary),
-                        ),
-                        Span::styled(
-                            format!("{rate:>3.0}%  "),
-                            if rate >= 90.0 {
-                                Style::default().fg(t.success)
-                            } else if rate >= 70.0 {
-                                Style::default().fg(t.warning)
-                            } else {
-                                Style::default().fg(t.error)
-                            },
-                        ),
-                        Span::styled(format!("{duration:>7}"), Style::default().fg(t.text_muted)),
-                    ])
-                })
-                .map(ListItem::new)
-                .collect();
-
-            let list = List::new(items)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded)
-                        .border_style(Style::default().fg(t.border_focus))
-                        .title(Span::styled(
-                            format!(" Sessions ({}) ", app.sessions.len()),
-                            Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
-                        )),
-                )
-                .highlight_style(
-                    Style::default()
-                        .bg(t.selection_bg)
-                        .fg(t.selection_fg)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .highlight_symbol(" > ");
-
-            f.render_stateful_widget(list, chunks[0], &mut app.list_state);
-
-            let footer = Paragraph::new(Line::from(vec![
-                Span::styled(" ↑↓", Style::default().fg(t.info)),
-                Span::styled(" Navigate  ", Style::default().fg(t.text_muted)),
-                Span::styled("Enter", Style::default().fg(t.success)),
-                Span::styled(" Select  ", Style::default().fg(t.text_muted)),
-                Span::styled("q", Style::default().fg(t.error)),
-                Span::styled(" Quit", Style::default().fg(t.text_muted)),
-            ]));
-            f.render_widget(footer, chunks[1]);
-        })?;
+        terminal.draw(|f| app.render_picker(f))?;
 
         if let Event::Key(key) = event::read()? {
             if key.kind != KeyEventKind::Press {

@@ -3,15 +3,16 @@ use crate::models::Stats;
 
 use super::Repository;
 
-impl Repository {
-    /// Get aggregated usage statistics, optionally filtered by tag.
-    #[allow(clippy::too_many_lines)]
-    pub fn get_stats(
-        &self,
-        days: Option<usize>,
-        top_n: usize,
-        tag_id: Option<i64>,
-    ) -> DbResult<Stats> {
+/// Reusable filter state for stats queries.
+struct StatsFilter {
+    time_filter: Option<i64>,
+    tag_id: Option<i64>,
+    join_clause: &'static str,
+    where_clause: String,
+}
+
+impl StatsFilter {
+    fn new(days: Option<usize>, tag_id: Option<i64>) -> Self {
         let time_filter = days.map(|d| {
             let now = chrono::Utc::now().timestamp_millis();
             now - i64::try_from(d)
@@ -19,7 +20,6 @@ impl Repository {
                 .saturating_mul(86_400_000)
         });
 
-        // Build reusable SQL fragments
         let join_clause = if tag_id.is_some() {
             " JOIN sessions s ON e.session_id = s.id"
         } else {
@@ -39,180 +39,184 @@ impl Repository {
             format!(" WHERE {}", conditions.join(" AND "))
         };
 
-        // Bind base filter params (time, then tag_id twice)
-        let bind = |stmt: &mut rusqlite::Statement| -> rusqlite::Result<usize> {
-            let mut idx: usize = 1;
-            if let Some(ts) = time_filter {
-                stmt.raw_bind_parameter(idx, ts)?;
-                idx += 1;
+        Self {
+            time_filter,
+            tag_id,
+            join_clause,
+            where_clause,
+        }
+    }
+
+    /// Bind the base filter parameters (time, then `tag_id` twice).
+    /// Returns the next free parameter index.
+    fn bind(&self, stmt: &mut rusqlite::Statement) -> rusqlite::Result<usize> {
+        let mut idx: usize = 1;
+        if let Some(ts) = self.time_filter {
+            stmt.raw_bind_parameter(idx, ts)?;
+            idx += 1;
+        }
+        if let Some(tid) = self.tag_id {
+            stmt.raw_bind_parameter(idx, tid)?;
+            idx += 1;
+            stmt.raw_bind_parameter(idx, tid)?;
+            idx += 1;
+        }
+        Ok(idx)
+    }
+
+    /// Append an extra condition, choosing AND or WHERE as needed.
+    fn where_with_extra(&self, extra: &str) -> String {
+        format!(
+            "{}{}",
+            self.where_clause,
+            if self.where_clause.is_empty() {
+                format!(" WHERE {extra}")
+            } else {
+                format!(" AND {extra}")
             }
-            if let Some(tid) = tag_id {
-                stmt.raw_bind_parameter(idx, tid)?;
-                idx += 1;
-                stmt.raw_bind_parameter(idx, tid)?;
-                idx += 1;
+        )
+    }
+}
+
+impl Repository {
+    /// Execute a scalar aggregate query using the given filter and return a
+    /// single `i64` value.
+    fn query_scalar(&self, sql: &str, filter: &StatsFilter) -> DbResult<i64> {
+        let mut stmt = self.conn.prepare(sql)?;
+        filter.bind(&mut stmt)?;
+        let val = stmt
+            .raw_query()
+            .next()?
+            .ok_or(crate::db::DbError::Validation(
+                "Expected row from aggregate query".into(),
+            ))?
+            .get(0)?;
+        Ok(val)
+    }
+
+    /// Execute a grouped query that returns `(String, i64)` pairs.
+    /// The filter parameters are bound first, then `top_n` is bound as a LIMIT.
+    fn query_grouped(
+        &self,
+        sql: &str,
+        filter: &StatsFilter,
+        top_n: Option<usize>,
+    ) -> DbResult<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare(sql)?;
+        let next_idx = filter.bind(&mut stmt)?;
+        if let Some(n) = top_n {
+            stmt.raw_bind_parameter(next_idx, i64::try_from(n).unwrap_or(i64::MAX))?;
+        }
+        let mut rows = stmt.raw_query();
+        let mut results = Vec::new();
+        while let Some(row) = rows.next()? {
+            results.push((row.get(0)?, row.get(1)?));
+        }
+        Ok(results)
+    }
+
+    /// Query the hourly distribution of commands.
+    fn query_hourly(&self, filter: &StatsFilter) -> DbResult<Vec<(u32, i64)>> {
+        let sql = format!(
+            "SELECT CAST(strftime('%H', datetime(e.started_at/1000, 'unixepoch', 'localtime')) \
+             AS INTEGER) as hour, COUNT(*) as cnt FROM entries e{}{} GROUP BY hour ORDER BY hour",
+            filter.join_clause, filter.where_clause
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        filter.bind(&mut stmt)?;
+        let mut rows = stmt.raw_query();
+        let mut results = Vec::new();
+        while let Some(row) = rows.next()? {
+            if let Some(h) = row.get::<_, Option<i64>>(0)? {
+                let hour = u32::try_from(h).unwrap_or(0);
+                results.push((hour, row.get(1)?));
             }
-            Ok(idx)
-        };
+        }
+        Ok(results)
+    }
 
-        // Total commands
-        let total_commands: i64 = {
-            let sql = format!("SELECT COUNT(*) FROM entries e{join_clause}{where_clause}");
-            let mut stmt = self.conn.prepare(&sql)?;
-            bind(&mut stmt)?;
-            let val = stmt
-                .raw_query()
-                .next()?
-                .ok_or(crate::db::DbError::Validation(
-                    "Expected row from aggregate query".into(),
-                ))?
-                .get(0)?;
-            val
-        };
+    /// Get aggregated usage statistics, optionally filtered by tag.
+    pub fn get_stats(
+        &self,
+        days: Option<usize>,
+        top_n: usize,
+        tag_id: Option<i64>,
+    ) -> DbResult<Stats> {
+        let f = StatsFilter::new(days, tag_id);
 
-        // Unique commands
-        let unique_commands: i64 = {
-            let sql =
-                format!("SELECT COUNT(DISTINCT command) FROM entries e{join_clause}{where_clause}");
-            let mut stmt = self.conn.prepare(&sql)?;
-            bind(&mut stmt)?;
-            let val = stmt
-                .raw_query()
-                .next()?
-                .ok_or(crate::db::DbError::Validation(
-                    "Expected row from aggregate query".into(),
-                ))?
-                .get(0)?;
-            val
-        };
+        let total_commands = self.query_scalar(
+            &format!(
+                "SELECT COUNT(*) FROM entries e{}{}",
+                f.join_clause, f.where_clause
+            ),
+            &f,
+        )?;
 
-        // Success / failure
-        let success_count: i64 = {
-            let sql = format!(
-                "SELECT COUNT(*) FROM entries e{join_clause}{where_clause}{} e.exit_code = 0",
-                if where_clause.is_empty() {
-                    " WHERE"
-                } else {
-                    " AND"
-                }
-            );
-            let mut stmt = self.conn.prepare(&sql)?;
-            bind(&mut stmt)?;
-            let val = stmt
-                .raw_query()
-                .next()?
-                .ok_or(crate::db::DbError::Validation(
-                    "Expected row from aggregate query".into(),
-                ))?
-                .get(0)?;
-            val
-        };
-        let failure_count: i64 = {
-            let sql = format!(
-                "SELECT COUNT(*) FROM entries e{join_clause}{where_clause}{} exit_code IS NOT NULL AND exit_code != 0",
-                if where_clause.is_empty() {
-                    " WHERE"
-                } else {
-                    " AND"
-                }
-            );
-            let mut stmt = self.conn.prepare(&sql)?;
-            bind(&mut stmt)?;
-            let val = stmt
-                .raw_query()
-                .next()?
-                .ok_or(crate::db::DbError::Validation(
-                    "Expected row from aggregate query".into(),
-                ))?
-                .get(0)?;
-            val
-        };
+        let unique_commands = self.query_scalar(
+            &format!(
+                "SELECT COUNT(DISTINCT command) FROM entries e{}{}",
+                f.join_clause, f.where_clause
+            ),
+            &f,
+        )?;
 
-        // Average duration
-        let avg_duration_ms: i64 = {
-            let sql = format!(
-                "SELECT COALESCE(CAST(AVG(duration_ms) AS INTEGER), 0) FROM entries e{join_clause}{where_clause}"
-            );
-            let mut stmt = self.conn.prepare(&sql)?;
-            bind(&mut stmt)?;
-            let val = stmt
-                .raw_query()
-                .next()?
-                .ok_or(crate::db::DbError::Validation(
-                    "Expected row from aggregate query".into(),
-                ))?
-                .get(0)?;
-            val
-        };
+        let success_count = self.query_scalar(
+            &format!(
+                "SELECT COUNT(*) FROM entries e{}{}",
+                f.join_clause,
+                f.where_with_extra("e.exit_code = 0")
+            ),
+            &f,
+        )?;
 
-        // Top commands
-        let top_commands: Vec<(String, i64)> = {
-            let sql = format!(
-                "SELECT command, COUNT(*) as cnt FROM entries e{join_clause}{where_clause} \
-                 GROUP BY command ORDER BY cnt DESC LIMIT ?"
-            );
-            let mut stmt = self.conn.prepare(&sql)?;
-            let next_idx = bind(&mut stmt)?;
-            stmt.raw_bind_parameter(next_idx, i64::try_from(top_n).unwrap_or(i64::MAX))?;
-            let mut rows = stmt.raw_query();
-            let mut results = Vec::new();
-            while let Some(row) = rows.next()? {
-                results.push((row.get(0)?, row.get(1)?));
-            }
-            results
-        };
+        let failure_count = self.query_scalar(
+            &format!(
+                "SELECT COUNT(*) FROM entries e{}{}",
+                f.join_clause,
+                f.where_with_extra("exit_code IS NOT NULL AND exit_code != 0")
+            ),
+            &f,
+        )?;
 
-        // Top directories
-        let top_directories: Vec<(String, i64)> = {
-            let sql = format!(
-                "SELECT cwd, COUNT(*) as cnt FROM entries e{join_clause}{where_clause} \
-                 GROUP BY cwd ORDER BY cnt DESC LIMIT ?"
-            );
-            let mut stmt = self.conn.prepare(&sql)?;
-            let next_idx = bind(&mut stmt)?;
-            stmt.raw_bind_parameter(next_idx, i64::try_from(top_n).unwrap_or(i64::MAX))?;
-            let mut rows = stmt.raw_query();
-            let mut results = Vec::new();
-            while let Some(row) = rows.next()? {
-                results.push((row.get(0)?, row.get(1)?));
-            }
-            results
-        };
+        let avg_duration_ms = self.query_scalar(
+            &format!(
+                "SELECT COALESCE(CAST(AVG(duration_ms) AS INTEGER), 0) FROM entries e{}{}",
+                f.join_clause, f.where_clause
+            ),
+            &f,
+        )?;
 
-        // Hourly distribution
-        let hourly_distribution: Vec<(u32, i64)> = {
-            let sql = format!(
-                "SELECT CAST(strftime('%H', datetime(e.started_at/1000, 'unixepoch', 'localtime')) AS INTEGER) as hour, \
-                 COUNT(*) as cnt FROM entries e{join_clause}{where_clause} GROUP BY hour ORDER BY hour"
-            );
-            let mut stmt = self.conn.prepare(&sql)?;
-            bind(&mut stmt)?;
-            let mut rows = stmt.raw_query();
-            let mut results = Vec::new();
-            while let Some(row) = rows.next()? {
-                if let Some(h) = row.get::<_, Option<i64>>(0)? {
-                    let hour = u32::try_from(h).unwrap_or(0);
-                    results.push((hour, row.get(1)?));
-                }
-            }
-            results
-        };
+        let top_commands = self.query_grouped(
+            &format!(
+                "SELECT command, COUNT(*) as cnt FROM entries e{}{} \
+                 GROUP BY command ORDER BY cnt DESC LIMIT ?",
+                f.join_clause, f.where_clause
+            ),
+            &f,
+            Some(top_n),
+        )?;
 
-        // Executor breakdown
-        let executor_breakdown: Vec<(String, i64)> = {
-            let sql = format!(
+        let top_directories = self.query_grouped(
+            &format!(
+                "SELECT cwd, COUNT(*) as cnt FROM entries e{}{} \
+                 GROUP BY cwd ORDER BY cnt DESC LIMIT ?",
+                f.join_clause, f.where_clause
+            ),
+            &f,
+            Some(top_n),
+        )?;
+
+        let hourly_distribution = self.query_hourly(&f)?;
+
+        let executor_breakdown = self.query_grouped(
+            &format!(
                 "SELECT COALESCE(e.executor_type, 'human') as exec_type, COUNT(*) as cnt \
-                 FROM entries e{join_clause}{where_clause} GROUP BY exec_type ORDER BY cnt DESC"
-            );
-            let mut stmt = self.conn.prepare(&sql)?;
-            bind(&mut stmt)?;
-            let mut rows = stmt.raw_query();
-            let mut results = Vec::new();
-            while let Some(row) = rows.next()? {
-                results.push((row.get(0)?, row.get(1)?));
-            }
-            results
-        };
+                 FROM entries e{}{} GROUP BY exec_type ORDER BY cnt DESC",
+                f.join_clause, f.where_clause
+            ),
+            &f,
+            None,
+        )?;
 
         Ok(Stats {
             total_commands,
@@ -282,7 +286,7 @@ impl Repository {
 
     /// Get frequently-used commands for alias suggestion.
     /// Returns `(command, count, dir_count)` tuples filtered by minimum length and count.
-    /// Results are ranked by frequency × directory diversity × recency:
+    /// Results are ranked by frequency x directory diversity x recency:
     ///   `score = count * min(dir_count, 5) * recency_weight`
     /// where `recency_weight` boosts commands used recently (half-life = 30 days).
     #[allow(dead_code)]
@@ -368,7 +372,7 @@ impl Repository {
             candidates.push((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?));
         }
 
-        // Rank by frequency × diversity × recency
+        // Rank by frequency x diversity x recency
         let mut scored: Vec<(String, i64, i64, f64)> = candidates
             .into_iter()
             .map(|(cmd, cnt, dir_cnt, last_used)| {
