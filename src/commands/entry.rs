@@ -130,6 +130,13 @@ pub fn handle_add_with_context(params: AddParams) -> Result<(), Box<dyn std::err
     };
     let ended_at = if ended_at == 0 { started_at } else { ended_at };
 
+    // Redact secrets before storage (unless disabled in config)
+    let command = if config.redaction.enabled {
+        crate::redact::redact_secrets(&command)
+    } else {
+        command
+    };
+
     // Create entry
     let mut entry = Entry::new(
         session_id.clone(),

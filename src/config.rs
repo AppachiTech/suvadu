@@ -30,6 +30,8 @@ pub struct Config {
     #[serde(default)]
     pub agent: AgentConfig,
     #[serde(default)]
+    pub redaction: RedactionConfig,
+    #[serde(default)]
     pub exclusions: Vec<String>,
     #[serde(default)]
     pub auto_tags: std::collections::HashMap<String, String>,
@@ -47,6 +49,7 @@ impl Default for Config {
             search: SearchConfig::default(),
             shell: ShellConfig::default(),
             agent: AgentConfig::default(),
+            redaction: RedactionConfig::default(),
             exclusions: Vec::new(),
             auto_tags: std::collections::HashMap::new(),
         }
@@ -114,6 +117,19 @@ impl Default for AgentConfig {
             show_risk_in_search: true,
             risk_ignore_patterns: Vec::new(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedactionConfig {
+    /// Enable automatic secret redaction before storage (default: true)
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for RedactionConfig {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 

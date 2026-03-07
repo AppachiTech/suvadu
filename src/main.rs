@@ -11,6 +11,7 @@ mod hooks;
 mod import_export;
 mod integrations;
 mod models;
+mod redact;
 mod repository;
 mod risk;
 mod search;
