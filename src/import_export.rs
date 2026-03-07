@@ -89,6 +89,7 @@ pub fn handle_import(file: &str, dry_run: bool) -> Result<(), Box<dyn std::error
 
     if dry_run {
         let mut count = 0u64;
+        let mut skipped = 0u64;
         for (line_num, line) in reader.lines().enumerate() {
             let line = line?;
             let trimmed = line.trim();
@@ -99,13 +100,16 @@ pub fn handle_import(file: &str, dry_run: bool) -> Result<(), Box<dyn std::error
                 Ok(e) => e,
                 Err(err) => {
                     eprintln!("Line {}: parse error: {err}", line_num + 1);
+                    skipped += 1;
                     continue;
                 }
             };
             println!("[dry-run] Would import: {} ({})", entry.command, entry.cwd);
             count += 1;
         }
-        println!("Dry run complete. {count} entries would be imported.");
+        println!(
+            "Dry run complete. {count} entries would be imported ({skipped} skipped due to errors)."
+        );
         return Ok(());
     }
 

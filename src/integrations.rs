@@ -6,11 +6,19 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Write `data` to `path` atomically: write to a PID-unique temp file, then rename.
+/// Write `data` to `path` atomically: write to a unique temp file, then rename.
 /// This prevents corruption if the process crashes mid-write and avoids collisions
 /// when multiple processes write to the same path concurrently.
 fn atomic_write(path: &Path, data: &str) -> std::io::Result<()> {
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    // Use PID + timestamp to avoid collisions from PID recycling
+    let unique = format!(
+        "tmp.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    );
+    let tmp = path.with_extension(unique);
     std::fs::write(&tmp, data)?;
     std::fs::rename(&tmp, path)?;
     Ok(())

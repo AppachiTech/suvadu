@@ -1,8 +1,5 @@
 use std::io;
 
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
-use crossterm::execute;
-use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
@@ -60,50 +57,22 @@ pub fn handle_session(
     }
 
     // Interactive picker → timeline
-    crossterm::terminal::enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
+    // RAII guard ensures terminal is restored even on panic
+    let _guard = util::TerminalGuardMouse::new()?;
+    let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
     let selected = session_ui::run_session_picker(&mut terminal, sessions);
 
     // If a session was selected, open its timeline
-    match selected {
-        Ok(Some(sid)) => {
-            // Stay in alternate screen for the timeline
-            let result = open_session_timeline_tui(&mut terminal, &repo, &sid);
-            crossterm::terminal::disable_raw_mode()?;
-            execute!(
-                terminal.backend_mut(),
-                LeaveAlternateScreen,
-                DisableMouseCapture
-            )?;
-            terminal.show_cursor()?;
-            result
-        }
-        Ok(None) => {
-            // User quit the picker
-            crossterm::terminal::disable_raw_mode()?;
-            execute!(
-                terminal.backend_mut(),
-                LeaveAlternateScreen,
-                DisableMouseCapture
-            )?;
-            terminal.show_cursor()?;
-            Ok(())
-        }
-        Err(e) => {
-            crossterm::terminal::disable_raw_mode()?;
-            execute!(
-                terminal.backend_mut(),
-                LeaveAlternateScreen,
-                DisableMouseCapture
-            )?;
-            terminal.show_cursor()?;
-            Err(e.into())
-        }
-    }
+    let result = match selected {
+        Ok(Some(sid)) => open_session_timeline_tui(&mut terminal, &repo, &sid),
+        Ok(None) => Ok(()),
+        Err(e) => Err(e.into()),
+    };
+    terminal.show_cursor()?;
+    // _guard drops here, restoring terminal
+    result
 }
 
 fn print_session_list(sessions: &[crate::models::SessionSummary]) {
@@ -167,22 +136,15 @@ fn open_session_timeline(
         return Ok(());
     }
 
-    crossterm::terminal::enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
+    // RAII guard ensures terminal is restored even on panic
+    let _guard = util::TerminalGuardMouse::new()?;
+    let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
     let result =
         session_ui::run_session_timeline(&mut terminal, session, tag_name, entries, noted_ids);
-
-    crossterm::terminal::disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
     terminal.show_cursor()?;
+    // _guard drops here, restoring terminal
 
     result.map_err(Into::into)
 }

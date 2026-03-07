@@ -10,11 +10,7 @@ use crate::repository::{QueryFilter, Repository};
 use crate::util;
 use arboard::Clipboard;
 use chrono::Local;
-use crossterm::{
-    event::{self, Event, KeyEventKind},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
+use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::{
     backend::CrosstermBackend,
     widgets::{ListState, TableState},
@@ -418,11 +414,10 @@ pub fn run_search(
     let bookmarked_commands = repo.get_bookmarked_commands().unwrap_or_default();
     let noted_entry_ids = repo.get_noted_entry_ids().unwrap_or_default();
 
-    // Setup terminal
-    enable_raw_mode()?;
-    let mut stderr = io::stderr();
-    execute!(stderr, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stderr);
+    // Setup terminal (uses stderr so stdout is free for returning selected command)
+    // RAII guard ensures terminal is restored even on panic
+    let _guard = crate::util::TerminalGuardStderr::new()?;
+    let backend = CrosstermBackend::new(io::stderr());
     let mut terminal = Terminal::new(backend)?;
 
     let context_boost = config.search.context_boost;
@@ -458,11 +453,8 @@ pub fn run_search(
     });
 
     let result = app.run(&mut terminal, repo);
-
-    // Restore terminal
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
+    // _guard drops here, restoring terminal
 
     result
 }

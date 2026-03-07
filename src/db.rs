@@ -17,7 +17,7 @@ pub enum DbError {
 pub type DbResult<T> = Result<T, DbError>;
 
 /// Current schema version. Increment when adding new migrations.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// Get the path to the suvadu database file
 pub fn get_db_path() -> DbResult<PathBuf> {
@@ -237,11 +237,20 @@ fn migrate_v3(conn: &Connection) -> DbResult<()> {
 pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
     let conn = Connection::open(path)?;
 
-    // Enable WAL mode for better concurrency and performance
-    conn.pragma_update(None, "journal_mode", "WAL")?;
+    // WAL mode is persistent — only set if not already active.
+    let current_mode: String = conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+    if current_mode != "wal" {
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+    }
+    // synchronous must be set per-connection
     conn.pragma_update(None, "synchronous", "NORMAL")?;
 
     let version = get_schema_version(&conn)?;
+
+    // Fast path: skip migration checks if already current
+    if version >= SCHEMA_VERSION {
+        return Ok(conn);
+    }
 
     if version < 1 {
         conn.execute_batch("BEGIN")?;
@@ -260,11 +269,26 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
     if version < 3 {
         conn.execute_batch("BEGIN")?;
         migrate_v3(&conn)?;
+        set_schema_version(&conn, 3)?;
+        conn.execute_batch("COMMIT")?;
+    }
+
+    if version < 4 {
+        conn.execute_batch("BEGIN")?;
+        migrate_v4(&conn)?;
         set_schema_version(&conn, SCHEMA_VERSION)?;
         conn.execute_batch("COMMIT")?;
     }
 
     Ok(conn)
+}
+
+/// Migration v4: composite index for pattern-based deletion and counting.
+fn migrate_v4(conn: &Connection) -> DbResult<()> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_entries_command_started ON entries(command, started_at);",
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -7,12 +7,14 @@ use super::{entry_from_row, FilterBuilder, Repository, ENTRY_COLUMNS, ENTRY_JOIN
 impl Repository {
     /// Insert a new entry
     pub fn insert_entry(&self, entry: &Entry) -> DbResult<i64> {
-        let context_json = entry.context.as_ref().map(|c| {
-            serde_json::to_string(c).unwrap_or_else(|e| {
-                eprintln!("suvadu: failed to serialize entry context: {e}");
-                String::new()
-            })
-        });
+        let context_json = entry
+            .context
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| {
+                crate::db::DbError::Validation(format!("failed to serialize entry context: {e}"))
+            })?;
 
         self.conn.execute(
             "INSERT INTO entries (session_id, command, cwd, exit_code, started_at, ended_at, duration_ms, context, tag_id, executor_type, executor)
@@ -86,7 +88,8 @@ impl Repository {
     }
 
     /// Get entries with optional filters (positional params wrapper for tests)
-    #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap, dead_code)]
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
     pub fn get_entries(
         &self,
         limit: usize,
@@ -176,7 +179,8 @@ impl Repository {
     }
 
     /// Get entries with unique command deduplication
-    #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap, dead_code)]
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
     pub fn get_unique_entries(
         &self,
         limit: usize,
@@ -208,6 +212,7 @@ impl Repository {
     }
 
     /// Get unique entries (positional params wrapper)
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
     pub fn get_unique_entries_field(
         &self,
@@ -338,7 +343,8 @@ impl Repository {
     }
 
     /// Count unique entries matching filters
-    #[allow(clippy::too_many_arguments, dead_code)]
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     pub fn count_unique_entries(
         &self,
         after: Option<i64>,
@@ -364,6 +370,7 @@ impl Repository {
     }
 
     /// Count unique entries (positional params wrapper)
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn count_unique_entries_field(
         &self,
@@ -413,18 +420,26 @@ impl Repository {
         before_timestamp: Option<i64>,
     ) -> DbResult<usize> {
         if is_regex {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT id, command, started_at FROM entries")?;
+            // Use WHERE clause to narrow candidates before regex filtering
+            let (sql, params) = before_timestamp.map_or_else(
+                || ("SELECT id, command FROM entries".to_string(), Vec::new()),
+                |ts| {
+                    (
+                        "SELECT id, command FROM entries WHERE started_at < ?".to_string(),
+                        vec![Box::new(ts) as Box<dyn rusqlite::ToSql>],
+                    )
+                },
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
             let regex = regex::Regex::new(pattern)
                 .map_err(|e| crate::db::DbError::Validation(e.to_string()))?;
 
+            let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(AsRef::as_ref).collect();
             let ids_to_delete: Vec<i64> = stmt
-                .query_map([], |row| {
+                .query_map(param_refs.as_slice(), |row| {
                     let id: i64 = row.get(0)?;
                     let cmd: String = row.get(1)?;
-                    let started_at: i64 = row.get(2)?;
-                    Ok((id, cmd, started_at))
+                    Ok((id, cmd))
                 })?
                 .filter_map(|r| match r {
                     Ok(v) => Some(v),
@@ -433,12 +448,8 @@ impl Repository {
                         None
                     }
                 })
-                .filter(|(_, cmd, started_at)| {
-                    let match_regex = regex.is_match(cmd);
-                    let match_date = before_timestamp.is_none_or(|ts| *started_at < ts);
-                    match_regex && match_date
-                })
-                .map(|(id, _, _)| id)
+                .filter(|(_, cmd)| regex.is_match(cmd))
+                .map(|(id, _)| id)
                 .collect();
 
             if ids_to_delete.is_empty() {
@@ -481,17 +492,25 @@ impl Repository {
         before_timestamp: Option<i64>,
     ) -> DbResult<usize> {
         if is_regex {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT command, started_at FROM entries")?;
+            // Use WHERE clause to narrow candidates before regex filtering
+            let (sql, params) = before_timestamp.map_or_else(
+                || ("SELECT command FROM entries".to_string(), Vec::new()),
+                |ts| {
+                    (
+                        "SELECT command FROM entries WHERE started_at < ?".to_string(),
+                        vec![Box::new(ts) as Box<dyn rusqlite::ToSql>],
+                    )
+                },
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
             let regex = regex::Regex::new(pattern)
                 .map_err(|e| crate::db::DbError::Validation(e.to_string()))?;
 
+            let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(AsRef::as_ref).collect();
             let count = stmt
-                .query_map([], |row| {
+                .query_map(param_refs.as_slice(), |row| {
                     let cmd: String = row.get(0)?;
-                    let started_at: i64 = row.get(1)?;
-                    Ok((cmd, started_at))
+                    Ok(cmd)
                 })?
                 .filter_map(|r| match r {
                     Ok(v) => Some(v),
@@ -500,11 +519,7 @@ impl Repository {
                         None
                     }
                 })
-                .filter(|(cmd, started_at)| {
-                    let match_regex = regex.is_match(cmd);
-                    let match_date = before_timestamp.is_none_or(|ts| *started_at < ts);
-                    match_regex && match_date
-                })
+                .filter(|cmd| regex.is_match(cmd))
                 .count();
             Ok(count)
         } else {
@@ -585,7 +600,8 @@ impl Repository {
     }
 
     /// Count entries matching filters
-    #[allow(clippy::too_many_arguments, dead_code)]
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     pub fn count_filtered_entries(
         &self,
         after: Option<i64>,
@@ -611,6 +627,7 @@ impl Repository {
     }
 
     /// Count entries matching filters (positional params wrapper)
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn count_filtered_entries_field(
         &self,

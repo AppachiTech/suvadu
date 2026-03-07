@@ -82,7 +82,7 @@ where
                 .iter()
                 .map(|s| {
                     let time = Local
-                        .timestamp_millis_opt(s.created_at)
+                        .timestamp_millis_opt(crate::util::normalize_display_ms(s.created_at))
                         .single()
                         .map_or_else(
                             || "????-??-?? ??:??".into(),

@@ -56,12 +56,16 @@ pub enum CompiledExclusion {
 }
 
 /// Compile exclusion patterns once for reuse across multiple `is_excluded` calls.
+/// Invalid regex patterns fall back to substring matching with a warning.
 pub fn compile_exclusions(patterns: &[String]) -> Vec<CompiledExclusion> {
     patterns
         .iter()
         .map(|p| {
             Regex::new(p).map_or_else(
-                |_| CompiledExclusion::Substring(p.clone()),
+                |e| {
+                    eprintln!("suvadu: invalid exclusion regex '{p}', using substring match: {e}");
+                    CompiledExclusion::Substring(p.clone())
+                },
                 CompiledExclusion::Regex,
             )
         })
@@ -130,6 +134,54 @@ impl Drop for TerminalGuard {
             crossterm::terminal::LeaveAlternateScreen
         );
         let _ = self.terminal.show_cursor();
+    }
+}
+
+/// RAII guard for stderr-based TUI (used by search, which needs stdout free for shell integration).
+/// Restores terminal on drop, including panic unwind.
+pub struct TerminalGuardStderr;
+
+impl TerminalGuardStderr {
+    /// Enter raw mode + alternate screen on stderr.
+    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        crossterm::terminal::enable_raw_mode()?;
+        crossterm::execute!(std::io::stderr(), crossterm::terminal::EnterAlternateScreen)?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalGuardStderr {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(std::io::stderr(), crossterm::terminal::LeaveAlternateScreen);
+    }
+}
+
+/// RAII guard for stdout-based TUI with mouse capture (used by session picker/timeline).
+/// Restores terminal + disables mouse capture on drop.
+pub struct TerminalGuardMouse;
+
+impl TerminalGuardMouse {
+    /// Enter raw mode + alternate screen + mouse capture on stdout.
+    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        crossterm::terminal::enable_raw_mode()?;
+        crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::EnterAlternateScreen,
+            crossterm::event::EnableMouseCapture
+        )?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalGuardMouse {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::LeaveAlternateScreen,
+            crossterm::event::DisableMouseCapture
+        );
     }
 }
 

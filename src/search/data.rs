@@ -165,7 +165,7 @@ impl SearchApp {
 
         if use_fuzzy {
             // Fuzzy path: fetch broad candidates from DB, then score + rank
-            const MAX_FUZZY_CANDIDATES: usize = 10_000;
+            const MAX_FUZZY_CANDIDATES: usize = 5_000;
             let qf = self.build_query_filter(None); // No SQL query — nucleo handles matching
 
             if self.unique_mode {

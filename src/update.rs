@@ -1,5 +1,3 @@
-use std::process;
-
 pub fn is_homebrew_install() -> bool {
     if let Ok(exe) = std::env::current_exe() {
         let path = exe.to_string_lossy();
@@ -34,8 +32,10 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
         "macos" => ("macos", "macOS"),
         "linux" => ("linux", "Linux"),
         os => {
-            eprintln!("Error: Unsupported platform '{os}'. Only macOS and Linux are supported.");
-            process::exit(1);
+            return Err(format!(
+                "Unsupported platform '{os}'. Only macOS and Linux are supported."
+            )
+            .into());
         }
     };
 
@@ -68,8 +68,7 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
         .status()?;
 
     if !status.success() {
-        eprintln!("Error: Failed to download update. Please check your internet connection.");
-        process::exit(1);
+        return Err("Failed to download update. Please check your internet connection.".into());
     }
 
     // 2. Download and verify checksum
@@ -101,24 +100,21 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
                 .to_string();
 
             if expected.is_empty() || actual.is_empty() || expected != actual {
-                eprintln!("Error: Checksum verification failed!");
-                eprintln!("  Expected: {expected}");
-                eprintln!("  Got:      {actual}");
-                eprintln!(
-                    "Aborting update for security. The download may be corrupted or tampered with."
-                );
-                process::exit(1);
+                return Err(format!(
+                    "Checksum verification failed!\n  Expected: {expected}\n  Got:      {actual}\n\
+                     Aborting update for security. The download may be corrupted or tampered with."
+                )
+                .into());
             }
             println!(
-                "✓ SHA256 checksum verified: {}",
+                "  SHA256 checksum verified: {}",
                 actual.get(..16).unwrap_or(&actual)
             );
         }
         _ => {
-            eprintln!(
-                "Error: Could not fetch checksum for verification. Aborting update for security."
+            return Err(
+                "Could not fetch checksum for verification. Aborting update for security.".into(),
             );
-            process::exit(1);
         }
     }
 
@@ -134,23 +130,20 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
         .status()?;
 
     if !status.success() {
-        eprintln!("Error: Failed to extract update archive.");
-        process::exit(1);
+        return Err("Failed to extract update archive.".into());
     }
 
     // Validate extracted binary is within temp dir (defense against tar path traversal)
     if !binary_path.exists() {
-        eprintln!("Error: Expected binary not found after extraction.");
-        process::exit(1);
+        return Err("Expected binary not found after extraction.".into());
     }
     let canonical_binary = binary_path.canonicalize()?;
     let canonical_dir = update_dir.path().canonicalize()?;
     if !canonical_binary.starts_with(&canonical_dir) {
-        eprintln!("Error: Extracted binary is outside temp directory. Aborting for security.");
-        process::exit(1);
+        return Err("Extracted binary is outside temp directory. Aborting for security.".into());
     }
 
-    println!("✓ Download complete");
+    println!("  Download complete");
     println!();
 
     // Determine install path from current executable location
@@ -188,15 +181,13 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
     // TempDir auto-cleans on drop
 
     if status_bin.success() && status_link.success() {
-        println!("✓ Update successful!");
+        println!("  Update successful!");
         println!();
         println!("Run 'suv version' to verify the new version.");
+        Ok(())
     } else {
-        eprintln!("Error: Failed to install update.");
-        process::exit(1);
+        Err("Failed to install update.".into())
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
