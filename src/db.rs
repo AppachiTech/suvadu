@@ -28,6 +28,14 @@ pub fn get_db_path() -> DbResult<PathBuf> {
     if !data_dir.exists() {
         std::fs::create_dir_all(data_dir)?;
     }
+
+    // Restrict directory permissions to owner-only on Unix (0o700)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+
     Ok(data_dir.join("history.db"))
 }
 
@@ -232,8 +240,18 @@ fn migrate_v3(conn: &Connection) -> DbResult<()> {
 pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
     let mut conn = Connection::open(path)?;
 
+    // Restrict database file permissions to owner-only on Unix (0o600)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
     // Retry on SQLITE_BUSY for up to 5 seconds (concurrent shell sessions)
     conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+
+    // Enforce foreign key constraints (off by default in SQLite, must be set per-connection)
+    conn.pragma_update(None, "foreign_keys", "ON")?;
 
     // Register a REGEXP function so `WHERE command REGEXP ?` works in SQL.
     // This avoids loading all rows into memory for regex-based delete/count.
@@ -501,6 +519,43 @@ mod tests {
         let conn = init_db(&db_path).unwrap();
 
         assert!(!column_exists(&conn, "entries", "evil_column"));
+    }
+
+    #[test]
+    fn test_foreign_keys_enforced() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let conn = init_db(&db_path).unwrap();
+
+        // Verify PRAGMA foreign_keys is ON
+        let fk_enabled: bool = conn
+            .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+            .unwrap();
+        assert!(fk_enabled, "foreign_keys pragma should be ON");
+
+        // Inserting an entry referencing a non-existent session should fail
+        let result = conn.execute(
+            "INSERT INTO entries (session_id, command, cwd, exit_code, started_at, ended_at, duration_ms)
+             VALUES ('nonexistent', 'ls', '/tmp', 0, 1000, 1100, 100)",
+            [],
+        );
+        assert!(result.is_err(), "FK violation should be rejected");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_db_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let _conn = init_db(&db_path).unwrap();
+
+        let mode = std::fs::metadata(&db_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "DB file should be owner-only (0o600), got {mode:o}"
+        );
     }
 
     #[test]
