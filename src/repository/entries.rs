@@ -1,5 +1,5 @@
 use crate::db::DbResult;
-use crate::models::Entry;
+use crate::models::{Entry, SessionSummary};
 use rusqlite::params;
 
 use super::{entry_from_row, FilterBuilder, Repository, ENTRY_COLUMNS, ENTRY_JOINS};
@@ -618,6 +618,86 @@ impl Repository {
             [],
         )?;
         Ok(count)
+    }
+
+    /// List recent sessions with summary stats (only sessions that have entries).
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn list_sessions(
+        &self,
+        after: Option<i64>,
+        tag_id: Option<i64>,
+        limit: usize,
+    ) -> DbResult<Vec<SessionSummary>> {
+        let mut conditions = Vec::new();
+        let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(ts) = after {
+            conditions.push("s.created_at >= ?".to_string());
+            param_values.push(Box::new(ts));
+        }
+        if let Some(tid) = tag_id {
+            conditions.push("s.tag_id = ?".to_string());
+            param_values.push(Box::new(tid));
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", conditions.join(" AND "))
+        };
+
+        let sql = format!(
+            "SELECT s.id, s.hostname, s.created_at, COALESCE(t.name, '') as tag_name,
+                    COUNT(e.id) as cmd_count,
+                    SUM(CASE WHEN e.exit_code = 0 THEN 1 ELSE 0 END) as success_count,
+                    MIN(e.started_at) as first_cmd, MAX(e.ended_at) as last_cmd
+             FROM sessions s
+             LEFT JOIN entries e ON e.session_id = s.id
+             LEFT JOIN tags t ON s.tag_id = t.id
+             {where_clause}
+             GROUP BY s.id
+             HAVING cmd_count > 0
+             ORDER BY s.created_at DESC
+             LIMIT ?"
+        );
+        param_values.push(Box::new(limit as i64));
+
+        let param_refs: Vec<&dyn rusqlite::ToSql> =
+            param_values.iter().map(AsRef::as_ref).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            let tag: String = row.get(3)?;
+            Ok(SessionSummary {
+                id: row.get(0)?,
+                hostname: row.get(1)?,
+                created_at: row.get(2)?,
+                tag_name: if tag.is_empty() { None } else { Some(tag) },
+                cmd_count: row.get(4)?,
+                success_count: row.get(5)?,
+                first_cmd_at: row.get(6)?,
+                last_cmd_at: row.get(7)?,
+            })
+        })?;
+
+        let mut sessions = Vec::new();
+        for row in rows {
+            sessions.push(row?);
+        }
+        Ok(sessions)
+    }
+
+    /// Find sessions matching a prefix. Returns matching session IDs.
+    pub fn find_sessions_by_prefix(&self, prefix: &str) -> DbResult<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM sessions WHERE id LIKE ?1 ORDER BY created_at DESC LIMIT 10",
+        )?;
+        let pattern = format!("{prefix}%");
+        let rows = stmt.query_map(params![pattern], |row| row.get::<_, String>(0))?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row?);
+        }
+        Ok(ids)
     }
 
     /// Run VACUUM to reclaim disk space.

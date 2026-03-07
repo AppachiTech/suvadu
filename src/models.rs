@@ -97,6 +97,18 @@ pub struct Alias {
     pub created_at: i64,
 }
 
+/// Summary of a session with aggregated stats (for session picker)
+pub struct SessionSummary {
+    pub id: String,
+    pub hostname: String,
+    pub created_at: i64,
+    pub tag_name: Option<String>,
+    pub cmd_count: i64,
+    pub success_count: i64,
+    pub first_cmd_at: i64,
+    pub last_cmd_at: i64,
+}
+
 /// Aggregated usage statistics
 #[derive(Debug, Clone)]
 pub struct Stats {

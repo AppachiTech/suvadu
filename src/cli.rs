@@ -233,6 +233,27 @@ pub enum Commands {
     )]
     Alias(AliasCommands),
 
+    /// Interactive session timeline view
+    #[command(
+        after_help = "Examples:\n  suv session                    # Pick from recent sessions\n  suv session abc123             # Open session by ID prefix\n  suv session --list             # List sessions without opening\n  suv session --after 2025-01-01 # Sessions after date\n  suv session --tag work         # Sessions with tag"
+    )]
+    Session {
+        /// Session ID or prefix (omit for interactive picker)
+        session_id: Option<String>,
+        /// List sessions and exit (no TUI)
+        #[arg(long)]
+        list: bool,
+        /// Only show sessions after this date
+        #[arg(long)]
+        after: Option<String>,
+        /// Filter by tag name
+        #[arg(long)]
+        tag: Option<String>,
+        /// Max sessions to show (default: 50)
+        #[arg(short = 'n', long, default_value_t = 50)]
+        limit: usize,
+    },
+
     /// Uninstall Suvadu (remove binaries from system)
     Uninstall,
 

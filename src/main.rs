@@ -14,6 +14,7 @@ mod models;
 mod repository;
 mod risk;
 mod search;
+mod session_ui;
 mod settings_ui;
 mod stats_ui;
 mod suggest;
@@ -245,6 +246,20 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             executor.as_deref(),
             here,
             cwd.as_deref(),
+        ),
+
+        Commands::Session {
+            session_id,
+            list,
+            after,
+            tag,
+            limit,
+        } => commands::session::handle_session(
+            session_id.as_deref(),
+            list,
+            after.as_deref(),
+            tag.as_deref(),
+            limit,
         ),
 
         Commands::Agent(cmd) => agent::handle_agent(cmd),
