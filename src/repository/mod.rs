@@ -88,6 +88,8 @@ pub struct ReplayFilter<'a> {
     pub exit_code: Option<i32>,
     pub executor: Option<&'a str>,
     pub cwd: Option<&'a str>,
+    /// Maximum number of entries to return (None = unlimited).
+    pub limit: Option<usize>,
 }
 
 /// Escape SQL LIKE wildcards (`%`, `_`) and the escape character (`\`) in user input.

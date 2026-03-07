@@ -17,12 +17,17 @@ fn atomic_write(path: &Path, data: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Maximum bytes to read from stdin for hook input (1 MB).
+const MAX_HOOK_INPUT_BYTES: u64 = 1_048_576;
+
 /// Handle `PostToolUse` hook from Claude Code — reads JSON event from stdin and records the command.
 pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Read;
 
     let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input)?;
+    std::io::stdin()
+        .take(MAX_HOOK_INPUT_BYTES)
+        .read_to_string(&mut input)?;
 
     let event: serde_json::Value = serde_json::from_str(&input)?;
 
@@ -99,7 +104,9 @@ pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Read;
 
     let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input)?;
+    std::io::stdin()
+        .take(MAX_HOOK_INPUT_BYTES)
+        .read_to_string(&mut input)?;
 
     let event: serde_json::Value = serde_json::from_str(&input)?;
 
@@ -125,7 +132,14 @@ pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
     let prompt_file = prompts_dir.join(format!("claude-{session_id}.prompt"));
     // Truncate to 500 chars to keep cache lightweight
     let truncated = crate::util::truncate_str(prompt, 500, "...");
-    std::fs::write(prompt_file, truncated)?;
+    std::fs::write(&prompt_file, truncated)?;
+
+    // Restrict prompt cache file to owner-only (contains user prompts)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&prompt_file, std::fs::Permissions::from_mode(0o600));
+    }
 
     Ok(())
 }

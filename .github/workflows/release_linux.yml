@@ -32,6 +32,10 @@ jobs:
         if: matrix.use_cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
+      - name: Run Tests
+        if: ${{ !matrix.use_cross }}
+        run: cargo test
+
       - name: Build Binary (Release)
         run: |
           if [ "${{ matrix.use_cross }}" = "true" ]; then

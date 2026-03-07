@@ -81,8 +81,8 @@ pub fn handle_add_with_context(params: AddParams) -> Result<(), Box<dyn std::err
         return Ok(());
     }
 
-    // Load config (filesystem read + TOML parse)
-    let config = config::load_config()?;
+    // Load config (cached; re-reads only when file mtime changes)
+    let config = config::load_config_cached()?;
     if !config.enabled {
         return Ok(());
     }
@@ -363,13 +363,8 @@ fn clean_prompt_caches() -> u64 {
 }
 
 fn get_prompts_dir() -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(
-        std::path::PathBuf::from(home)
-            .join(".config")
-            .join("suvadu")
-            .join("prompts"),
-    )
+    let dirs = crate::util::project_dirs()?;
+    Some(dirs.data_dir().join("prompts"))
 }
 
 fn count_old_files(dir: &std::path::Path, max_age_secs: u64) -> u64 {

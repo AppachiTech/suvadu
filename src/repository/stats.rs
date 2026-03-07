@@ -63,37 +63,9 @@ impl StatsFilter {
         }
         Ok(idx)
     }
-
-    /// Append an extra condition, choosing AND or WHERE as needed.
-    fn where_with_extra(&self, extra: &str) -> String {
-        format!(
-            "{}{}",
-            self.where_clause,
-            if self.where_clause.is_empty() {
-                format!(" WHERE {extra}")
-            } else {
-                format!(" AND {extra}")
-            }
-        )
-    }
 }
 
 impl Repository {
-    /// Execute a scalar aggregate query using the given filter and return a
-    /// single `i64` value.
-    fn query_scalar(&self, sql: &str, filter: &StatsFilter) -> DbResult<i64> {
-        let mut stmt = self.conn.prepare(sql)?;
-        filter.bind(&mut stmt)?;
-        let val = stmt
-            .raw_query()
-            .next()?
-            .ok_or(crate::db::DbError::Validation(
-                "Expected row from aggregate query".into(),
-            ))?
-            .get(0)?;
-        Ok(val)
-    }
-
     /// Execute a grouped query that returns `(String, i64)` pairs.
     /// The filter parameters are bound first, then `top_n` is bound as a LIMIT.
     fn query_grouped(
@@ -144,47 +116,34 @@ impl Repository {
     ) -> DbResult<Stats> {
         let f = StatsFilter::new(days, tag_id);
 
-        let total_commands = self.query_scalar(
-            &format!(
-                "SELECT COUNT(*) FROM entries e{}{}",
-                f.join_clause, f.where_clause
-            ),
-            &f,
-        )?;
-
-        let unique_commands = self.query_scalar(
-            &format!(
-                "SELECT COUNT(DISTINCT command) FROM entries e{}{}",
-                f.join_clause, f.where_clause
-            ),
-            &f,
-        )?;
-
-        let success_count = self.query_scalar(
-            &format!(
-                "SELECT COUNT(*) FROM entries e{}{}",
-                f.join_clause,
-                f.where_with_extra("e.exit_code = 0")
-            ),
-            &f,
-        )?;
-
-        let failure_count = self.query_scalar(
-            &format!(
-                "SELECT COUNT(*) FROM entries e{}{}",
-                f.join_clause,
-                f.where_with_extra("exit_code IS NOT NULL AND exit_code != 0")
-            ),
-            &f,
-        )?;
-
-        let avg_duration_ms = self.query_scalar(
-            &format!(
-                "SELECT COALESCE(CAST(AVG(duration_ms) AS INTEGER), 0) FROM entries e{}{}",
-                f.join_clause, f.where_clause
-            ),
-            &f,
-        )?;
+        // Combined aggregate: single table scan instead of 5 separate queries
+        let agg_sql = format!(
+            "SELECT COUNT(*), \
+                    COUNT(DISTINCT e.command), \
+                    COALESCE(SUM(CASE WHEN e.exit_code = 0 THEN 1 ELSE 0 END), 0), \
+                    COALESCE(SUM(CASE WHEN e.exit_code IS NOT NULL AND e.exit_code != 0 THEN 1 ELSE 0 END), 0), \
+                    COALESCE(CAST(AVG(e.duration_ms) AS INTEGER), 0) \
+             FROM entries e{}{}",
+            f.join_clause, f.where_clause
+        );
+        let mut agg_stmt = self.conn.prepare(&agg_sql)?;
+        f.bind(&mut agg_stmt)?;
+        let (total_commands, unique_commands, success_count, failure_count, avg_duration_ms) =
+            agg_stmt
+                .raw_query()
+                .next()?
+                .ok_or(crate::db::DbError::Validation(
+                    "Expected row from aggregate query".into(),
+                ))
+                .map(|row| -> rusqlite::Result<(i64, i64, i64, i64, i64)> {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })??;
 
         let top_commands = self.query_grouped(
             &format!(

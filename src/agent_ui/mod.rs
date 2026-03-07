@@ -57,6 +57,9 @@ impl Period {
 
 // ── Helpers ──────────────────────────────────────────────────
 
+/// Maximum entries to load into memory for agent UI views.
+const MAX_AGENT_ENTRIES: usize = 10_000;
+
 pub fn load_entries(
     repo: &Repository,
     after_ms: Option<i64>,
@@ -70,6 +73,7 @@ pub fn load_entries(
                 after: after_ms,
                 executor,
                 cwd,
+                limit: Some(MAX_AGENT_ENTRIES),
                 ..Default::default()
             },
         )

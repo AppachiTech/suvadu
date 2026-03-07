@@ -54,6 +54,7 @@ pub fn handle_replay(p: &ReplayParams) -> Result<(), Box<dyn std::error::Error>>
             exit_code: p.exit_code,
             executor: p.executor,
             cwd: cwd_filter.as_deref(),
+            ..Default::default()
         },
     )?;
 

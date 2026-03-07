@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::SystemTime;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -218,6 +220,49 @@ pub fn load_config() -> ConfigResult<Config> {
     Ok(config)
 }
 
+/// Cached config with mtime for invalidation.
+struct CachedConfig {
+    config: Config,
+    mtime: Option<SystemTime>,
+}
+
+static CONFIG_CACHE: Mutex<Option<CachedConfig>> = Mutex::new(None);
+
+/// Load configuration with caching. Re-reads from disk only when the file's
+/// modification time changes. Optimized for the hot path (called per shell command).
+pub fn load_config_cached() -> ConfigResult<Config> {
+    let path = get_config_path()?;
+    let current_mtime = std::fs::metadata(&path)
+        .ok()
+        .and_then(|m| m.modified().ok());
+
+    if let Ok(guard) = CONFIG_CACHE.lock() {
+        if let Some(cached) = guard.as_ref() {
+            if cached.mtime == current_mtime {
+                return Ok(cached.config.clone());
+            }
+        }
+    }
+
+    let config = load_config()?;
+
+    if let Ok(mut guard) = CONFIG_CACHE.lock() {
+        *guard = Some(CachedConfig {
+            config: config.clone(),
+            mtime: current_mtime,
+        });
+    }
+
+    Ok(config)
+}
+
+/// Invalidate the config cache (called after `save_config`).
+fn invalidate_cache() {
+    if let Ok(mut guard) = CONFIG_CACHE.lock() {
+        *guard = None;
+    }
+}
+
 /// Validate config values after loading.
 fn validate_config(config: &Config) -> ConfigResult<()> {
     if config.search.page_limit == 0 {
@@ -250,6 +295,7 @@ pub fn save_config(config: &Config) -> ConfigResult<()> {
     let tmp = tempfile::NamedTempFile::new_in(dir)?;
     std::fs::write(tmp.path(), contents)?;
     tmp.persist(&path).map_err(std::io::Error::from)?;
+    invalidate_cache();
     Ok(())
 }
 

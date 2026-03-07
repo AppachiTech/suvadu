@@ -159,8 +159,13 @@ impl Repository {
             .with_executor(filter.executor)
             .with_cwd(filter.cwd);
 
+        let limit_clause = filter
+            .limit
+            .map(|n| format!(" LIMIT {n}"))
+            .unwrap_or_default();
+
         let sql = format!(
-            "SELECT {ENTRY_COLUMNS} {ENTRY_JOINS}{} ORDER BY e.started_at ASC",
+            "SELECT {ENTRY_COLUMNS} {ENTRY_JOINS}{} ORDER BY e.started_at ASC{limit_clause}",
             fb.build_where()
         );
 
