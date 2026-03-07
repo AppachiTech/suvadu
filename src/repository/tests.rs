@@ -869,7 +869,7 @@ fn test_executor_filter_in_count() {
 #[test]
 fn test_stats_empty_db() {
     let (_temp, repo) = setup_test_db();
-    let stats = repo.get_stats(None, 10).unwrap();
+    let stats = repo.get_stats(None, 10, None).unwrap();
     assert_eq!(stats.total_commands, 0);
     assert_eq!(stats.unique_commands, 0);
     assert_eq!(stats.success_count, 0);
@@ -921,7 +921,7 @@ fn test_stats_with_entries() {
     entry.executor_type = Some("agent".to_string());
     repo.insert_entry(&entry).unwrap();
 
-    let stats = repo.get_stats(None, 10).unwrap();
+    let stats = repo.get_stats(None, 10, None).unwrap();
     assert_eq!(stats.total_commands, 5);
     assert_eq!(stats.unique_commands, 2);
     assert_eq!(stats.success_count, 4);
@@ -976,11 +976,11 @@ fn test_stats_with_days_filter() {
     repo.insert_entry(&entry).unwrap();
 
     // All time: 2 commands
-    let stats = repo.get_stats(None, 10).unwrap();
+    let stats = repo.get_stats(None, 10, None).unwrap();
     assert_eq!(stats.total_commands, 2);
 
     // Last 7 days: only 1 command
-    let stats = repo.get_stats(Some(7), 10).unwrap();
+    let stats = repo.get_stats(Some(7), 10, None).unwrap();
     assert_eq!(stats.total_commands, 1);
     assert_eq!(stats.top_commands[0].0, "recent");
 }

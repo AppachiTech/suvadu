@@ -4,29 +4,60 @@ use crate::models::Stats;
 use super::Repository;
 
 impl Repository {
-    /// Get aggregated usage statistics
+    /// Get aggregated usage statistics, optionally filtered by tag.
     #[allow(clippy::too_many_lines)]
-    pub fn get_stats(&self, days: Option<usize>, top_n: usize) -> DbResult<Stats> {
+    pub fn get_stats(
+        &self,
+        days: Option<usize>,
+        top_n: usize,
+        tag_id: Option<i64>,
+    ) -> DbResult<Stats> {
         let time_filter = days.map(|d| {
             let now = chrono::Utc::now().timestamp_millis();
             now - i64::try_from(d)
                 .unwrap_or(i64::MAX)
                 .saturating_mul(86_400_000)
         });
-        let where_clause = match time_filter {
-            Some(_) => " WHERE e.started_at >= ?1",
-            None => "",
+
+        // Build reusable SQL fragments
+        let join_clause = if tag_id.is_some() {
+            " JOIN sessions s ON e.session_id = s.id"
+        } else {
+            ""
         };
-        let bind = |stmt: &mut rusqlite::Statement| -> rusqlite::Result<()> {
+
+        let mut conditions: Vec<&str> = Vec::new();
+        if time_filter.is_some() {
+            conditions.push("e.started_at >= ?");
+        }
+        if tag_id.is_some() {
+            conditions.push("(s.tag_id = ? OR e.tag_id = ?)");
+        }
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", conditions.join(" AND "))
+        };
+
+        // Bind base filter params (time, then tag_id twice)
+        let bind = |stmt: &mut rusqlite::Statement| -> rusqlite::Result<usize> {
+            let mut idx: usize = 1;
             if let Some(ts) = time_filter {
-                stmt.raw_bind_parameter(1, ts)?;
+                stmt.raw_bind_parameter(idx, ts)?;
+                idx += 1;
             }
-            Ok(())
+            if let Some(tid) = tag_id {
+                stmt.raw_bind_parameter(idx, tid)?;
+                idx += 1;
+                stmt.raw_bind_parameter(idx, tid)?;
+                idx += 1;
+            }
+            Ok(idx)
         };
 
         // Total commands
         let total_commands: i64 = {
-            let sql = format!("SELECT COUNT(*) FROM entries e{where_clause}");
+            let sql = format!("SELECT COUNT(*) FROM entries e{join_clause}{where_clause}");
             let mut stmt = self.conn.prepare(&sql)?;
             bind(&mut stmt)?;
             let val = stmt
@@ -41,7 +72,8 @@ impl Repository {
 
         // Unique commands
         let unique_commands: i64 = {
-            let sql = format!("SELECT COUNT(DISTINCT command) FROM entries e{where_clause}");
+            let sql =
+                format!("SELECT COUNT(DISTINCT command) FROM entries e{join_clause}{where_clause}");
             let mut stmt = self.conn.prepare(&sql)?;
             bind(&mut stmt)?;
             let val = stmt
@@ -56,12 +88,14 @@ impl Repository {
 
         // Success / failure
         let success_count: i64 = {
-            let extra = if where_clause.is_empty() {
-                " WHERE e.exit_code = 0"
-            } else {
-                " AND e.exit_code = 0"
-            };
-            let sql = format!("SELECT COUNT(*) FROM entries e{where_clause}{extra}");
+            let sql = format!(
+                "SELECT COUNT(*) FROM entries e{join_clause}{where_clause}{} e.exit_code = 0",
+                if where_clause.is_empty() {
+                    " WHERE"
+                } else {
+                    " AND"
+                }
+            );
             let mut stmt = self.conn.prepare(&sql)?;
             bind(&mut stmt)?;
             let val = stmt
@@ -77,8 +111,9 @@ impl Repository {
 
         // Average duration
         let avg_duration_ms: i64 = {
-            let sql =
-                format!("SELECT COALESCE(CAST(AVG(duration_ms) AS INTEGER), 0) FROM entries e{where_clause}");
+            let sql = format!(
+                "SELECT COALESCE(CAST(AVG(duration_ms) AS INTEGER), 0) FROM entries e{join_clause}{where_clause}"
+            );
             let mut stmt = self.conn.prepare(&sql)?;
             bind(&mut stmt)?;
             let val = stmt
@@ -94,13 +129,12 @@ impl Repository {
         // Top commands
         let top_commands: Vec<(String, i64)> = {
             let sql = format!(
-                "SELECT command, COUNT(*) as cnt FROM entries e{where_clause} GROUP BY command ORDER BY cnt DESC LIMIT ?{}",
-                if time_filter.is_some() { "2" } else { "1" }
+                "SELECT command, COUNT(*) as cnt FROM entries e{join_clause}{where_clause} \
+                 GROUP BY command ORDER BY cnt DESC LIMIT ?"
             );
             let mut stmt = self.conn.prepare(&sql)?;
-            bind(&mut stmt)?;
-            let param_idx = if time_filter.is_some() { 2 } else { 1 };
-            stmt.raw_bind_parameter(param_idx, i64::try_from(top_n).unwrap_or(i64::MAX))?;
+            let next_idx = bind(&mut stmt)?;
+            stmt.raw_bind_parameter(next_idx, i64::try_from(top_n).unwrap_or(i64::MAX))?;
             let mut rows = stmt.raw_query();
             let mut results = Vec::new();
             while let Some(row) = rows.next()? {
@@ -112,13 +146,12 @@ impl Repository {
         // Top directories
         let top_directories: Vec<(String, i64)> = {
             let sql = format!(
-                "SELECT cwd, COUNT(*) as cnt FROM entries e{where_clause} GROUP BY cwd ORDER BY cnt DESC LIMIT ?{}",
-                if time_filter.is_some() { "2" } else { "1" }
+                "SELECT cwd, COUNT(*) as cnt FROM entries e{join_clause}{where_clause} \
+                 GROUP BY cwd ORDER BY cnt DESC LIMIT ?"
             );
             let mut stmt = self.conn.prepare(&sql)?;
-            bind(&mut stmt)?;
-            let param_idx = if time_filter.is_some() { 2 } else { 1 };
-            stmt.raw_bind_parameter(param_idx, i64::try_from(top_n).unwrap_or(i64::MAX))?;
+            let next_idx = bind(&mut stmt)?;
+            stmt.raw_bind_parameter(next_idx, i64::try_from(top_n).unwrap_or(i64::MAX))?;
             let mut rows = stmt.raw_query();
             let mut results = Vec::new();
             while let Some(row) = rows.next()? {
@@ -131,7 +164,7 @@ impl Repository {
         let hourly_distribution: Vec<(u32, i64)> = {
             let sql = format!(
                 "SELECT CAST(strftime('%H', datetime(e.started_at/1000, 'unixepoch', 'localtime')) AS INTEGER) as hour, \
-                 COUNT(*) as cnt FROM entries e{where_clause} GROUP BY hour ORDER BY hour"
+                 COUNT(*) as cnt FROM entries e{join_clause}{where_clause} GROUP BY hour ORDER BY hour"
             );
             let mut stmt = self.conn.prepare(&sql)?;
             bind(&mut stmt)?;
@@ -150,7 +183,7 @@ impl Repository {
         let executor_breakdown: Vec<(String, i64)> = {
             let sql = format!(
                 "SELECT COALESCE(e.executor_type, 'human') as exec_type, COUNT(*) as cnt \
-                 FROM entries e{where_clause} GROUP BY exec_type ORDER BY cnt DESC"
+                 FROM entries e{join_clause}{where_clause} GROUP BY exec_type ORDER BY cnt DESC"
             );
             let mut stmt = self.conn.prepare(&sql)?;
             bind(&mut stmt)?;
@@ -178,22 +211,44 @@ impl Repository {
 
     /// Get daily command counts for the heatmap and trend chart.
     /// Returns `(date_string, day_of_week 0=Sun..6=Sat, count)`.
-    pub fn get_daily_activity(&self, days: usize) -> DbResult<Vec<(String, u32, i64)>> {
+    pub fn get_daily_activity(
+        &self,
+        days: usize,
+        tag_id: Option<i64>,
+    ) -> DbResult<Vec<(String, u32, i64)>> {
         let now = chrono::Utc::now().timestamp_millis();
         let since = now
             - i64::try_from(days)
                 .unwrap_or(i64::MAX)
                 .saturating_mul(86_400_000);
-        let sql = "SELECT \
+
+        let join_clause = if tag_id.is_some() {
+            " JOIN sessions s ON e.session_id = s.id"
+        } else {
+            ""
+        };
+        let tag_filter = if tag_id.is_some() {
+            " AND (s.tag_id = ?2 OR e.tag_id = ?2)"
+        } else {
+            ""
+        };
+
+        let sql = format!(
+            "SELECT \
                 date(e.started_at/1000, 'unixepoch', 'localtime') as day, \
                 CAST(strftime('%w', datetime(e.started_at/1000, 'unixepoch', 'localtime')) AS INTEGER) as dow, \
                 COUNT(*) as cnt \
-            FROM entries e \
-            WHERE e.started_at >= ?1 \
+            FROM entries e{join_clause} \
+            WHERE e.started_at >= ?1{tag_filter} \
             GROUP BY day \
-            ORDER BY day ASC";
-        let mut stmt = self.conn.prepare(sql)?;
-        let mut rows = stmt.query(rusqlite::params![since])?;
+            ORDER BY day ASC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        stmt.raw_bind_parameter(1, since)?;
+        if let Some(tid) = tag_id {
+            stmt.raw_bind_parameter(2, tid)?;
+        }
+        let mut rows = stmt.raw_query();
         let mut results = Vec::new();
         while let Some(row) = rows.next()? {
             let day: String = row.get(0)?;

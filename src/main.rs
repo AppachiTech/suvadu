@@ -220,11 +220,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         },
 
-        Commands::Stats { days, top, text } => {
+        Commands::Stats {
+            days,
+            top,
+            text,
+            tag,
+        } => {
             if text {
-                commands::stats::handle_stats_text(days, top)
+                commands::stats::handle_stats_text(days, top, tag.as_deref())
             } else {
-                commands::stats::handle_stats_tui(days, top)
+                commands::stats::handle_stats_tui(days, top, tag.as_deref())
             }
         }
 

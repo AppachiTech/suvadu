@@ -100,12 +100,20 @@ struct StatsApp {
     program_groups: Vec<(String, i64)>,
     show_executor: bool,
     top_n: usize,
+    tag_id: Option<i64>,
+    tag_name: Option<String>,
 }
 
 impl StatsApp {
-    fn new(repo: &Repository, period: Period, top_n: usize) -> Self {
+    fn new(
+        repo: &Repository,
+        period: Period,
+        top_n: usize,
+        tag_id: Option<i64>,
+        tag_name: Option<String>,
+    ) -> Self {
         let stats = repo
-            .get_stats(period.days(), top_n)
+            .get_stats(period.days(), top_n, tag_id)
             .unwrap_or_else(|_| Stats {
                 total_commands: 0,
                 unique_commands: 0,
@@ -120,7 +128,7 @@ impl StatsApp {
             });
 
         let daily_activity = repo
-            .get_daily_activity(period.heatmap_days())
+            .get_daily_activity(period.heatmap_days(), tag_id)
             .unwrap_or_default();
 
         let program_groups = compute_program_groups(&stats.top_commands);
@@ -136,6 +144,8 @@ impl StatsApp {
             program_groups,
             show_executor: false,
             top_n,
+            tag_id,
+            tag_name,
         };
 
         if !app.stats.top_commands.is_empty() {
@@ -152,10 +162,10 @@ impl StatsApp {
     }
 
     fn reload(&mut self, repo: &Repository) {
-        if let Ok(s) = repo.get_stats(self.period.days(), self.top_n) {
+        if let Ok(s) = repo.get_stats(self.period.days(), self.top_n, self.tag_id) {
             self.stats = s;
         }
-        if let Ok(d) = repo.get_daily_activity(self.period.heatmap_days()) {
+        if let Ok(d) = repo.get_daily_activity(self.period.heatmap_days(), self.tag_id) {
             self.daily_activity = d;
         }
         self.program_groups = compute_program_groups(&self.stats.top_commands);
@@ -312,10 +322,20 @@ impl StatsApp {
     fn render_header(&self, f: &mut ratatui::Frame, area: Rect) {
         let t = theme();
 
-        let title = Span::styled(
+        let mut title_spans: Vec<Span> = vec![Span::styled(
             " Suvadu Stats ",
             Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
-        );
+        )];
+
+        if let Some(ref tag) = self.tag_name {
+            title_spans.push(Span::styled(
+                format!(" tag:{tag} "),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(t.warning)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
 
         let periods = [
             Period::Days7,
@@ -342,12 +362,14 @@ impl StatsApp {
             period_spans.push(Span::raw(" "));
         }
 
+        let title_width: usize = title_spans.iter().map(Span::width).sum();
         let period_width: usize = period_spans.iter().map(Span::width).sum();
         let padding = area
             .width
-            .saturating_sub(title.width() as u16 + period_width as u16);
+            .saturating_sub(title_width as u16 + period_width as u16);
 
-        let mut spans = vec![title, Span::raw(" ".repeat(padding as usize))];
+        let mut spans = title_spans;
+        spans.push(Span::raw(" ".repeat(padding as usize)));
         spans.extend(period_spans);
 
         f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -883,6 +905,8 @@ pub fn run_stats_ui<B: Backend>(
     repo: &Repository,
     initial_days: Option<usize>,
     top_n: usize,
+    tag_id: Option<i64>,
+    tag_name: Option<&str>,
 ) -> io::Result<()>
 where
     io::Error: From<B::Error>,
@@ -894,7 +918,7 @@ where
         _ => Period::AllTime,
     };
 
-    let mut app = StatsApp::new(repo, period, top_n);
+    let mut app = StatsApp::new(repo, period, top_n, tag_id, tag_name.map(String::from));
 
     loop {
         terminal.draw(|f| app.render(f))?;

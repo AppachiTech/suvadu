@@ -128,7 +128,7 @@ pub enum Commands {
 
     /// Show usage analytics and trends
     #[command(
-        after_help = "Examples:\n  suv stats\n  suv stats --days 30\n  suv stats --days 7 -n 5"
+        after_help = "Examples:\n  suv stats\n  suv stats --days 30\n  suv stats --days 7 -n 5\n  suv stats --tag work"
     )]
     Stats {
         /// Number of days to analyze (default: all time)
@@ -140,6 +140,9 @@ pub enum Commands {
         /// Output plain text instead of interactive TUI
         #[arg(long)]
         text: bool,
+        /// Filter by tag name
+        #[arg(long)]
+        tag: Option<String>,
     },
 
     /// Replay commands chronologically (session timeline or time range)
@@ -592,10 +595,27 @@ mod tests {
     fn test_cli_parses_stats_defaults() {
         let cli = Cli::try_parse_from(["suv", "stats"]).unwrap();
         match cli.command {
-            Commands::Stats { days, top, text } => {
+            Commands::Stats {
+                days,
+                top,
+                text,
+                tag,
+            } => {
                 assert!(days.is_none());
                 assert_eq!(top, 10);
                 assert!(!text);
+                assert!(tag.is_none());
+            }
+            _ => panic!("Expected Stats command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_stats_with_tag() {
+        let cli = Cli::try_parse_from(["suv", "stats", "--tag", "work"]).unwrap();
+        match cli.command {
+            Commands::Stats { tag, .. } => {
+                assert_eq!(tag, Some("work".to_string()));
             }
             _ => panic!("Expected Stats command"),
         }

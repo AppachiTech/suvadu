@@ -4,8 +4,14 @@ use crate::util::{
     dirs_home, format_count, format_duration_ms, shorten_path, truncate_str, truncate_str_start,
 };
 
-pub fn handle_stats_tui(days: Option<usize>, top: usize) -> Result<(), Box<dyn std::error::Error>> {
+pub fn handle_stats_tui(
+    days: Option<usize>,
+    top: usize,
+    tag: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let repo = repository::Repository::init()?;
+
+    let tag_id = resolve_tag(&repo, tag)?;
 
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -13,7 +19,7 @@ pub fn handle_stats_tui(days: Option<usize>, top: usize) -> Result<(), Box<dyn s
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
 
-    let res = stats_ui::run_stats_ui(&mut terminal, &repo, days, top);
+    let res = stats_ui::run_stats_ui(&mut terminal, &repo, days, top, tag_id, tag);
 
     crossterm::terminal::disable_raw_mode()?;
     crossterm::execute!(
@@ -29,13 +35,33 @@ pub fn handle_stats_tui(days: Option<usize>, top: usize) -> Result<(), Box<dyn s
     Ok(())
 }
 
+/// Resolve a tag name to its ID, returning an error message if not found.
+fn resolve_tag(
+    repo: &repository::Repository,
+    tag: Option<&str>,
+) -> Result<Option<i64>, Box<dyn std::error::Error>> {
+    let Some(name) = tag else {
+        return Ok(None);
+    };
+    let tag_id = repo.get_tag_id_by_name(name)?;
+    if tag_id.is_none() {
+        return Err(
+            format!("Tag '{name}' not found. Use `suv tag list` to see available tags.").into(),
+        );
+    }
+    Ok(tag_id)
+}
+
 #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
 pub fn handle_stats_text(
     days: Option<usize>,
     top: usize,
+    tag: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = repository::Repository::init()?;
-    let stats = repo.get_stats(days, top)?;
+
+    let tag_id = resolve_tag(&repo, tag)?;
+    let stats = repo.get_stats(days, top, tag_id)?;
 
     let home = dirs_home();
 
@@ -43,7 +69,8 @@ pub fn handle_stats_text(
     let period = stats
         .period_days
         .map_or_else(|| "all time".to_string(), |d| format!("last {d} days"));
-    println!("\n\x1b[1m── Suvadu Stats ({period}) ─────────────────────\x1b[0m");
+    let tag_label = tag.map_or_else(String::new, |t| format!(", tag: {t}"));
+    println!("\n\x1b[1m── Suvadu Stats ({period}{tag_label}) ─────────────────────\x1b[0m");
     println!(
         "  Total commands    {:<10}  Unique commands  {}",
         format_count(stats.total_commands),
@@ -146,7 +173,7 @@ mod tests {
     #[test]
     fn test_stats_empty_db() {
         let repo = test_repo();
-        let stats = repo.get_stats(None, 10).unwrap();
+        let stats = repo.get_stats(None, 10, None).unwrap();
         assert_eq!(stats.total_commands, 0);
         assert!(stats.top_commands.is_empty());
         assert!(stats.executor_breakdown.is_empty());
@@ -175,7 +202,7 @@ mod tests {
             repo.insert_entry(&entry).unwrap();
         }
 
-        let stats = repo.get_stats(None, 10).unwrap();
+        let stats = repo.get_stats(None, 10, None).unwrap();
         assert_eq!(stats.total_commands, 5);
         assert_eq!(stats.success_count, 5);
         assert!(!stats.top_commands.is_empty());
@@ -185,13 +212,9 @@ mod tests {
 
     #[test]
     fn test_stats_percentage_no_division_by_zero() {
-        // With total_commands == 0, the percentage sections are skipped
         let repo = test_repo();
-        let stats = repo.get_stats(None, 10).unwrap();
+        let stats = repo.get_stats(None, 10, None).unwrap();
         assert_eq!(stats.total_commands, 0);
-        // Verify handle_stats_text doesn't panic with empty data
-        // We can't call it directly (needs real DB path), but verify the
-        // guard conditions: top_commands guard requires total > 0
         assert!(stats.top_commands.is_empty() || stats.total_commands > 0);
     }
 
@@ -230,9 +253,74 @@ mod tests {
             repo.insert_entry(&entry).unwrap();
         }
 
-        let stats = repo.get_stats(None, 10).unwrap();
+        let stats = repo.get_stats(None, 10, None).unwrap();
         assert_eq!(stats.total_commands, 5);
         assert_eq!(stats.success_count, 3);
         assert_eq!(stats.failure_count, 2);
+    }
+
+    #[test]
+    fn test_stats_filtered_by_tag() {
+        let repo = test_repo();
+
+        // Create a tag
+        repo.create_tag("work", None).unwrap();
+        let tag_id = repo.get_tag_id_by_name("work").unwrap().unwrap();
+
+        // Session with the tag
+        let tagged_session = Session {
+            id: "tagged-sess".to_string(),
+            hostname: "host".to_string(),
+            created_at: 1_000_000,
+            tag_id: Some(tag_id),
+        };
+        repo.insert_session(&tagged_session).unwrap();
+        repo.tag_session("tagged-sess", Some(tag_id)).unwrap();
+
+        // Session without the tag
+        let untagged_session = Session {
+            id: "untagged-sess".to_string(),
+            hostname: "host".to_string(),
+            created_at: 1_000_000,
+            tag_id: None,
+        };
+        repo.insert_session(&untagged_session).unwrap();
+
+        // 3 entries in tagged session
+        for i in 0..3 {
+            let entry = Entry::new(
+                "tagged-sess".to_string(),
+                "cargo build".to_string(),
+                "/project".to_string(),
+                Some(0),
+                1_000_000 + i * 1000,
+                1_000_000 + i * 1000 + 100,
+            );
+            repo.insert_entry(&entry).unwrap();
+        }
+
+        // 2 entries in untagged session
+        for i in 0..2 {
+            let entry = Entry::new(
+                "untagged-sess".to_string(),
+                "ls".to_string(),
+                "/tmp".to_string(),
+                Some(0),
+                2_000_000 + i * 1000,
+                2_000_000 + i * 1000 + 50,
+            );
+            repo.insert_entry(&entry).unwrap();
+        }
+
+        // Unfiltered: all 5 entries
+        let all_stats = repo.get_stats(None, 10, None).unwrap();
+        assert_eq!(all_stats.total_commands, 5);
+
+        // Filtered by tag: only 3 entries from tagged session
+        let tag_stats = repo.get_stats(None, 10, Some(tag_id)).unwrap();
+        assert_eq!(tag_stats.total_commands, 3);
+        assert_eq!(tag_stats.success_count, 3);
+        assert_eq!(tag_stats.top_commands[0].0, "cargo build");
+        assert_eq!(tag_stats.top_directories[0].0, "/project");
     }
 }
