@@ -138,13 +138,11 @@ fn is_valid_session_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// Get the directory for cached agent prompts
+/// Get the directory for cached agent prompts (uses `directories` crate for platform-correct paths)
 fn get_prompts_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let home = std::env::var("HOME")?;
-    Ok(PathBuf::from(home)
-        .join(".config")
-        .join("suvadu")
-        .join("prompts"))
+    let proj = directories::ProjectDirs::from("tech", "appachi", "suvadu")
+        .ok_or("Could not determine data directory")?;
+    Ok(proj.data_dir().join("prompts"))
 }
 
 /// Read the cached prompt for a session (if any)
@@ -797,19 +795,14 @@ mod tests {
 
     #[test]
     fn test_get_prompts_dir() {
-        // get_prompts_dir is private, so test via the module's internal access
         let result = get_prompts_dir();
-        // Should succeed as long as HOME is set
-        assert!(
-            result.is_ok(),
-            "get_prompts_dir should succeed when HOME is set"
-        );
+        assert!(result.is_ok(), "get_prompts_dir should succeed");
         let path = result.unwrap();
-        // Should be under .config/suvadu
         let path_str = path.to_string_lossy().to_string();
+        // Should use directories crate path (contains suvadu) and end with prompts
         assert!(
-            path_str.contains(".config/suvadu"),
-            "Prompts dir should be under .config/suvadu, got: {path_str}"
+            path_str.contains("suvadu"),
+            "Prompts dir should be under suvadu data dir, got: {path_str}"
         );
         assert!(
             path_str.ends_with("prompts"),

@@ -171,11 +171,11 @@ mod tests {
     use crate::models::{Entry, Session};
     use crate::repository::Repository;
 
-    fn test_repo() -> Repository {
+    fn test_repo() -> (tempfile::TempDir, Repository) {
         let temp_dir = tempfile::TempDir::new().unwrap();
-        let db_path = temp_dir.keep().join("test.db");
+        let db_path = temp_dir.path().join("test.db");
         let conn = db::init_db(&db_path).unwrap();
-        Repository::new(conn)
+        (temp_dir, Repository::new(conn))
     }
 
     fn seed_session(repo: &Repository, session_id: &str) {
@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn test_replay_entries_by_session() {
-        let repo = test_repo();
+        let (_dir, repo) = test_repo();
         seed_session(&repo, "sess-abc");
         seed_entry(&repo, "sess-abc", "git status", 0, 1_700_000_001_000);
         seed_entry(&repo, "sess-abc", "cargo build", 0, 1_700_000_002_000);
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn test_replay_entries_exit_code_filter() {
-        let repo = test_repo();
+        let (_dir, repo) = test_repo();
         seed_session(&repo, "sess-def");
         seed_entry(&repo, "sess-def", "ls", 0, 1_700_000_001_000);
         seed_entry(&repo, "sess-def", "bad", 1, 1_700_000_002_000);
@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn test_replay_entries_time_filter() {
-        let repo = test_repo();
+        let (_dir, repo) = test_repo();
         seed_session(&repo, "sess-time");
         seed_entry(&repo, "sess-time", "early", 0, 1_700_000_000_000);
         seed_entry(&repo, "sess-time", "late", 0, 1_700_000_100_000);
@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn test_replay_empty_session() {
-        let repo = test_repo();
+        let (_dir, repo) = test_repo();
         seed_session(&repo, "empty-sess");
 
         let entries = repo
@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn test_replay_entries_cwd_filter() {
-        let repo = test_repo();
+        let (_dir, repo) = test_repo();
         seed_session(&repo, "sess-cwd");
 
         let mut e1 = Entry::new(

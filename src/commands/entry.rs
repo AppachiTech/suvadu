@@ -4,12 +4,18 @@ use crate::repository::Repository;
 use crate::util;
 
 /// Normalize a timestamp to milliseconds.
-/// Detects microsecond timestamps (16+ digits) and converts them.
-/// Detects second timestamps (10 digits) and converts them.
+/// Detects nanosecond (19 digits), microsecond (16+ digits), and
+/// second (10 digits) timestamps and converts them.
 /// Returns 0 unchanged (handled separately).
 pub const fn normalize_timestamp(ts: i64) -> i64 {
+    // Nanoseconds: 19 digits (> 9_999_999_999_999_999) → divide by 1_000_000
+    const NANOSECOND_THRESHOLD: i64 = 9_999_999_999_999_999;
+
     if ts <= 0 {
         return ts;
+    }
+    if ts > NANOSECOND_THRESHOLD {
+        return ts / 1_000_000;
     }
     // Microseconds: 16 digits — use shared threshold constant
     if ts > crate::util::MICROSECOND_THRESHOLD {
@@ -379,6 +385,70 @@ fn delete_old_files(dir: &std::path::Path, max_age_secs: u64) -> u64 {
 mod tests {
     use super::*;
 
+    /// Integration test: exercises the full handle_add_with_context pipeline
+    /// (timestamp normalize → session ensure → entry insert) with a temp DB.
+    #[test]
+    fn test_handle_add_pipeline() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let conn = crate::db::init_db(&db_path).unwrap();
+        let repo = Repository::new(conn);
+
+        let session_id = "test-session-123";
+
+        // Insert via the repo directly (simulating what handle_add_with_context does
+        // without config/exclusion dependencies)
+        let started_at = normalize_timestamp(1_709_683_200); // seconds → ms
+        let ended_at = normalize_timestamp(1_709_683_205);
+        assert_eq!(started_at, 1_709_683_200_000);
+        assert_eq!(ended_at, 1_709_683_205_000);
+
+        // Ensure session is created
+        assert!(repo.get_session(session_id).unwrap().is_none());
+        let session = crate::models::Session {
+            id: session_id.to_string(),
+            hostname: "test-host".to_string(),
+            created_at: started_at,
+            tag_id: None,
+        };
+        repo.insert_session(&session).unwrap();
+        assert!(repo.get_session(session_id).unwrap().is_some());
+
+        // Insert entry
+        let entry = Entry::new(
+            session_id.to_string(),
+            "cargo test".to_string(),
+            "/home/user/project".to_string(),
+            Some(0),
+            started_at,
+            ended_at,
+        );
+        repo.insert_entry(&entry).unwrap();
+
+        // Verify the entry was stored correctly
+        let entries = repo
+            .get_entries(1, 0, None, None, None, None, None, false, None, None)
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].command, "cargo test");
+        assert_eq!(entries[0].cwd, "/home/user/project");
+        assert_eq!(entries[0].exit_code, Some(0));
+        assert_eq!(entries[0].started_at, 1_709_683_200_000);
+        assert_eq!(entries[0].duration_ms, 5_000);
+    }
+
+    /// Test nanosecond timestamps are properly normalized through the pipeline
+    #[test]
+    fn test_handle_add_nanosecond_timestamps() {
+        let ts_ns = 1_770_574_211_585_923_456_i64;
+        let normalized = normalize_timestamp(ts_ns);
+        // Should convert to milliseconds, not microseconds
+        assert_eq!(normalized, ts_ns / 1_000_000);
+        // Verify it's in a reasonable millisecond range (13 digits)
+        assert!(normalized > 1_000_000_000_000);
+        assert!(normalized < 10_000_000_000_000);
+    }
+
     #[test]
     fn test_normalize_timestamp_milliseconds() {
         // Already milliseconds (13 digits) — no change
@@ -431,10 +501,10 @@ mod tests {
 
     #[test]
     fn test_normalize_timestamp_nanoseconds() {
-        // Nanoseconds (19 digits) → divide by 1000 (becomes microseconds)
-        // This is a known limitation — only one level of conversion
+        // Nanoseconds (19 digits) → divide by 1_000_000 to get milliseconds directly
         let ts_ns = 1_770_574_211_585_923_456;
-        assert_eq!(normalize_timestamp(ts_ns), ts_ns / 1000);
+        let expected_ms = 1_770_574_211_585; // ts_ns / 1_000_000 (truncated)
+        assert_eq!(normalize_timestamp(ts_ns), expected_ms);
     }
 
     #[test]

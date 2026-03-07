@@ -244,18 +244,24 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
     let version = get_schema_version(&conn)?;
 
     if version < 1 {
+        conn.execute_batch("BEGIN")?;
         migrate_v1(&conn)?;
         set_schema_version(&conn, 1)?;
+        conn.execute_batch("COMMIT")?;
     }
 
     if version < 2 {
+        conn.execute_batch("BEGIN")?;
         migrate_v2(&conn)?;
         set_schema_version(&conn, 2)?;
+        conn.execute_batch("COMMIT")?;
     }
 
     if version < 3 {
+        conn.execute_batch("BEGIN")?;
         migrate_v3(&conn)?;
         set_schema_version(&conn, SCHEMA_VERSION)?;
+        conn.execute_batch("COMMIT")?;
     }
 
     Ok(conn)

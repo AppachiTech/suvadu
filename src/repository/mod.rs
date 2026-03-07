@@ -439,23 +439,13 @@ impl Repository {
         Ok(())
     }
 
-    /// Get all (command, `started_at_ms`) pairs for dedup during import.
-    /// Uses millisecond precision to avoid collisions between distinct entries
-    /// that happen to share the same second. Callers importing second-precision
-    /// sources (e.g. zsh-history) should round their timestamps before lookup.
-    pub fn get_existing_command_timestamps(
-        &self,
-    ) -> DbResult<std::collections::HashSet<(String, i64)>> {
+    /// Check if a (command, `started_at`) pair already exists in the database.
+    /// Used during import dedup — avoids loading the entire history into memory.
+    pub fn entry_exists(&self, command: &str, started_at: i64) -> DbResult<bool> {
         let mut stmt = self
             .conn
-            .prepare("SELECT command, started_at FROM entries")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })?;
-        let mut set = std::collections::HashSet::new();
-        for row in rows {
-            set.insert(row?);
-        }
-        Ok(set)
+            .prepare_cached("SELECT 1 FROM entries WHERE command = ? AND started_at = ? LIMIT 1")?;
+        let exists = stmt.exists(params![command, started_at])?;
+        Ok(exists)
     }
 }

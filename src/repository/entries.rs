@@ -549,6 +549,34 @@ impl Repository {
         Ok(entries)
     }
 
+    /// Stream entries for export, calling `f` for each row without collecting all into memory.
+    pub fn stream_export_entries<F>(
+        &self,
+        after: Option<i64>,
+        before: Option<i64>,
+        mut f: F,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        F: FnMut(Entry) -> Result<(), Box<dyn std::error::Error>>,
+    {
+        let filter = FilterBuilder::new().with_date_range(after, before);
+        let where_clause = filter.build_where();
+        let param_refs = filter.params_refs();
+
+        let sql = format!(
+            "SELECT {ENTRY_COLUMNS} {ENTRY_JOINS} {where_clause} ORDER BY e.started_at ASC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(param_refs))?;
+
+        while let Some(row) = rows.next()? {
+            let entry = entry_from_row(row, 10)?;
+            f(entry)?;
+        }
+
+        Ok(())
+    }
+
     /// Delete an entry by ID
     pub fn delete_entry(&self, id: i64) -> DbResult<()> {
         self.conn

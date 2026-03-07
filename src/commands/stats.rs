@@ -149,16 +149,16 @@ mod tests {
     use crate::models::{Entry, Session};
     use crate::repository::Repository;
 
-    fn test_repo() -> Repository {
+    fn test_repo() -> (tempfile::TempDir, Repository) {
         let temp_dir = tempfile::TempDir::new().unwrap();
-        let db_path = temp_dir.keep().join("test.db");
+        let db_path = temp_dir.path().join("test.db");
         let conn = db::init_db(&db_path).unwrap();
-        Repository::new(conn)
+        (temp_dir, Repository::new(conn))
     }
 
     #[test]
     fn test_stats_empty_db() {
-        let repo = test_repo();
+        let (_dir, repo) = test_repo();
         let stats = repo.get_stats(None, 10, None).unwrap();
         assert_eq!(stats.total_commands, 0);
         assert!(stats.top_commands.is_empty());
@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn test_stats_with_entries() {
-        let repo = test_repo();
+        let (_dir, repo) = test_repo();
         let session = Session {
             id: "test-sess".to_string(),
             hostname: "host".to_string(),
@@ -198,7 +198,7 @@ mod tests {
 
     #[test]
     fn test_stats_percentage_no_division_by_zero() {
-        let repo = test_repo();
+        let (_dir, repo) = test_repo();
         let stats = repo.get_stats(None, 10, None).unwrap();
         assert_eq!(stats.total_commands, 0);
         assert!(stats.top_commands.is_empty() || stats.total_commands > 0);
@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn test_stats_with_failures() {
-        let repo = test_repo();
+        let (_dir, repo) = test_repo();
         let session = Session {
             id: "s1".to_string(),
             hostname: "host".to_string(),
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn test_stats_filtered_by_tag() {
-        let repo = test_repo();
+        let (_dir, repo) = test_repo();
 
         // Create a tag
         repo.create_tag("work", None).unwrap();

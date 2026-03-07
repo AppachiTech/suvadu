@@ -566,8 +566,7 @@ fn handle_agent_stats_text(
     }
 
     // Overall risk summary
-    let all_risk = entries.clone();
-    let overall = risk::session_risk(&all_risk);
+    let overall = risk::session_risk(&entries);
     if overall.critical_count + overall.high_count > 0 {
         println!("\x1b[1m  High Risk Summary\x1b[0m");
         println!("  {}", "─".repeat(20));

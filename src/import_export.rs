@@ -26,26 +26,34 @@ pub fn handle_export(
     let after_ms = after.and_then(|d| util::parse_date_input(d, false));
     let before_ms = before.and_then(|d| util::parse_date_input(d, true));
 
-    let entries = repo.export_entries(after_ms, before_ms)?;
-
-    if entries.is_empty() {
-        eprintln!("No entries to export.");
-        return Ok(());
-    }
-
     match format {
         "json" => {
+            // JSON requires collecting all entries for the array structure
+            let entries = repo.export_entries(after_ms, before_ms)?;
+            if entries.is_empty() {
+                eprintln!("No entries to export.");
+                return Ok(());
+            }
             println!("{}", serde_json::to_string_pretty(&entries)?);
+            eprintln!("Exported {} entries.", entries.len());
         }
         "jsonl" => {
-            for entry in &entries {
-                println!("{}", serde_json::to_string(entry)?);
+            let mut count = 0usize;
+            repo.stream_export_entries(after_ms, before_ms, |entry| {
+                println!("{}", serde_json::to_string(&entry)?);
+                count += 1;
+                Ok(())
+            })?;
+            if count == 0 {
+                eprintln!("No entries to export.");
+            } else {
+                eprintln!("Exported {count} entries.");
             }
         }
         "csv" => {
             println!("command,cwd,exit_code,started_at,ended_at,duration_ms,session_id,executor_type,executor");
-            for entry in &entries {
-                // Escape command for CSV and guard against formula injection
+            let mut count = 0usize;
+            repo.stream_export_entries(after_ms, before_ms, |entry| {
                 let cmd = csv_safe(&entry.command);
                 let cwd = csv_safe(&entry.cwd);
                 let sid = csv_safe(&entry.session_id);
@@ -58,15 +66,20 @@ pub fn handle_export(
                     entry.ended_at,
                     entry.duration_ms,
                 );
+                count += 1;
+                Ok(())
+            })?;
+            if count == 0 {
+                eprintln!("No entries to export.");
+            } else {
+                eprintln!("Exported {count} entries.");
             }
         }
         _ => {
-            eprintln!("Unknown format: {format}. Use 'json', 'jsonl', or 'csv'.");
-            std::process::exit(1);
+            return Err(format!("Unknown format: {format}. Use 'json', 'jsonl', or 'csv'.").into());
         }
     }
 
-    eprintln!("Exported {} entries.", entries.len());
     Ok(())
 }
 
@@ -251,12 +264,7 @@ pub fn handle_import_zsh_history(
     // Phase 2: Open DB and deduplicate
     let repo = Repository::init()?;
 
-    // Load existing (command, started_at_seconds) for dedup
-    let existing = repo.get_existing_command_timestamps()?;
-    println!(
-        "Existing entries in DB: {} (checking for duplicates)",
-        existing.len()
-    );
+    println!("Checking for duplicates against existing entries...");
 
     // Create a dedicated import session
     let session_id = format!("import-zsh-{}", uuid::Uuid::new_v4());
@@ -274,7 +282,7 @@ pub fn handle_import_zsh_history(
     // Phase 3: Insert in a transaction for performance + atomicity
     repo.begin_transaction()?;
 
-    let result = import_entries_batch(&repo, &parsed, &existing, &session_id, now);
+    let result = import_entries_batch(&repo, &parsed, &session_id, now);
 
     match result {
         Ok((imported, skipped)) => {
@@ -300,7 +308,6 @@ pub fn handle_import_zsh_history(
 fn import_entries_batch(
     repo: &Repository,
     parsed: &[(String, i64, i64)],
-    existing: &std::collections::HashSet<(String, i64)>,
     session_id: &str,
     now: i64,
 ) -> Result<(u64, u64), Box<dyn std::error::Error>> {
@@ -316,9 +323,8 @@ fn import_entries_batch(
         }
 
         // Dedup: skip if (command, timestamp_ms) already exists.
-        // Zsh-history timestamps are second-precision (ts * 1000), so they
-        // match exactly against entries stored with the same granularity.
-        if *ts > 0 && existing.contains(&(cmd.clone(), *ts)) {
+        // Uses indexed SQL lookup instead of loading all entries into memory.
+        if *ts > 0 && repo.entry_exists(cmd, *ts)? {
             skipped += 1;
             continue;
         }

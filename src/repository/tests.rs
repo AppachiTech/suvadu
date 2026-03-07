@@ -2015,10 +2015,10 @@ fn test_get_tag_by_nonexistent_session() {
     assert!(tag_name.is_none());
 }
 
-// ── Existing Command Timestamps (import dedup) ─────────
+// ── Entry Exists (import dedup) ─────────────────────────
 
 #[test]
-fn test_get_existing_command_timestamps() {
+fn test_entry_exists() {
     let (_dir, repo) = setup_test_db();
     let session = Session::new("host".to_string(), 100);
     repo.insert_session(&session).unwrap();
@@ -2028,7 +2028,7 @@ fn test_get_existing_command_timestamps() {
         "git status".into(),
         "/tmp".into(),
         Some(0),
-        1_000_000, // 1000 seconds
+        1_000_000,
         1_001_000,
     ))
     .unwrap();
@@ -2042,10 +2042,13 @@ fn test_get_existing_command_timestamps() {
     ))
     .unwrap();
 
-    let timestamps = repo.get_existing_command_timestamps().unwrap();
-    assert_eq!(timestamps.len(), 2);
-    assert!(timestamps.contains(&("git status".to_string(), 1_000_000)));
-    assert!(timestamps.contains(&("cargo build".to_string(), 2_000_000)));
+    // Existing entries should be found
+    assert!(repo.entry_exists("git status", 1_000_000).unwrap());
+    assert!(repo.entry_exists("cargo build", 2_000_000).unwrap());
+
+    // Non-existing entries should not be found
+    assert!(!repo.entry_exists("git status", 9_999_999).unwrap());
+    assert!(!repo.entry_exists("nonexistent", 1_000_000).unwrap());
 }
 
 // ── Transaction Tests ───────────────────────────────────
