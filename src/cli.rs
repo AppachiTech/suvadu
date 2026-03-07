@@ -269,12 +269,12 @@ pub enum Commands {
         text: bool,
     },
 
-    /// Export history to a file (JSONL or CSV format)
+    /// Export history to a file (JSON, JSONL, or CSV format)
     #[command(
-        after_help = "Examples:\n  suv export > history.jsonl\n  suv export --format csv > history.csv\n  suv export --after 2025-01-01 > recent.jsonl"
+        after_help = "Examples:\n  suv export --format json > history.json\n  suv export > history.jsonl\n  suv export --format csv > history.csv\n  suv export --after 2025-01-01 > recent.jsonl"
     )]
     Export {
-        /// Output format: jsonl (default) or csv
+        /// Output format: json, jsonl (default), or csv
         #[arg(long, default_value = "jsonl")]
         format: String,
         /// Only export entries after this date (YYYY-MM-DD)

@@ -34,6 +34,9 @@ pub fn handle_export(
     }
 
     match format {
+        "json" => {
+            println!("{}", serde_json::to_string_pretty(&entries)?);
+        }
         "jsonl" => {
             for entry in &entries {
                 println!("{}", serde_json::to_string(entry)?);
@@ -58,7 +61,7 @@ pub fn handle_export(
             }
         }
         _ => {
-            eprintln!("Unknown format: {format}. Use 'jsonl' or 'csv'.");
+            eprintln!("Unknown format: {format}. Use 'json', 'jsonl', or 'csv'.");
             std::process::exit(1);
         }
     }
