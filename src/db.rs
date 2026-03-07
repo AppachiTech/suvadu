@@ -249,6 +249,14 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
 
     let version = get_schema_version(&conn)?;
 
+    // Reject databases created by a newer version of Suvadu
+    if version > SCHEMA_VERSION {
+        return Err(DbError::Path(format!(
+            "Database schema version ({version}) is newer than this version of Suvadu supports ({SCHEMA_VERSION}). \
+             Please upgrade Suvadu or use the version that created this database."
+        )));
+    }
+
     // Fast path: skip migration checks if already current
     if version >= SCHEMA_VERSION {
         return Ok(conn);

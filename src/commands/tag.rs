@@ -159,16 +159,11 @@ fn handle_tag_update(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::init_db;
     use crate::models::Session;
-    use tempfile::TempDir;
+    use crate::test_utils::test_repo;
 
-    fn setup_test_db() -> (TempDir, Repository) {
-        let temp_dir = TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-        let conn = init_db(&db_path).unwrap();
-        let repo = Repository::new(conn);
-        (temp_dir, repo)
+    fn setup_test_db() -> (tempfile::TempDir, Repository) {
+        test_repo()
     }
 
     #[test]

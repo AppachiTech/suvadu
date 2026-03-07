@@ -49,6 +49,7 @@ struct AgentApp {
     detail_open: bool,
 
     home: String,
+    status_message: Option<(String, std::time::Instant)>,
 }
 
 impl AgentApp {
@@ -90,6 +91,7 @@ impl AgentApp {
             table_state: TableState::default(),
             detail_open: true,
             home,
+            status_message: None,
         };
         if !app.visible.is_empty() {
             app.table_state.select(Some(0));
@@ -225,8 +227,17 @@ impl AgentApp {
             // Copy
             KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(entry) = self.selected_entry() {
-                    if let Ok(mut clip) = arboard::Clipboard::new() {
-                        let _ = clip.set_text(entry.command.clone());
+                    match arboard::Clipboard::new()
+                        .and_then(|mut c| c.set_text(entry.command.clone()))
+                    {
+                        Ok(()) => {
+                            self.status_message =
+                                Some(("Copied!".into(), std::time::Instant::now()));
+                        }
+                        Err(_) => {
+                            self.status_message =
+                                Some(("Copy failed".into(), std::time::Instant::now()));
+                        }
                     }
                 }
             }
@@ -886,6 +897,15 @@ impl AgentApp {
             format!(" {}/{total_pages} ", self.page),
             Style::default().fg(t.text_muted),
         ));
+
+        if let Some((msg, time)) = &self.status_message {
+            if time.elapsed() < std::time::Duration::from_secs(2) {
+                spans.push(Span::styled(
+                    format!(" {msg} "),
+                    Style::default().fg(t.success).add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
 
         f.render_widget(Paragraph::new(Line::from(spans)), area);
     }

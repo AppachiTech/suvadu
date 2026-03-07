@@ -8,7 +8,7 @@ pub fn handle_alias(cmd: AliasCommands) -> Result<(), Box<dyn std::error::Error>
     match cmd {
         AliasCommands::Add { name, command } => handle_add(&name, &command),
         AliasCommands::Remove { name } => handle_remove(&name),
-        AliasCommands::List => handle_list(),
+        AliasCommands::List { json } => handle_list(json),
         AliasCommands::Apply { stdout } => handle_apply(stdout),
         AliasCommands::AddSuggested {
             min_count,
@@ -58,9 +58,14 @@ fn handle_remove(name: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn handle_list() -> Result<(), Box<dyn std::error::Error>> {
+fn handle_list(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let repo = Repository::init()?;
     let aliases = repo.list_aliases()?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&aliases)?);
+        return Ok(());
+    }
 
     if aliases.is_empty() {
         println!("No managed aliases. Use 'suv alias add <name> <command>' to add one.");
@@ -165,13 +170,7 @@ fn handle_add_suggested(
 
 #[cfg(test)]
 mod tests {
-    use crate::repository::Repository;
-
-    fn test_repo() -> (tempfile::TempDir, Repository) {
-        let dir = tempfile::TempDir::new().unwrap();
-        let conn = crate::db::init_db(&dir.path().join("test.db")).unwrap();
-        (dir, Repository::new(conn))
-    }
+    use crate::test_utils::test_repo;
 
     #[test]
     fn test_alias_add_and_list() {

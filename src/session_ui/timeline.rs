@@ -42,6 +42,7 @@ struct SessionApp {
     page_size: usize,
     detail_open: bool,
     home: String,
+    status_message: Option<(String, std::time::Instant)>,
 }
 
 impl SessionApp {
@@ -63,6 +64,7 @@ impl SessionApp {
             page_size: PAGE_SIZE,
             detail_open: true,
             home: dirs_home(),
+            status_message: None,
         };
         if !app.timeline.is_empty() {
             app.table_state.select(Some(0));
@@ -165,8 +167,17 @@ impl SessionApp {
             // Copy
             KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(entry) = self.selected_entry() {
-                    if let Ok(mut clip) = arboard::Clipboard::new() {
-                        let _ = clip.set_text(entry.command.clone());
+                    match arboard::Clipboard::new()
+                        .and_then(|mut c| c.set_text(entry.command.clone()))
+                    {
+                        Ok(()) => {
+                            self.status_message =
+                                Some(("Copied!".into(), std::time::Instant::now()));
+                        }
+                        Err(_) => {
+                            self.status_message =
+                                Some(("Copy failed".into(), std::time::Instant::now()));
+                        }
                     }
                 }
             }
@@ -231,7 +242,7 @@ impl SessionApp {
             self.render_table(f, chunks[1], t);
         }
 
-        Self::render_footer(f, chunks[2], t);
+        self.render_footer(f, chunks[2], t);
     }
 
     fn render_header(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
@@ -537,14 +548,14 @@ impl SessionApp {
         lines
     }
 
-    fn render_footer(f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
+    fn render_footer(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
         let badge_key = Style::default()
             .fg(t.bg_elevated)
             .bg(t.text_secondary)
             .add_modifier(Modifier::BOLD);
         let badge_label = Style::default().fg(t.text_muted);
 
-        let spans = vec![
+        let mut spans = vec![
             Span::styled(" ↑↓ ", badge_key),
             Span::styled(" Navigate  ", badge_label),
             Span::styled(" ←→ ", badge_key),
@@ -558,6 +569,15 @@ impl SessionApp {
             Span::styled(" q ", badge_key),
             Span::styled(" Quit  ", badge_label),
         ];
+
+        if let Some((msg, time)) = &self.status_message {
+            if time.elapsed() < std::time::Duration::from_secs(2) {
+                spans.push(Span::styled(
+                    format!(" {msg} "),
+                    Style::default().fg(t.success).add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
 
         f.render_widget(Paragraph::new(Line::from(spans)), area);
     }

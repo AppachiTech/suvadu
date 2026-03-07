@@ -140,6 +140,9 @@ pub enum Commands {
         /// Output plain text instead of interactive TUI
         #[arg(long)]
         text: bool,
+        /// Output as JSON for scripting
+        #[arg(long)]
+        json: bool,
         /// Filter by tag name
         #[arg(long)]
         tag: Option<String>,
@@ -416,7 +419,11 @@ pub enum BookmarkCommands {
     },
 
     /// List all bookmarked commands
-    List,
+    List {
+        /// Output as JSON for scripting
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Remove a bookmark
     Remove {
@@ -442,7 +449,11 @@ pub enum AliasCommands {
     },
 
     /// List all managed aliases
-    List,
+    List {
+        /// Output as JSON for scripting
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Write aliases to a sourceable shell file (or stdout)
     Apply {
@@ -603,11 +614,13 @@ mod tests {
                 days,
                 top,
                 text,
+                json,
                 tag,
             } => {
                 assert!(days.is_none());
                 assert_eq!(top, 10);
                 assert!(!text);
+                assert!(!json);
                 assert!(tag.is_none());
             }
             _ => panic!("Expected Stats command"),

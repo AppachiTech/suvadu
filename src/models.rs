@@ -110,7 +110,7 @@ pub struct SessionSummary {
 }
 
 /// Aggregated usage statistics
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Stats {
     pub total_commands: i64,
     pub unique_commands: i64,

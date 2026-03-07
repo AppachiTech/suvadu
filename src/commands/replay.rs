@@ -209,16 +209,9 @@ fn print_replay_entries(entries: &[Entry]) {
 
 #[cfg(test)]
 mod tests {
-    use crate::db;
     use crate::models::{Entry, Session};
     use crate::repository::{ReplayFilter, Repository};
-
-    fn test_repo() -> (tempfile::TempDir, Repository) {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-        let conn = db::init_db(&db_path).unwrap();
-        (temp_dir, Repository::new(conn))
-    }
+    use crate::test_utils::test_repo;
 
     fn seed_session(repo: &Repository, session_id: &str) {
         let session = Session {

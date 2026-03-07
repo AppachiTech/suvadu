@@ -49,6 +49,7 @@ struct AgentStatsApp {
     focus: StatsFocus,
     risk_selected: usize, // Which high risk row
     cli_executor: Option<String>,
+    status_message: Option<(String, std::time::Instant)>,
 }
 
 impl AgentStatsApp {
@@ -66,6 +67,7 @@ impl AgentStatsApp {
             focus: StatsFocus::Cards,
             risk_selected: 0,
             cli_executor: executor.map(String::from),
+            status_message: None,
         }
     }
 
@@ -212,9 +214,13 @@ impl AgentStatsApp {
                     KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         if let Some(agent) = self.agents.get(self.selected) {
                             if let Some(hr) = agent.high_risk_cmds.get(self.risk_selected) {
-                                if let Ok(mut clip) = arboard::Clipboard::new() {
-                                    let _ = clip.set_text(hr.command.clone());
-                                }
+                                let msg = arboard::Clipboard::new()
+                                    .and_then(|mut clip| clip.set_text(hr.command.clone()))
+                                    .map_or_else(
+                                        |e| format!("Clipboard error: {e}"),
+                                        |()| "Copied!".into(),
+                                    );
+                                self.status_message = Some((msg, std::time::Instant::now()));
                             }
                         }
                     }
@@ -307,7 +313,7 @@ impl AgentStatsApp {
             StatsFocus::Cards => " High Risk ",
             StatsFocus::HighRisk => " Cards ",
         };
-        let footer = vec![
+        let mut footer = vec![
             Span::styled(" 1-4 ", badge_key),
             Span::styled(" Period  ", badge_label),
             Span::styled(" Tab ", badge_key),
@@ -326,6 +332,16 @@ impl AgentStatsApp {
             Span::styled(" q ", badge_key),
             Span::styled(" Quit ", badge_label),
         ];
+
+        if let Some((msg, time)) = &self.status_message {
+            if time.elapsed() < std::time::Duration::from_secs(2) {
+                footer.push(Span::styled(
+                    format!(" {msg} "),
+                    Style::default().fg(t.success).add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
+
         f.render_widget(Paragraph::new(Line::from(footer)), chunks[3]);
     }
 

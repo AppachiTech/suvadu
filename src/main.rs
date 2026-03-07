@@ -19,6 +19,8 @@ mod settings_ui;
 mod stats_ui;
 mod suggest;
 mod suggest_ui;
+#[cfg(test)]
+mod test_utils;
 mod theme;
 mod update;
 mod util;
@@ -139,9 +141,12 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
             days,
             top,
             text,
+            json,
             tag,
         } => {
-            if text {
+            if json {
+                commands::stats::handle_stats_json(days, top, tag.as_deref())
+            } else if text {
                 commands::stats::handle_stats_text(days, top, tag.as_deref())
             } else {
                 commands::stats::handle_stats_tui(days, top, tag.as_deref())

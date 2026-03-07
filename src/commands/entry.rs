@@ -236,9 +236,11 @@ pub fn handle_bookmark(
             repo.add_bookmark(&command, label.as_deref())?;
             println!("Bookmarked: {command}");
         }
-        crate::cli::BookmarkCommands::List => {
+        crate::cli::BookmarkCommands::List { json } => {
             let bookmarks = repo.list_bookmarks()?;
-            if bookmarks.is_empty() {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&bookmarks)?);
+            } else if bookmarks.is_empty() {
                 println!("No bookmarks yet. Use `suv bookmark add <command>` to save one.");
             } else {
                 if util::color_enabled() {

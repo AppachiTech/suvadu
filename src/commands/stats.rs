@@ -40,6 +40,18 @@ fn resolve_tag(
     Ok(tag_id)
 }
 
+pub fn handle_stats_json(
+    days: Option<usize>,
+    top: usize,
+    tag: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let repo = repository::Repository::init()?;
+    let tag_id = resolve_tag(&repo, tag)?;
+    let stats = repo.get_stats(days, top, tag_id)?;
+    println!("{}", serde_json::to_string_pretty(&stats)?);
+    Ok(())
+}
+
 #[allow(clippy::cast_precision_loss)]
 pub fn handle_stats_text(
     days: Option<usize>,
@@ -185,16 +197,8 @@ fn print_executor_breakdown(stats: &Stats) {
 
 #[cfg(test)]
 mod tests {
-    use crate::db;
     use crate::models::{Entry, Session};
-    use crate::repository::Repository;
-
-    fn test_repo() -> (tempfile::TempDir, Repository) {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-        let conn = db::init_db(&db_path).unwrap();
-        (temp_dir, Repository::new(conn))
-    }
+    use crate::test_utils::test_repo;
 
     #[test]
     fn test_stats_empty_db() {
