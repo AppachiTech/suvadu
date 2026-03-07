@@ -46,23 +46,23 @@ fn handle_tag_create(
     };
 
     if name.is_empty() {
-        eprintln!("Tag name cannot be empty.");
-        return Ok(());
+        return Err("Tag name cannot be empty.".into());
     }
 
     match repo.create_tag(&name, description) {
-        Ok(_) => println!("✓ Tag '{}' created", name.to_lowercase()),
+        Ok(_) => {
+            println!("✓ Tag '{}' created", name.to_lowercase());
+            Ok(())
+        }
         Err(e) => {
             if let db::DbError::Sqlite(rusqlite::Error::SqliteFailure(err, _)) = &e {
                 if err.code == rusqlite::ErrorCode::ConstraintViolation {
-                    eprintln!("Error: Tag '{name}' already exists.");
-                    return Ok(());
+                    return Err(format!("Tag '{name}' already exists.").into());
                 }
             }
-            eprintln!("Error creating tag: {e}");
+            Err(e.into())
         }
     }
-    Ok(())
 }
 
 fn handle_tag_list(repo: &Repository) -> Result<(), Box<dyn std::error::Error>> {
@@ -117,12 +117,7 @@ fn handle_tag_associate(
                 id
             }
             Err(e) => {
-                if let db::DbError::Validation(ref msg) = e {
-                    eprintln!("Error: {msg}");
-                } else {
-                    eprintln!("Error creating tag: {e}");
-                }
-                return Ok(());
+                return Err(e.into());
             }
         }
     };
@@ -132,8 +127,7 @@ fn handle_tag_associate(
         .unwrap_or_default();
 
     if sid.is_empty() {
-        eprintln!("No session ID provided or found in env.");
-        return Ok(());
+        return Err("No session ID provided or found in env.".into());
     }
 
     repo.tag_session(&sid, Some(tag_id))?;
@@ -150,17 +144,15 @@ fn handle_tag_update(
     let tags = repo.get_tags()?;
     let tag = tags.iter().find(|t| t.name == name.to_lowercase());
 
-    if let Some(t) = tag {
-        let updated_name = new_name.unwrap_or(&t.name);
-        let updated_desc = description.or(t.description.as_deref());
+    let Some(t) = tag else {
+        return Err(format!("Tag '{name}' not found.").into());
+    };
 
-        match repo.update_tag(t.id, updated_name, updated_desc) {
-            Ok(()) => println!("✓ Tag '{}' updated", t.name),
-            Err(e) => eprintln!("Error updating tag: {e}"),
-        }
-    } else {
-        eprintln!("Tag '{name}' not found.");
-    }
+    let updated_name = new_name.unwrap_or(&t.name);
+    let updated_desc = description.or(t.description.as_deref());
+
+    repo.update_tag(t.id, updated_name, updated_desc)?;
+    println!("✓ Tag '{}' updated", t.name);
     Ok(())
 }
 
@@ -201,8 +193,9 @@ mod tests {
     #[test]
     fn test_tag_create_empty_name() {
         let (_dir, repo) = setup_test_db();
-        // Empty string name — should not create a tag
-        handle_tag_create(&repo, Some(String::new()), None).unwrap();
+        // Empty string name — should return an error
+        let result = handle_tag_create(&repo, Some(String::new()), None);
+        assert!(result.is_err());
         let tags = repo.get_tags().unwrap();
         assert!(tags.is_empty());
     }
@@ -211,8 +204,9 @@ mod tests {
     fn test_tag_create_duplicate() {
         let (_dir, repo) = setup_test_db();
         handle_tag_create(&repo, Some("work".to_string()), None).unwrap();
-        // Creating again with same name (case insensitive) should not panic
-        handle_tag_create(&repo, Some("WORK".to_string()), None).unwrap();
+        // Creating again with same name (case insensitive) should return error
+        let result = handle_tag_create(&repo, Some("WORK".to_string()), None);
+        assert!(result.is_err());
 
         let tags = repo.get_tags().unwrap();
         assert_eq!(tags.len(), 1); // Still only one
@@ -268,9 +262,10 @@ mod tests {
     fn test_tag_associate_no_session_id() {
         let (_dir, repo) = setup_test_db();
         repo.create_tag("work", None).unwrap();
-        // No session ID provided and env var not set — should not error
+        // No session ID provided and env var not set — should return error
         std::env::remove_var("SUVADU_SESSION_ID");
-        handle_tag_associate(&repo, "work", None).unwrap();
+        let result = handle_tag_associate(&repo, "work", None);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -298,7 +293,8 @@ mod tests {
     #[test]
     fn test_tag_update_not_found() {
         let (_dir, repo) = setup_test_db();
-        // Should not error when updating nonexistent tag
-        handle_tag_update(&repo, "nonexistent", Some("new"), None).unwrap();
+        // Should return error when updating nonexistent tag
+        let result = handle_tag_update(&repo, "nonexistent", Some("new"), None);
+        assert!(result.is_err());
     }
 }

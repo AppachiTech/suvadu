@@ -1,5 +1,5 @@
 use crate::models::Entry;
-use crate::repository::Repository;
+use crate::repository::{QueryFilter, Repository};
 
 use super::SearchApp;
 
@@ -33,6 +33,21 @@ impl SearchApp {
             count += 1;
         }
         count
+    }
+
+    /// Build a `QueryFilter` from the current search state.
+    fn build_query_filter<'a>(&'a self, query: Option<&'a str>) -> QueryFilter<'a> {
+        QueryFilter {
+            after: self.filter_after,
+            before: self.filter_before,
+            tag_id: self.filter_tag_id,
+            exit_code: self.filter_exit_code,
+            query,
+            prefix_match: false,
+            executor: self.filter_executor_type.as_deref(),
+            cwd: self.filter_cwd.as_deref(),
+            field: &self.search_field,
+        }
     }
 
     #[allow(
@@ -142,7 +157,6 @@ impl SearchApp {
         });
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(super) fn reload_entries(
         &mut self,
         repo: &Repository,
@@ -152,25 +166,13 @@ impl SearchApp {
         if use_fuzzy {
             // Fuzzy path: fetch broad candidates from DB, then score + rank
             const MAX_FUZZY_CANDIDATES: usize = 10_000;
+            let qf = self.build_query_filter(None); // No SQL query — nucleo handles matching
 
             if self.unique_mode {
-                let unique_res = repo.get_unique_entries_field(
-                    MAX_FUZZY_CANDIDATES,
-                    0,
-                    self.filter_after,
-                    self.filter_before,
-                    self.filter_tag_id,
-                    self.filter_exit_code,
-                    None, // No SQL query filter — nucleo handles matching
-                    false,
-                    false, // Recency sort (will be re-sorted by score)
-                    self.filter_executor_type.as_deref(),
-                    self.filter_cwd.as_deref(),
-                    &self.search_field,
-                )?;
+                let unique_res =
+                    repo.get_unique_entries_filtered(MAX_FUZZY_CANDIDATES, 0, &qf, false)?;
                 let (entries, counts): (Vec<Entry>, Vec<i64>) = unique_res.into_iter().unzip();
 
-                // Build count map before fuzzy filtering
                 let mut count_map = std::collections::HashMap::new();
                 for (entry, count) in entries.iter().zip(counts.iter()) {
                     if let Some(id) = entry.id {
@@ -187,19 +189,7 @@ impl SearchApp {
                 self.unique_counts = count_map;
                 self.fuzzy_results = scored;
             } else {
-                let entries = repo.get_entries_field(
-                    MAX_FUZZY_CANDIDATES,
-                    0,
-                    self.filter_after,
-                    self.filter_before,
-                    self.filter_tag_id,
-                    self.filter_exit_code,
-                    None, // No SQL query filter
-                    false,
-                    self.filter_executor_type.as_deref(),
-                    self.filter_cwd.as_deref(),
-                    &self.search_field,
-                )?;
+                let entries = repo.get_entries_filtered(MAX_FUZZY_CANDIDATES, 0, &qf)?;
 
                 let boost_cwd = if self.context_boost {
                     self.current_cwd.as_deref()
@@ -222,36 +212,14 @@ impl SearchApp {
             } else {
                 Some(self.query.as_str())
             };
+            let qf = self.build_query_filter(query_param);
 
             if self.unique_mode {
-                let new_count = usize::try_from(repo.count_unique_entries_field(
-                    self.filter_after,
-                    self.filter_before,
-                    self.filter_tag_id,
-                    self.filter_exit_code,
-                    query_param,
-                    false,
-                    self.filter_executor_type.as_deref(),
-                    self.filter_cwd.as_deref(),
-                    &self.search_field,
-                )?)?;
-                self.total_items = new_count;
+                let new_count = repo.count_unique_filtered(&qf)?;
+                let unique_res = repo.get_unique_entries_filtered(self.page_size, 0, &qf, true)?;
+                // qf no longer needed — safe to mutate self
+                self.total_items = usize::try_from(new_count)?;
                 self.page = 1;
-
-                let unique_res = repo.get_unique_entries_field(
-                    self.page_size,
-                    0,
-                    self.filter_after,
-                    self.filter_before,
-                    self.filter_tag_id,
-                    self.filter_exit_code,
-                    query_param,
-                    false,
-                    true, // Alphabetical for unique
-                    self.filter_executor_type.as_deref(),
-                    self.filter_cwd.as_deref(),
-                    &self.search_field,
-                )?;
                 let (entries, counts): (Vec<Entry>, Vec<i64>) = unique_res.into_iter().unzip();
                 self.unique_counts.clear();
                 for (entry, count) in entries.iter().zip(counts.iter()) {
@@ -261,33 +229,11 @@ impl SearchApp {
                 }
                 self.entries = entries;
             } else {
-                let new_count = usize::try_from(repo.count_filtered_entries_field(
-                    self.filter_after,
-                    self.filter_before,
-                    self.filter_tag_id,
-                    self.filter_exit_code,
-                    query_param,
-                    false,
-                    self.filter_executor_type.as_deref(),
-                    self.filter_cwd.as_deref(),
-                    &self.search_field,
-                )?)?;
-                self.total_items = new_count;
+                let new_count = repo.count_filtered(&qf)?;
+                let new_entries = repo.get_entries_filtered(self.page_size, 0, &qf)?;
+                // qf no longer needed — safe to mutate self
+                self.total_items = usize::try_from(new_count)?;
                 self.page = 1;
-
-                let new_entries = repo.get_entries_field(
-                    self.page_size,
-                    0,
-                    self.filter_after,
-                    self.filter_before,
-                    self.filter_tag_id,
-                    self.filter_exit_code,
-                    query_param,
-                    false,
-                    self.filter_executor_type.as_deref(),
-                    self.filter_cwd.as_deref(),
-                    &self.search_field,
-                )?;
                 self.entries = new_entries;
             }
         }
@@ -315,22 +261,11 @@ impl SearchApp {
             } else {
                 Some(self.query.as_str())
             };
+            let qf = self.build_query_filter(query_param);
 
             if self.unique_mode {
-                let unique_res = repo.get_unique_entries_field(
-                    self.page_size,
-                    offset,
-                    self.filter_after,
-                    self.filter_before,
-                    self.filter_tag_id,
-                    self.filter_exit_code,
-                    query_param,
-                    false,
-                    true, // Alphabetical for unique
-                    self.filter_executor_type.as_deref(),
-                    self.filter_cwd.as_deref(),
-                    &self.search_field,
-                )?;
+                let unique_res =
+                    repo.get_unique_entries_filtered(self.page_size, offset, &qf, true)?;
                 let (entries, counts): (Vec<Entry>, Vec<i64>) = unique_res.into_iter().unzip();
                 self.unique_counts.clear();
                 for (entry, count) in entries.iter().zip(counts.iter()) {
@@ -340,20 +275,7 @@ impl SearchApp {
                 }
                 self.entries = entries;
             } else {
-                let new_entries = repo.get_entries_field(
-                    self.page_size,
-                    offset,
-                    self.filter_after,
-                    self.filter_before,
-                    self.filter_tag_id,
-                    self.filter_exit_code,
-                    query_param,
-                    false,
-                    self.filter_executor_type.as_deref(),
-                    self.filter_cwd.as_deref(),
-                    &self.search_field,
-                )?;
-                self.entries = new_entries;
+                self.entries = repo.get_entries_filtered(self.page_size, offset, &qf)?;
             }
         } else {
             // Fuzzy mode: paginate from in-memory scored results

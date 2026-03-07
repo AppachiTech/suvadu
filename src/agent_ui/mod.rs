@@ -94,11 +94,7 @@ pub fn compute_agent_counts(entries: &[Entry]) -> Vec<(String, usize)> {
 
 /// Short time for table columns: "MM-DD HH:MM"
 pub fn format_datetime(ms: i64) -> String {
-    let ms_val = if ms > 9_999_999_999_999 {
-        ms / 1000
-    } else {
-        ms
-    };
+    let ms_val = crate::util::normalize_display_ms(ms);
     Local.timestamp_millis_opt(ms_val).single().map_or_else(
         || "??-?? ??:??".into(),
         |dt| dt.format("%m-%d %H:%M").to_string(),
@@ -107,11 +103,7 @@ pub fn format_datetime(ms: i64) -> String {
 
 /// Full datetime for detail pane: "YYYY-MM-DD HH:MM:SS"
 pub fn format_full_datetime(ms: i64) -> String {
-    let ms_val = if ms > 9_999_999_999_999 {
-        ms / 1000
-    } else {
-        ms
-    };
+    let ms_val = crate::util::normalize_display_ms(ms);
     Local.timestamp_millis_opt(ms_val).single().map_or_else(
         || "????-??-?? ??:??:??".into(),
         |dt| dt.format("%Y-%m-%d %H:%M:%S").to_string(),

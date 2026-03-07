@@ -85,7 +85,7 @@ impl Repository {
         Ok(count)
     }
 
-    /// Get entries with optional filters (defaults to command field search)
+    /// Get entries with optional filters (positional params wrapper for tests)
     #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap, dead_code)]
     pub fn get_entries(
         &self,
@@ -100,44 +100,32 @@ impl Repository {
         executor: Option<&str>,
         cwd: Option<&str>,
     ) -> DbResult<Vec<Entry>> {
-        self.get_entries_field(
+        self.get_entries_filtered(
             limit,
             offset,
-            after,
-            before,
-            tag_id,
-            exit_code,
-            query,
-            prefix_match,
-            executor,
-            cwd,
-            "command",
+            &super::QueryFilter {
+                after,
+                before,
+                tag_id,
+                exit_code,
+                query,
+                prefix_match,
+                executor,
+                cwd,
+                field: "command",
+            },
         )
     }
 
     /// Get entries with optional filters and field-specific search
-    #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
-    pub fn get_entries_field(
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn get_entries_filtered(
         &self,
         limit: usize,
         offset: usize,
-        after: Option<i64>,
-        before: Option<i64>,
-        tag_id: Option<i64>,
-        exit_code: Option<i32>,
-        query: Option<&str>,
-        prefix_match: bool,
-        executor: Option<&str>,
-        cwd: Option<&str>,
-        field: &str,
+        filter: &super::QueryFilter,
     ) -> DbResult<Vec<Entry>> {
-        let mut fb = FilterBuilder::new()
-            .with_date_range(after, before)
-            .with_tag(tag_id)
-            .with_exit_code(exit_code)
-            .with_query_field(query, prefix_match, field)
-            .with_executor(executor)
-            .with_cwd(cwd);
+        let mut fb = filter.to_filter_builder();
 
         let sql = format!(
             "SELECT {ENTRY_COLUMNS} {ENTRY_JOINS}{} ORDER BY e.started_at DESC LIMIT ? OFFSET ?",
@@ -219,7 +207,7 @@ impl Repository {
         )
     }
 
-    /// Get entries with unique command deduplication and field-specific search
+    /// Get unique entries (positional params wrapper)
     #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
     pub fn get_unique_entries_field(
         &self,
@@ -236,13 +224,34 @@ impl Repository {
         cwd: Option<&str>,
         field: &str,
     ) -> DbResult<Vec<(Entry, i64)>> {
-        let mut fb = FilterBuilder::new()
-            .with_date_range(after, before)
-            .with_tag(tag_id)
-            .with_exit_code(exit_code)
-            .with_query_field(query, prefix_match, field)
-            .with_executor(executor)
-            .with_cwd(cwd);
+        self.get_unique_entries_filtered(
+            limit,
+            offset,
+            &super::QueryFilter {
+                after,
+                before,
+                tag_id,
+                exit_code,
+                query,
+                prefix_match,
+                executor,
+                cwd,
+                field,
+            },
+            sort_alphabetically,
+        )
+    }
+
+    /// Get entries with unique command deduplication using `QueryFilter`
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn get_unique_entries_filtered(
+        &self,
+        limit: usize,
+        offset: usize,
+        filter: &super::QueryFilter,
+        sort_alphabetically: bool,
+    ) -> DbResult<Vec<(Entry, i64)>> {
+        let mut fb = filter.to_filter_builder();
 
         let order = if sort_alphabetically {
             "e.command ASC"
@@ -354,7 +363,7 @@ impl Repository {
         )
     }
 
-    /// Count unique entries matching filters with field-specific search
+    /// Count unique entries (positional params wrapper)
     #[allow(clippy::too_many_arguments)]
     pub fn count_unique_entries_field(
         &self,
@@ -368,13 +377,22 @@ impl Repository {
         cwd: Option<&str>,
         field: &str,
     ) -> DbResult<i64> {
-        let fb = FilterBuilder::new()
-            .with_date_range(after, before)
-            .with_tag(tag_id)
-            .with_exit_code(exit_code)
-            .with_query_field(query, prefix_match, field)
-            .with_executor(executor)
-            .with_cwd(cwd);
+        self.count_unique_filtered(&super::QueryFilter {
+            after,
+            before,
+            tag_id,
+            exit_code,
+            query,
+            prefix_match,
+            executor,
+            cwd,
+            field,
+        })
+    }
+
+    /// Count unique entries matching `QueryFilter`
+    pub fn count_unique_filtered(&self, filter: &super::QueryFilter) -> DbResult<i64> {
+        let fb = filter.to_filter_builder();
 
         let sql = format!(
             "SELECT COUNT(DISTINCT command) FROM entries e
@@ -564,7 +582,7 @@ impl Repository {
         )
     }
 
-    /// Count entries matching filters with field-specific search
+    /// Count entries matching filters (positional params wrapper)
     #[allow(clippy::too_many_arguments)]
     pub fn count_filtered_entries_field(
         &self,
@@ -578,13 +596,22 @@ impl Repository {
         cwd: Option<&str>,
         field: &str,
     ) -> DbResult<i64> {
-        let fb = FilterBuilder::new()
-            .with_date_range(after, before)
-            .with_tag(tag_id)
-            .with_exit_code(exit_code)
-            .with_query_field(query, prefix_match, field)
-            .with_executor(executor)
-            .with_cwd(cwd);
+        self.count_filtered(&super::QueryFilter {
+            after,
+            before,
+            tag_id,
+            exit_code,
+            query,
+            prefix_match,
+            executor,
+            cwd,
+            field,
+        })
+    }
+
+    /// Count entries matching a `QueryFilter`
+    pub fn count_filtered(&self, filter: &super::QueryFilter) -> DbResult<i64> {
+        let fb = filter.to_filter_builder();
 
         let sql = format!(
             "SELECT COUNT(*) FROM entries e LEFT JOIN sessions s ON e.session_id = s.id{}",

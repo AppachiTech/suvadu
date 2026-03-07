@@ -39,8 +39,7 @@ fn handle_add(name: &str, command: &str) -> Result<(), Box<dyn std::error::Error
             .chars()
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
     {
-        eprintln!("Invalid alias name: '{name}'. Use only alphanumeric characters, hyphens, and underscores.");
-        std::process::exit(1);
+        return Err(format!("Invalid alias name: '{name}'. Use only alphanumeric characters, hyphens, and underscores.").into());
     }
 
     let repo = Repository::init()?;

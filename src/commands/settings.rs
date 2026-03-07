@@ -7,28 +7,11 @@ use crate::util;
 pub fn handle_settings() -> Result<(), Box<dyn std::error::Error>> {
     let config = config::load_config()?;
 
-    // Setup TUI
-    crossterm::terminal::enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
-    let backend = ratatui::backend::CrosstermBackend::new(stdout);
-    let mut terminal = ratatui::Terminal::new(backend)?;
+    let mut guard = util::TerminalGuard::new()?;
+    let res = settings_ui::run_settings_ui(guard.terminal(), config);
+    drop(guard);
 
-    // Run Settings Loop
-    let res = settings_ui::run_settings_ui(&mut terminal, config);
-
-    // Restore terminal
-    crossterm::terminal::disable_raw_mode()?;
-    crossterm::execute!(
-        terminal.backend_mut(),
-        crossterm::terminal::LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
-
-    if let Err(e) = res {
-        eprintln!("Error in settings UI: {e}");
-    }
-
+    res?;
     Ok(())
 }
 

@@ -51,6 +51,42 @@ pub fn entry_from_row(row: &rusqlite::Row, tag_id_col: usize) -> rusqlite::Resul
     })
 }
 
+/// Filter parameters for entry queries. Replaces 10-12 positional parameters
+/// with a single self-documenting struct.
+#[derive(Default, Clone)]
+pub struct QueryFilter<'a> {
+    pub after: Option<i64>,
+    pub before: Option<i64>,
+    pub tag_id: Option<i64>,
+    pub exit_code: Option<i32>,
+    pub query: Option<&'a str>,
+    pub prefix_match: bool,
+    pub executor: Option<&'a str>,
+    pub cwd: Option<&'a str>,
+    pub field: &'a str,
+}
+
+impl QueryFilter<'_> {
+    #[allow(dead_code)]
+    pub fn new() -> Self {
+        Self {
+            field: "command",
+            ..Default::default()
+        }
+    }
+
+    /// Build a `FilterBuilder` from this filter.
+    pub fn to_filter_builder(&self) -> FilterBuilder {
+        FilterBuilder::new()
+            .with_date_range(self.after, self.before)
+            .with_tag(self.tag_id)
+            .with_exit_code(self.exit_code)
+            .with_query_field(self.query, self.prefix_match, self.field)
+            .with_executor(self.executor)
+            .with_cwd(self.cwd)
+    }
+}
+
 /// Escape SQL LIKE wildcards (`%`, `_`) and the escape character (`\`) in user input.
 fn escape_like(s: &str) -> String {
     s.replace('\\', "\\\\")

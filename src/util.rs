@@ -2,6 +2,22 @@ use chrono::{Local, NaiveDate, NaiveTime, TimeZone};
 use directories::BaseDirs;
 use regex::Regex;
 
+/// Threshold above which a timestamp is treated as microseconds (not milliseconds).
+/// `9_999_999_999_999` is ~Nov 2286 in milliseconds, so any value above it is certainly
+/// microseconds (16+ digits). Used consistently across all display and normalization code.
+pub const MICROSECOND_THRESHOLD: i64 = 9_999_999_999_999;
+
+/// Normalize a timestamp for display by converting microseconds to milliseconds.
+/// This is the single function all display/formatting code should call.
+/// Does NOT handle seconds→ms conversion (that's `normalize_timestamp` for ingestion).
+pub const fn normalize_display_ms(ts: i64) -> i64 {
+    if ts > MICROSECOND_THRESHOLD {
+        ts / 1000
+    } else {
+        ts
+    }
+}
+
 /// Parse a date string input into a Unix timestamp (milliseconds).
 ///
 /// Supported formats:
@@ -78,6 +94,43 @@ pub fn is_excluded_compiled(command: &str, exclusions: &[CompiledExclusion]) -> 
 pub fn is_excluded(command: &str, exclusions: &[String]) -> bool {
     let compiled = compile_exclusions(exclusions);
     is_excluded_compiled(command, &compiled)
+}
+
+/// RAII guard that sets up and tears down the terminal for TUI rendering.
+/// On creation it enters raw mode and the alternate screen.
+/// On drop (including panic unwind) it restores the terminal.
+pub struct TerminalGuard {
+    terminal: ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+}
+
+impl TerminalGuard {
+    /// Enter raw mode + alternate screen and return a ready terminal.
+    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        crossterm::terminal::enable_raw_mode()?;
+        let mut stdout = std::io::stdout();
+        crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
+        let backend = ratatui::backend::CrosstermBackend::new(stdout);
+        let terminal = ratatui::Terminal::new(backend)?;
+        Ok(Self { terminal })
+    }
+
+    /// Borrow the underlying terminal for rendering.
+    pub const fn terminal(
+        &mut self,
+    ) -> &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>> {
+        &mut self.terminal
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(
+            self.terminal.backend_mut(),
+            crossterm::terminal::LeaveAlternateScreen
+        );
+        let _ = self.terminal.show_cursor();
+    }
 }
 
 /// Resolve tag from path based on configuration using longest prefix match.

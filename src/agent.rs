@@ -390,26 +390,15 @@ fn handle_agent_dashboard(
         None
     };
 
-    crossterm::terminal::enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
-    let backend = ratatui::backend::CrosstermBackend::new(stdout);
-    let mut terminal = ratatui::Terminal::new(backend)?;
-
+    let mut guard = util::TerminalGuard::new()?;
     let res = agent_ui::run_agent_ui(
-        &mut terminal,
+        guard.terminal(),
         &repo,
         after_ms,
         executor,
         cwd_filter.as_deref(),
     );
-
-    crossterm::terminal::disable_raw_mode()?;
-    crossterm::execute!(
-        terminal.backend_mut(),
-        crossterm::terminal::LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
+    drop(guard);
 
     if let Err(e) = res {
         eprintln!("Error in agent UI: {e}");
@@ -423,20 +412,9 @@ fn handle_agent_stats_tui(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = repository::Repository::init()?;
 
-    crossterm::terminal::enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
-    let backend = ratatui::backend::CrosstermBackend::new(stdout);
-    let mut terminal = ratatui::Terminal::new(backend)?;
-
-    let res = agent_ui::run_agent_stats_ui(&mut terminal, &repo, days, executor);
-
-    crossterm::terminal::disable_raw_mode()?;
-    crossterm::execute!(
-        terminal.backend_mut(),
-        crossterm::terminal::LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
+    let mut guard = util::TerminalGuard::new()?;
+    let res = agent_ui::run_agent_stats_ui(guard.terminal(), &repo, days, executor);
+    drop(guard);
 
     if let Err(e) = res {
         eprintln!("Error in agent stats UI: {e}");
@@ -614,11 +592,7 @@ fn handle_agent_stats_text(
 
 fn format_timestamp_time(ms: i64) -> String {
     use chrono::TimeZone;
-    let ms_val = if ms > 9_999_999_999_999 {
-        ms / 1000
-    } else {
-        ms
-    };
+    let ms_val = crate::util::normalize_display_ms(ms);
     chrono::Local
         .timestamp_millis_opt(ms_val)
         .single()

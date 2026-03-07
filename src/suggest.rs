@@ -222,20 +222,9 @@ pub fn handle_suggest_aliases_tui(
         return Ok(());
     }
 
-    crossterm::terminal::enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
-    let backend = ratatui::backend::CrosstermBackend::new(stdout);
-    let mut terminal = ratatui::Terminal::new(backend)?;
-
-    let res = suggest_ui::run_suggest_ui(&mut terminal, suggestions, skipped);
-
-    crossterm::terminal::disable_raw_mode()?;
-    crossterm::execute!(
-        terminal.backend_mut(),
-        crossterm::terminal::LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
+    let mut guard = crate::util::TerminalGuard::new()?;
+    let res = suggest_ui::run_suggest_ui(guard.terminal(), suggestions, skipped);
+    drop(guard);
 
     match res {
         Ok(Some(selected)) => {
@@ -278,20 +267,9 @@ pub fn run_suggest_and_select(
         return Ok(None);
     }
 
-    crossterm::terminal::enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
-    let backend = ratatui::backend::CrosstermBackend::new(stdout);
-    let mut terminal = ratatui::Terminal::new(backend)?;
-
-    let res = suggest_ui::run_suggest_ui(&mut terminal, suggestions, skipped);
-
-    crossterm::terminal::disable_raw_mode()?;
-    crossterm::execute!(
-        terminal.backend_mut(),
-        crossterm::terminal::LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
+    let mut guard = crate::util::TerminalGuard::new()?;
+    let res = suggest_ui::run_suggest_ui(guard.terminal(), suggestions, skipped);
+    drop(guard);
 
     match res {
         Ok(result) => Ok(result),

@@ -6,7 +6,7 @@ mod render;
 mod tests;
 
 use crate::models::{Entry, Tag};
-use crate::repository::Repository;
+use crate::repository::{QueryFilter, Repository};
 use crate::util;
 use arboard::Clipboard;
 use chrono::Local;
@@ -406,32 +406,21 @@ pub fn run_search(
     let filter_after = after.and_then(|s| util::parse_date_input(s, false));
     let filter_before = before.and_then(|s| util::parse_date_input(s, true));
 
+    let qf = QueryFilter {
+        after: filter_after,
+        before: filter_before,
+        tag_id,
+        exit_code,
+        query: initial_query,
+        prefix_match,
+        executor,
+        cwd,
+        field,
+    };
+
     let (entries, total_count, unique_counts) = if effective_unique {
-        let count = usize::try_from(repo.count_unique_entries_field(
-            filter_after,
-            filter_before,
-            tag_id,
-            exit_code,
-            initial_query,
-            prefix_match,
-            executor,
-            cwd,
-            field,
-        )?)?;
-        let unique_res = repo.get_unique_entries_field(
-            page_size,
-            0,
-            filter_after,
-            filter_before,
-            tag_id,
-            exit_code,
-            initial_query,
-            prefix_match,
-            true,
-            executor,
-            cwd,
-            field,
-        )?;
+        let count = usize::try_from(repo.count_unique_filtered(&qf)?)?;
+        let unique_res = repo.get_unique_entries_filtered(page_size, 0, &qf, true)?;
         let (entries, counts): (Vec<Entry>, Vec<i64>) = unique_res.into_iter().unzip();
         let mut count_map = std::collections::HashMap::new();
         for (entry, cnt) in entries.iter().zip(counts.iter()) {
@@ -441,30 +430,8 @@ pub fn run_search(
         }
         (entries, count, count_map)
     } else {
-        let count = usize::try_from(repo.count_filtered_entries_field(
-            filter_after,
-            filter_before,
-            tag_id,
-            exit_code,
-            initial_query,
-            prefix_match,
-            executor,
-            cwd,
-            field,
-        )?)?;
-        let entries = repo.get_entries_field(
-            page_size,
-            0,
-            filter_after,
-            filter_before,
-            tag_id,
-            exit_code,
-            initial_query,
-            prefix_match,
-            executor,
-            cwd,
-            field,
-        )?;
+        let count = usize::try_from(repo.count_filtered(&qf)?)?;
+        let entries = repo.get_entries_filtered(page_size, 0, &qf)?;
         (entries, count, std::collections::HashMap::new())
     };
 

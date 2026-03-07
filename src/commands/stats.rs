@@ -13,25 +13,11 @@ pub fn handle_stats_tui(
 
     let tag_id = resolve_tag(&repo, tag)?;
 
-    crossterm::terminal::enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
-    let backend = ratatui::backend::CrosstermBackend::new(stdout);
-    let mut terminal = ratatui::Terminal::new(backend)?;
+    let mut guard = crate::util::TerminalGuard::new()?;
+    let res = stats_ui::run_stats_ui(guard.terminal(), &repo, days, top, tag_id, tag);
+    drop(guard);
 
-    let res = stats_ui::run_stats_ui(&mut terminal, &repo, days, top, tag_id, tag);
-
-    crossterm::terminal::disable_raw_mode()?;
-    crossterm::execute!(
-        terminal.backend_mut(),
-        crossterm::terminal::LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
-
-    if let Err(e) = res {
-        eprintln!("Error in stats UI: {e}");
-    }
-
+    res?;
     Ok(())
 }
 

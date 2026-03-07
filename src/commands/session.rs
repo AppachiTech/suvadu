@@ -31,17 +31,17 @@ pub fn handle_session(
         let matches = repo.find_sessions_by_prefix(prefix)?;
         match matches.len() {
             0 => {
-                eprintln!("No session found matching '{prefix}'");
-                std::process::exit(1);
+                return Err(format!("No session found matching '{prefix}'").into());
             }
             1 => return open_session_timeline(&repo, &matches[0]),
             _ => {
-                eprintln!("Multiple sessions match '{prefix}':");
+                use std::fmt::Write;
+                let mut msg = format!("Multiple sessions match '{prefix}':\n");
                 for id in &matches {
-                    eprintln!("  {}", &id[..id.len().min(12)]);
+                    let _ = writeln!(msg, "  {}", &id[..id.len().min(12)]);
                 }
-                eprintln!("Provide a longer prefix to narrow it down.");
-                std::process::exit(1);
+                msg.push_str("Provide a longer prefix to narrow it down.");
+                return Err(msg.into());
             }
         }
     }

@@ -11,8 +11,8 @@ pub const fn normalize_timestamp(ts: i64) -> i64 {
     if ts <= 0 {
         return ts;
     }
-    // Microseconds: 16 digits (> 9_999_999_999_999 i.e. > ~Nov 2286 in ms)
-    if ts > 9_999_999_999_999 {
+    // Microseconds: 16 digits — use shared threshold constant
+    if ts > crate::util::MICROSECOND_THRESHOLD {
         return ts / 1000;
     }
     // Seconds: 10 digits (< 100_000_000_000 i.e. < ~1973 in ms)
@@ -227,7 +227,7 @@ pub fn handle_bookmark(
             if repo.remove_bookmark(&command)? {
                 println!("Removed bookmark: {command}");
             } else {
-                eprintln!("No bookmark found for: {command}");
+                return Err(format!("No bookmark found for: {command}").into());
             }
         }
     }
@@ -245,7 +245,7 @@ pub fn handle_note(
         if repo.delete_note(entry_id)? {
             println!("Note deleted for entry {entry_id}.");
         } else {
-            eprintln!("No note found for entry {entry_id}.");
+            return Err(format!("No note found for entry {entry_id}.").into());
         }
     } else if let Some(text) = content {
         repo.upsert_note(entry_id, &text)?;
@@ -253,7 +253,7 @@ pub fn handle_note(
     } else {
         match repo.get_note(entry_id)? {
             Some(note) => println!("{}", note.content),
-            None => eprintln!("No note for entry {entry_id}."),
+            None => return Err(format!("No note for entry {entry_id}.").into()),
         }
     }
     Ok(())

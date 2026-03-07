@@ -298,12 +298,7 @@ impl SearchApp {
                 #[allow(clippy::cast_precision_loss)]
                 let duration_secs = entry.duration_ms as f64 / 1000.0;
 
-                // Normalize: if timestamp looks like microseconds (16+ digits), convert to ms
-                let ts_ms = if entry.started_at > 9_999_999_999_999 {
-                    entry.started_at / 1000
-                } else {
-                    entry.started_at
-                };
+                let ts_ms = crate::util::normalize_display_ms(entry.started_at);
                 let time_str = Local.timestamp_millis_opt(ts_ms).single().map_or_else(
                     || "??-?? ??:??".into(),
                     |dt| dt.format("%m-%d %H:%M").to_string(),
@@ -576,12 +571,7 @@ impl SearchApp {
                 .add_modifier(Modifier::BOLD);
             let value_style = Style::default().fg(t.text);
 
-            // Timestamp
-            let ts_ms = if entry.started_at > 9_999_999_999_999 {
-                entry.started_at / 1000
-            } else {
-                entry.started_at
-            };
+            let ts_ms = crate::util::normalize_display_ms(entry.started_at);
             let time_str = Local.timestamp_millis_opt(ts_ms).single().map_or_else(
                 || "????-??-?? ??:??:??".into(),
                 |dt| dt.format("%Y-%m-%d %H:%M:%S").to_string(),
