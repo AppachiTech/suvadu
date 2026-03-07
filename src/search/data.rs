@@ -123,7 +123,8 @@ impl SearchApp {
     /// Secondary: human-executed entries above agent entries.
     /// This avoids the competing-sort problem where two sequential sorts
     /// could undo each other's grouping.
-    fn apply_combined_sort(entries: &mut [Entry], context_cwd: Option<&str>) {
+    #[cfg(test)]
+    pub(super) fn apply_combined_sort(entries: &mut [Entry], context_cwd: Option<&str>) {
         entries.sort_by(|a, b| {
             // Primary: local directory first (if context boost is active)
             if let Some(cwd) = context_cwd {
@@ -139,11 +140,6 @@ impl SearchApp {
             let b_human = b.executor_type.as_deref().unwrap_or("human") == "human";
             b_human.cmp(&a_human)
         });
-    }
-
-    #[cfg(test)]
-    pub(super) fn apply_combined_sort_test(entries: &mut [Entry], context_cwd: Option<&str>) {
-        Self::apply_combined_sort(entries, context_cwd);
     }
 
     #[allow(clippy::too_many_lines)]
@@ -294,14 +290,6 @@ impl SearchApp {
                 )?;
                 self.entries = new_entries;
             }
-
-            // Combined sort: context-first + human-first in one pass
-            let context_cwd = if self.context_boost {
-                self.current_cwd.as_deref()
-            } else {
-                None
-            };
-            Self::apply_combined_sort(&mut self.entries, context_cwd);
         }
 
         self.table_state.select(if self.entries.is_empty() {
@@ -367,14 +355,6 @@ impl SearchApp {
                 )?;
                 self.entries = new_entries;
             }
-
-            // Combined sort: context-first + human-first in one pass
-            let context_cwd = if self.context_boost {
-                self.current_cwd.as_deref()
-            } else {
-                None
-            };
-            Self::apply_combined_sort(&mut self.entries, context_cwd);
         } else {
             // Fuzzy mode: paginate from in-memory scored results
             let end = (offset + self.page_size).min(self.fuzzy_results.len());

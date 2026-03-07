@@ -47,8 +47,9 @@ pub fn handle_add_with_context(
         return Ok(()); // Silently skip
     }
 
-    // Check exclusions
-    if util::is_excluded(&command, &config.exclusions) {
+    // Check exclusions (pre-compiled for performance on hot path)
+    let compiled = util::compile_exclusions(&config.exclusions);
+    if util::is_excluded_compiled(&command, &compiled) {
         return Ok(());
     }
 
@@ -150,6 +151,12 @@ pub fn handle_delete(
     dry_run: bool,
     before: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if pattern.is_empty() {
+        return Err(
+            "Empty pattern would match all entries. Please provide a specific pattern.".into(),
+        );
+    }
+
     let repo = Repository::init()?;
 
     let before_timestamp: Option<i64> = if let Some(date_str) = before {
@@ -257,12 +264,14 @@ pub fn handle_gc(dry_run: bool, vacuum: bool) -> Result<(), Box<dyn std::error::
 
     let orphaned_sessions = repo.count_orphaned_sessions()?;
     let orphaned_notes = repo.count_orphaned_notes()?;
+    let stale_prompts = count_stale_prompt_caches();
 
     if dry_run {
         println!("Dry run — nothing will be deleted.\n");
         println!("  Orphaned sessions (no entries): {orphaned_sessions}");
         println!("  Orphaned notes (missing entry): {orphaned_notes}");
-        if orphaned_sessions == 0 && orphaned_notes == 0 {
+        println!("  Stale prompt cache files:       {stale_prompts}");
+        if orphaned_sessions == 0 && orphaned_notes == 0 && stale_prompts == 0 {
             println!("\nNothing to clean up.");
         }
         return Ok(());
@@ -270,6 +279,7 @@ pub fn handle_gc(dry_run: bool, vacuum: bool) -> Result<(), Box<dyn std::error::
 
     let deleted_notes = repo.delete_orphaned_notes()?;
     let deleted_sessions = repo.delete_orphaned_sessions()?;
+    let deleted_prompts = clean_prompt_caches();
 
     if deleted_sessions > 0 {
         println!("Removed {deleted_sessions} orphaned sessions.");
@@ -277,7 +287,10 @@ pub fn handle_gc(dry_run: bool, vacuum: bool) -> Result<(), Box<dyn std::error::
     if deleted_notes > 0 {
         println!("Removed {deleted_notes} orphaned notes.");
     }
-    if deleted_sessions == 0 && deleted_notes == 0 {
+    if deleted_prompts > 0 {
+        println!("Removed {deleted_prompts} stale prompt cache files.");
+    }
+    if deleted_sessions == 0 && deleted_notes == 0 && deleted_prompts == 0 {
         println!("Nothing to clean up.");
     }
 
@@ -288,6 +301,78 @@ pub fn handle_gc(dry_run: bool, vacuum: bool) -> Result<(), Box<dyn std::error::
     }
 
     Ok(())
+}
+
+/// Count prompt cache files older than 7 days.
+fn count_stale_prompt_caches() -> u64 {
+    let Some(prompts_dir) = get_prompts_dir() else {
+        return 0;
+    };
+    count_old_files(&prompts_dir, 7 * 24 * 3600)
+}
+
+/// Delete prompt cache files older than 7 days. Returns count deleted.
+fn clean_prompt_caches() -> u64 {
+    let Some(prompts_dir) = get_prompts_dir() else {
+        return 0;
+    };
+    delete_old_files(&prompts_dir, 7 * 24 * 3600)
+}
+
+fn get_prompts_dir() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".config")
+            .join("suvadu")
+            .join("prompts"),
+    )
+}
+
+fn count_old_files(dir: &std::path::Path, max_age_secs: u64) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let now = std::time::SystemTime::now();
+    let mut count = 0u64;
+    for entry in entries.flatten() {
+        if let Ok(meta) = entry.metadata() {
+            if meta.is_file() {
+                if let Ok(modified) = meta.modified() {
+                    if let Ok(age) = now.duration_since(modified) {
+                        if age.as_secs() > max_age_secs {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
+fn delete_old_files(dir: &std::path::Path, max_age_secs: u64) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let now = std::time::SystemTime::now();
+    let mut deleted = 0u64;
+    for entry in entries.flatten() {
+        if let Ok(meta) = entry.metadata() {
+            if meta.is_file() {
+                if let Ok(modified) = meta.modified() {
+                    if let Ok(age) = now.duration_since(modified) {
+                        if age.as_secs() > max_age_secs
+                            && std::fs::remove_file(entry.path()).is_ok()
+                        {
+                            deleted += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    deleted
 }
 
 #[cfg(test)]

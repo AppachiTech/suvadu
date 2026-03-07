@@ -250,14 +250,25 @@ impl Repository {
             "recent_start DESC"
         };
 
+        // Use a subquery to deterministically select the most recent row per command.
+        // The inner query groups by command to get max id and count; the outer query
+        // joins back to get all columns from that specific row.
+        let inner_where = fb.build_where();
         let sql = format!(
             "SELECT e.id, e.session_id, e.command, e.cwd, e.exit_code,
-                MAX(e.started_at) as recent_start, e.ended_at, e.duration_ms, e.context,
+                e.started_at as recent_start, e.ended_at, e.duration_ms, e.context,
                 COALESCE(et.name, st.name) as name,
-                COUNT(*) as occurrence_count,
+                g.occurrence_count,
                 e.tag_id, e.executor_type, e.executor
-             {ENTRY_JOINS}{} GROUP BY e.command ORDER BY {order} LIMIT ? OFFSET ?",
-            fb.build_where()
+             FROM (
+                SELECT MAX(e.id) as max_id, COUNT(*) as occurrence_count, e.command
+                {ENTRY_JOINS}{inner_where} GROUP BY e.command
+             ) g
+             JOIN entries e ON e.id = g.max_id
+             LEFT JOIN tags et ON e.tag_id = et.id
+             LEFT JOIN sessions s ON e.session_id = s.id
+             LEFT JOIN tags st ON s.tag_id = st.id
+             ORDER BY {order} LIMIT ? OFFSET ?",
         );
         fb.push_param(Box::new(limit as i64));
         fb.push_param(Box::new(offset as i64));
@@ -427,9 +438,10 @@ impl Repository {
 
             Ok(total_deleted)
         } else {
-            let mut sql = String::from("DELETE FROM entries WHERE command LIKE ?1");
+            let escaped = super::escape_like(pattern);
+            let mut sql = String::from("DELETE FROM entries WHERE command LIKE ?1 ESCAPE '\\'");
             let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-            params.push(Box::new(format!("%{pattern}%")));
+            params.push(Box::new(format!("%{escaped}%")));
 
             if let Some(ts) = before_timestamp {
                 sql.push_str(" AND started_at < ?2");
@@ -478,9 +490,11 @@ impl Repository {
                 .count();
             Ok(count)
         } else {
-            let mut sql = String::from("SELECT COUNT(*) FROM entries WHERE command LIKE ?1");
+            let escaped = super::escape_like(pattern);
+            let mut sql =
+                String::from("SELECT COUNT(*) FROM entries WHERE command LIKE ?1 ESCAPE '\\'");
             let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-            params.push(Box::new(format!("%{pattern}%")));
+            params.push(Box::new(format!("%{escaped}%")));
 
             if let Some(ts) = before_timestamp {
                 sql.push_str(" AND started_at < ?2");

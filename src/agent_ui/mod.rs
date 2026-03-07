@@ -94,7 +94,7 @@ pub fn compute_agent_counts(entries: &[Entry]) -> Vec<(String, usize)> {
 
 /// Short time for table columns: "MM-DD HH:MM"
 pub fn format_datetime(ms: i64) -> String {
-    let ms_val = if ms > 1_000_000_000_000_000 {
+    let ms_val = if ms > 9_999_999_999_999 {
         ms / 1000
     } else {
         ms
@@ -107,7 +107,7 @@ pub fn format_datetime(ms: i64) -> String {
 
 /// Full datetime for detail pane: "YYYY-MM-DD HH:MM:SS"
 pub fn format_full_datetime(ms: i64) -> String {
-    let ms_val = if ms > 1_000_000_000_000_000 {
+    let ms_val = if ms > 9_999_999_999_999 {
         ms / 1000
     } else {
         ms

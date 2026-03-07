@@ -38,6 +38,36 @@ pub enum SearchAction {
     DeleteNote(i64),
 }
 
+/// Configuration bundle for constructing a `SearchApp`, reducing constructor parameter count.
+#[allow(clippy::struct_excessive_bools)]
+pub struct SearchConfig {
+    pub entries: Vec<Entry>,
+    pub initial_query: Option<String>,
+    pub total_items: usize,
+    pub page: usize,
+    pub page_size: usize,
+    pub tags: Vec<Tag>,
+    pub unique_mode: bool,
+    pub unique_counts: std::collections::HashMap<i64, i64>,
+    pub filter_after: Option<i64>,
+    pub filter_before: Option<i64>,
+    pub filter_tag_id: Option<i64>,
+    pub filter_exit_code: Option<i32>,
+    pub filter_executor_type: Option<String>,
+    pub start_date_input: Option<String>,
+    pub end_date_input: Option<String>,
+    pub tag_filter_input: Option<String>,
+    pub exit_code_input: Option<String>,
+    pub executor_filter_input: Option<String>,
+    pub bookmarked_commands: std::collections::HashSet<String>,
+    pub filter_cwd: Option<String>,
+    pub noted_entry_ids: std::collections::HashSet<i64>,
+    pub context_boost: bool,
+    pub show_detail_pane: bool,
+    pub show_risk_in_search: bool,
+    pub search_field: String,
+}
+
 #[allow(clippy::struct_excessive_bools)]
 pub struct SearchApp {
     query: String,
@@ -113,67 +143,41 @@ pub struct SearchApp {
 }
 
 impl SearchApp {
-    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-    pub fn new(
-        entries: Vec<Entry>,
-        initial_query: Option<String>,
-        total_items: usize,
-        page: usize,
-        page_size: usize,
-        tags: Vec<Tag>,
-        unique_mode: bool,
-        unique_counts: std::collections::HashMap<i64, i64>,
-        filter_after: Option<i64>,
-        filter_before: Option<i64>,
-        filter_tag_id: Option<i64>,
-        filter_exit_code: Option<i32>,
-        filter_executor_type: Option<String>,
-        start_date_input: Option<String>,
-        end_date_input: Option<String>,
-        tag_filter_input: Option<String>,
-        exit_code_input: Option<String>,
-        executor_filter_input: Option<String>,
-        bookmarked_commands: std::collections::HashSet<String>,
-        filter_cwd: Option<String>,
-        noted_entry_ids: std::collections::HashSet<i64>,
-        context_boost: bool,
-        show_detail_pane: bool,
-        show_risk_in_search: bool,
-        search_field: String,
-    ) -> Self {
-        let query = initial_query.unwrap_or_default();
+    pub fn new(cfg: SearchConfig) -> Self {
+        let query = cfg.initial_query.unwrap_or_default();
 
         let now = Local::now();
         let five_days_ago = now - chrono::Duration::days(5);
-        let start_default =
-            start_date_input.unwrap_or_else(|| five_days_ago.format("%Y-%m-%d").to_string());
-        let end_default = end_date_input.unwrap_or_else(|| "today".to_string());
+        let start_default = cfg
+            .start_date_input
+            .unwrap_or_else(|| five_days_ago.format("%Y-%m-%d").to_string());
+        let end_default = cfg.end_date_input.unwrap_or_else(|| "today".to_string());
 
         let mut app = Self {
             query,
-            entries,
+            entries: cfg.entries,
             table_state: TableState::default(),
 
-            page,
-            total_items,
-            page_size,
+            page: cfg.page,
+            total_items: cfg.total_items,
+            page_size: cfg.page_size.max(1),
 
             filter_mode: false,
             start_date_input: start_default,
             end_date_input: end_default,
-            tag_filter_input: tag_filter_input.unwrap_or_default(),
-            exit_code_input: exit_code_input.unwrap_or_default(),
-            executor_filter_input: executor_filter_input.unwrap_or_default(),
+            tag_filter_input: cfg.tag_filter_input.unwrap_or_default(),
+            exit_code_input: cfg.exit_code_input.unwrap_or_default(),
+            executor_filter_input: cfg.executor_filter_input.unwrap_or_default(),
             focus_index: 0,
 
-            filter_after,
-            filter_before,
-            filter_tag_id,
-            filter_exit_code,
-            filter_executor_type,
+            filter_after: cfg.filter_after,
+            filter_before: cfg.filter_before,
+            filter_tag_id: cfg.filter_tag_id,
+            filter_exit_code: cfg.filter_exit_code,
+            filter_executor_type: cfg.filter_executor_type,
 
-            unique_mode,
-            unique_counts,
+            unique_mode: cfg.unique_mode,
+            unique_counts: cfg.unique_counts,
 
             delete_dialog_open: false,
             pending_delete_id: None,
@@ -182,29 +186,29 @@ impl SearchApp {
             goto_input: String::new(),
 
             tag_dialog_open: false,
-            tags,
+            tags: cfg.tags,
             tag_list_state: ListState::default(),
 
-            noted_entry_ids,
+            noted_entry_ids: cfg.noted_entry_ids,
             note_dialog_open: false,
             note_input: String::new(),
             note_entry_id: None,
 
-            filter_cwd,
+            filter_cwd: cfg.filter_cwd,
 
-            detail_pane_open: show_detail_pane,
-            show_risk_in_search,
+            detail_pane_open: cfg.show_detail_pane,
+            show_risk_in_search: cfg.show_risk_in_search,
 
-            context_boost,
+            context_boost: cfg.context_boost,
             current_cwd: std::env::current_dir()
                 .ok()
                 .map(|p| p.to_string_lossy().to_string()),
 
-            bookmarked_commands,
+            bookmarked_commands: cfg.bookmarked_commands,
 
             fuzzy_results: Vec::new(),
 
-            search_field,
+            search_field: cfg.search_field,
 
             status_message: None,
         };
@@ -484,33 +488,33 @@ pub fn run_search(
     let show_detail_pane = config.search.show_detail_pane;
     let show_risk_in_search = config.agent.show_risk_in_search;
 
-    let mut app = SearchApp::new(
+    let mut app = SearchApp::new(SearchConfig {
         entries,
-        initial_query.map(String::from),
-        total_count,
-        1,
+        initial_query: initial_query.map(String::from),
+        total_items: total_count,
+        page: 1,
         page_size,
         tags,
-        effective_unique,
+        unique_mode: effective_unique,
         unique_counts,
         filter_after,
         filter_before,
-        tag_id,
-        exit_code,
-        executor.map(String::from),
-        after.map(String::from),
-        before.map(String::from),
-        tag.map(String::from),
-        exit_code.map(|ec| ec.to_string()),
-        executor.map(String::from),
+        filter_tag_id: tag_id,
+        filter_exit_code: exit_code,
+        filter_executor_type: executor.map(String::from),
+        start_date_input: after.map(String::from),
+        end_date_input: before.map(String::from),
+        tag_filter_input: tag.map(String::from),
+        exit_code_input: exit_code.map(|ec| ec.to_string()),
+        executor_filter_input: executor.map(String::from),
         bookmarked_commands,
-        cwd.map(String::from),
+        filter_cwd: cwd.map(String::from),
         noted_entry_ids,
         context_boost,
         show_detail_pane,
         show_risk_in_search,
-        field.to_string(),
-    );
+        search_field: field.to_string(),
+    });
 
     let result = app.run(&mut terminal, repo);
 

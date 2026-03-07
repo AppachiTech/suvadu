@@ -1,6 +1,6 @@
 use crate::models::AliasSuggestion;
 use crate::theme::theme;
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{
     backend::Backend,
     layout::{Constraint, Direction, Layout},
@@ -141,6 +141,9 @@ where
         terminal.draw(|f| ui(f, &mut app))?;
 
         if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
             if let Some(confirmed) = app.handle_input(key) {
                 if confirmed {
                     let selected: Vec<AliasSuggestion> =

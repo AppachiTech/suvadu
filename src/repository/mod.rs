@@ -51,6 +51,13 @@ pub fn entry_from_row(row: &rusqlite::Row, tag_id_col: usize) -> rusqlite::Resul
     })
 }
 
+/// Escape SQL LIKE wildcards (`%`, `_`) and the escape character (`\`) in user input.
+fn escape_like(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 /// Builds WHERE clauses and collects parameters for filtered queries.
 pub struct FilterBuilder {
     clauses: Vec<String>,
@@ -111,11 +118,12 @@ impl FilterBuilder {
                 "executor" => "COALESCE(e.executor_type || ' ' || e.executor, '')",
                 _ => "e.command",
             };
-            self.clauses.push(format!("{column} LIKE ?"));
+            self.clauses.push(format!("{column} LIKE ? ESCAPE '\\'"));
+            let escaped = escape_like(q);
             if prefix_match {
-                self.params.push(Box::new(format!("{q}%")));
+                self.params.push(Box::new(format!("{escaped}%")));
             } else {
-                self.params.push(Box::new(format!("%{q}%")));
+                self.params.push(Box::new(format!("%{escaped}%")));
             }
         }
         self
@@ -140,9 +148,10 @@ impl FilterBuilder {
     pub fn with_executor(mut self, executor: Option<&str>) -> Self {
         if let Some(exec) = executor {
             self.clauses.push(
-                "(e.executor_type LIKE ? OR e.executor LIKE ? OR (e.executor_type || '-' || e.executor) LIKE ?)".into(),
+                "(e.executor_type LIKE ? ESCAPE '\\' OR e.executor LIKE ? ESCAPE '\\' OR (e.executor_type || '-' || e.executor) LIKE ? ESCAPE '\\')".into(),
             );
-            let pattern = format!("%{}%", exec.to_lowercase());
+            let escaped = escape_like(exec);
+            let pattern = format!("%{escaped}%");
             self.params.push(Box::new(pattern.clone()));
             self.params.push(Box::new(pattern.clone()));
             self.params.push(Box::new(pattern));
@@ -229,39 +238,40 @@ mod filter_builder_tests {
     #[test]
     fn with_query_contains_mode() {
         let fb = FilterBuilder::new().with_query(Some("git"), false);
-        assert_eq!(fb.build_where(), " WHERE e.command LIKE ?");
+        assert_eq!(fb.build_where(), " WHERE e.command LIKE ? ESCAPE '\\'");
         assert_eq!(fb.params_refs().len(), 1);
     }
 
     #[test]
     fn with_query_prefix_mode() {
         let fb = FilterBuilder::new().with_query(Some("git"), true);
-        assert_eq!(fb.build_where(), " WHERE e.command LIKE ?");
+        assert_eq!(fb.build_where(), " WHERE e.command LIKE ? ESCAPE '\\'");
         assert_eq!(fb.params_refs().len(), 1);
     }
 
     #[test]
     fn with_query_field_cwd() {
         let fb = FilterBuilder::new().with_query_field(Some("home"), false, "cwd");
-        assert_eq!(fb.build_where(), " WHERE e.cwd LIKE ?");
+        assert_eq!(fb.build_where(), " WHERE e.cwd LIKE ? ESCAPE '\\'");
     }
 
     #[test]
     fn with_query_field_session() {
         let fb = FilterBuilder::new().with_query_field(Some("abc"), false, "session");
-        assert_eq!(fb.build_where(), " WHERE e.session_id LIKE ?");
+        assert_eq!(fb.build_where(), " WHERE e.session_id LIKE ? ESCAPE '\\'");
     }
 
     #[test]
     fn with_query_field_executor() {
         let fb = FilterBuilder::new().with_query_field(Some("claude"), false, "executor");
         assert!(fb.build_where().contains("COALESCE"));
+        assert!(fb.build_where().contains("ESCAPE '\\'"));
     }
 
     #[test]
     fn with_query_field_unknown_defaults_to_command() {
         let fb = FilterBuilder::new().with_query_field(Some("test"), false, "unknown_field");
-        assert_eq!(fb.build_where(), " WHERE e.command LIKE ?");
+        assert_eq!(fb.build_where(), " WHERE e.command LIKE ? ESCAPE '\\'");
     }
 
     #[test]
@@ -344,8 +354,13 @@ impl Repository {
     /// Insert a new session
     pub fn insert_session(&self, session: &Session) -> DbResult<()> {
         self.conn.execute(
-            "INSERT INTO sessions (id, hostname, created_at) VALUES (?1, ?2, ?3)",
-            params![session.id, session.hostname, session.created_at],
+            "INSERT INTO sessions (id, hostname, created_at, tag_id) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                session.id,
+                session.hostname,
+                session.created_at,
+                session.tag_id
+            ],
         )?;
         Ok(())
     }

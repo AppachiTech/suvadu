@@ -33,19 +33,51 @@ pub fn parse_date_input(input: &str, is_end_of_day: bool) -> Option<i64> {
     Some(dt_local.timestamp_millis())
 }
 
-/// Check if a command matches any of the exclusion patterns.
-/// Patterns are treated as Regex first, falling back to substring match if invalid regex.
-pub fn is_excluded(command: &str, exclusions: &[String]) -> bool {
+/// A pre-compiled exclusion pattern: either a valid regex or a literal substring.
+pub enum CompiledExclusion {
+    Regex(Regex),
+    Substring(String),
+}
+
+/// Compile exclusion patterns once for reuse across multiple `is_excluded` calls.
+pub fn compile_exclusions(patterns: &[String]) -> Vec<CompiledExclusion> {
+    patterns
+        .iter()
+        .map(|p| {
+            Regex::new(p).map_or_else(
+                |_| CompiledExclusion::Substring(p.clone()),
+                CompiledExclusion::Regex,
+            )
+        })
+        .collect()
+}
+
+/// Check if a command matches any of the pre-compiled exclusion patterns.
+pub fn is_excluded_compiled(command: &str, exclusions: &[CompiledExclusion]) -> bool {
     for pattern in exclusions {
-        if let Ok(re) = Regex::new(pattern) {
-            if re.is_match(command) {
-                return true;
+        match pattern {
+            CompiledExclusion::Regex(re) => {
+                if re.is_match(command) {
+                    return true;
+                }
             }
-        } else if command.contains(pattern) {
-            return true;
+            CompiledExclusion::Substring(s) => {
+                if command.contains(s.as_str()) {
+                    return true;
+                }
+            }
         }
     }
     false
+}
+
+/// Check if a command matches any of the exclusion patterns.
+/// Patterns are treated as Regex first, falling back to substring match if invalid regex.
+/// Convenience wrapper that compiles exclusions on each call.
+#[cfg(test)]
+pub fn is_excluded(command: &str, exclusions: &[String]) -> bool {
+    let compiled = compile_exclusions(exclusions);
+    is_excluded_compiled(command, &compiled)
 }
 
 /// Resolve tag from path based on configuration using longest prefix match.

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io;
 
 use chrono::{Datelike, Duration, Local};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::backend::Backend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -924,6 +924,9 @@ where
         terminal.draw(|f| app.render(f))?;
 
         if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
             if !app.handle_input(key, repo) {
                 return Ok(());
             }

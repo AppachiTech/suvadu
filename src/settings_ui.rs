@@ -1,6 +1,6 @@
 use crate::config::{save_config, Config};
 use crate::theme::theme;
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{
     backend::Backend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -31,6 +31,7 @@ struct AppState {
     // (Tab Index -> Number of items)
     tab_items: Vec<usize>,
     exclusion_list_state: ListState,
+    auto_tag_list_state: ListState,
     save_status: Option<String>,
     dirty: bool,
 }
@@ -49,6 +50,7 @@ impl AppState {
             // Tab 0: Search (5 items), Tab 1: Shell (2 + theme), Tab 2: Exclusions (Dynamic), Tab 3: Auto Tags (Dynamic)
             tab_items: vec![5, 3, 0, 0],
             exclusion_list_state: ListState::default(),
+            auto_tag_list_state: ListState::default(),
             save_status: None,
             dirty: false,
         }
@@ -79,8 +81,10 @@ impl AppState {
 
         if max > 0 {
             self.selected_item = (self.selected_item + 1) % max;
-            if self.current_tab == 2 || self.current_tab == 3 {
+            if self.current_tab == 2 {
                 self.exclusion_list_state.select(Some(self.selected_item));
+            } else if self.current_tab == 3 {
+                self.auto_tag_list_state.select(Some(self.selected_item));
             }
         }
     }
@@ -100,8 +104,10 @@ impl AppState {
             } else {
                 self.selected_item = max - 1;
             }
-            if self.current_tab == 2 || self.current_tab == 3 {
+            if self.current_tab == 2 {
                 self.exclusion_list_state.select(Some(self.selected_item));
+            } else if self.current_tab == 3 {
+                self.auto_tag_list_state.select(Some(self.selected_item));
             }
         }
     }
@@ -228,7 +234,7 @@ impl AppState {
                         } else if self.config.auto_tags.is_empty() {
                             self.selected_item = 0;
                         }
-                        self.exclusion_list_state
+                        self.auto_tag_list_state
                             .select(if self.config.auto_tags.is_empty() {
                                 None
                             } else {
@@ -298,7 +304,7 @@ impl AppState {
                                 sorted_keys.sort();
                                 self.selected_item =
                                     sorted_keys.iter().position(|k| k == &path_key).unwrap_or(0);
-                                self.exclusion_list_state.select(Some(self.selected_item));
+                                self.auto_tag_list_state.select(Some(self.selected_item));
                                 self.input_mode = InputMode::Normal;
                             } else {
                                 self.save_status =
@@ -358,6 +364,9 @@ where
         terminal.draw(|f| ui(f, &mut app))?;
 
         if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
             if !app.handle_input(key) {
                 return Ok(());
             }
@@ -776,11 +785,11 @@ fn render_auto_tags_tab(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) 
             )
             .highlight_symbol(" > ");
 
-        if app.exclusion_list_state.selected().is_none() && !app.config.auto_tags.is_empty() {
-            app.exclusion_list_state.select(Some(0));
+        if app.auto_tag_list_state.selected().is_none() && !app.config.auto_tags.is_empty() {
+            app.auto_tag_list_state.select(Some(0));
         }
 
-        f.render_stateful_widget(list, chunks[0], &mut app.exclusion_list_state);
+        f.render_stateful_widget(list, chunks[0], &mut app.auto_tag_list_state);
     }
 
     let description = Paragraph::new(

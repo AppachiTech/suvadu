@@ -152,7 +152,17 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("✓ Download complete");
     println!();
-    print!("Install update? This will replace /usr/local/bin/suv [y/N] ");
+
+    // Determine install path from current executable location
+    let install_path =
+        std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/usr/local/bin/suv"));
+    let install_str = install_path.to_string_lossy();
+    let install_dir = install_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("/usr/local/bin"));
+    let symlink_path = install_dir.join("suvadu");
+
+    print!("Install update? This will replace {install_str} [y/N] ");
     std::io::Write::flush(&mut std::io::stdout())?;
 
     let mut input = String::new();
@@ -167,12 +177,12 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
 
     // Install binary
     let status_bin = std::process::Command::new("sudo")
-        .args(["cp", &binary_str, "/usr/local/bin/suv"])
+        .args(["cp", &binary_str, &*install_str])
         .status()?;
 
     // Create/update symlink
     let status_link = std::process::Command::new("sudo")
-        .args(["ln", "-sf", "/usr/local/bin/suv", "/usr/local/bin/suvadu"])
+        .args(["ln", "-sf", &*install_str, &*symlink_path.to_string_lossy()])
         .status()?;
 
     // TempDir auto-cleans on drop

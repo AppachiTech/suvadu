@@ -20,39 +20,43 @@ fn create_test_entry(cmd: &str) -> Entry {
     }
 }
 
+fn test_search_config(entries: Vec<Entry>, total_items: usize) -> SearchConfig {
+    SearchConfig {
+        entries,
+        initial_query: None,
+        total_items,
+        page: 1,
+        page_size: 50,
+        tags: vec![],
+        unique_mode: false,
+        unique_counts: std::collections::HashMap::new(),
+        filter_after: None,
+        filter_before: None,
+        filter_tag_id: None,
+        filter_exit_code: None,
+        filter_executor_type: None,
+        start_date_input: None,
+        end_date_input: None,
+        tag_filter_input: None,
+        exit_code_input: None,
+        executor_filter_input: None,
+        bookmarked_commands: std::collections::HashSet::new(),
+        filter_cwd: None,
+        noted_entry_ids: std::collections::HashSet::new(),
+        context_boost: true,
+        show_detail_pane: true,
+        show_risk_in_search: false,
+        search_field: "command".to_string(),
+    }
+}
+
 #[test]
 fn test_search_app_initialization() {
     let entries = vec![
         create_test_entry("cargo build"),
         create_test_entry("git status"),
     ];
-    let app = SearchApp::new(
-        entries.clone(),
-        None,
-        2,
-        1,
-        50,
-        vec![],
-        false,
-        std::collections::HashMap::new(),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        std::collections::HashSet::new(),
-        None,
-        std::collections::HashSet::new(),
-        true,
-        true,
-        false,
-        "command".to_string(),
-    );
+    let app = SearchApp::new(test_search_config(entries, 2));
 
     assert_eq!(app.entries.len(), 2);
     assert_eq!(app.page, 1);
@@ -63,33 +67,7 @@ fn test_search_app_initialization() {
 fn test_pagination_logic() {
     let entries = vec![create_test_entry("cmd")];
     // Pretend we have 1500 items, page size 50. So 30 pages.
-    let mut app = SearchApp::new(
-        entries,
-        None,
-        1500,
-        1,
-        50,
-        vec![],
-        false,
-        std::collections::HashMap::new(),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        std::collections::HashSet::new(),
-        None,
-        std::collections::HashSet::new(),
-        true,
-        true,
-        false,
-        "command".to_string(),
-    );
+    let mut app = SearchApp::new(test_search_config(entries, 1500));
 
     // Next page
     let key = KeyEvent::from(KeyCode::Right);
@@ -230,33 +208,7 @@ fn test_fuzzy_score_single_char() {
 #[test]
 fn test_active_filter_count() {
     let entries = vec![create_test_entry("test")];
-    let mut app = SearchApp::new(
-        entries,
-        None,
-        1,
-        1,
-        50,
-        vec![],
-        false,
-        std::collections::HashMap::new(),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        std::collections::HashSet::new(),
-        None,
-        std::collections::HashSet::new(),
-        true,
-        true,
-        false,
-        "command".to_string(),
-    );
+    let mut app = SearchApp::new(test_search_config(entries, 1));
 
     assert_eq!(app.active_filter_count(), 0);
 
@@ -279,33 +231,7 @@ fn test_active_filter_count() {
 #[test]
 fn test_get_selected_entry() {
     let entries = vec![create_test_entry("first"), create_test_entry("second")];
-    let mut app = SearchApp::new(
-        entries,
-        None,
-        2,
-        1,
-        50,
-        vec![],
-        false,
-        std::collections::HashMap::new(),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        std::collections::HashSet::new(),
-        None,
-        std::collections::HashSet::new(),
-        true,
-        true,
-        false,
-        "command".to_string(),
-    );
+    let mut app = SearchApp::new(test_search_config(entries, 2));
 
     // Default selection is 0
     app.table_state.select(Some(0));
@@ -321,33 +247,7 @@ fn test_get_selected_entry() {
 #[test]
 fn test_get_selected_entry_out_of_bounds() {
     let entries = vec![create_test_entry("only")];
-    let mut app = SearchApp::new(
-        entries,
-        None,
-        1,
-        1,
-        50,
-        vec![],
-        false,
-        std::collections::HashMap::new(),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        std::collections::HashSet::new(),
-        None,
-        std::collections::HashSet::new(),
-        true,
-        true,
-        false,
-        "command".to_string(),
-    );
+    let mut app = SearchApp::new(test_search_config(entries, 1));
 
     // Out of bounds selection should return None
     app.table_state.select(Some(999));
@@ -380,7 +280,7 @@ fn test_combined_sort_human_first() {
         create_entry_with_cwd_and_executor("cmd1", "/tmp", "agent"),
         create_entry_with_cwd_and_executor("cmd2", "/tmp", "human"),
     ];
-    SearchApp::apply_combined_sort_test(&mut entries, None);
+    SearchApp::apply_combined_sort(&mut entries, None);
     assert_eq!(entries[0].executor_type.as_deref(), Some("human"));
     assert_eq!(entries[1].executor_type.as_deref(), Some("agent"));
 }
@@ -391,7 +291,7 @@ fn test_combined_sort_cwd_first() {
         create_entry_with_cwd_and_executor("cmd1", "/other", "human"),
         create_entry_with_cwd_and_executor("cmd2", "/project", "human"),
     ];
-    SearchApp::apply_combined_sort_test(&mut entries, Some("/project"));
+    SearchApp::apply_combined_sort(&mut entries, Some("/project"));
     assert_eq!(entries[0].cwd, "/project");
     assert_eq!(entries[1].cwd, "/other");
 }
@@ -403,7 +303,7 @@ fn test_combined_sort_cwd_beats_human() {
         create_entry_with_cwd_and_executor("cmd1", "/other", "human"),
         create_entry_with_cwd_and_executor("cmd2", "/project", "agent"),
     ];
-    SearchApp::apply_combined_sort_test(&mut entries, Some("/project"));
+    SearchApp::apply_combined_sort(&mut entries, Some("/project"));
     // Agent entry in matching CWD should come first
     assert_eq!(entries[0].cwd, "/project");
 }
@@ -415,13 +315,13 @@ fn test_combined_sort_no_context_human_only() {
         create_entry_with_cwd_and_executor("cmd2", "/b", "human"),
         create_entry_with_cwd_and_executor("cmd3", "/c", "agent"),
     ];
-    SearchApp::apply_combined_sort_test(&mut entries, None);
+    SearchApp::apply_combined_sort(&mut entries, None);
     assert_eq!(entries[0].executor_type.as_deref(), Some("human"));
 }
 
 #[test]
 fn test_combined_sort_empty() {
     let mut entries: Vec<Entry> = vec![];
-    SearchApp::apply_combined_sort_test(&mut entries, Some("/project"));
+    SearchApp::apply_combined_sort(&mut entries, Some("/project"));
     assert!(entries.is_empty());
 }

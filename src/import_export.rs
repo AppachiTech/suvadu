@@ -48,15 +48,15 @@ pub fn handle_export(
                 // Escape command for CSV and guard against formula injection
                 let cmd = csv_safe(&entry.command);
                 let cwd = csv_safe(&entry.cwd);
+                let sid = csv_safe(&entry.session_id);
+                let etype = csv_safe(entry.executor_type.as_deref().unwrap_or(""));
+                let exec = csv_safe(entry.executor.as_deref().unwrap_or(""));
                 println!(
-                    "\"{cmd}\",\"{cwd}\",{},{},{},{},{},{},{}",
+                    "\"{cmd}\",\"{cwd}\",{},{},{},{},\"{sid}\",\"{etype}\",\"{exec}\"",
                     entry.exit_code.map_or(String::new(), |c| c.to_string()),
                     entry.started_at,
                     entry.ended_at,
                     entry.duration_ms,
-                    entry.session_id,
-                    entry.executor_type.as_deref().unwrap_or(""),
-                    entry.executor.as_deref().unwrap_or(""),
                 );
             }
         }

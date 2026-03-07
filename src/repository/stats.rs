@@ -107,7 +107,26 @@ impl Repository {
                 .get(0)?;
             val
         };
-        let failure_count = total_commands - success_count;
+        let failure_count: i64 = {
+            let sql = format!(
+                "SELECT COUNT(*) FROM entries e{join_clause}{where_clause}{} exit_code IS NOT NULL AND exit_code != 0",
+                if where_clause.is_empty() {
+                    " WHERE"
+                } else {
+                    " AND"
+                }
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            bind(&mut stmt)?;
+            let val = stmt
+                .raw_query()
+                .next()?
+                .ok_or(crate::db::DbError::Validation(
+                    "Expected row from aggregate query".into(),
+                ))?
+                .get(0)?;
+            val
+        };
 
         // Average duration
         let avg_duration_ms: i64 = {

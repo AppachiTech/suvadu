@@ -614,7 +614,7 @@ fn handle_agent_stats_text(
 
 fn format_timestamp_time(ms: i64) -> String {
     use chrono::TimeZone;
-    let ms_val = if ms > 1_000_000_000_000_000 {
+    let ms_val = if ms > 9_999_999_999_999 {
         ms / 1000
     } else {
         ms
