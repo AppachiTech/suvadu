@@ -46,9 +46,13 @@ fn main() {
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     print_setup_hint(&cli.command);
 
-    // Initialize the global theme from config (before any TUI rendering)
-    let theme_name = config::load_config().map(|c| c.theme).unwrap_or_default();
-    theme::init_theme(theme_name);
+    // Initialize theme only for user-facing commands.
+    // Internal commands (Add, Get, hooks, etc.) don't render TUI,
+    // so skip the config read + theme init on the hot path.
+    if is_user_facing_command(&cli.command) {
+        let theme_name = config::load_config().map(|c| c.theme).unwrap_or_default();
+        theme::init_theme(theme_name);
+    }
 
     run_command(cli.command)
 }

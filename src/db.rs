@@ -21,12 +21,13 @@ const SCHEMA_VERSION: i64 = 4;
 
 /// Get the path to the suvadu database file
 pub fn get_db_path() -> DbResult<PathBuf> {
-    let data_dir = directories::ProjectDirs::from("tech", "appachi", "suvadu")
-        .ok_or_else(|| DbError::Path("Could not determine data directory".to_string()))?
-        .data_dir()
-        .to_path_buf();
+    let dirs = crate::util::project_dirs()
+        .ok_or_else(|| DbError::Path("Could not determine data directory".to_string()))?;
+    let data_dir = dirs.data_dir();
 
-    std::fs::create_dir_all(&data_dir)?;
+    if !data_dir.exists() {
+        std::fs::create_dir_all(data_dir)?;
+    }
     Ok(data_dir.join("history.db"))
 }
 

@@ -462,8 +462,8 @@ bind -x '"\C-r": __suvadu_search_widget'
 /// Returns `Some(snippet)` when the project directory can be resolved, `None`
 /// otherwise.
 fn aliases_source_script() -> Option<String> {
-    let proj = directories::ProjectDirs::from("tech", "appachi", "suvadu")?;
-    let aliases_path = proj.data_dir().join("aliases.sh");
+    let dirs = crate::util::project_dirs()?;
+    let aliases_path = dirs.data_dir().join("aliases.sh");
     Some(format!(
         "\n# Suvadu managed aliases\n[ -f \"{}\" ] && source \"{}\"\n",
         aliases_path.display(),

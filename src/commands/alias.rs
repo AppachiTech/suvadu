@@ -111,11 +111,11 @@ fn handle_apply(to_stdout: bool) -> Result<(), Box<dyn std::error::Error>> {
     if to_stdout {
         print!("{lines}");
     } else {
-        let data_dir = directories::ProjectDirs::from("tech", "appachi", "suvadu")
-            .ok_or("Could not determine data directory")?
-            .data_dir()
-            .to_path_buf();
-        std::fs::create_dir_all(&data_dir)?;
+        let dirs = crate::util::project_dirs().ok_or("Could not determine data directory")?;
+        let data_dir = dirs.data_dir();
+        if !data_dir.exists() {
+            std::fs::create_dir_all(data_dir)?;
+        }
         let path = data_dir.join("aliases.sh");
         std::fs::write(&path, &lines)?;
         println!("✓ Wrote {} aliases to {}", aliases.len(), path.display());

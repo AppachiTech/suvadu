@@ -42,21 +42,26 @@ pub fn handle_add_with_context(
     executor: Option<String>,
     context: Option<std::collections::HashMap<String, String>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Check config
-    let config = config::load_config()?;
-    if !config.enabled || config::is_paused() {
+    // Cheapest checks first — no I/O required
+    if config::is_paused() {
         return Ok(());
     }
-
-    // Sanitize: ignore commands starting with space (privacy feature)
     if command.starts_with(' ') {
-        return Ok(()); // Silently skip
+        return Ok(());
     }
 
-    // Check exclusions (pre-compiled for performance on hot path)
-    let compiled = util::compile_exclusions(&config.exclusions);
-    if util::is_excluded_compiled(&command, &compiled) {
+    // Load config (filesystem read + TOML parse)
+    let config = config::load_config()?;
+    if !config.enabled {
         return Ok(());
+    }
+
+    // Check exclusions — skip compilation entirely when no patterns configured
+    if !config.exclusions.is_empty() {
+        let compiled = util::compile_exclusions(&config.exclusions);
+        if util::is_excluded_compiled(&command, &compiled) {
+            return Ok(());
+        }
     }
 
     // Initialize database

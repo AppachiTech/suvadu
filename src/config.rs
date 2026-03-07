@@ -129,25 +129,23 @@ const fn default_false() -> bool {
 /// directories 5.x: ~/Library/Preferences/tech.appachi.suvadu/
 /// directories 6.x: ~/Library/Application Support/tech.appachi.suvadu/
 /// Only runs when the old path has a config and the new path does not.
+/// Compiled out entirely on non-macOS platforms.
+#[cfg(target_os = "macos")]
 pub fn migrate_config_macos() {
-    if !cfg!(target_os = "macos") {
-        return;
-    }
-
     let Some(home) = std::env::var_os("HOME") else {
         return;
     };
-    let old_dir = PathBuf::from(&home).join("Library/Preferences/tech.appachi.suvadu");
-    let old_config = old_dir.join("config.toml");
+    let old_config =
+        PathBuf::from(&home).join("Library/Preferences/tech.appachi.suvadu/config.toml");
 
     if !old_config.exists() {
         return;
     }
 
-    let Some(proj) = directories::ProjectDirs::from("tech", "appachi", "suvadu") else {
+    let Some(dirs) = crate::util::project_dirs() else {
         return;
     };
-    let new_dir = proj.config_dir();
+    let new_dir = dirs.config_dir();
     let new_config = new_dir.join("config.toml");
 
     if new_config.exists() {
@@ -169,14 +167,18 @@ pub fn migrate_config_macos() {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn migrate_config_macos() {}
+
 /// Get the path to the suvadu config file
 pub fn get_config_path() -> ConfigResult<PathBuf> {
-    let config_dir = directories::ProjectDirs::from("tech", "appachi", "suvadu")
-        .ok_or_else(|| ConfigError::Path("Could not determine config directory".to_string()))?
-        .config_dir()
-        .to_path_buf();
+    let dirs = crate::util::project_dirs()
+        .ok_or_else(|| ConfigError::Path("Could not determine config directory".to_string()))?;
+    let config_dir = dirs.config_dir();
 
-    std::fs::create_dir_all(&config_dir)?;
+    if !config_dir.exists() {
+        std::fs::create_dir_all(config_dir)?;
+    }
     Ok(config_dir.join("config.toml"))
 }
 

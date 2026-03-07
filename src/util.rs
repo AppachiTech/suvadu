@@ -1,6 +1,18 @@
 use chrono::{Local, NaiveDate, NaiveTime, TimeZone};
 use directories::BaseDirs;
 use regex::Regex;
+use std::sync::LazyLock;
+
+// ── Cached project directories ──────────────────────────────
+
+static PROJECT_DIRS: LazyLock<Option<directories::ProjectDirs>> =
+    LazyLock::new(|| directories::ProjectDirs::from("tech", "appachi", "suvadu"));
+
+/// Cached project directory lookup. Avoids re-computing paths on every call.
+/// Called from config, db, hooks, integrations, and alias modules.
+pub fn project_dirs() -> Option<&'static directories::ProjectDirs> {
+    PROJECT_DIRS.as_ref()
+}
 
 /// Threshold above which a timestamp is treated as microseconds (not milliseconds).
 /// `9_999_999_999_999` is ~Nov 2286 in milliseconds, so any value above it is certainly

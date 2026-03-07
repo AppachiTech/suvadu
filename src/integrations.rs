@@ -146,11 +146,10 @@ fn is_valid_session_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// Get the directory for cached agent prompts (uses `directories` crate for platform-correct paths)
+/// Get the directory for cached agent prompts (uses cached project dirs)
 fn get_prompts_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let proj = directories::ProjectDirs::from("tech", "appachi", "suvadu")
-        .ok_or("Could not determine data directory")?;
-    Ok(proj.data_dir().join("prompts"))
+    let dirs = crate::util::project_dirs().ok_or("Could not determine data directory")?;
+    Ok(dirs.data_dir().join("prompts"))
 }
 
 /// Read the cached prompt for a session (if any)
