@@ -939,8 +939,8 @@ where
 const fn heatmap_colors(t: &crate::theme::Theme) -> [Color; 5] {
     [
         t.bg_elevated,
-        Color::Rgb(10, 50, 32),
-        Color::Rgb(10, 100, 50),
+        t.heatmap_low,
+        t.heatmap_mid,
         t.primary_dim,
         t.primary,
     ]

@@ -20,6 +20,7 @@ pub type ConfigResult<T> = Result<T, ConfigError>;
 
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
@@ -295,6 +296,14 @@ pub fn save_config(config: &Config) -> ConfigResult<()> {
     let tmp = tempfile::NamedTempFile::new_in(dir)?;
     std::fs::write(tmp.path(), contents)?;
     tmp.persist(&path).map_err(std::io::Error::from)?;
+
+    // Restrict config file to owner-only on Unix (may contain exclusion patterns)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+
     invalidate_cache();
     Ok(())
 }

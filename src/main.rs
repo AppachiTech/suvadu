@@ -34,7 +34,11 @@ fn main() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = crossterm::terminal::disable_raw_mode();
-        let _ = crossterm::execute!(std::io::stderr(), crossterm::terminal::LeaveAlternateScreen);
+        let _ = crossterm::execute!(
+            std::io::stderr(),
+            crossterm::event::DisableMouseCapture,
+            crossterm::terminal::LeaveAlternateScreen
+        );
         default_hook(info);
     }));
 
@@ -132,12 +136,12 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
             format,
             after,
             before,
-        } => import_export::handle_export(&format, after.as_deref(), before.as_deref()),
+        } => import_export::handle_export(format.as_str(), after.as_deref(), before.as_deref()),
         Commands::Import {
             file,
             from,
             dry_run,
-        } => run_import(&file, &from, dry_run),
+        } => run_import(&file, from, dry_run),
         Commands::Stats {
             days,
             top,
@@ -185,7 +189,7 @@ fn run_add(cmd: Commands) -> Result<(), Box<dyn std::error::Error>> {
     else {
         unreachable!()
     };
-    commands::entry::handle_add(commands::entry::AddParams {
+    commands::entry::handle_add_with_context(commands::entry::AddParams {
         session_id,
         command,
         cwd,
@@ -222,7 +226,7 @@ fn run_search(cmd: Commands) -> Result<(), Box<dyn std::error::Error>> {
         exit_code,
         executor: executor.as_deref(),
         here,
-        field: &field,
+        field: field.as_str(),
     })
 }
 
@@ -295,14 +299,14 @@ fn run_init(target: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn run_import(file: &str, from: &str, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn run_import(
+    file: &str,
+    from: cli::ImportFormat,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     match from {
-        "jsonl" => import_export::handle_import(file, dry_run),
-        "zsh-history" => import_export::handle_import_zsh_history(file, dry_run),
-        _ => {
-            eprintln!("Unknown import format: {from}. Use 'jsonl' or 'zsh-history'.");
-            process::exit(1);
-        }
+        cli::ImportFormat::Jsonl => import_export::handle_import(file, dry_run),
+        cli::ImportFormat::ZshHistory => import_export::handle_import_zsh_history(file, dry_run),
     }
 }
 

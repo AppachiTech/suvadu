@@ -107,8 +107,7 @@ impl SearchApp {
                 let mut final_score = (f64::from(score) * length_factor) as u32;
 
                 // Boost human-executed commands over agent commands
-                let is_human = entry.executor_type.as_deref().unwrap_or("human") == "human";
-                if is_human {
+                if entry.is_human() {
                     final_score = final_score.saturating_add(final_score / HUMAN_BOOST_FRACTION);
                 }
                 // Boost same-CWD commands
@@ -126,9 +125,7 @@ impl SearchApp {
                 return score_cmp;
             }
             // Tiebreaker: human entries first
-            let a_human = a.0.executor_type.as_deref().unwrap_or("human") == "human";
-            let b_human = b.0.executor_type.as_deref().unwrap_or("human") == "human";
-            b_human.cmp(&a_human)
+            b.0.is_human().cmp(&a.0.is_human())
         });
         scored.into_iter().map(|(e, _)| e).collect()
     }
@@ -151,9 +148,7 @@ impl SearchApp {
                 }
             }
             // Secondary: human entries first
-            let a_human = a.executor_type.as_deref().unwrap_or("human") == "human";
-            let b_human = b.executor_type.as_deref().unwrap_or("human") == "human";
-            b_human.cmp(&a_human)
+            b.is_human().cmp(&a.is_human())
         });
     }
 

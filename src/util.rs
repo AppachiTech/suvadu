@@ -399,6 +399,19 @@ pub fn highlight_command(command: &str, wrap_width: usize) -> ratatui::text::Tex
     ratatui::text::Text::from(lines)
 }
 
+// ── Atomic file writes ──────────────────────────────────────
+
+/// Write `data` to `path` atomically using `tempfile::NamedTempFile` + persist.
+/// The temp file is created in the same directory as `path` to ensure the
+/// rename is atomic (same filesystem). On error the temp file is auto-cleaned.
+pub fn atomic_write(path: &std::path::Path, data: &str) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let tmp = tempfile::NamedTempFile::new_in(dir)?;
+    std::fs::write(tmp.path(), data)?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
+
 // ── Shell RC cleanup ────────────────────────────────────────
 
 /// Remove the Suvadu initialization line from a shell RC file.
@@ -429,7 +442,7 @@ fn cleanup_shell_rc(filename: &str, shell: &str) -> Result<(), std::io::Error> {
         .collect();
 
     let new_content = filtered_content.join("\n") + "\n";
-    std::fs::write(&rc_path, new_content)?;
+    atomic_write(&rc_path, &new_content)?;
 
     Ok(())
 }
@@ -514,7 +527,7 @@ pub fn cleanup_claude_settings_at(
     }
 
     let updated = serde_json::to_string_pretty(&settings)?;
-    std::fs::write(settings_path, updated)?;
+    atomic_write(settings_path, &updated)?;
 
     Ok(true)
 }

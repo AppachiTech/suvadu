@@ -1,6 +1,6 @@
 use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Available theme presets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -22,6 +22,14 @@ impl ThemeName {
             Self::Dark => Self::Light,
             Self::Light => Self::Terminal,
             Self::Terminal => Self::Dark,
+        }
+    }
+
+    pub const fn index(self) -> u8 {
+        match self {
+            Self::Dark => 0,
+            Self::Light => 1,
+            Self::Terminal => 2,
         }
     }
 
@@ -63,6 +71,8 @@ pub struct Theme {
     pub badge_executor: Color,
     pub badge_path: Color,
     pub error_bg: Color,
+    pub heatmap_low: Color,
+    pub heatmap_mid: Color,
 }
 
 impl Theme {
@@ -90,6 +100,8 @@ impl Theme {
             badge_executor: Color::Rgb(147, 51, 234),
             badge_path: Color::Rgb(6, 182, 212),
             error_bg: Color::Rgb(40, 10, 10),
+            heatmap_low: Color::Rgb(10, 50, 32),
+            heatmap_mid: Color::Rgb(10, 100, 50),
         }
     }
 
@@ -117,6 +129,8 @@ impl Theme {
             badge_executor: Color::Rgb(120, 40, 190),
             badge_path: Color::Rgb(0, 140, 170),
             error_bg: Color::Rgb(255, 230, 230),
+            heatmap_low: Color::Rgb(180, 230, 200),
+            heatmap_mid: Color::Rgb(100, 190, 140),
         }
     }
 
@@ -144,14 +158,8 @@ impl Theme {
             badge_executor: Color::Magenta,
             badge_path: Color::Cyan,
             error_bg: Color::Red,
-        }
-    }
-
-    const fn from_name(name: ThemeName) -> Self {
-        match name {
-            ThemeName::Dark => Self::dark(),
-            ThemeName::Light => Self::light(),
-            ThemeName::Terminal => Self::terminal(),
+            heatmap_low: Color::DarkGray,
+            heatmap_mid: Color::Gray,
         }
     }
 }
@@ -162,17 +170,18 @@ impl Default for Theme {
     }
 }
 
-static GLOBAL_THEME: OnceLock<Theme> = OnceLock::new();
+static THEMES: [Theme; 3] = [Theme::dark(), Theme::light(), Theme::terminal()];
+static THEME_INDEX: AtomicU8 = AtomicU8::new(0); // 0=dark, 1=light, 2=terminal
 
-/// Initialize the global theme. Call once at startup before any TUI rendering.
-/// If called multiple times, only the first call takes effect.
+/// Initialize (or update) the global theme.
+/// Can be called multiple times — e.g. from the settings UI after a theme toggle.
 pub fn init_theme(name: ThemeName) {
-    let _ = GLOBAL_THEME.set(Theme::from_name(name));
+    THEME_INDEX.store(name.index(), Ordering::Relaxed);
 }
 
 /// Get the global theme. Falls back to dark theme if `init_theme` was not called.
 pub fn theme() -> &'static Theme {
-    GLOBAL_THEME.get_or_init(Theme::default)
+    &THEMES[THEME_INDEX.load(Ordering::Relaxed) as usize]
 }
 
 #[cfg(test)]
@@ -228,8 +237,14 @@ mod tests {
     }
 
     #[test]
-    fn test_from_name() {
-        let t = Theme::from_name(ThemeName::Terminal);
-        assert_eq!(t.primary, Color::Green);
+    fn test_theme_index() {
+        assert_eq!(ThemeName::Dark.index(), 0);
+        assert_eq!(ThemeName::Light.index(), 1);
+        assert_eq!(ThemeName::Terminal.index(), 2);
+        // Verify the static array matches
+        assert_eq!(
+            THEMES[ThemeName::Terminal.index() as usize].primary,
+            Color::Green
+        );
     }
 }

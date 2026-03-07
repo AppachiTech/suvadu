@@ -6,16 +6,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Write `data` to `path` atomically using `tempfile::NamedTempFile` + persist.
-/// The temp file is created in the same directory as `path` to ensure the
-/// rename is atomic (same filesystem). On error the temp file is auto-cleaned.
-fn atomic_write(path: &Path, data: &str) -> std::io::Result<()> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let tmp = tempfile::NamedTempFile::new_in(dir)?;
-    std::fs::write(tmp.path(), data)?;
-    tmp.persist(path).map_err(|e| e.error)?;
-    Ok(())
-}
+use crate::util::atomic_write;
 
 /// Maximum bytes to read from stdin for hook input (1 MB).
 const MAX_HOOK_INPUT_BYTES: u64 = 1_048_576;

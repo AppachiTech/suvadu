@@ -609,7 +609,9 @@ impl SearchApp {
             .border_style(Style::default().fg(t.primary).add_modifier(Modifier::BOLD))
             .style(Style::default().bg(t.bg_elevated));
 
-        let popup_area = centered_rect(60, 50, area);
+        // Cap popup height to available terminal rows (minimum 16 rows for all fields)
+        let popup_height = area.height.clamp(16, 50);
+        let popup_area = centered_rect(60, popup_height, area);
         f.render_widget(Clear, popup_area);
         f.render_widget(block, popup_area);
 
@@ -1077,4 +1079,76 @@ fn build_command_text(app: &SearchApp, entry: &crate::models::Entry) -> String {
         "{}{}{}{}",
         note_prefix, bookmark_prefix, count_display, entry.command
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::Entry;
+    use ratatui::style::Style;
+
+    fn make_entry(
+        executor_type: Option<&str>,
+        executor: Option<&str>,
+        exit_code: Option<i32>,
+    ) -> Entry {
+        Entry {
+            id: None,
+            session_id: "s1".to_string(),
+            command: "test".to_string(),
+            cwd: "/tmp".to_string(),
+            exit_code,
+            started_at: 1_700_000_000_000,
+            ended_at: 1_700_000_001_000,
+            duration_ms: 1000,
+            context: None,
+            tag_name: None,
+            tag_id: None,
+            executor_type: executor_type.map(String::from),
+            executor: executor.map(String::from),
+        }
+    }
+
+    #[test]
+    fn test_format_executor_human() {
+        let e = make_entry(Some("human"), Some("zsh"), None);
+        let result = format_executor(&e);
+        assert!(result.contains("zsh"));
+    }
+
+    #[test]
+    fn test_format_executor_agent() {
+        let e = make_entry(Some("agent"), Some("claude-code"), None);
+        let result = format_executor(&e);
+        assert!(result.contains("claude-code"));
+    }
+
+    #[test]
+    fn test_format_executor_none() {
+        let e = make_entry(None, None, None);
+        let result = format_executor(&e);
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_format_exit_code_success() {
+        let e = make_entry(None, None, Some(0));
+        let (display, _style) = format_exit_code(&e, Style::default());
+        assert!(display.contains('✔'));
+    }
+
+    #[test]
+    fn test_format_exit_code_failure() {
+        let e = make_entry(None, None, Some(1));
+        let (display, _style) = format_exit_code(&e, Style::default());
+        assert!(display.contains('✘'));
+        assert!(display.contains('1'));
+    }
+
+    #[test]
+    fn test_format_exit_code_none() {
+        let e = make_entry(None, None, None);
+        let (display, _style) = format_exit_code(&e, Style::default());
+        assert!(display.contains('○'));
+    }
 }

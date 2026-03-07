@@ -152,10 +152,9 @@ impl AppState {
             (1, 2) => {
                 self.config.theme = self.config.theme.next();
                 self.dirty = true;
-                self.save_status = Some(format!(
-                    "Theme set to '{}' — save & restart to apply",
-                    self.config.theme
-                ));
+                // Apply immediately so the UI reflects the new theme
+                crate::theme::init_theme(self.config.theme);
+                self.save_status = Some(format!("Theme set to '{}'", self.config.theme));
             }
             _ => {}
         }
@@ -616,7 +615,7 @@ const fn get_setting_description(tab: usize, item: usize) -> &'static str {
         (0, 4) => "Show the detail preview pane when opening search (toggle with Tab)",
         (1, 0) => "Bind Up/Down arrow keys to cycle through command history",
         (1, 1) => "Show risk assessment badges in the search detail pane for agent commands",
-        (1, 2) => "Color theme: dark (RGB for dark terminals), light (RGB for light terminals), terminal (ANSI 16 — adapts to your scheme). Save & restart to apply.",
+        (1, 2) => "Color theme: dark (RGB for dark terminals), light (RGB for light terminals), terminal (ANSI 16 — adapts to your scheme). Changes apply immediately.",
         _ => "Use [a] to add new items, [d] to delete selected items",
     }
 }

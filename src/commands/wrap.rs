@@ -30,7 +30,7 @@ pub fn handle_wrap(
     let exit_code = status.map_or(127, exit_code_from_status);
 
     // Record in history (log failure to stderr; don't block the wrapped command's exit)
-    if let Err(e) = super::entry::handle_add(super::entry::AddParams {
+    if let Err(e) = super::entry::handle_add_with_context(super::entry::AddParams {
         session_id,
         command: cmd_str,
         cwd,

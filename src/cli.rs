@@ -1,4 +1,4 @@
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(
@@ -10,6 +10,51 @@ use clap::{CommandFactory, Parser, Subcommand};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
+}
+
+/// Search field for filtering entries
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum SearchField {
+    Command,
+    Cwd,
+    Session,
+    Executor,
+}
+
+impl SearchField {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Command => "command",
+            Self::Cwd => "cwd",
+            Self::Session => "session",
+            Self::Executor => "executor",
+        }
+    }
+}
+
+/// Export file format
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ExportFormat {
+    Json,
+    Jsonl,
+    Csv,
+}
+
+impl ExportFormat {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Jsonl => "jsonl",
+            Self::Csv => "csv",
+        }
+    }
+}
+
+/// Import source format
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ImportFormat {
+    Jsonl,
+    ZshHistory,
 }
 
 #[derive(Subcommand)]
@@ -122,8 +167,8 @@ pub enum Commands {
         here: bool,
 
         /// Search field: command (default), cwd, session, or executor
-        #[arg(long, default_value = "command")]
-        field: String,
+        #[arg(long, value_enum, default_value_t = SearchField::Command)]
+        field: SearchField,
     },
 
     /// Show usage analytics and trends
@@ -294,8 +339,8 @@ pub enum Commands {
     )]
     Export {
         /// Output format: json, jsonl (default), or csv
-        #[arg(long, default_value = "jsonl")]
-        format: String,
+        #[arg(long, value_enum, default_value_t = ExportFormat::Jsonl)]
+        format: ExportFormat,
         /// Only export entries after this date (YYYY-MM-DD)
         #[arg(long)]
         after: Option<String>,
@@ -311,9 +356,9 @@ pub enum Commands {
     Import {
         /// Path to the file to import
         file: String,
-        /// Source format: "jsonl" (default) or "zsh-history"
-        #[arg(long, default_value = "jsonl")]
-        from: String,
+        /// Source format: jsonl (default) or zsh-history
+        #[arg(long, value_enum, default_value_t = ImportFormat::Jsonl)]
+        from: ImportFormat,
         /// Preview import without writing to database
         #[arg(long)]
         dry_run: bool,

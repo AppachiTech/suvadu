@@ -50,9 +50,17 @@ impl Entry {
         }
     }
 
+    /// Returns `true` if this entry was executed by a human (or unknown/missing executor).
+    pub fn is_human(&self) -> bool {
+        matches!(
+            self.executor_type.as_deref(),
+            None | Some("human" | "unknown")
+        )
+    }
+
     /// Returns `true` if this entry was executed by an agent (not human/unknown).
     pub fn is_agent(&self) -> bool {
-        matches!(self.executor_type.as_deref(), Some(et) if et != "human" && et != "unknown")
+        !self.is_human()
     }
 
     /// Set `tag_id`

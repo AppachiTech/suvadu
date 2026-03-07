@@ -170,10 +170,6 @@ pub fn handle_add_with_context(params: AddParams) -> Result<(), Box<dyn std::err
     Ok(()) // Silent success
 }
 
-pub fn handle_add(params: AddParams) -> Result<(), Box<dyn std::error::Error>> {
-    handle_add_with_context(params)
-}
-
 pub fn handle_delete(
     pattern: &str,
     is_regex: bool,
@@ -181,7 +177,7 @@ pub fn handle_delete(
     skip_confirm: bool,
     before: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if pattern.is_empty() {
+    if pattern.trim().is_empty() {
         return Err(
             "Empty pattern would match all entries. Please provide a specific pattern.".into(),
         );
@@ -346,20 +342,23 @@ pub fn handle_gc(dry_run: bool, vacuum: bool) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-/// Count prompt cache files older than 7 days.
+/// Maximum age for prompt cache files (7 days).
+const PROMPT_CACHE_MAX_AGE_SECS: u64 = 7 * 24 * 3600;
+
+/// Count prompt cache files older than the threshold.
 fn count_stale_prompt_caches() -> u64 {
     let Some(prompts_dir) = get_prompts_dir() else {
         return 0;
     };
-    count_old_files(&prompts_dir, 7 * 24 * 3600)
+    process_old_files(&prompts_dir, PROMPT_CACHE_MAX_AGE_SECS, false)
 }
 
-/// Delete prompt cache files older than 7 days. Returns count deleted.
+/// Delete prompt cache files older than the threshold. Returns count deleted.
 fn clean_prompt_caches() -> u64 {
     let Some(prompts_dir) = get_prompts_dir() else {
         return 0;
     };
-    delete_old_files(&prompts_dir, 7 * 24 * 3600)
+    process_old_files(&prompts_dir, PROMPT_CACHE_MAX_AGE_SECS, true)
 }
 
 fn get_prompts_dir() -> Option<std::path::PathBuf> {
@@ -367,7 +366,8 @@ fn get_prompts_dir() -> Option<std::path::PathBuf> {
     Some(dirs.data_dir().join("prompts"))
 }
 
-fn count_old_files(dir: &std::path::Path, max_age_secs: u64) -> u64 {
+/// Count (and optionally delete) files older than `max_age_secs`.
+fn process_old_files(dir: &std::path::Path, max_age_secs: u64, delete: bool) -> u64 {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
     };
@@ -379,7 +379,13 @@ fn count_old_files(dir: &std::path::Path, max_age_secs: u64) -> u64 {
                 if let Ok(modified) = meta.modified() {
                     if let Ok(age) = now.duration_since(modified) {
                         if age.as_secs() > max_age_secs {
-                            count += 1;
+                            if delete {
+                                if std::fs::remove_file(entry.path()).is_ok() {
+                                    count += 1;
+                                }
+                            } else {
+                                count += 1;
+                            }
                         }
                     }
                 }
@@ -387,30 +393,6 @@ fn count_old_files(dir: &std::path::Path, max_age_secs: u64) -> u64 {
         }
     }
     count
-}
-
-fn delete_old_files(dir: &std::path::Path, max_age_secs: u64) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    let now = std::time::SystemTime::now();
-    let mut deleted = 0u64;
-    for entry in entries.flatten() {
-        if let Ok(meta) = entry.metadata() {
-            if meta.is_file() {
-                if let Ok(modified) = meta.modified() {
-                    if let Ok(age) = now.duration_since(modified) {
-                        if age.as_secs() > max_age_secs
-                            && std::fs::remove_file(entry.path()).is_ok()
-                        {
-                            deleted += 1;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    deleted
 }
 
 #[cfg(test)]
