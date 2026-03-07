@@ -170,6 +170,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             before,
         } => commands::entry::handle_delete(&pattern, regex, dry_run, before.as_deref()),
 
+        Commands::Gc { dry_run, vacuum } => commands::entry::handle_gc(dry_run, vacuum),
+
         Commands::Uninstall => commands::settings::handle_uninstall(),
 
         Commands::Version => {

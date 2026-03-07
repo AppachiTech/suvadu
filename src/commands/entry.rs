@@ -252,6 +252,44 @@ pub fn handle_note(
     Ok(())
 }
 
+pub fn handle_gc(dry_run: bool, vacuum: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let repo = Repository::init()?;
+
+    let orphaned_sessions = repo.count_orphaned_sessions()?;
+    let orphaned_notes = repo.count_orphaned_notes()?;
+
+    if dry_run {
+        println!("Dry run — nothing will be deleted.\n");
+        println!("  Orphaned sessions (no entries): {orphaned_sessions}");
+        println!("  Orphaned notes (missing entry): {orphaned_notes}");
+        if orphaned_sessions == 0 && orphaned_notes == 0 {
+            println!("\nNothing to clean up.");
+        }
+        return Ok(());
+    }
+
+    let deleted_notes = repo.delete_orphaned_notes()?;
+    let deleted_sessions = repo.delete_orphaned_sessions()?;
+
+    if deleted_sessions > 0 {
+        println!("Removed {deleted_sessions} orphaned sessions.");
+    }
+    if deleted_notes > 0 {
+        println!("Removed {deleted_notes} orphaned notes.");
+    }
+    if deleted_sessions == 0 && deleted_notes == 0 {
+        println!("Nothing to clean up.");
+    }
+
+    if vacuum {
+        println!("Running VACUUM...");
+        repo.vacuum()?;
+        println!("Database compacted.");
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

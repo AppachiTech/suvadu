@@ -581,4 +581,48 @@ impl Repository {
         let count: i64 = stmt.query_row(fb.params_refs().as_slice(), |row| row.get(0))?;
         Ok(count)
     }
+
+    /// Count orphaned sessions (sessions with no remaining entries).
+    pub fn count_orphaned_sessions(&self) -> DbResult<i64> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sessions s WHERE NOT EXISTS (SELECT 1 FROM entries e WHERE e.session_id = s.id)",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Delete orphaned sessions. Returns count deleted.
+    pub fn delete_orphaned_sessions(&self) -> DbResult<usize> {
+        let count = self.conn.execute(
+            "DELETE FROM sessions WHERE id NOT IN (SELECT DISTINCT session_id FROM entries)",
+            [],
+        )?;
+        Ok(count)
+    }
+
+    /// Count orphaned notes (notes referencing non-existent entries).
+    pub fn count_orphaned_notes(&self) -> DbResult<i64> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM notes n WHERE NOT EXISTS (SELECT 1 FROM entries e WHERE e.id = n.entry_id)",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Delete orphaned notes. Returns count deleted.
+    pub fn delete_orphaned_notes(&self) -> DbResult<usize> {
+        let count = self.conn.execute(
+            "DELETE FROM notes WHERE entry_id NOT IN (SELECT id FROM entries)",
+            [],
+        )?;
+        Ok(count)
+    }
+
+    /// Run VACUUM to reclaim disk space.
+    pub fn vacuum(&self) -> DbResult<()> {
+        self.conn.execute_batch("VACUUM")?;
+        Ok(())
+    }
 }

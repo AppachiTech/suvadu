@@ -311,6 +311,19 @@ pub enum Commands {
     )]
     Agent(AgentCommands),
 
+    /// Remove orphaned data and compact the database
+    #[command(
+        after_help = "Examples:\n  suv gc              # Remove orphaned sessions/notes\n  suv gc --dry-run    # Preview what would be cleaned\n  suv gc --vacuum     # Also compact the database file"
+    )]
+    Gc {
+        /// Preview what would be deleted without deleting
+        #[arg(long)]
+        dry_run: bool,
+        /// Run VACUUM after cleanup to compact the database file
+        #[arg(long)]
+        vacuum: bool,
+    },
+
     /// Execute a command and record it in Suvadu history
     /// Useful for AI agents and scripts that don't load shell hooks
     #[command(

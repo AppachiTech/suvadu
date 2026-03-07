@@ -2070,3 +2070,67 @@ fn test_begin_and_commit_transaction() {
 
     assert_eq!(repo.count_entries().unwrap(), 1);
 }
+
+// ── GC Tests ────────────────────────────────────────────
+
+#[test]
+fn test_gc_orphaned_sessions() {
+    let (_dir, repo) = setup_test_db();
+
+    let s1 = Session::new("host".to_string(), 100);
+    repo.insert_session(&s1).unwrap();
+    let s2 = Session::new("host".to_string(), 200);
+    repo.insert_session(&s2).unwrap();
+
+    // Only s1 has entries
+    repo.insert_entry(&Entry::new(
+        s1.id.clone(),
+        "cmd".into(),
+        "/tmp".into(),
+        Some(0),
+        1000,
+        1100,
+    ))
+    .unwrap();
+
+    assert_eq!(repo.count_orphaned_sessions().unwrap(), 1);
+    let deleted = repo.delete_orphaned_sessions().unwrap();
+    assert_eq!(deleted, 1);
+    assert_eq!(repo.count_orphaned_sessions().unwrap(), 0);
+}
+
+#[test]
+fn test_gc_orphaned_notes() {
+    let (_dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    let id = repo
+        .insert_entry(&Entry::new(
+            session.id.clone(),
+            "cmd".into(),
+            "/tmp".into(),
+            Some(0),
+            1000,
+            1100,
+        ))
+        .unwrap();
+
+    repo.upsert_note(id, "test note").unwrap();
+    assert_eq!(repo.count_orphaned_notes().unwrap(), 0);
+
+    // Delete the entry — note becomes orphaned
+    // (CASCADE may handle this, but test the count query regardless)
+    repo.delete_entry(id).unwrap();
+
+    // SQLite ON DELETE CASCADE should clean up, but our GC catches stragglers
+    let orphaned = repo.count_orphaned_notes().unwrap();
+    let deleted = repo.delete_orphaned_notes().unwrap();
+    assert_eq!(orphaned, deleted as i64);
+}
+
+#[test]
+fn test_vacuum() {
+    let (_dir, repo) = setup_test_db();
+    repo.vacuum().unwrap();
+}
