@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use crate::config;
 
 #[allow(clippy::too_many_lines)]
@@ -248,6 +250,17 @@ bindkey '^[OB' suvadu-down-arrow
         );
     }
 
+    // Auto-source managed aliases file if it exists
+    if let Some(proj) = directories::ProjectDirs::from("tech", "appachi", "suvadu") {
+        let aliases_path = proj.data_dir().join("aliases.sh");
+        let _ = write!(
+            script,
+            "\n# Suvadu managed aliases\n[ -f \"{}\" ] && source \"{}\"\n",
+            aliases_path.display(),
+            aliases_path.display()
+        );
+    }
+
     Ok(script)
 }
 
@@ -256,7 +269,7 @@ pub fn get_bash_hook(config: &config::Config) -> Result<String, Box<dyn std::err
     let current_exe = std::env::current_exe()?;
     let bin_path = current_exe.to_string_lossy();
 
-    let script = format!(
+    let mut script = format!(
         r#"# Suvadu - Bash Shell History Integration
 # Add this to your ~/.bashrc:
 # eval "$(suv init bash)"
@@ -438,6 +451,17 @@ bind -x '"\C-r": __suvadu_search_widget'
     // Note: Bash doesn't have zsh's zle widgets for arrow key override,
     // so arrow-based history navigation is not supported in Bash.
     let _ = config; // Config reserved for future Bash-specific settings
+
+    // Auto-source managed aliases file if it exists
+    if let Some(proj) = directories::ProjectDirs::from("tech", "appachi", "suvadu") {
+        let aliases_path = proj.data_dir().join("aliases.sh");
+        let _ = write!(
+            script,
+            "\n# Suvadu managed aliases\n[ -f \"{}\" ] && source \"{}\"\n",
+            aliases_path.display(),
+            aliases_path.display()
+        );
+    }
 
     Ok(script)
 }

@@ -1,3 +1,4 @@
+mod aliases;
 mod bookmarks;
 mod entries;
 mod notes;

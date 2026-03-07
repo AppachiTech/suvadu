@@ -17,7 +17,7 @@ pub enum DbError {
 pub type DbResult<T> = Result<T, DbError>;
 
 /// Current schema version. Increment when adding new migrations.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Get the path to the suvadu database file
 pub fn get_db_path() -> DbResult<PathBuf> {
@@ -58,7 +58,14 @@ fn set_schema_version(conn: &Connection, version: i64) -> DbResult<()> {
 
 /// Allowed table names for `column_exists` -- defense-in-depth against
 /// SQL injection even though all callers use hardcoded literals.
-const ALLOWED_TABLES: &[&str] = &["entries", "sessions", "tags", "bookmarks", "notes"];
+const ALLOWED_TABLES: &[&str] = &[
+    "entries",
+    "sessions",
+    "tags",
+    "bookmarks",
+    "notes",
+    "aliases",
+];
 
 /// Allowed column names for `column_exists`.
 const ALLOWED_COLUMNS: &[&str] = &[
@@ -204,6 +211,24 @@ fn migrate_v2(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Migration v3: aliases table for managed shell aliases.
+fn migrate_v3(conn: &Connection) -> DbResult<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS aliases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            command TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_aliases_name ON aliases(name)",
+        [],
+    )?;
+    Ok(())
+}
+
 /// Initialize the database with proper schema and settings.
 ///
 /// Migrations are tracked via a `schema_version` table so each
@@ -225,6 +250,11 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
 
     if version < 2 {
         migrate_v2(&conn)?;
+        set_schema_version(&conn, 2)?;
+    }
+
+    if version < 3 {
+        migrate_v3(&conn)?;
         set_schema_version(&conn, SCHEMA_VERSION)?;
     }
 

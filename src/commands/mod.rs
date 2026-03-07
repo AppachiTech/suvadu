@@ -1,3 +1,4 @@
+pub mod alias;
 pub mod entry;
 pub mod replay;
 pub mod search;

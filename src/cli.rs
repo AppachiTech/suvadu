@@ -226,6 +226,13 @@ pub enum Commands {
     )]
     Bookmark(BookmarkCommands),
 
+    /// Manage shell aliases
+    #[command(
+        subcommand,
+        after_help = "Examples:\n  suv alias add gst \"git status\"\n  suv alias list\n  suv alias apply --stdout\n  suv alias remove gst\n  suv alias add-suggested"
+    )]
+    Alias(AliasCommands),
+
     /// Uninstall Suvadu (remove binaries from system)
     Uninstall,
 
@@ -249,29 +256,6 @@ pub enum Commands {
 
     /// Update to the latest version
     Update,
-
-    /// Suggest shell aliases for frequently-typed long commands
-    #[command(
-        name = "suggest-aliases",
-        after_help = "Examples:\n  suv suggest-aliases                    # Interactive TUI\n  suv suggest-aliases --text             # Plain text output\n  suv suggest-aliases --days 30 -c 5     # Last 30 days, min 5 uses"
-    )]
-    SuggestAliases {
-        /// Minimum times a command must appear (default: 10)
-        #[arg(short = 'c', long, default_value_t = 10)]
-        min_count: usize,
-        /// Minimum character length of command (default: 12)
-        #[arg(short = 'l', long, default_value_t = 12)]
-        min_length: usize,
-        /// Only analyze last N days
-        #[arg(short, long)]
-        days: Option<usize>,
-        /// Max suggestions to show (default: 20)
-        #[arg(short = 'n', long, default_value_t = 20)]
-        top: usize,
-        /// Skip TUI, print suggestions to stdout
-        #[arg(long)]
-        text: bool,
-    },
 
     /// Export history to a file (JSON, JSONL, or CSV format)
     #[command(
@@ -410,6 +394,72 @@ pub enum BookmarkCommands {
     Remove {
         /// The command text to un-bookmark
         command: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AliasCommands {
+    /// Register a shell alias
+    Add {
+        /// Alias name (alphanumeric, hyphens, underscores)
+        name: String,
+        /// The command the alias expands to
+        command: String,
+    },
+
+    /// Remove a managed alias
+    Remove {
+        /// Alias name to remove
+        name: String,
+    },
+
+    /// List all managed aliases
+    List,
+
+    /// Write aliases to a sourceable shell file (or stdout)
+    Apply {
+        /// Print alias lines to stdout instead of writing to file
+        #[arg(long)]
+        stdout: bool,
+    },
+
+    /// Interactively pick from suggestions and store to DB
+    #[command(name = "add-suggested")]
+    AddSuggested {
+        /// Minimum times a command must appear (default: 10)
+        #[arg(short = 'c', long, default_value_t = 10)]
+        min_count: usize,
+        /// Minimum character length of command (default: 12)
+        #[arg(short = 'l', long, default_value_t = 12)]
+        min_length: usize,
+        /// Only analyze last N days
+        #[arg(short, long)]
+        days: Option<usize>,
+        /// Max suggestions to show (default: 20)
+        #[arg(short = 'n', long, default_value_t = 20)]
+        top: usize,
+    },
+
+    /// Suggest aliases for frequently-typed long commands
+    #[command(
+        after_help = "Examples:\n  suv alias suggest                    # Interactive TUI\n  suv alias suggest --text             # Plain text output\n  suv alias suggest --days 30 -c 5     # Last 30 days, min 5 uses"
+    )]
+    Suggest {
+        /// Minimum times a command must appear (default: 10)
+        #[arg(short = 'c', long, default_value_t = 10)]
+        min_count: usize,
+        /// Minimum character length of command (default: 12)
+        #[arg(short = 'l', long, default_value_t = 12)]
+        min_length: usize,
+        /// Only analyze last N days
+        #[arg(short, long)]
+        days: Option<usize>,
+        /// Max suggestions to show (default: 20)
+        #[arg(short = 'n', long, default_value_t = 20)]
+        top: usize,
+        /// Skip TUI, print suggestions to stdout
+        #[arg(long)]
+        text: bool,
     },
 }
 

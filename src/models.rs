@@ -88,6 +88,15 @@ pub struct Bookmark {
     pub created_at: i64,
 }
 
+/// A managed shell alias
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Alias {
+    pub id: i64,
+    pub name: String,
+    pub command: String,
+    pub created_at: i64,
+}
+
 /// Aggregated usage statistics
 #[derive(Debug, Clone)]
 pub struct Stats {

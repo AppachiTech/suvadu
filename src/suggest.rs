@@ -105,21 +105,24 @@ fn generate_alias_name(command: &str, taken: &std::collections::HashSet<String>)
 }
 
 /// Escape a string for use in a shell alias value (single-quoted).
-fn shell_quote(s: &str) -> String {
+pub fn shell_quote(s: &str) -> String {
     // In single-quoted strings, replace ' with '\''
     s.replace('\'', "'\\''")
 }
 
 /// Build suggestions from history, filtering out already-aliased commands.
-fn build_suggestions(
+/// When `human_only` is true, only commands executed by humans are considered.
+pub fn build_suggestions(
     min_count: usize,
     min_length: usize,
     days: Option<usize>,
     top: usize,
+    human_only: bool,
 ) -> Result<(Vec<AliasSuggestion>, Vec<String>), Box<dyn std::error::Error>> {
     let repo = repository::Repository::init()?;
 
-    let frequent = repo.get_frequent_commands(days, min_count, min_length, top * 3)?;
+    let frequent =
+        repo.get_frequent_commands_filtered(days, min_count, min_length, top * 3, human_only)?;
 
     let alias_output = get_shell_aliases();
     let (alias_values, mut alias_names) = parse_alias_output(&alias_output);
@@ -165,7 +168,7 @@ pub fn handle_suggest_aliases_text(
     days: Option<usize>,
     top: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (suggestions, skipped) = build_suggestions(min_count, min_length, days, top)?;
+    let (suggestions, skipped) = build_suggestions(min_count, min_length, days, top, false)?;
 
     if suggestions.is_empty() {
         let period = days.map_or_else(|| "all time".to_string(), |d| format!("last {d} days"));
@@ -210,7 +213,7 @@ pub fn handle_suggest_aliases_tui(
     days: Option<usize>,
     top: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (suggestions, skipped) = build_suggestions(min_count, min_length, days, top)?;
+    let (suggestions, skipped) = build_suggestions(min_count, min_length, days, top, false)?;
 
     if suggestions.is_empty() {
         let period = days.map_or_else(|| "all time".to_string(), |d| format!("last {d} days"));
@@ -255,6 +258,45 @@ pub fn handle_suggest_aliases_tui(
     }
 
     Ok(())
+}
+
+/// Run the suggest TUI and return the user's selected suggestions (or None if quit).
+/// When `human_only` is true, only human-executed commands are considered.
+pub fn run_suggest_and_select(
+    min_count: usize,
+    min_length: usize,
+    days: Option<usize>,
+    top: usize,
+    human_only: bool,
+) -> Result<Option<Vec<AliasSuggestion>>, Box<dyn std::error::Error>> {
+    let (suggestions, skipped) = build_suggestions(min_count, min_length, days, top, human_only)?;
+
+    if suggestions.is_empty() {
+        let period = days.map_or_else(|| "all time".to_string(), |d| format!("last {d} days"));
+        println!("No alias suggestions found.");
+        println!("  Criteria: min {min_count} uses, min {min_length} chars, {period}");
+        return Ok(None);
+    }
+
+    crossterm::terminal::enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
+    let backend = ratatui::backend::CrosstermBackend::new(stdout);
+    let mut terminal = ratatui::Terminal::new(backend)?;
+
+    let res = suggest_ui::run_suggest_ui(&mut terminal, suggestions, skipped);
+
+    crossterm::terminal::disable_raw_mode()?;
+    crossterm::execute!(
+        terminal.backend_mut(),
+        crossterm::terminal::LeaveAlternateScreen
+    )?;
+    terminal.show_cursor()?;
+
+    match res {
+        Ok(result) => Ok(result),
+        Err(e) => Err(e.into()),
+    }
 }
 
 #[cfg(test)]

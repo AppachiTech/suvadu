@@ -157,6 +157,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         Commands::Bookmark(cmd) => commands::entry::handle_bookmark(cmd),
 
+        Commands::Alias(cmd) => commands::alias::handle_alias(cmd),
+
         Commands::Note {
             entry_id,
             content,
@@ -222,20 +224,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 commands::stats::handle_stats_text(days, top)
             } else {
                 commands::stats::handle_stats_tui(days, top)
-            }
-        }
-
-        Commands::SuggestAliases {
-            min_count,
-            min_length,
-            days,
-            top,
-            text,
-        } => {
-            if text {
-                suggest::handle_suggest_aliases_text(min_count, min_length, days, top)
-            } else {
-                suggest::handle_suggest_aliases_tui(min_count, min_length, days, top)
             }
         }
 

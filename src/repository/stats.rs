@@ -211,13 +211,26 @@ impl Repository {
     /// Results are ranked by frequency × directory diversity × recency:
     ///   `score = count * min(dir_count, 5) * recency_weight`
     /// where `recency_weight` boosts commands used recently (half-life = 30 days).
-    #[allow(clippy::cast_precision_loss)]
+    #[allow(dead_code)]
     pub fn get_frequent_commands(
         &self,
         days: Option<usize>,
         min_count: usize,
         min_length: usize,
         limit: usize,
+    ) -> DbResult<Vec<(String, i64, i64)>> {
+        self.get_frequent_commands_filtered(days, min_count, min_length, limit, false)
+    }
+
+    /// Like `get_frequent_commands` but with an optional human-only filter.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn get_frequent_commands_filtered(
+        &self,
+        days: Option<usize>,
+        min_count: usize,
+        min_length: usize,
+        limit: usize,
+        human_only: bool,
     ) -> DbResult<Vec<(String, i64, i64)>> {
         // Half-life: 30 days in ms. Commands used 30 days ago get ~50% recency weight.
         const HALF_LIFE_MS: f64 = 30.0 * 86_400_000.0;
@@ -230,22 +243,32 @@ impl Repository {
                     .saturating_mul(86_400_000)
         });
 
-        let where_clause = if time_filter.is_some() {
-            " WHERE LENGTH(e.command) >= ?1 AND e.started_at >= ?2"
-        } else {
-            " WHERE LENGTH(e.command) >= ?1"
-        };
+        let mut conditions = vec!["LENGTH(e.command) >= ?1".to_string()];
+        let mut param_idx: usize = 2;
 
-        let having_param = if time_filter.is_some() { "?3" } else { "?2" };
-        let limit_param = if time_filter.is_some() { "?4" } else { "?3" };
+        if time_filter.is_some() {
+            conditions.push(format!("e.started_at >= ?{param_idx}"));
+            param_idx += 1;
+        }
+
+        if human_only {
+            conditions.push(
+                "(e.executor_type IS NULL OR e.executor_type = 'human' OR e.executor_type = 'unknown')"
+                    .to_string(),
+            );
+        }
+
+        let where_clause = format!(" WHERE {}", conditions.join(" AND "));
+        let having_idx = param_idx;
+        let limit_idx = param_idx + 1;
 
         // Fetch candidates with MAX(started_at) for recency weighting
         let sql = format!(
             "SELECT e.command, COUNT(*) as cnt, COUNT(DISTINCT e.cwd) as dir_cnt, \
              MAX(e.started_at) as last_used \
              FROM entries e{where_clause} \
-             GROUP BY e.command HAVING cnt >= {having_param} \
-             ORDER BY cnt DESC LIMIT {limit_param}"
+             GROUP BY e.command HAVING cnt >= ?{having_idx} \
+             ORDER BY cnt DESC LIMIT ?{limit_idx}"
         );
 
         let mut stmt = self.conn.prepare(&sql)?;
@@ -254,15 +277,16 @@ impl Repository {
         // Fetch more candidates than needed, then rank in Rust
         let fetch_limit = i64::try_from(limit).unwrap_or(i64::MAX).saturating_mul(3);
 
-        stmt.raw_bind_parameter(1, min_len_i64)?;
+        let mut bind_idx: usize = 1;
+        stmt.raw_bind_parameter(bind_idx, min_len_i64)?;
+        bind_idx += 1;
         if let Some(ts) = time_filter {
-            stmt.raw_bind_parameter(2, ts)?;
-            stmt.raw_bind_parameter(3, min_cnt_i64)?;
-            stmt.raw_bind_parameter(4, fetch_limit)?;
-        } else {
-            stmt.raw_bind_parameter(2, min_cnt_i64)?;
-            stmt.raw_bind_parameter(3, fetch_limit)?;
+            stmt.raw_bind_parameter(bind_idx, ts)?;
+            bind_idx += 1;
         }
+        stmt.raw_bind_parameter(bind_idx, min_cnt_i64)?;
+        bind_idx += 1;
+        stmt.raw_bind_parameter(bind_idx, fetch_limit)?;
 
         let mut rows = stmt.raw_query();
         let mut candidates: Vec<(String, i64, i64, i64)> = Vec::new();
