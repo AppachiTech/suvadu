@@ -353,3 +353,75 @@ fn test_get_selected_entry_out_of_bounds() {
     app.table_state.select(Some(999));
     assert!(app.get_selected_entry().is_none());
 }
+
+// ── apply_combined_sort tests ──
+
+fn create_entry_with_cwd_and_executor(cmd: &str, cwd: &str, executor_type: &str) -> Entry {
+    Entry {
+        id: None,
+        session_id: "s1".to_string(),
+        command: cmd.to_string(),
+        cwd: cwd.to_string(),
+        exit_code: Some(0),
+        started_at: 1000,
+        ended_at: 2000,
+        duration_ms: 1000,
+        context: None,
+        tag_name: None,
+        tag_id: None,
+        executor_type: Some(executor_type.to_string()),
+        executor: None,
+    }
+}
+
+#[test]
+fn test_combined_sort_human_first() {
+    let mut entries = vec![
+        create_entry_with_cwd_and_executor("cmd1", "/tmp", "agent"),
+        create_entry_with_cwd_and_executor("cmd2", "/tmp", "human"),
+    ];
+    SearchApp::apply_combined_sort_test(&mut entries, None);
+    assert_eq!(entries[0].executor_type.as_deref(), Some("human"));
+    assert_eq!(entries[1].executor_type.as_deref(), Some("agent"));
+}
+
+#[test]
+fn test_combined_sort_cwd_first() {
+    let mut entries = vec![
+        create_entry_with_cwd_and_executor("cmd1", "/other", "human"),
+        create_entry_with_cwd_and_executor("cmd2", "/project", "human"),
+    ];
+    SearchApp::apply_combined_sort_test(&mut entries, Some("/project"));
+    assert_eq!(entries[0].cwd, "/project");
+    assert_eq!(entries[1].cwd, "/other");
+}
+
+#[test]
+fn test_combined_sort_cwd_beats_human() {
+    // CWD match should take priority over human/agent distinction
+    let mut entries = vec![
+        create_entry_with_cwd_and_executor("cmd1", "/other", "human"),
+        create_entry_with_cwd_and_executor("cmd2", "/project", "agent"),
+    ];
+    SearchApp::apply_combined_sort_test(&mut entries, Some("/project"));
+    // Agent entry in matching CWD should come first
+    assert_eq!(entries[0].cwd, "/project");
+}
+
+#[test]
+fn test_combined_sort_no_context_human_only() {
+    let mut entries = vec![
+        create_entry_with_cwd_and_executor("cmd1", "/a", "agent"),
+        create_entry_with_cwd_and_executor("cmd2", "/b", "human"),
+        create_entry_with_cwd_and_executor("cmd3", "/c", "agent"),
+    ];
+    SearchApp::apply_combined_sort_test(&mut entries, None);
+    assert_eq!(entries[0].executor_type.as_deref(), Some("human"));
+}
+
+#[test]
+fn test_combined_sort_empty() {
+    let mut entries: Vec<Entry> = vec![];
+    SearchApp::apply_combined_sort_test(&mut entries, Some("/project"));
+    assert!(entries.is_empty());
+}

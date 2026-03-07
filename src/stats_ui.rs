@@ -992,3 +992,118 @@ fn compute_program_groups(top_commands: &[(String, i64)]) -> Vec<(String, i64)> 
     sorted.sort_by(|a, b| b.1.cmp(&a.1));
     sorted
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intensity_level_zero_count() {
+        assert_eq!(intensity_level(0, 100), 0);
+    }
+
+    #[test]
+    fn intensity_level_zero_max() {
+        assert_eq!(intensity_level(50, 0), 0);
+    }
+
+    #[test]
+    fn intensity_level_low() {
+        assert_eq!(intensity_level(20, 100), 1);
+    }
+
+    #[test]
+    fn intensity_level_medium_low() {
+        assert_eq!(intensity_level(50, 100), 2);
+    }
+
+    #[test]
+    fn intensity_level_medium_high() {
+        assert_eq!(intensity_level(75, 100), 3);
+    }
+
+    #[test]
+    fn intensity_level_high() {
+        assert_eq!(intensity_level(90, 100), 4);
+    }
+
+    #[test]
+    fn intensity_level_exact_boundaries() {
+        // 25% boundary
+        assert_eq!(intensity_level(25, 100), 1);
+        // 50% boundary
+        assert_eq!(intensity_level(50, 100), 2);
+        // 75% boundary
+        assert_eq!(intensity_level(75, 100), 3);
+        // 76% -> level 4
+        assert_eq!(intensity_level(76, 100), 4);
+    }
+
+    #[test]
+    fn intensity_level_equal_count_and_max() {
+        assert_eq!(intensity_level(100, 100), 4);
+    }
+
+    #[test]
+    fn month_abbrev_all_months() {
+        assert_eq!(month_abbrev(1), "Ja");
+        assert_eq!(month_abbrev(2), "Fe");
+        assert_eq!(month_abbrev(3), "Mr");
+        assert_eq!(month_abbrev(4), "Ap");
+        assert_eq!(month_abbrev(5), "Ma");
+        assert_eq!(month_abbrev(6), "Jn");
+        assert_eq!(month_abbrev(7), "Jl");
+        assert_eq!(month_abbrev(8), "Au");
+        assert_eq!(month_abbrev(9), "Se");
+        assert_eq!(month_abbrev(10), "Oc");
+        assert_eq!(month_abbrev(11), "No");
+        assert_eq!(month_abbrev(12), "De");
+    }
+
+    #[test]
+    fn month_abbrev_out_of_range() {
+        assert_eq!(month_abbrev(0), "  ");
+        assert_eq!(month_abbrev(13), "  ");
+    }
+
+    #[test]
+    fn compute_program_groups_empty() {
+        let result = compute_program_groups(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn compute_program_groups_single_program() {
+        let commands = vec![("git status".to_string(), 5), ("git push".to_string(), 3)];
+        let groups = compute_program_groups(&commands);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "git");
+        assert_eq!(groups[0].1, 8);
+    }
+
+    #[test]
+    fn compute_program_groups_multiple_programs() {
+        let commands = vec![
+            ("cargo build".to_string(), 10),
+            ("git status".to_string(), 5),
+            ("cargo test".to_string(), 8),
+            ("ls -la".to_string(), 3),
+        ];
+        let groups = compute_program_groups(&commands);
+        assert_eq!(groups[0].0, "cargo");
+        assert_eq!(groups[0].1, 18);
+        assert_eq!(groups[1].0, "git");
+        assert_eq!(groups[1].1, 5);
+        assert_eq!(groups[2].0, "ls");
+        assert_eq!(groups[2].1, 3);
+    }
+
+    #[test]
+    fn compute_program_groups_single_word_command() {
+        let commands = vec![("ls".to_string(), 10)];
+        let groups = compute_program_groups(&commands);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "ls");
+        assert_eq!(groups[0].1, 10);
+    }
+}

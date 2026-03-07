@@ -141,6 +141,11 @@ impl SearchApp {
         });
     }
 
+    #[cfg(test)]
+    pub(super) fn apply_combined_sort_test(entries: &mut [Entry], context_cwd: Option<&str>) {
+        Self::apply_combined_sort(entries, context_cwd);
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(super) fn reload_entries(
         &mut self,

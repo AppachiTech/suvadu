@@ -11,7 +11,7 @@ use ratatui::{
 };
 use std::io;
 
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 enum InputMode {
     Normal,
     EditingName,
@@ -312,4 +312,206 @@ fn ui(f: &mut ratatui::Frame, app: &mut AppState) {
 
     let footer = Paragraph::new(Line::from(footer_spans)).wrap(Wrap { trim: false });
     f.render_widget(footer, chunks[2]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::AliasSuggestion;
+    use crossterm::event::KeyEvent;
+
+    fn make_suggestions(n: usize) -> Vec<AliasSuggestion> {
+        (0..n)
+            .map(|i| AliasSuggestion {
+                name: format!("alias{i}"),
+                command: format!("command{i}"),
+                count: (i + 1) as i64,
+                dir_count: 1,
+                selected: false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn new_state_selects_first() {
+        let app = AppState::new(make_suggestions(3), vec![]);
+        assert_eq!(app.selected_idx, 0);
+        assert_eq!(app.list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn new_state_empty_suggestions() {
+        let app = AppState::new(vec![], vec![]);
+        assert_eq!(app.selected_idx, 0);
+        assert_eq!(app.list_state.selected(), None);
+    }
+
+    #[test]
+    fn next_wraps_around() {
+        let mut app = AppState::new(make_suggestions(3), vec![]);
+        app.next();
+        assert_eq!(app.selected_idx, 1);
+        app.next();
+        assert_eq!(app.selected_idx, 2);
+        app.next();
+        assert_eq!(app.selected_idx, 0); // wraps
+    }
+
+    #[test]
+    fn prev_wraps_around() {
+        let mut app = AppState::new(make_suggestions(3), vec![]);
+        app.prev();
+        assert_eq!(app.selected_idx, 2); // wraps to last
+        app.prev();
+        assert_eq!(app.selected_idx, 1);
+    }
+
+    #[test]
+    fn next_on_empty_is_noop() {
+        let mut app = AppState::new(vec![], vec![]);
+        app.next();
+        assert_eq!(app.selected_idx, 0);
+    }
+
+    #[test]
+    fn prev_on_empty_is_noop() {
+        let mut app = AppState::new(vec![], vec![]);
+        app.prev();
+        assert_eq!(app.selected_idx, 0);
+    }
+
+    #[test]
+    fn toggle_selected() {
+        let mut app = AppState::new(make_suggestions(2), vec![]);
+        assert!(!app.suggestions[0].selected);
+        app.toggle_selected();
+        assert!(app.suggestions[0].selected);
+        app.toggle_selected();
+        assert!(!app.suggestions[0].selected);
+    }
+
+    #[test]
+    fn select_all() {
+        let mut app = AppState::new(make_suggestions(3), vec![]);
+        app.select_all();
+        assert!(app.suggestions.iter().all(|s| s.selected));
+    }
+
+    #[test]
+    fn deselect_all() {
+        let mut app = AppState::new(make_suggestions(3), vec![]);
+        app.select_all();
+        app.deselect_all();
+        assert!(app.suggestions.iter().all(|s| !s.selected));
+    }
+
+    #[test]
+    fn handle_input_quit_q() {
+        let mut app = AppState::new(make_suggestions(1), vec![]);
+        let result = app.handle_input(KeyEvent::from(KeyCode::Char('q')));
+        assert_eq!(result, Some(false));
+    }
+
+    #[test]
+    fn handle_input_quit_esc() {
+        let mut app = AppState::new(make_suggestions(1), vec![]);
+        let result = app.handle_input(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(result, Some(false));
+    }
+
+    #[test]
+    fn handle_input_confirm_enter() {
+        let mut app = AppState::new(make_suggestions(1), vec![]);
+        let result = app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(result, Some(true));
+    }
+
+    #[test]
+    fn handle_input_navigation() {
+        let mut app = AppState::new(make_suggestions(3), vec![]);
+        app.handle_input(KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(app.selected_idx, 1);
+        app.handle_input(KeyEvent::from(KeyCode::Char('k')));
+        assert_eq!(app.selected_idx, 0);
+        app.handle_input(KeyEvent::from(KeyCode::Down));
+        assert_eq!(app.selected_idx, 1);
+        app.handle_input(KeyEvent::from(KeyCode::Up));
+        assert_eq!(app.selected_idx, 0);
+    }
+
+    #[test]
+    fn handle_input_space_toggles() {
+        let mut app = AppState::new(make_suggestions(1), vec![]);
+        app.handle_input(KeyEvent::from(KeyCode::Char(' ')));
+        assert!(app.suggestions[0].selected);
+    }
+
+    #[test]
+    fn handle_input_a_selects_all() {
+        let mut app = AppState::new(make_suggestions(3), vec![]);
+        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        assert!(app.suggestions.iter().all(|s| s.selected));
+    }
+
+    #[test]
+    fn handle_input_n_deselects_all() {
+        let mut app = AppState::new(make_suggestions(3), vec![]);
+        app.select_all();
+        app.handle_input(KeyEvent::from(KeyCode::Char('n')));
+        assert!(app.suggestions.iter().all(|s| !s.selected));
+    }
+
+    #[test]
+    fn handle_input_e_enters_edit_mode() {
+        let mut app = AppState::new(make_suggestions(1), vec![]);
+        app.handle_input(KeyEvent::from(KeyCode::Char('e')));
+        assert_eq!(app.input_mode, InputMode::EditingName);
+        assert_eq!(app.edit_buffer, "alias0");
+    }
+
+    #[test]
+    fn edit_mode_typing_and_confirm() {
+        let mut app = AppState::new(make_suggestions(1), vec![]);
+        app.handle_input(KeyEvent::from(KeyCode::Char('e')));
+        // Clear and type new name
+        app.edit_buffer.clear();
+        app.handle_input(KeyEvent::from(KeyCode::Char('g')));
+        app.handle_input(KeyEvent::from(KeyCode::Char('s')));
+        app.handle_input(KeyEvent::from(KeyCode::Char('t')));
+        assert_eq!(app.edit_buffer, "gst");
+        // Confirm
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.suggestions[0].name, "gst");
+    }
+
+    #[test]
+    fn edit_mode_backspace() {
+        let mut app = AppState::new(make_suggestions(1), vec![]);
+        app.handle_input(KeyEvent::from(KeyCode::Char('e')));
+        app.handle_input(KeyEvent::from(KeyCode::Backspace));
+        assert_eq!(app.edit_buffer, "alias"); // removed trailing '0'
+    }
+
+    #[test]
+    fn edit_mode_esc_cancels() {
+        let mut app = AppState::new(make_suggestions(1), vec![]);
+        app.handle_input(KeyEvent::from(KeyCode::Char('e')));
+        app.edit_buffer = "changed".to_string();
+        app.handle_input(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        // Name should NOT be changed on cancel
+        assert_eq!(app.suggestions[0].name, "alias0");
+    }
+
+    #[test]
+    fn edit_mode_rejects_invalid_chars() {
+        let mut app = AppState::new(make_suggestions(1), vec![]);
+        app.handle_input(KeyEvent::from(KeyCode::Char('e')));
+        let before = app.edit_buffer.clone();
+        app.handle_input(KeyEvent::from(KeyCode::Char('!')));
+        app.handle_input(KeyEvent::from(KeyCode::Char(' ')));
+        app.handle_input(KeyEvent::from(KeyCode::Char('@')));
+        assert_eq!(app.edit_buffer, before); // unchanged
+    }
 }

@@ -170,6 +170,159 @@ impl FilterBuilder {
     }
 }
 
+#[cfg(test)]
+mod filter_builder_tests {
+    use super::FilterBuilder;
+
+    #[test]
+    fn empty_builder_produces_where_1_eq_1() {
+        let fb = FilterBuilder::new();
+        assert_eq!(fb.build_where(), " WHERE 1=1");
+        assert!(fb.params_refs().is_empty());
+    }
+
+    #[test]
+    fn with_date_range_after_only() {
+        let fb = FilterBuilder::new().with_date_range(Some(1000), None);
+        assert_eq!(fb.build_where(), " WHERE e.started_at >= ?");
+        assert_eq!(fb.params_refs().len(), 1);
+    }
+
+    #[test]
+    fn with_date_range_before_only() {
+        let fb = FilterBuilder::new().with_date_range(None, Some(2000));
+        assert_eq!(fb.build_where(), " WHERE e.started_at <= ?");
+        assert_eq!(fb.params_refs().len(), 1);
+    }
+
+    #[test]
+    fn with_date_range_both() {
+        let fb = FilterBuilder::new().with_date_range(Some(1000), Some(2000));
+        assert_eq!(
+            fb.build_where(),
+            " WHERE e.started_at >= ? AND e.started_at <= ?"
+        );
+        assert_eq!(fb.params_refs().len(), 2);
+    }
+
+    #[test]
+    fn with_tag_adds_two_params() {
+        let fb = FilterBuilder::new().with_tag(Some(42));
+        assert_eq!(fb.build_where(), " WHERE (s.tag_id = ? OR e.tag_id = ?)");
+        assert_eq!(fb.params_refs().len(), 2);
+    }
+
+    #[test]
+    fn with_tag_none_is_noop() {
+        let fb = FilterBuilder::new().with_tag(None);
+        assert_eq!(fb.build_where(), " WHERE 1=1");
+        assert!(fb.params_refs().is_empty());
+    }
+
+    #[test]
+    fn with_exit_code() {
+        let fb = FilterBuilder::new().with_exit_code(Some(0));
+        assert_eq!(fb.build_where(), " WHERE e.exit_code = ?");
+        assert_eq!(fb.params_refs().len(), 1);
+    }
+
+    #[test]
+    fn with_query_contains_mode() {
+        let fb = FilterBuilder::new().with_query(Some("git"), false);
+        assert_eq!(fb.build_where(), " WHERE e.command LIKE ?");
+        assert_eq!(fb.params_refs().len(), 1);
+    }
+
+    #[test]
+    fn with_query_prefix_mode() {
+        let fb = FilterBuilder::new().with_query(Some("git"), true);
+        assert_eq!(fb.build_where(), " WHERE e.command LIKE ?");
+        assert_eq!(fb.params_refs().len(), 1);
+    }
+
+    #[test]
+    fn with_query_field_cwd() {
+        let fb = FilterBuilder::new().with_query_field(Some("home"), false, "cwd");
+        assert_eq!(fb.build_where(), " WHERE e.cwd LIKE ?");
+    }
+
+    #[test]
+    fn with_query_field_session() {
+        let fb = FilterBuilder::new().with_query_field(Some("abc"), false, "session");
+        assert_eq!(fb.build_where(), " WHERE e.session_id LIKE ?");
+    }
+
+    #[test]
+    fn with_query_field_executor() {
+        let fb = FilterBuilder::new().with_query_field(Some("claude"), false, "executor");
+        assert!(fb.build_where().contains("COALESCE"));
+    }
+
+    #[test]
+    fn with_query_field_unknown_defaults_to_command() {
+        let fb = FilterBuilder::new().with_query_field(Some("test"), false, "unknown_field");
+        assert_eq!(fb.build_where(), " WHERE e.command LIKE ?");
+    }
+
+    #[test]
+    fn with_cwd() {
+        let fb = FilterBuilder::new().with_cwd(Some("/home/user"));
+        assert_eq!(fb.build_where(), " WHERE e.cwd = ?");
+        assert_eq!(fb.params_refs().len(), 1);
+    }
+
+    #[test]
+    fn with_session() {
+        let fb = FilterBuilder::new().with_session(Some("sess-123"));
+        assert_eq!(fb.build_where(), " WHERE e.session_id = ?");
+        assert_eq!(fb.params_refs().len(), 1);
+    }
+
+    #[test]
+    fn with_executor() {
+        let fb = FilterBuilder::new().with_executor(Some("claude"));
+        assert!(fb.build_where().contains("e.executor_type LIKE ?"));
+        assert_eq!(fb.params_refs().len(), 3);
+    }
+
+    #[test]
+    fn chained_filters() {
+        let fb = FilterBuilder::new()
+            .with_date_range(Some(1000), None)
+            .with_tag(Some(5))
+            .with_exit_code(Some(0))
+            .with_query(Some("cargo"), false);
+        let where_clause = fb.build_where();
+        assert!(where_clause.contains("e.started_at >= ?"));
+        assert!(where_clause.contains("s.tag_id = ? OR e.tag_id = ?"));
+        assert!(where_clause.contains("e.exit_code = ?"));
+        assert!(where_clause.contains("e.command LIKE ?"));
+        // 1 (date) + 2 (tag) + 1 (exit) + 1 (query) = 5
+        assert_eq!(fb.params_refs().len(), 5);
+    }
+
+    #[test]
+    fn push_param_adds_to_list() {
+        let mut fb = FilterBuilder::new();
+        fb.push_param(Box::new(42_i64));
+        assert_eq!(fb.params_refs().len(), 1);
+    }
+
+    #[test]
+    fn all_none_filters_produce_no_clauses() {
+        let fb = FilterBuilder::new()
+            .with_date_range(None, None)
+            .with_tag(None)
+            .with_exit_code(None)
+            .with_query(None, false)
+            .with_cwd(None)
+            .with_session(None)
+            .with_executor(None);
+        assert_eq!(fb.build_where(), " WHERE 1=1");
+        assert!(fb.params_refs().is_empty());
+    }
+}
+
 /// Repository for managing history entries and sessions
 pub struct Repository {
     conn: Connection,
