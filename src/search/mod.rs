@@ -105,6 +105,9 @@ pub struct SearchApp {
     // Fuzzy search: cached scored results for pagination
     fuzzy_results: Vec<Entry>,
 
+    // Field-specific search (command, cwd, session, executor)
+    pub search_field: String,
+
     // UI Feedback
     status_message: Option<(String, std::time::Instant)>,
 }
@@ -136,6 +139,7 @@ impl SearchApp {
         context_boost: bool,
         show_detail_pane: bool,
         show_risk_in_search: bool,
+        search_field: String,
     ) -> Self {
         let query = initial_query.unwrap_or_default();
 
@@ -199,6 +203,8 @@ impl SearchApp {
             bookmarked_commands,
 
             fuzzy_results: Vec::new(),
+
+            search_field,
 
             status_message: None,
         };
@@ -376,6 +382,7 @@ pub fn run_search(
     executor: Option<&str>,
     prefix_match: bool,
     cwd: Option<&str>,
+    field: &str,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
     // Load config
     let config = crate::config::load_config().unwrap_or_default();
@@ -396,7 +403,7 @@ pub fn run_search(
     let filter_before = before.and_then(|s| util::parse_date_input(s, true));
 
     let (entries, total_count, unique_counts) = if effective_unique {
-        let count = usize::try_from(repo.count_unique_entries(
+        let count = usize::try_from(repo.count_unique_entries_field(
             filter_after,
             filter_before,
             tag_id,
@@ -405,8 +412,9 @@ pub fn run_search(
             prefix_match,
             executor,
             cwd,
+            field,
         )?)?;
-        let unique_res = repo.get_unique_entries(
+        let unique_res = repo.get_unique_entries_field(
             page_size,
             0,
             filter_after,
@@ -418,6 +426,7 @@ pub fn run_search(
             true,
             executor,
             cwd,
+            field,
         )?;
         let (entries, counts): (Vec<Entry>, Vec<i64>) = unique_res.into_iter().unzip();
         let mut count_map = std::collections::HashMap::new();
@@ -428,7 +437,7 @@ pub fn run_search(
         }
         (entries, count, count_map)
     } else {
-        let count = usize::try_from(repo.count_filtered_entries(
+        let count = usize::try_from(repo.count_filtered_entries_field(
             filter_after,
             filter_before,
             tag_id,
@@ -437,8 +446,9 @@ pub fn run_search(
             prefix_match,
             executor,
             cwd,
+            field,
         )?)?;
-        let entries = repo.get_entries(
+        let entries = repo.get_entries_field(
             page_size,
             0,
             filter_after,
@@ -449,6 +459,7 @@ pub fn run_search(
             prefix_match,
             executor,
             cwd,
+            field,
         )?;
         (entries, count, std::collections::HashMap::new())
     };
@@ -498,6 +509,7 @@ pub fn run_search(
         context_boost,
         show_detail_pane,
         show_risk_in_search,
+        field.to_string(),
     );
 
     let result = app.run(&mut terminal, repo);

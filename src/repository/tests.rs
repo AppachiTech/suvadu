@@ -1427,7 +1427,7 @@ fn test_get_frequent_commands_dir_diversity_ranking() {
     let session = Session::new("host".to_string(), 100);
     repo.insert_session(&session).unwrap();
 
-    let now = chrono::Utc::now().timestamp();
+    let now = chrono::Utc::now().timestamp_millis();
 
     // Command A: 10 uses from 1 directory -> score = 10 * 1 = 10
     for i in 0..10 {
@@ -1436,8 +1436,8 @@ fn test_get_frequent_commands_dir_diversity_ranking() {
             "cargo build --release".into(),
             "/project-a".into(),
             Some(0),
-            now + i,
-            now + i + 50,
+            now + i * 1000,
+            now + i * 1000 + 50_000,
         ))
         .unwrap();
     }
@@ -1450,8 +1450,8 @@ fn test_get_frequent_commands_dir_diversity_ranking() {
             "git log --oneline".into(),
             dirs[i % 4].into(),
             Some(0),
-            now + 100 + i as i64,
-            now + 100 + i as i64 + 50,
+            now + 100_000 + i as i64 * 1000,
+            now + 100_000 + i as i64 * 1000 + 50_000,
         ))
         .unwrap();
     }

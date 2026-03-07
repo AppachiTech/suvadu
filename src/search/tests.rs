@@ -51,6 +51,7 @@ fn test_search_app_initialization() {
         true,
         true,
         false,
+        "command".to_string(),
     );
 
     assert_eq!(app.entries.len(), 2);
@@ -87,6 +88,7 @@ fn test_pagination_logic() {
         true,
         true,
         false,
+        "command".to_string(),
     );
 
     // Next page
@@ -117,7 +119,7 @@ fn test_fuzzy_score_ranking() {
     ];
 
     // "gco" should match git commands but not "echo" or "cargo build"
-    let scored = SearchApp::fuzzy_score(entries, "gco", None);
+    let scored = SearchApp::fuzzy_score(entries, "gco", None, "command");
     assert!(!scored.is_empty());
     // Both git commands should match, non-git commands should not
     let cmds: Vec<&str> = scored.iter().map(|e| e.command.as_str()).collect();
@@ -130,7 +132,7 @@ fn test_fuzzy_score_ranking() {
 fn test_fuzzy_score_no_match() {
     let entries = vec![create_test_entry("ls -la"), create_test_entry("pwd")];
 
-    let scored = SearchApp::fuzzy_score(entries, "zzzzz", None);
+    let scored = SearchApp::fuzzy_score(entries, "zzzzz", None, "command");
     assert!(scored.is_empty());
 }
 
@@ -143,7 +145,7 @@ fn test_fuzzy_score_filters_irrelevant() {
         create_test_entry("cargo test"),
     ];
 
-    let scored = SearchApp::fuzzy_score(entries, "cargo test", None);
+    let scored = SearchApp::fuzzy_score(entries, "cargo test", None, "command");
     assert!(!scored.is_empty());
     // Both "cargo test" entries should match, "npm install" should not
     let cmds: Vec<&str> = scored.iter().map(|e| e.command.as_str()).collect();
@@ -162,7 +164,7 @@ fn test_fuzzy_score_length_penalty() {
         ),
     ];
 
-    let scored = SearchApp::fuzzy_score(entries, "git status", None);
+    let scored = SearchApp::fuzzy_score(entries, "git status", None, "command");
     assert_eq!(scored.len(), 2);
     // Short command should come first due to length penalty
     assert_eq!(scored[0].command, "git status");
@@ -178,7 +180,7 @@ fn test_fuzzy_score_human_boost() {
 
     let entries = vec![agent_entry, human_entry];
 
-    let scored = SearchApp::fuzzy_score(entries, "cargo build", None);
+    let scored = SearchApp::fuzzy_score(entries, "cargo build", None, "command");
     assert_eq!(scored.len(), 2);
     // Human entry should come first
     assert_eq!(scored[0].executor_type.as_deref(), Some("human"));
@@ -194,7 +196,7 @@ fn test_fuzzy_score_cwd_boost() {
 
     let entries = vec![remote_entry, local_entry];
 
-    let scored = SearchApp::fuzzy_score(entries, "make test", Some("/project"));
+    let scored = SearchApp::fuzzy_score(entries, "make test", Some("/project"), "command");
     assert_eq!(scored.len(), 2);
     // Local CWD entry should come first
     assert_eq!(scored[0].cwd, "/project");
@@ -205,7 +207,7 @@ fn test_fuzzy_score_empty_query() {
     let entries = vec![create_test_entry("ls"), create_test_entry("pwd")];
 
     // Empty query should match nothing (nucleo needs at least some pattern)
-    let scored = SearchApp::fuzzy_score(entries, "", None);
+    let scored = SearchApp::fuzzy_score(entries, "", None, "command");
     // nucleo Pattern::parse("") returns a pattern that matches everything
     // This is fine — the caller gates on query.len() >= 2
     assert!(scored.len() <= 2);
@@ -219,7 +221,7 @@ fn test_fuzzy_score_single_char() {
         create_test_entry("cd /tmp"),
     ];
 
-    let scored = SearchApp::fuzzy_score(entries, "l", None);
+    let scored = SearchApp::fuzzy_score(entries, "l", None, "command");
     // Should match "ls -la" at minimum
     let cmds: Vec<&str> = scored.iter().map(|e| e.command.as_str()).collect();
     assert!(cmds.contains(&"ls -la"));
@@ -253,6 +255,7 @@ fn test_active_filter_count() {
         true,
         true,
         false,
+        "command".to_string(),
     );
 
     assert_eq!(app.active_filter_count(), 0);
@@ -301,6 +304,7 @@ fn test_get_selected_entry() {
         true,
         true,
         false,
+        "command".to_string(),
     );
 
     // Default selection is 0
@@ -342,6 +346,7 @@ fn test_get_selected_entry_out_of_bounds() {
         true,
         true,
         false,
+        "command".to_string(),
     );
 
     // Out of bounds selection should return None

@@ -208,8 +208,10 @@ impl Repository {
 
     /// Get frequently-used commands for alias suggestion.
     /// Returns `(command, count, dir_count)` tuples filtered by minimum length and count.
-    /// Results are ranked by `count * min(dir_count, 5)` — commands used across many
-    /// directories are boosted as better alias candidates.
+    /// Results are ranked by frequency × directory diversity × recency:
+    ///   `score = count * min(dir_count, 5) * recency_weight`
+    /// where `recency_weight` boosts commands used recently (half-life = 30 days).
+    #[allow(clippy::cast_precision_loss)]
     pub fn get_frequent_commands(
         &self,
         days: Option<usize>,
@@ -217,8 +219,12 @@ impl Repository {
         min_length: usize,
         limit: usize,
     ) -> DbResult<Vec<(String, i64, i64)>> {
+        // Half-life: 30 days in ms. Commands used 30 days ago get ~50% recency weight.
+        const HALF_LIFE_MS: f64 = 30.0 * 86_400_000.0;
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
         let time_filter = days.map(|d| {
-            chrono::Utc::now().timestamp_millis()
+            now_ms
                 - i64::try_from(d)
                     .unwrap_or(i64::MAX)
                     .saturating_mul(86_400_000)
@@ -233,33 +239,55 @@ impl Repository {
         let having_param = if time_filter.is_some() { "?3" } else { "?2" };
         let limit_param = if time_filter.is_some() { "?4" } else { "?3" };
 
+        // Fetch candidates with MAX(started_at) for recency weighting
         let sql = format!(
-            "SELECT e.command, COUNT(*) as cnt, COUNT(DISTINCT e.cwd) as dir_cnt \
+            "SELECT e.command, COUNT(*) as cnt, COUNT(DISTINCT e.cwd) as dir_cnt, \
+             MAX(e.started_at) as last_used \
              FROM entries e{where_clause} \
              GROUP BY e.command HAVING cnt >= {having_param} \
-             ORDER BY (cnt * MIN(dir_cnt, 5)) DESC LIMIT {limit_param}"
+             ORDER BY cnt DESC LIMIT {limit_param}"
         );
 
         let mut stmt = self.conn.prepare(&sql)?;
         let min_len_i64 = i64::try_from(min_length).unwrap_or(i64::MAX);
         let min_cnt_i64 = i64::try_from(min_count).unwrap_or(i64::MAX);
-        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+        // Fetch more candidates than needed, then rank in Rust
+        let fetch_limit = i64::try_from(limit).unwrap_or(i64::MAX).saturating_mul(3);
 
         stmt.raw_bind_parameter(1, min_len_i64)?;
         if let Some(ts) = time_filter {
             stmt.raw_bind_parameter(2, ts)?;
             stmt.raw_bind_parameter(3, min_cnt_i64)?;
-            stmt.raw_bind_parameter(4, limit_i64)?;
+            stmt.raw_bind_parameter(4, fetch_limit)?;
         } else {
             stmt.raw_bind_parameter(2, min_cnt_i64)?;
-            stmt.raw_bind_parameter(3, limit_i64)?;
+            stmt.raw_bind_parameter(3, fetch_limit)?;
         }
 
         let mut rows = stmt.raw_query();
-        let mut results = Vec::new();
+        let mut candidates: Vec<(String, i64, i64, i64)> = Vec::new();
         while let Some(row) = rows.next()? {
-            results.push((row.get(0)?, row.get(1)?, row.get(2)?));
+            candidates.push((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?));
         }
-        Ok(results)
+
+        // Rank by frequency × diversity × recency
+        let mut scored: Vec<(String, i64, i64, f64)> = candidates
+            .into_iter()
+            .map(|(cmd, cnt, dir_cnt, last_used)| {
+                let age_ms = (now_ms - last_used).max(0) as f64;
+                let recency = 0.5_f64.powf(age_ms / HALF_LIFE_MS);
+                let diversity = dir_cnt.min(5) as f64;
+                let score = cnt as f64 * diversity * 0.5f64.mul_add(recency, 0.5);
+                (cmd, cnt, dir_cnt, score)
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+
+        Ok(scored
+            .into_iter()
+            .map(|(cmd, cnt, dir, _)| (cmd, cnt, dir))
+            .collect())
     }
 }

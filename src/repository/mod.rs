@@ -93,9 +93,24 @@ impl FilterBuilder {
         self
     }
 
-    pub fn with_query(mut self, query: Option<&str>, prefix_match: bool) -> Self {
+    pub fn with_query(self, query: Option<&str>, prefix_match: bool) -> Self {
+        self.with_query_field(query, prefix_match, "command")
+    }
+
+    pub fn with_query_field(
+        mut self,
+        query: Option<&str>,
+        prefix_match: bool,
+        field: &str,
+    ) -> Self {
         if let Some(q) = query {
-            self.clauses.push("e.command LIKE ?".into());
+            let column = match field {
+                "cwd" => "e.cwd",
+                "session" => "e.session_id",
+                "executor" => "COALESCE(e.executor_type || ' ' || e.executor, '')",
+                _ => "e.command",
+            };
+            self.clauses.push(format!("{column} LIKE ?"));
             if prefix_match {
                 self.params.push(Box::new(format!("{q}%")));
             } else {

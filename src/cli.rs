@@ -86,7 +86,7 @@ pub enum Commands {
 
     /// Interactive search through history (Ctrl+R replacement)
     #[command(
-        after_help = "Examples:\n  suv search --query \"git\"\n  suv search --unique\n  suv search --executor bot\n  suv search --after today"
+        after_help = "Examples:\n  suv search --query \"git\"\n  suv search --unique\n  suv search --executor bot\n  suv search --after today\n  suv search --query \"/home\" --field cwd"
     )]
     Search {
         /// Optional initial query
@@ -120,6 +120,10 @@ pub enum Commands {
         /// Filter to commands run in the current directory
         #[arg(long)]
         here: bool,
+
+        /// Search field: command (default), cwd, session, or executor
+        #[arg(long, default_value = "command")]
+        field: String,
     },
 
     /// Show usage analytics and trends

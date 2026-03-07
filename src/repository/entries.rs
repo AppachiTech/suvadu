@@ -85,8 +85,8 @@ impl Repository {
         Ok(count)
     }
 
-    /// Get entries with optional filters
-    #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
+    /// Get entries with optional filters (defaults to command field search)
+    #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap, dead_code)]
     pub fn get_entries(
         &self,
         limit: usize,
@@ -100,11 +100,42 @@ impl Repository {
         executor: Option<&str>,
         cwd: Option<&str>,
     ) -> DbResult<Vec<Entry>> {
+        self.get_entries_field(
+            limit,
+            offset,
+            after,
+            before,
+            tag_id,
+            exit_code,
+            query,
+            prefix_match,
+            executor,
+            cwd,
+            "command",
+        )
+    }
+
+    /// Get entries with optional filters and field-specific search
+    #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
+    pub fn get_entries_field(
+        &self,
+        limit: usize,
+        offset: usize,
+        after: Option<i64>,
+        before: Option<i64>,
+        tag_id: Option<i64>,
+        exit_code: Option<i32>,
+        query: Option<&str>,
+        prefix_match: bool,
+        executor: Option<&str>,
+        cwd: Option<&str>,
+        field: &str,
+    ) -> DbResult<Vec<Entry>> {
         let mut fb = FilterBuilder::new()
             .with_date_range(after, before)
             .with_tag(tag_id)
             .with_exit_code(exit_code)
-            .with_query(query, prefix_match)
+            .with_query_field(query, prefix_match, field)
             .with_executor(executor)
             .with_cwd(cwd);
 
@@ -157,7 +188,7 @@ impl Repository {
     }
 
     /// Get entries with unique command deduplication
-    #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
+    #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap, dead_code)]
     pub fn get_unique_entries(
         &self,
         limit: usize,
@@ -172,11 +203,44 @@ impl Repository {
         executor: Option<&str>,
         cwd: Option<&str>,
     ) -> DbResult<Vec<(Entry, i64)>> {
+        self.get_unique_entries_field(
+            limit,
+            offset,
+            after,
+            before,
+            tag_id,
+            exit_code,
+            query,
+            prefix_match,
+            sort_alphabetically,
+            executor,
+            cwd,
+            "command",
+        )
+    }
+
+    /// Get entries with unique command deduplication and field-specific search
+    #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
+    pub fn get_unique_entries_field(
+        &self,
+        limit: usize,
+        offset: usize,
+        after: Option<i64>,
+        before: Option<i64>,
+        tag_id: Option<i64>,
+        exit_code: Option<i32>,
+        query: Option<&str>,
+        prefix_match: bool,
+        sort_alphabetically: bool,
+        executor: Option<&str>,
+        cwd: Option<&str>,
+        field: &str,
+    ) -> DbResult<Vec<(Entry, i64)>> {
         let mut fb = FilterBuilder::new()
             .with_date_range(after, before)
             .with_tag(tag_id)
             .with_exit_code(exit_code)
-            .with_query(query, prefix_match)
+            .with_query_field(query, prefix_match, field)
             .with_executor(executor)
             .with_cwd(cwd);
 
@@ -254,7 +318,7 @@ impl Repository {
     }
 
     /// Count unique entries matching filters
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, dead_code)]
     pub fn count_unique_entries(
         &self,
         after: Option<i64>,
@@ -266,11 +330,38 @@ impl Repository {
         executor: Option<&str>,
         cwd: Option<&str>,
     ) -> DbResult<i64> {
+        self.count_unique_entries_field(
+            after,
+            before,
+            tag_id,
+            exit_code,
+            query,
+            prefix_match,
+            executor,
+            cwd,
+            "command",
+        )
+    }
+
+    /// Count unique entries matching filters with field-specific search
+    #[allow(clippy::too_many_arguments)]
+    pub fn count_unique_entries_field(
+        &self,
+        after: Option<i64>,
+        before: Option<i64>,
+        tag_id: Option<i64>,
+        exit_code: Option<i32>,
+        query: Option<&str>,
+        prefix_match: bool,
+        executor: Option<&str>,
+        cwd: Option<&str>,
+        field: &str,
+    ) -> DbResult<i64> {
         let fb = FilterBuilder::new()
             .with_date_range(after, before)
             .with_tag(tag_id)
             .with_exit_code(exit_code)
-            .with_query(query, prefix_match)
+            .with_query_field(query, prefix_match, field)
             .with_executor(executor)
             .with_cwd(cwd);
 
@@ -434,7 +525,7 @@ impl Repository {
     }
 
     /// Count entries matching filters
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, dead_code)]
     pub fn count_filtered_entries(
         &self,
         after: Option<i64>,
@@ -446,11 +537,38 @@ impl Repository {
         executor: Option<&str>,
         cwd: Option<&str>,
     ) -> DbResult<i64> {
+        self.count_filtered_entries_field(
+            after,
+            before,
+            tag_id,
+            exit_code,
+            query,
+            prefix_match,
+            executor,
+            cwd,
+            "command",
+        )
+    }
+
+    /// Count entries matching filters with field-specific search
+    #[allow(clippy::too_many_arguments)]
+    pub fn count_filtered_entries_field(
+        &self,
+        after: Option<i64>,
+        before: Option<i64>,
+        tag_id: Option<i64>,
+        exit_code: Option<i32>,
+        query: Option<&str>,
+        prefix_match: bool,
+        executor: Option<&str>,
+        cwd: Option<&str>,
+        field: &str,
+    ) -> DbResult<i64> {
         let fb = FilterBuilder::new()
             .with_date_range(after, before)
             .with_tag(tag_id)
             .with_exit_code(exit_code)
-            .with_query(query, prefix_match)
+            .with_query_field(query, prefix_match, field)
             .with_executor(executor)
             .with_cwd(cwd);
 

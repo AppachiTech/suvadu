@@ -129,6 +129,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             exit_code,
             executor,
             here,
+            field,
         } => commands::search::handle_search(
             query.as_ref(),
             unique,
@@ -138,6 +139,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             exit_code,
             executor.as_deref(),
             here,
+            &field,
         ),
 
         Commands::Get {

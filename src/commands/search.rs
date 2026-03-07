@@ -14,6 +14,7 @@ pub fn handle_search(
     exit_code: Option<i32>,
     executor: Option<&str>,
     here: bool,
+    field: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Check if recording is enabled/active
     // If not, we want to fallback to the shell's default search.
@@ -55,6 +56,7 @@ pub fn handle_search(
         executor,
         false, // TUI uses substring matching
         cwd_filter.as_deref(),
+        field,
     )?;
 
     // Output selected command to stdout (for shell to execute)

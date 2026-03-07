@@ -44,6 +44,7 @@ impl SearchApp {
         entries: Vec<Entry>,
         query: &str,
         boost_cwd: Option<&str>,
+        field: &str,
     ) -> Vec<Entry> {
         use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
         use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
@@ -66,13 +67,23 @@ impl SearchApp {
 
         for entry in entries {
             buf.clear();
-            let haystack = Utf32Str::new(&entry.command, &mut buf);
+            let executor_str;
+            let field_value: &str = match field {
+                "cwd" => &entry.cwd,
+                "session" => &entry.session_id,
+                "executor" => {
+                    executor_str = entry.executor_type.as_deref().unwrap_or("").to_string();
+                    &executor_str
+                }
+                _ => &entry.command,
+            };
+            let haystack = Utf32Str::new(field_value, &mut buf);
             if let Some(score) = pattern.score(haystack, &mut matcher) {
                 // Penalise long commands — short matches are more relevant.
                 // Commands ≤ LENGTH_THRESHOLD chars keep full score; longer
                 // ones are scaled down by sqrt(threshold/len) so a 500-char
                 // command gets ~40% score.
-                let cmd_len = entry.command.len().max(1) as f64;
+                let cmd_len = field_value.len().max(1) as f64;
                 let length_factor = if cmd_len <= LENGTH_THRESHOLD {
                     1.0
                 } else {
@@ -142,7 +153,7 @@ impl SearchApp {
             const MAX_FUZZY_CANDIDATES: usize = 10_000;
 
             if self.unique_mode {
-                let unique_res = repo.get_unique_entries(
+                let unique_res = repo.get_unique_entries_field(
                     MAX_FUZZY_CANDIDATES,
                     0,
                     self.filter_after,
@@ -154,6 +165,7 @@ impl SearchApp {
                     false, // Recency sort (will be re-sorted by score)
                     self.filter_executor_type.as_deref(),
                     self.filter_cwd.as_deref(),
+                    &self.search_field,
                 )?;
                 let (entries, counts): (Vec<Entry>, Vec<i64>) = unique_res.into_iter().unzip();
 
@@ -170,11 +182,11 @@ impl SearchApp {
                 } else {
                     None
                 };
-                let scored = Self::fuzzy_score(entries, &self.query, boost_cwd);
+                let scored = Self::fuzzy_score(entries, &self.query, boost_cwd, &self.search_field);
                 self.unique_counts = count_map;
                 self.fuzzy_results = scored;
             } else {
-                let entries = repo.get_entries(
+                let entries = repo.get_entries_field(
                     MAX_FUZZY_CANDIDATES,
                     0,
                     self.filter_after,
@@ -185,6 +197,7 @@ impl SearchApp {
                     false,
                     self.filter_executor_type.as_deref(),
                     self.filter_cwd.as_deref(),
+                    &self.search_field,
                 )?;
 
                 let boost_cwd = if self.context_boost {
@@ -192,7 +205,8 @@ impl SearchApp {
                 } else {
                     None
                 };
-                self.fuzzy_results = Self::fuzzy_score(entries, &self.query, boost_cwd);
+                self.fuzzy_results =
+                    Self::fuzzy_score(entries, &self.query, boost_cwd, &self.search_field);
             }
 
             self.total_items = self.fuzzy_results.len();
@@ -209,7 +223,7 @@ impl SearchApp {
             };
 
             if self.unique_mode {
-                let new_count = usize::try_from(repo.count_unique_entries(
+                let new_count = usize::try_from(repo.count_unique_entries_field(
                     self.filter_after,
                     self.filter_before,
                     self.filter_tag_id,
@@ -218,11 +232,12 @@ impl SearchApp {
                     false,
                     self.filter_executor_type.as_deref(),
                     self.filter_cwd.as_deref(),
+                    &self.search_field,
                 )?)?;
                 self.total_items = new_count;
                 self.page = 1;
 
-                let unique_res = repo.get_unique_entries(
+                let unique_res = repo.get_unique_entries_field(
                     self.page_size,
                     0,
                     self.filter_after,
@@ -234,6 +249,7 @@ impl SearchApp {
                     true, // Alphabetical for unique
                     self.filter_executor_type.as_deref(),
                     self.filter_cwd.as_deref(),
+                    &self.search_field,
                 )?;
                 let (entries, counts): (Vec<Entry>, Vec<i64>) = unique_res.into_iter().unzip();
                 self.unique_counts.clear();
@@ -244,7 +260,7 @@ impl SearchApp {
                 }
                 self.entries = entries;
             } else {
-                let new_count = usize::try_from(repo.count_filtered_entries(
+                let new_count = usize::try_from(repo.count_filtered_entries_field(
                     self.filter_after,
                     self.filter_before,
                     self.filter_tag_id,
@@ -253,11 +269,12 @@ impl SearchApp {
                     false,
                     self.filter_executor_type.as_deref(),
                     self.filter_cwd.as_deref(),
+                    &self.search_field,
                 )?)?;
                 self.total_items = new_count;
                 self.page = 1;
 
-                let new_entries = repo.get_entries(
+                let new_entries = repo.get_entries_field(
                     self.page_size,
                     0,
                     self.filter_after,
@@ -268,6 +285,7 @@ impl SearchApp {
                     false,
                     self.filter_executor_type.as_deref(),
                     self.filter_cwd.as_deref(),
+                    &self.search_field,
                 )?;
                 self.entries = new_entries;
             }
@@ -306,7 +324,7 @@ impl SearchApp {
             };
 
             if self.unique_mode {
-                let unique_res = repo.get_unique_entries(
+                let unique_res = repo.get_unique_entries_field(
                     self.page_size,
                     offset,
                     self.filter_after,
@@ -318,6 +336,7 @@ impl SearchApp {
                     true, // Alphabetical for unique
                     self.filter_executor_type.as_deref(),
                     self.filter_cwd.as_deref(),
+                    &self.search_field,
                 )?;
                 let (entries, counts): (Vec<Entry>, Vec<i64>) = unique_res.into_iter().unzip();
                 self.unique_counts.clear();
@@ -328,7 +347,7 @@ impl SearchApp {
                 }
                 self.entries = entries;
             } else {
-                let new_entries = repo.get_entries(
+                let new_entries = repo.get_entries_field(
                     self.page_size,
                     offset,
                     self.filter_after,
@@ -339,6 +358,7 @@ impl SearchApp {
                     false,
                     self.filter_executor_type.as_deref(),
                     self.filter_cwd.as_deref(),
+                    &self.search_field,
                 )?;
                 self.entries = new_entries;
             }
