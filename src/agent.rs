@@ -60,23 +60,24 @@ fn handle_agent_report(
     let entries = if let Some(exec) = executor {
         repo.get_replay_entries(
             None,
-            after_ms,
-            before_ms,
-            None,
-            None,
-            Some(exec),
-            cwd_filter.as_deref(),
+            &crate::repository::ReplayFilter {
+                after: after_ms,
+                before: before_ms,
+                executor: Some(exec),
+                cwd: cwd_filter.as_deref(),
+                ..Default::default()
+            },
         )?
     } else {
         // Get all entries, then filter out human
         let all = repo.get_replay_entries(
             None,
-            after_ms,
-            before_ms,
-            None,
-            None,
-            None,
-            cwd_filter.as_deref(),
+            &crate::repository::ReplayFilter {
+                after: after_ms,
+                before: before_ms,
+                cwd: cwd_filter.as_deref(),
+                ..Default::default()
+            },
         )?;
         all.into_iter().filter(Entry::is_agent).collect()
     };
@@ -448,7 +449,14 @@ fn handle_agent_stats_text(
         .saturating_mul(86_400_000);
     let after_ms = Some(now.saturating_sub(days_ms));
 
-    let all_entries = repo.get_replay_entries(None, after_ms, None, None, None, executor, None)?;
+    let all_entries = repo.get_replay_entries(
+        None,
+        &crate::repository::ReplayFilter {
+            after: after_ms,
+            executor,
+            ..Default::default()
+        },
+    )?;
 
     let entries: Vec<_> = if executor.is_some() {
         all_entries

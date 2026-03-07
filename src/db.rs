@@ -238,6 +238,9 @@ fn migrate_v3(conn: &Connection) -> DbResult<()> {
 pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
     let conn = Connection::open(path)?;
 
+    // Retry on SQLITE_BUSY for up to 5 seconds (concurrent shell sessions)
+    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+
     // WAL mode is persistent — only set if not already active.
     let current_mode: String = conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
     if current_mode != "wal" {

@@ -1,4 +1,4 @@
-use std::io::BufRead;
+use std::io::{BufRead, Write};
 
 use crate::models::{Entry, Session};
 use crate::repository::Repository;
@@ -28,14 +28,26 @@ pub fn handle_export(
 
     match format {
         "json" => {
-            // JSON requires collecting all entries for the array structure
-            let entries = repo.export_entries(after_ms, before_ms)?;
-            if entries.is_empty() {
+            // Stream JSON array: print `[`, then comma-separated entries, then `]`
+            let mut count = 0usize;
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            repo.stream_export_entries(after_ms, before_ms, |entry| {
+                if count == 0 {
+                    writeln!(out, "[")?;
+                } else {
+                    writeln!(out, ",")?;
+                }
+                write!(out, "  {}", serde_json::to_string(&entry)?)?;
+                count += 1;
+                Ok(())
+            })?;
+            if count == 0 {
                 eprintln!("No entries to export.");
-                return Ok(());
+            } else {
+                writeln!(out, "\n]")?;
+                eprintln!("Exported {count} entries.");
             }
-            println!("{}", serde_json::to_string_pretty(&entries)?);
-            eprintln!("Exported {} entries.", entries.len());
         }
         "jsonl" => {
             let mut count = 0usize;

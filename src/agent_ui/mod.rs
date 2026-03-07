@@ -64,7 +64,15 @@ pub fn load_entries(
     cwd: Option<&str>,
 ) -> Vec<Entry> {
     let all = repo
-        .get_replay_entries(None, after_ms, None, None, None, executor, cwd)
+        .get_replay_entries(
+            None,
+            &crate::repository::ReplayFilter {
+                after: after_ms,
+                executor,
+                cwd,
+                ..Default::default()
+            },
+        )
         .unwrap_or_default();
 
     if executor.is_some() {

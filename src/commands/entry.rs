@@ -30,18 +30,31 @@ pub const fn normalize_timestamp(ts: i64) -> i64 {
     ts
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn handle_add_with_context(
-    session_id: &str,
-    command: String,
-    cwd: String,
-    exit_code: Option<i32>,
-    started_at: i64,
-    ended_at: i64,
-    executor_type: Option<String>,
-    executor: Option<String>,
-    context: Option<std::collections::HashMap<String, String>>,
-) -> Result<(), Box<dyn std::error::Error>> {
+/// Parameters for `handle_add` / `handle_add_with_context`.
+pub struct AddParams {
+    pub session_id: String,
+    pub command: String,
+    pub cwd: String,
+    pub exit_code: Option<i32>,
+    pub started_at: i64,
+    pub ended_at: i64,
+    pub executor_type: Option<String>,
+    pub executor: Option<String>,
+    pub context: Option<std::collections::HashMap<String, String>>,
+}
+
+pub fn handle_add_with_context(params: AddParams) -> Result<(), Box<dyn std::error::Error>> {
+    let AddParams {
+        session_id,
+        command,
+        cwd,
+        exit_code,
+        started_at,
+        ended_at,
+        executor_type,
+        executor,
+        context,
+    } = params;
     // Cheapest checks first — no I/O required
     if config::is_paused() {
         return Ok(());
@@ -101,7 +114,7 @@ pub fn handle_add_with_context(
 
     // Create entry
     let mut entry = Entry::new(
-        session_id.to_string(),
+        session_id.clone(),
         command,
         cwd,
         exit_code,
@@ -116,9 +129,9 @@ pub fn handle_add_with_context(
     entry.context = context;
 
     // Ensure session exists
-    if repo.get_session(session_id)?.is_none() {
+    if repo.get_session(&session_id)?.is_none() {
         let session = Session {
-            id: session_id.to_string(),
+            id: session_id,
             hostname: hostname::get()?.to_string_lossy().to_string(),
             created_at: started_at,
             tag_id: None,
@@ -132,28 +145,8 @@ pub fn handle_add_with_context(
     Ok(()) // Silent success
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn handle_add(
-    session_id: &str,
-    command: String,
-    cwd: String,
-    exit_code: Option<i32>,
-    started_at: i64,
-    ended_at: i64,
-    executor_type: Option<String>,
-    executor: Option<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    handle_add_with_context(
-        session_id,
-        command,
-        cwd,
-        exit_code,
-        started_at,
-        ended_at,
-        executor_type,
-        executor,
-        None,
-    )
+pub fn handle_add(params: AddParams) -> Result<(), Box<dyn std::error::Error>> {
+    handle_add_with_context(params)
 }
 
 pub fn handle_delete(

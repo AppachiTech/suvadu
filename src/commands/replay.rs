@@ -2,46 +2,59 @@ use crate::models::Entry;
 use crate::repository;
 use crate::util::{self, dirs_home, format_duration_ms, shorten_path};
 
-#[allow(clippy::too_many_arguments)]
-pub fn handle_replay(
-    session: Option<&str>,
-    after: Option<&str>,
-    before: Option<&str>,
-    tag: Option<&str>,
-    exit_code: Option<i32>,
-    executor: Option<&str>,
-    here: bool,
-    cwd: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub struct ReplayParams<'a> {
+    pub session: Option<&'a str>,
+    pub after: Option<&'a str>,
+    pub before: Option<&'a str>,
+    pub tag: Option<&'a str>,
+    pub exit_code: Option<i32>,
+    pub executor: Option<&'a str>,
+    pub here: bool,
+    pub cwd: Option<&'a str>,
+}
+
+pub fn handle_replay(p: &ReplayParams) -> Result<(), Box<dyn std::error::Error>> {
     let repo = repository::Repository::init()?;
 
-    let tag_id = tag
+    let tag_id = p
+        .tag
         .map(|t| repo.get_tag_id_by_name(t))
         .transpose()?
         .flatten();
 
     // Resolve --here flag
-    let cwd_filter = if here {
+    let cwd_filter = if p.here {
         Some(std::env::current_dir()?.to_string_lossy().to_string())
     } else {
-        cwd.map(String::from)
+        p.cwd.map(String::from)
     };
 
     // Parse date filters
-    let after_ms = after.and_then(|d| util::parse_date_input(d, false));
-    let before_ms = before.and_then(|d| util::parse_date_input(d, true));
+    let after_ms = p.after.and_then(|d| util::parse_date_input(d, false));
+    let before_ms = p.before.and_then(|d| util::parse_date_input(d, true));
 
-    let (session_filter, effective_after, label) =
-        resolve_replay_scope(session, after, after_ms, before, before_ms, tag, here, cwd);
+    let scope = ReplayScope {
+        session: p.session,
+        after: p.after,
+        after_ms,
+        before: p.before,
+        before_ms,
+        tag: p.tag,
+        here: p.here,
+        cwd: p.cwd,
+    };
+    let (session_filter, effective_after, label) = resolve_replay_scope(&scope);
 
     let entries = repo.get_replay_entries(
         session_filter.as_deref(),
-        effective_after,
-        before_ms,
-        tag_id,
-        exit_code,
-        executor,
-        cwd_filter.as_deref(),
+        &repository::ReplayFilter {
+            after: effective_after,
+            before: before_ms,
+            tag_id,
+            exit_code: p.exit_code,
+            executor: p.executor,
+            cwd: cwd_filter.as_deref(),
+        },
     )?;
 
     if entries.is_empty() {
@@ -76,34 +89,36 @@ pub fn handle_replay(
     Ok(())
 }
 
+struct ReplayScope<'a> {
+    session: Option<&'a str>,
+    after: Option<&'a str>,
+    after_ms: Option<i64>,
+    before: Option<&'a str>,
+    before_ms: Option<i64>,
+    tag: Option<&'a str>,
+    here: bool,
+    cwd: Option<&'a str>,
+}
+
 /// Resolve the session filter, effective `after` timestamp, and display label
 /// based on the combination of CLI flags and environment.
-#[allow(clippy::too_many_arguments)]
-fn resolve_replay_scope(
-    session: Option<&str>,
-    after: Option<&str>,
-    after_ms: Option<i64>,
-    before: Option<&str>,
-    before_ms: Option<i64>,
-    tag: Option<&str>,
-    here: bool,
-    cwd: Option<&str>,
-) -> (Option<String>, Option<i64>, String) {
-    if let Some(sid) = session {
+fn resolve_replay_scope(s: &ReplayScope) -> (Option<String>, Option<i64>, String) {
+    if let Some(sid) = s.session {
         let label = format!("session {}", &sid[..sid.len().min(8)]);
-        return (Some(sid.to_string()), after_ms, label);
+        return (Some(sid.to_string()), s.after_ms, label);
     }
 
-    if after_ms.is_some() || before_ms.is_some() || tag.is_some() || here || cwd.is_some() {
+    if s.after_ms.is_some() || s.before_ms.is_some() || s.tag.is_some() || s.here || s.cwd.is_some()
+    {
         // User specified time/filter flags — don't scope to session
         let parts: Vec<String> = [
-            after.map(|d| format!("after {d}")),
-            before.map(|d| format!("before {d}")),
-            tag.map(|t| format!("tag:{t}")),
-            if here {
+            s.after.map(|d| format!("after {d}")),
+            s.before.map(|d| format!("before {d}")),
+            s.tag.map(|t| format!("tag:{t}")),
+            if s.here {
                 Some("current dir".into())
             } else {
-                cwd.map(|d| format!("dir:{d}"))
+                s.cwd.map(|d| format!("dir:{d}"))
             },
         ]
         .into_iter()
@@ -114,12 +129,12 @@ fn resolve_replay_scope(
         } else {
             parts.join(", ")
         };
-        return (None, after_ms, label);
+        return (None, s.after_ms, label);
     }
 
     if let Ok(sid) = std::env::var("SUVADU_SESSION_ID") {
         let label = format!("current session ({})", &sid[..sid.len().min(8)]);
-        return (Some(sid), after_ms, label);
+        return (Some(sid), s.after_ms, label);
     }
 
     // No session env, no flags → last 24h
@@ -185,7 +200,7 @@ fn print_replay_entries(entries: &[Entry]) {
 mod tests {
     use crate::db;
     use crate::models::{Entry, Session};
-    use crate::repository::Repository;
+    use crate::repository::{ReplayFilter, Repository};
 
     fn test_repo() -> (tempfile::TempDir, Repository) {
         let temp_dir = tempfile::TempDir::new().unwrap();
@@ -225,7 +240,7 @@ mod tests {
         seed_entry(&repo, "sess-abc", "cargo test", 1, 1_700_000_003_000);
 
         let entries = repo
-            .get_replay_entries(Some("sess-abc"), None, None, None, None, None, None)
+            .get_replay_entries(Some("sess-abc"), &ReplayFilter::default())
             .unwrap();
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].command, "git status");
@@ -242,7 +257,13 @@ mod tests {
 
         // Only failures
         let entries = repo
-            .get_replay_entries(Some("sess-def"), None, None, None, Some(1), None, None)
+            .get_replay_entries(
+                Some("sess-def"),
+                &ReplayFilter {
+                    exit_code: Some(1),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].command, "bad");
@@ -257,7 +278,13 @@ mod tests {
 
         // Only after the first entry
         let entries = repo
-            .get_replay_entries(None, Some(1_700_000_050_000), None, None, None, None, None)
+            .get_replay_entries(
+                None,
+                &ReplayFilter {
+                    after: Some(1_700_000_050_000),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].command, "late");
@@ -269,7 +296,7 @@ mod tests {
         seed_session(&repo, "empty-sess");
 
         let entries = repo
-            .get_replay_entries(Some("empty-sess"), None, None, None, None, None, None)
+            .get_replay_entries(Some("empty-sess"), &ReplayFilter::default())
             .unwrap();
         assert!(entries.is_empty());
     }
@@ -298,12 +325,10 @@ mod tests {
         let entries = repo
             .get_replay_entries(
                 None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some("/home/user/project"),
+                &ReplayFilter {
+                    cwd: Some("/home/user/project"),
+                    ..Default::default()
+                },
             )
             .unwrap();
         assert_eq!(entries.len(), 1);

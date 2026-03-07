@@ -1370,7 +1370,9 @@ fn test_get_frequent_commands() {
     }
 
     // min_length=12 should exclude "ls", min_count=5 should exclude "git status --short"
-    let results = repo.get_frequent_commands(None, 5, 12, 10).unwrap();
+    let results = repo
+        .get_frequent_commands_filtered(None, 5, 12, 10, false)
+        .unwrap();
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0, "cargo build --release");
@@ -1414,7 +1416,9 @@ fn test_get_frequent_commands_with_days() {
     }
 
     // With days=30, only recent commands
-    let results = repo.get_frequent_commands(Some(30), 5, 12, 10).unwrap();
+    let results = repo
+        .get_frequent_commands_filtered(Some(30), 5, 12, 10, false)
+        .unwrap();
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0, "cargo test --workspace");
@@ -1456,7 +1460,9 @@ fn test_get_frequent_commands_dir_diversity_ranking() {
         .unwrap();
     }
 
-    let results = repo.get_frequent_commands(None, 5, 12, 10).unwrap();
+    let results = repo
+        .get_frequent_commands_filtered(None, 5, 12, 10, false)
+        .unwrap();
 
     // "git log --oneline" should rank first despite fewer uses (higher dir diversity)
     assert_eq!(results.len(), 2);
@@ -1768,7 +1774,7 @@ fn test_get_replay_entries_by_session() {
 
     // Replay for session — should be chronological (ASC)
     let entries = repo
-        .get_replay_entries(Some(&session.id), None, None, None, None, None, None)
+        .get_replay_entries(Some(&session.id), &super::ReplayFilter::default())
         .unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].command, "cmd1"); // ASC order
@@ -1802,14 +1808,26 @@ fn test_get_replay_entries_with_date_filter() {
 
     // After 3000
     let entries = repo
-        .get_replay_entries(None, Some(3000), None, None, None, None, None)
+        .get_replay_entries(
+            None,
+            &super::ReplayFilter {
+                after: Some(3000),
+                ..Default::default()
+            },
+        )
         .unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].command, "new_cmd");
 
     // Before 3000
     let entries = repo
-        .get_replay_entries(None, None, Some(3000), None, None, None, None)
+        .get_replay_entries(
+            None,
+            &super::ReplayFilter {
+                before: Some(3000),
+                ..Default::default()
+            },
+        )
         .unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].command, "old_cmd");
@@ -1841,7 +1859,13 @@ fn test_get_replay_entries_with_exit_code_filter() {
     .unwrap();
 
     let entries = repo
-        .get_replay_entries(None, None, None, None, Some(1), None, None)
+        .get_replay_entries(
+            None,
+            &super::ReplayFilter {
+                exit_code: Some(1),
+                ..Default::default()
+            },
+        )
         .unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].command, "fail_cmd");
@@ -1873,7 +1897,13 @@ fn test_get_replay_entries_with_cwd_filter() {
     .unwrap();
 
     let entries = repo
-        .get_replay_entries(None, None, None, None, None, None, Some("/project"))
+        .get_replay_entries(
+            None,
+            &super::ReplayFilter {
+                cwd: Some("/project"),
+                ..Default::default()
+            },
+        )
         .unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].command, "cmd_a");
@@ -1909,7 +1939,13 @@ fn test_get_replay_entries_with_executor_filter() {
     repo.insert_entry(&entry2).unwrap();
 
     let entries = repo
-        .get_replay_entries(None, None, None, None, None, Some("agent"), None)
+        .get_replay_entries(
+            None,
+            &super::ReplayFilter {
+                executor: Some("agent"),
+                ..Default::default()
+            },
+        )
         .unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].command, "agent_cmd");

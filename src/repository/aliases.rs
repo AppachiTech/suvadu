@@ -43,16 +43,4 @@ impl Repository {
         }
         Ok(aliases)
     }
-
-    /// Get all alias names as a set (for collision detection).
-    #[allow(dead_code)]
-    pub fn get_alias_names(&self) -> DbResult<std::collections::HashSet<String>> {
-        let mut stmt = self.conn.prepare("SELECT name FROM aliases")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        let mut set = std::collections::HashSet::new();
-        for row in rows {
-            set.insert(row?);
-        }
-        Ok(set)
-    }
 }

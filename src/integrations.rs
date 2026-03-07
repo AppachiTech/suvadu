@@ -88,17 +88,17 @@ pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
         ctx
     });
 
-    crate::commands::entry::handle_add_with_context(
-        &session_id,
-        command.to_string(),
-        cwd.to_string(),
+    crate::commands::entry::handle_add_with_context(crate::commands::entry::AddParams {
+        session_id,
+        command: command.to_string(),
+        cwd: cwd.to_string(),
         exit_code,
-        now,
-        now,
-        Some("agent".to_string()),
-        Some("claude-code".to_string()),
+        started_at: now,
+        ended_at: now,
+        executor_type: Some("agent".to_string()),
+        executor: Some("claude-code".to_string()),
         context,
-    )
+    })
 }
 
 /// Handle `UserPromptSubmit` hook from Claude Code — caches the prompt text

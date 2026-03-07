@@ -4,18 +4,19 @@ use crate::config;
 use crate::repository::Repository;
 use crate::search;
 
-#[allow(clippy::too_many_arguments)]
-pub fn handle_search(
-    query: Option<&String>,
-    unique: bool,
-    after: Option<&str>,
-    before: Option<&str>,
-    tag: Option<&str>,
-    exit_code: Option<i32>,
-    executor: Option<&str>,
-    here: bool,
-    field: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub struct SearchParams<'a> {
+    pub query: Option<&'a String>,
+    pub unique: bool,
+    pub after: Option<&'a str>,
+    pub before: Option<&'a str>,
+    pub tag: Option<&'a str>,
+    pub exit_code: Option<i32>,
+    pub executor: Option<&'a str>,
+    pub here: bool,
+    pub field: &'a str,
+}
+
+pub fn handle_search(p: &SearchParams) -> Result<(), Box<dyn std::error::Error>> {
     // Check if recording is enabled/active
     // If not, we want to fallback to the shell's default search.
     // We use exit code 10 to signal this to the shell widget.
@@ -28,8 +29,8 @@ pub fn handle_search(
     let app_config = config::load_config()?;
 
     // Auto-filter by session tag if enabled and no explicit tag provided
-    let mut resolved_tag = tag.map(String::from);
-    if tag.is_none() && app_config.search.filter_by_current_session_tag {
+    let mut resolved_tag = p.tag.map(String::from);
+    if p.tag.is_none() && app_config.search.filter_by_current_session_tag {
         if let Ok(session_id) = std::env::var("SUVADU_SESSION_ID") {
             if let Ok(Some(current_tag)) = repo.get_tag_by_session(&session_id) {
                 resolved_tag = Some(current_tag);
@@ -38,7 +39,7 @@ pub fn handle_search(
     }
 
     // Resolve --here flag to current directory path
-    let cwd_filter = if here {
+    let cwd_filter = if p.here {
         Some(std::env::current_dir()?.to_string_lossy().to_string())
     } else {
         None
@@ -47,16 +48,18 @@ pub fn handle_search(
     // Run TUI
     let selected = search::run_search(
         &repo,
-        query.map(String::as_str),
-        unique,
-        after,
-        before,
-        resolved_tag.as_deref(),
-        exit_code,
-        executor,
-        false, // TUI uses substring matching
-        cwd_filter.as_deref(),
-        field,
+        &search::SearchArgs {
+            initial_query: p.query.map(String::as_str),
+            unique_mode: p.unique,
+            after: p.after,
+            before: p.before,
+            tag: resolved_tag.as_deref(),
+            exit_code: p.exit_code,
+            executor: p.executor,
+            prefix_match: false,
+            cwd: cwd_filter.as_deref(),
+            field: p.field,
+        },
     )?;
 
     // Output selected command to stdout (for shell to execute)

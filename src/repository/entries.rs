@@ -145,25 +145,19 @@ impl Repository {
         Ok(entries)
     }
 
-    /// Get entries in chronological order for replay
-    #[allow(clippy::too_many_arguments)]
+    /// Get entries in chronological order for replay.
     pub fn get_replay_entries(
         &self,
         session_id: Option<&str>,
-        after: Option<i64>,
-        before: Option<i64>,
-        tag_id: Option<i64>,
-        exit_code: Option<i32>,
-        executor: Option<&str>,
-        cwd: Option<&str>,
+        filter: &super::ReplayFilter,
     ) -> DbResult<Vec<Entry>> {
         let fb = FilterBuilder::new()
             .with_session(session_id)
-            .with_date_range(after, before)
-            .with_tag(tag_id)
-            .with_exit_code(exit_code)
-            .with_executor(executor)
-            .with_cwd(cwd);
+            .with_date_range(filter.after, filter.before)
+            .with_tag(filter.tag_id)
+            .with_exit_code(filter.exit_code)
+            .with_executor(filter.executor)
+            .with_cwd(filter.cwd);
 
         let sql = format!(
             "SELECT {ENTRY_COLUMNS} {ENTRY_JOINS}{} ORDER BY e.started_at ASC",
@@ -547,6 +541,7 @@ impl Repository {
     }
 
     /// Export all entries with optional date filtering (no pagination)
+    #[cfg(test)]
     pub fn export_entries(&self, after: Option<i64>, before: Option<i64>) -> DbResult<Vec<Entry>> {
         let filter = FilterBuilder::new().with_date_range(after, before);
         let where_clause = filter.build_where();
@@ -707,6 +702,10 @@ impl Repository {
     }
 
     /// List recent sessions with summary stats (only sessions that have entries).
+    ///
+    /// Uses hand-built WHERE clauses instead of `FilterBuilder` because the
+    /// primary table here is `sessions` (not `entries`) and the filters are on
+    /// `s.created_at` / `s.tag_id` — columns `FilterBuilder` doesn't cover.
     #[allow(clippy::cast_possible_wrap)]
     pub fn list_sessions(
         &self,
@@ -775,9 +774,10 @@ impl Repository {
     /// Find sessions matching a prefix. Returns matching session IDs.
     pub fn find_sessions_by_prefix(&self, prefix: &str) -> DbResult<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id FROM sessions WHERE id LIKE ?1 ORDER BY created_at DESC LIMIT 10",
+            "SELECT id FROM sessions WHERE id LIKE ?1 ESCAPE '\\' ORDER BY created_at DESC LIMIT 10",
         )?;
-        let pattern = format!("{prefix}%");
+        let escaped = super::escape_like(prefix);
+        let pattern = format!("{escaped}%");
         let rows = stmt.query_map(params![pattern], |row| row.get::<_, String>(0))?;
         let mut ids = Vec::new();
         for row in rows {

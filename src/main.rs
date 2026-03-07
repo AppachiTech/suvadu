@@ -167,8 +167,8 @@ fn run_add(cmd: Commands) -> Result<(), Box<dyn std::error::Error>> {
     else {
         unreachable!()
     };
-    commands::entry::handle_add(
-        &session_id,
+    commands::entry::handle_add(commands::entry::AddParams {
+        session_id,
         command,
         cwd,
         exit_code,
@@ -176,7 +176,8 @@ fn run_add(cmd: Commands) -> Result<(), Box<dyn std::error::Error>> {
         ended_at,
         executor_type,
         executor,
-    )
+        context: None,
+    })
 }
 
 fn run_search(cmd: Commands) -> Result<(), Box<dyn std::error::Error>> {
@@ -194,17 +195,17 @@ fn run_search(cmd: Commands) -> Result<(), Box<dyn std::error::Error>> {
     else {
         unreachable!()
     };
-    commands::search::handle_search(
-        query.as_ref(),
+    commands::search::handle_search(&commands::search::SearchParams {
+        query: query.as_ref(),
         unique,
-        after.as_deref(),
-        before.as_deref(),
-        tag.as_deref(),
+        after: after.as_deref(),
+        before: before.as_deref(),
+        tag: tag.as_deref(),
         exit_code,
-        executor.as_deref(),
+        executor: executor.as_deref(),
         here,
-        &field,
-    )
+        field: &field,
+    })
 }
 
 fn run_replay(cmd: Commands) -> Result<(), Box<dyn std::error::Error>> {
@@ -221,16 +222,16 @@ fn run_replay(cmd: Commands) -> Result<(), Box<dyn std::error::Error>> {
     else {
         unreachable!()
     };
-    commands::replay::handle_replay(
-        session.as_deref(),
-        after.as_deref(),
-        before.as_deref(),
-        tag.as_deref(),
+    commands::replay::handle_replay(&commands::replay::ReplayParams {
+        session: session.as_deref(),
+        after: after.as_deref(),
+        before: before.as_deref(),
+        tag: tag.as_deref(),
         exit_code,
-        executor.as_deref(),
+        executor: executor.as_deref(),
         here,
-        cwd.as_deref(),
-    )
+        cwd: cwd.as_deref(),
+    })
 }
 
 fn run_toggle(enable: bool) -> Result<(), Box<dyn std::error::Error>> {

@@ -285,22 +285,6 @@ impl Repository {
     }
 
     /// Get frequently-used commands for alias suggestion.
-    /// Returns `(command, count, dir_count)` tuples filtered by minimum length and count.
-    /// Results are ranked by frequency x directory diversity x recency:
-    ///   `score = count * min(dir_count, 5) * recency_weight`
-    /// where `recency_weight` boosts commands used recently (half-life = 30 days).
-    #[allow(dead_code)]
-    pub fn get_frequent_commands(
-        &self,
-        days: Option<usize>,
-        min_count: usize,
-        min_length: usize,
-        limit: usize,
-    ) -> DbResult<Vec<(String, i64, i64)>> {
-        self.get_frequent_commands_filtered(days, min_count, min_length, limit, false)
-    }
-
-    /// Like `get_frequent_commands` but with an optional human-only filter.
     #[allow(clippy::cast_precision_loss)]
     pub fn get_frequent_commands_filtered(
         &self,

@@ -125,7 +125,8 @@ fn open_session_timeline(
         .get_session(session_id)?
         .ok_or_else(|| format!("Session {session_id} not found"))?;
     let tag_name = repo.get_tag_by_session(session_id)?;
-    let entries = repo.get_replay_entries(Some(session_id), None, None, None, None, None, None)?;
+    let entries =
+        repo.get_replay_entries(Some(session_id), &repository::ReplayFilter::default())?;
     let noted_ids = repo.get_noted_entry_ids().unwrap_or_default();
 
     if entries.is_empty() {
@@ -161,7 +162,8 @@ where
         .get_session(session_id)?
         .ok_or_else(|| format!("Session {session_id} not found"))?;
     let tag_name = repo.get_tag_by_session(session_id)?;
-    let entries = repo.get_replay_entries(Some(session_id), None, None, None, None, None, None)?;
+    let entries =
+        repo.get_replay_entries(Some(session_id), &repository::ReplayFilter::default())?;
     let noted_ids = repo.get_noted_entry_ids().unwrap_or_default();
 
     if entries.is_empty() {

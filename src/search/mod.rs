@@ -370,44 +370,50 @@ fn load_search_entries(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Parameters for `run_search` — bundles the CLI flags into one struct
+/// to avoid excessive positional arguments.
+pub struct SearchArgs<'a> {
+    pub initial_query: Option<&'a str>,
+    pub unique_mode: bool,
+    pub after: Option<&'a str>,
+    pub before: Option<&'a str>,
+    pub tag: Option<&'a str>,
+    pub exit_code: Option<i32>,
+    pub executor: Option<&'a str>,
+    pub prefix_match: bool,
+    pub cwd: Option<&'a str>,
+    pub field: &'a str,
+}
+
 pub fn run_search(
     repo: &Repository,
-    initial_query: Option<&str>,
-    unique_mode: bool,
-    after: Option<&str>,
-    before: Option<&str>,
-    tag: Option<&str>,
-    exit_code: Option<i32>,
-    executor: Option<&str>,
-    prefix_match: bool,
-    cwd: Option<&str>,
-    field: &str,
+    args: &SearchArgs,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
     let config = crate::config::load_config().unwrap_or_default();
     let page_size = config.search.page_limit;
-    let effective_unique = unique_mode || config.search.show_unique_by_default;
+    let effective_unique = args.unique_mode || config.search.show_unique_by_default;
     let tags = repo.get_tags().unwrap_or_default();
 
-    let tag_id = tag
+    let tag_id = args
+        .tag
         .map(|t| repo.get_tag_id_by_name(t))
         .transpose()
         .unwrap_or(None)
         .flatten();
 
-    let filter_after = after.and_then(|s| util::parse_date_input(s, false));
-    let filter_before = before.and_then(|s| util::parse_date_input(s, true));
+    let filter_after = args.after.and_then(|s| util::parse_date_input(s, false));
+    let filter_before = args.before.and_then(|s| util::parse_date_input(s, true));
 
     let qf = QueryFilter {
         after: filter_after,
         before: filter_before,
         tag_id,
-        exit_code,
-        query: initial_query,
-        prefix_match,
-        executor,
-        cwd,
-        field,
+        exit_code: args.exit_code,
+        query: args.initial_query,
+        prefix_match: args.prefix_match,
+        executor: args.executor,
+        cwd: args.cwd,
+        field: args.field,
     };
 
     let (entries, total_count, unique_counts) =
@@ -427,7 +433,7 @@ pub fn run_search(
 
     let mut app = SearchApp::new(SearchConfig {
         entries,
-        initial_query: initial_query.map(String::from),
+        initial_query: args.initial_query.map(String::from),
         total_items: total_count,
         page: 1,
         page_size,
@@ -437,20 +443,20 @@ pub fn run_search(
         filter_after,
         filter_before,
         filter_tag_id: tag_id,
-        filter_exit_code: exit_code,
-        filter_executor_type: executor.map(String::from),
-        start_date_input: after.map(String::from),
-        end_date_input: before.map(String::from),
-        tag_filter_input: tag.map(String::from),
-        exit_code_input: exit_code.map(|ec| ec.to_string()),
-        executor_filter_input: executor.map(String::from),
+        filter_exit_code: args.exit_code,
+        filter_executor_type: args.executor.map(String::from),
+        start_date_input: args.after.map(String::from),
+        end_date_input: args.before.map(String::from),
+        tag_filter_input: args.tag.map(String::from),
+        exit_code_input: args.exit_code.map(|ec| ec.to_string()),
+        executor_filter_input: args.executor.map(String::from),
         bookmarked_commands,
-        filter_cwd: cwd.map(String::from),
+        filter_cwd: args.cwd.map(String::from),
         noted_entry_ids,
         context_boost: config.search.context_boost,
         show_detail_pane: config.search.show_detail_pane,
         show_risk_in_search: config.agent.show_risk_in_search,
-        search_field: field.to_string(),
+        search_field: args.field.to_string(),
     });
 
     let result = app.run(&mut terminal, repo);

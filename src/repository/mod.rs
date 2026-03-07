@@ -67,14 +67,6 @@ pub struct QueryFilter<'a> {
 }
 
 impl QueryFilter<'_> {
-    #[allow(dead_code)]
-    pub fn new() -> Self {
-        Self {
-            field: "command",
-            ..Default::default()
-        }
-    }
-
     /// Build a `FilterBuilder` from this filter.
     pub fn to_filter_builder(&self) -> FilterBuilder {
         FilterBuilder::new()
@@ -85,6 +77,17 @@ impl QueryFilter<'_> {
             .with_executor(self.executor)
             .with_cwd(self.cwd)
     }
+}
+
+/// Filter parameters for replay queries.
+#[derive(Default)]
+pub struct ReplayFilter<'a> {
+    pub after: Option<i64>,
+    pub before: Option<i64>,
+    pub tag_id: Option<i64>,
+    pub exit_code: Option<i32>,
+    pub executor: Option<&'a str>,
+    pub cwd: Option<&'a str>,
 }
 
 /// Escape SQL LIKE wildcards (`%`, `_`) and the escape character (`\`) in user input.
