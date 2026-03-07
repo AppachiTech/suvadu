@@ -536,7 +536,7 @@ impl SearchApp {
                             "History (0/0)".to_string()
                         } else {
                             let start_index = (self.page - 1) * self.page_size + 1;
-                            let end_index = start_index + self.entries.len() - 1;
+                            let end_index = start_index + self.entries.len().saturating_sub(1);
                             format!(
                                 "History ({}-{} / {})",
                                 start_index, end_index, self.total_items

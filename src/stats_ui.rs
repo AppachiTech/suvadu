@@ -955,13 +955,7 @@ const fn month_abbrev(month: u32) -> &'static str {
 }
 
 fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else if max_len > 3 {
-        format!("{}...", &s[..max_len - 3])
-    } else {
-        s[..max_len].to_string()
-    }
+    crate::util::truncate_str(s, max_len, "...")
 }
 
 fn compute_program_groups(top_commands: &[(String, i64)]) -> Vec<(String, i64)> {

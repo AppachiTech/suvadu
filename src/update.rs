@@ -109,7 +109,10 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 process::exit(1);
             }
-            println!("✓ SHA256 checksum verified: {}", &actual[..16]);
+            println!(
+                "✓ SHA256 checksum verified: {}",
+                actual.get(..16).unwrap_or(&actual)
+            );
         }
         _ => {
             eprintln!(

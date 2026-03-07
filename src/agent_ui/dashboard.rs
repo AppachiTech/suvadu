@@ -589,7 +589,7 @@ impl AgentApp {
             "Agent Commands (0/0)".to_string()
         } else {
             let start = (self.page - 1) * self.page_size + 1;
-            let end = start + page_items.len() - 1;
+            let end = start + page_items.len().saturating_sub(1);
             format!("Agent Commands ({start}-{end} / {})", self.visible.len())
         };
 

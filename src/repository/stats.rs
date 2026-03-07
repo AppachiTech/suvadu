@@ -217,8 +217,12 @@ impl Repository {
         min_length: usize,
         limit: usize,
     ) -> DbResult<Vec<(String, i64, i64)>> {
-        #[allow(clippy::cast_possible_wrap)]
-        let time_filter = days.map(|d| chrono::Utc::now().timestamp() - (d as i64 * 86400));
+        let time_filter = days.map(|d| {
+            chrono::Utc::now().timestamp_millis()
+                - i64::try_from(d)
+                    .unwrap_or(i64::MAX)
+                    .saturating_mul(86_400_000)
+        });
 
         let where_clause = if time_filter.is_some() {
             " WHERE LENGTH(e.command) >= ?1 AND e.started_at >= ?2"

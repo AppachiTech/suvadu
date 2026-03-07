@@ -207,11 +207,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut AppState) {
 
             // Command text — truncate if needed
             let max_cmd_len = size.width.saturating_sub(40) as usize;
-            let cmd_display = if s.command.len() > max_cmd_len {
-                format!("{}...", &s.command[..max_cmd_len.saturating_sub(3)])
-            } else {
-                s.command.clone()
-            };
+            let cmd_display = crate::util::truncate_str(&s.command, max_cmd_len, "...");
             let cmd_span = Span::styled(cmd_display, Style::default().fg(t.text));
 
             // Count + dir diversity

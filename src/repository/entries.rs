@@ -306,7 +306,13 @@ impl Repository {
                     let started_at: i64 = row.get(2)?;
                     Ok((id, cmd, started_at))
                 })?
-                .filter_map(Result::ok)
+                .filter_map(|r| match r {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        eprintln!("suvadu: skipping row during delete: {e}");
+                        None
+                    }
+                })
                 .filter(|(_, cmd, started_at)| {
                     let match_regex = regex.is_match(cmd);
                     let match_date = before_timestamp.is_none_or(|ts| *started_at < ts);
@@ -366,7 +372,13 @@ impl Repository {
                     let started_at: i64 = row.get(1)?;
                     Ok((cmd, started_at))
                 })?
-                .filter_map(Result::ok)
+                .filter_map(|r| match r {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        eprintln!("suvadu: skipping row during count: {e}");
+                        None
+                    }
+                })
                 .filter(|(cmd, started_at)| {
                     let match_regex = regex.is_match(cmd);
                     let match_date = before_timestamp.is_none_or(|ts| *started_at < ts);

@@ -1384,8 +1384,8 @@ fn test_get_frequent_commands_with_days() {
     let session = Session::new("host".to_string(), 100);
     repo.insert_session(&session).unwrap();
 
-    let now = chrono::Utc::now().timestamp();
-    let old = now - 100 * 86400; // 100 days ago
+    let now = chrono::Utc::now().timestamp_millis();
+    let old = now - 100 * 86_400_000; // 100 days ago
 
     // Old commands
     for i in 0..10 {
