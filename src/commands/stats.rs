@@ -2,7 +2,8 @@ use crate::models::Stats;
 use crate::repository;
 use crate::stats_ui;
 use crate::util::{
-    dirs_home, format_count, format_duration_ms, shorten_path, truncate_str, truncate_str_start,
+    self, dirs_home, format_count, format_duration_ms, shorten_path, truncate_str,
+    truncate_str_start,
 };
 
 pub fn handle_stats_tui(
@@ -55,7 +56,9 @@ pub fn handle_stats_text(
         .period_days
         .map_or_else(|| "all time".to_string(), |d| format!("last {d} days"));
     let tag_label = tag.map_or_else(String::new, |t| format!(", tag: {t}"));
-    println!("\n\x1b[1m── Suvadu Stats ({period}{tag_label}) ─────────────────────\x1b[0m");
+    let c = util::color_enabled();
+    let (b, r) = if c { ("\x1b[1m", "\x1b[0m") } else { ("", "") };
+    println!("\n{b}── Suvadu Stats ({period}{tag_label}) ─────────────────────{r}");
     println!(
         "  Total commands    {:<10}  Unique commands  {}",
         format_count(stats.total_commands),
@@ -92,7 +95,12 @@ fn print_top_commands(stats: &Stats) {
     if stats.top_commands.is_empty() || stats.total_commands == 0 {
         return;
     }
-    println!("\n\x1b[1m── Top Commands ──────────────────────────────────\x1b[0m");
+    let (b, r) = if util::color_enabled() {
+        ("\x1b[1m", "\x1b[0m")
+    } else {
+        ("", "")
+    };
+    println!("\n{b}── Top Commands ──────────────────────────────────{r}");
     for (i, (cmd, count)) in stats.top_commands.iter().enumerate() {
         let pct = *count as f64 / stats.total_commands as f64 * 100.0;
         let truncated = truncate_str(cmd, 40, "…");
@@ -116,12 +124,18 @@ fn print_hourly_distribution(stats: &Stats) {
         .map(|(_, c)| *c)
         .max()
         .unwrap_or(1);
-    println!("\n\x1b[1m── Busiest Hours ─────────────────────────────────\x1b[0m");
+    let c = util::color_enabled();
+    let (b, r) = if c { ("\x1b[1m", "\x1b[0m") } else { ("", "") };
+    println!("\n{b}── Busiest Hours ─────────────────────────────────{r}");
     for (hour, count) in &stats.hourly_distribution {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let bar_len = (*count as f64 / max_count as f64 * 30.0) as usize;
         let bar: String = "█".repeat(bar_len);
-        println!("  {hour:02}:00  \x1b[32m{bar:<30}\x1b[0m  {count}");
+        if c {
+            println!("  {hour:02}:00  \x1b[32m{bar:<30}\x1b[0m  {count}");
+        } else {
+            println!("  {hour:02}:00  {bar:<30}  {count}");
+        }
     }
 }
 
@@ -130,7 +144,12 @@ fn print_top_directories(stats: &Stats) {
         return;
     }
     let home = dirs_home();
-    println!("\n\x1b[1m── Top Directories ───────────────────────────────\x1b[0m");
+    let (b, r) = if util::color_enabled() {
+        ("\x1b[1m", "\x1b[0m")
+    } else {
+        ("", "")
+    };
+    println!("\n{b}── Top Directories ───────────────────────────────{r}");
     for (i, (dir, count)) in stats.top_directories.iter().enumerate() {
         let short = shorten_path(dir, &home);
         let truncated = truncate_str_start(&short, 45, "…");
@@ -148,7 +167,12 @@ fn print_executor_breakdown(stats: &Stats) {
     if stats.executor_breakdown.is_empty() || stats.total_commands == 0 {
         return;
     }
-    println!("\n\x1b[1m── Executor Breakdown ────────────────────────────\x1b[0m");
+    let (b, r) = if util::color_enabled() {
+        ("\x1b[1m", "\x1b[0m")
+    } else {
+        ("", "")
+    };
+    println!("\n{b}── Executor Breakdown ────────────────────────────{r}");
     for (exec_type, count) in &stats.executor_breakdown {
         let pct = *count as f64 / stats.total_commands as f64 * 100.0;
         println!(

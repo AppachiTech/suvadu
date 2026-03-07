@@ -414,52 +414,24 @@ impl Repository {
         before_timestamp: Option<i64>,
     ) -> DbResult<usize> {
         if is_regex {
-            // Use WHERE clause to narrow candidates before regex filtering
-            let (sql, params) = before_timestamp.map_or_else(
-                || ("SELECT id, command FROM entries".to_string(), Vec::new()),
-                |ts| {
-                    (
-                        "SELECT id, command FROM entries WHERE started_at < ?".to_string(),
-                        vec![Box::new(ts) as Box<dyn rusqlite::ToSql>],
-                    )
-                },
-            );
-            let mut stmt = self.conn.prepare(&sql)?;
-            let regex = regex::Regex::new(pattern)
+            // Validate regex before sending to SQLite
+            regex::Regex::new(pattern)
                 .map_err(|e| crate::db::DbError::Validation(e.to_string()))?;
 
-            let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(AsRef::as_ref).collect();
-            let ids_to_delete: Vec<i64> = stmt
-                .query_map(param_refs.as_slice(), |row| {
-                    let id: i64 = row.get(0)?;
-                    let cmd: String = row.get(1)?;
-                    Ok((id, cmd))
-                })?
-                .filter_map(|r| match r {
-                    Ok(v) => Some(v),
-                    Err(e) => {
-                        eprintln!("suvadu: skipping row during delete: {e}");
-                        None
-                    }
-                })
-                .filter(|(_, cmd)| regex.is_match(cmd))
-                .map(|(id, _)| id)
-                .collect();
+            // Use SQLite REGEXP function — no need to load rows into memory
+            let mut sql = String::from("DELETE FROM entries WHERE command REGEXP ?1");
+            let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            param_values.push(Box::new(pattern.to_string()));
 
-            if ids_to_delete.is_empty() {
-                return Ok(0);
+            if let Some(ts) = before_timestamp {
+                sql.push_str(" AND started_at < ?2");
+                param_values.push(Box::new(ts));
             }
 
-            let mut total_deleted = 0;
-            for chunk in ids_to_delete.chunks(900) {
-                let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-                let sql = format!("DELETE FROM entries WHERE id IN ({placeholders})");
-                let params: Vec<&dyn rusqlite::ToSql> =
-                    chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
-                total_deleted += self.conn.execute(&sql, params.as_slice())?;
-            }
-
-            Ok(total_deleted)
+            let count = self
+                .conn
+                .execute(&sql, rusqlite::params_from_iter(param_values.iter()))?;
+            Ok(count)
         } else {
             let escaped = super::escape_like(pattern);
             let mut sql = String::from("DELETE FROM entries WHERE command LIKE ?1 ESCAPE '\\'");
@@ -486,36 +458,29 @@ impl Repository {
         before_timestamp: Option<i64>,
     ) -> DbResult<usize> {
         if is_regex {
-            // Use WHERE clause to narrow candidates before regex filtering
-            let (sql, params) = before_timestamp.map_or_else(
-                || ("SELECT command FROM entries".to_string(), Vec::new()),
-                |ts| {
-                    (
-                        "SELECT command FROM entries WHERE started_at < ?".to_string(),
-                        vec![Box::new(ts) as Box<dyn rusqlite::ToSql>],
-                    )
-                },
-            );
-            let mut stmt = self.conn.prepare(&sql)?;
-            let regex = regex::Regex::new(pattern)
+            // Validate regex before sending to SQLite
+            regex::Regex::new(pattern)
                 .map_err(|e| crate::db::DbError::Validation(e.to_string()))?;
 
-            let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(AsRef::as_ref).collect();
-            let count = stmt
-                .query_map(param_refs.as_slice(), |row| {
-                    let cmd: String = row.get(0)?;
-                    Ok(cmd)
-                })?
-                .filter_map(|r| match r {
-                    Ok(v) => Some(v),
-                    Err(e) => {
-                        eprintln!("suvadu: skipping row during count: {e}");
-                        None
-                    }
-                })
-                .filter(|cmd| regex.is_match(cmd))
-                .count();
-            Ok(count)
+            // Use SQLite REGEXP function — no need to load rows into memory
+            let mut sql = String::from("SELECT COUNT(*) FROM entries WHERE command REGEXP ?1");
+            let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            param_values.push(Box::new(pattern.to_string()));
+
+            if let Some(ts) = before_timestamp {
+                sql.push_str(" AND started_at < ?2");
+                param_values.push(Box::new(ts));
+            }
+
+            let count: i64 = self.conn.query_row(
+                &sql,
+                rusqlite::params_from_iter(param_values.iter()),
+                |row| row.get(0),
+            )?;
+            Ok(
+                usize::try_from(count)
+                    .map_err(|e| crate::db::DbError::Validation(e.to_string()))?,
+            )
         } else {
             let escaped = super::escape_like(pattern);
             let mut sql =

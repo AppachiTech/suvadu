@@ -100,6 +100,7 @@ fn handle_agent_report(
 }
 
 fn print_agent_report_text(entries: &[Entry], risk_summary: &risk::SessionRisk, home: &str) {
+    let c = util::color_enabled();
     let mut agent_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     for e in entries {
@@ -111,14 +112,15 @@ fn print_agent_report_text(entries: &[Entry], risk_summary: &risk::SessionRisk, 
 
     let total = entries.len();
 
-    print_report_header(entries, &agents_sorted, total, risk_summary);
-    print_report_high_risk(entries, home);
-    print_report_medium_risk(entries, home);
-    print_report_packages(risk_summary);
-    print_report_failures(risk_summary);
-    print_report_agent_breakdown(&agents_sorted, total);
+    print_report_header(entries, &agents_sorted, total, risk_summary, c);
+    print_report_high_risk(entries, home, c);
+    print_report_medium_risk(entries, home, c);
+    print_report_packages(risk_summary, c);
+    print_report_failures(risk_summary, c);
+    print_report_agent_breakdown(&agents_sorted, total, c);
 
-    println!("\x1b[1m═══════════════════════════════════════════════════════\x1b[0m");
+    let (b, r) = if c { ("\x1b[1m", "\x1b[0m") } else { ("", "") };
+    println!("{b}═══════════════════════════════════════════════════════{r}");
     println!();
 }
 
@@ -127,6 +129,7 @@ fn print_report_header(
     agents_sorted: &[(&String, &usize)],
     total: usize,
     risk_summary: &risk::SessionRisk,
+    c: bool,
 ) {
     let now = chrono::Local::now();
     let date_str = now.format("%b %d, %Y").to_string();
@@ -142,10 +145,11 @@ fn print_report_header(
     let first_str = format_timestamp_time(entries.first().map_or(0, |e| e.started_at));
     let last_str = format_timestamp_time(entries.last().map_or(0, |e| e.started_at));
 
+    let (b, r) = if c { ("\x1b[1m", "\x1b[0m") } else { ("", "") };
     println!();
-    println!("\x1b[1m═══════════════════════════════════════════════════════\x1b[0m");
-    println!("\x1b[1m  AGENT ACTIVITY REPORT — {date_str}\x1b[0m");
-    println!("\x1b[1m═══════════════════════════════════════════════════════\x1b[0m");
+    println!("{b}═══════════════════════════════════════════════════════{r}");
+    println!("{b}  AGENT ACTIVITY REPORT — {date_str}{r}");
+    println!("{b}═══════════════════════════════════════════════════════{r}");
     println!();
     println!("  Period:     {first_str} — {last_str}");
     print!("  Agents:     ");
@@ -165,13 +169,17 @@ fn print_report_header(
     .map(|(c, l)| format!("{c} {l}"))
     .collect();
     if risk_parts.is_empty() {
-        println!("  Risk:       \x1b[32m✔ No high-risk commands\x1b[0m");
+        if c {
+            println!("  Risk:       \x1b[32m✔ No high-risk commands\x1b[0m");
+        } else {
+            println!("  Risk:       ✔ No high-risk commands");
+        }
     } else {
         println!("  Risk:       {}", risk_parts.join(", "));
     }
 }
 
-fn print_report_high_risk(entries: &[Entry], home: &str) {
+fn print_report_high_risk(entries: &[Entry], home: &str, c: bool) {
     let high_risk: Vec<_> = entries
         .iter()
         .filter_map(|e| {
@@ -185,10 +193,12 @@ fn print_report_high_risk(entries: &[Entry], home: &str) {
         .collect();
 
     if !high_risk.is_empty() {
+        let (b, r) = if c { ("\x1b[1m", "\x1b[0m") } else { ("", "") };
+        let orange = if c { "\x1b[38;5;208m" } else { "" };
         println!();
-        println!("\x1b[1m───────────────────────────────────────────────────────\x1b[0m");
-        println!("\x1b[1m  \x1b[38;5;208m⚠ HIGH RISK COMMANDS\x1b[0m");
-        println!("\x1b[1m───────────────────────────────────────────────────────\x1b[0m");
+        println!("{b}───────────────────────────────────────────────────────{r}");
+        println!("{b}  {orange}⚠ HIGH RISK COMMANDS{r}");
+        println!("{b}───────────────────────────────────────────────────────{r}");
         for (entry, assessment) in &high_risk {
             let executor = entry.executor.as_deref().unwrap_or("unknown");
             let time_str = format_timestamp_time(entry.started_at);
@@ -196,8 +206,8 @@ fn print_report_high_risk(entries: &[Entry], home: &str) {
                 .exit_code
                 .map_or(String::new(), |c| format!("exit {c}"));
             let path = shorten_path(&entry.cwd, home);
-            let color = assessment.level.ansi_color();
-            println!("  {color}[{executor}]\x1b[0m  {}", entry.command);
+            let color = if c { assessment.level.ansi_color() } else { "" };
+            println!("  {color}[{executor}]{r}  {}", entry.command);
             println!("             {path} · {time_str} · {exit_str}");
             println!("             Category: {}", assessment.category);
             println!();
@@ -205,7 +215,7 @@ fn print_report_high_risk(entries: &[Entry], home: &str) {
     }
 }
 
-fn print_report_medium_risk(entries: &[Entry], home: &str) {
+fn print_report_medium_risk(entries: &[Entry], home: &str, c: bool) {
     let medium_risk: Vec<_> = entries
         .iter()
         .filter_map(|e| {
@@ -219,9 +229,11 @@ fn print_report_medium_risk(entries: &[Entry], home: &str) {
         .collect();
 
     if !medium_risk.is_empty() {
-        println!("\x1b[1m───────────────────────────────────────────────────────\x1b[0m");
-        println!("\x1b[1m  \x1b[33m⚡ MEDIUM RISK COMMANDS\x1b[0m");
-        println!("\x1b[1m───────────────────────────────────────────────────────\x1b[0m");
+        let (b, r) = if c { ("\x1b[1m", "\x1b[0m") } else { ("", "") };
+        let yellow = if c { "\x1b[33m" } else { "" };
+        println!("{b}───────────────────────────────────────────────────────{r}");
+        println!("{b}  {yellow}⚡ MEDIUM RISK COMMANDS{r}");
+        println!("{b}───────────────────────────────────────────────────────{r}");
         for (entry, _assessment) in medium_risk.iter().take(10) {
             let executor = entry.executor.as_deref().unwrap_or("unknown");
             let time_str = format_timestamp_time(entry.started_at);
@@ -229,7 +241,7 @@ fn print_report_medium_risk(entries: &[Entry], home: &str) {
                 .exit_code
                 .map_or(String::new(), |c| format!("exit {c}"));
             let path = shorten_path(&entry.cwd, home);
-            println!("  \x1b[33m[{executor}]\x1b[0m  {}", entry.command);
+            println!("  {yellow}[{executor}]{r}  {}", entry.command);
             println!("             {path} · {time_str} · {exit_str}");
         }
         if medium_risk.len() > 10 {
@@ -239,11 +251,12 @@ fn print_report_medium_risk(entries: &[Entry], home: &str) {
     }
 }
 
-fn print_report_packages(risk_summary: &risk::SessionRisk) {
+fn print_report_packages(risk_summary: &risk::SessionRisk, c: bool) {
     if !risk_summary.packages_installed.is_empty() {
-        println!("\x1b[1m───────────────────────────────────────────────────────\x1b[0m");
-        println!("\x1b[1m  📦 PACKAGES INSTALLED\x1b[0m");
-        println!("\x1b[1m───────────────────────────────────────────────────────\x1b[0m");
+        let (b, r) = if c { ("\x1b[1m", "\x1b[0m") } else { ("", "") };
+        println!("{b}───────────────────────────────────────────────────────{r}");
+        println!("{b}  📦 PACKAGES INSTALLED{r}");
+        println!("{b}───────────────────────────────────────────────────────{r}");
         let mut by_manager: std::collections::HashMap<&str, Vec<String>> =
             std::collections::HashMap::new();
         for pkg in &risk_summary.packages_installed {
@@ -259,19 +272,21 @@ fn print_report_packages(risk_summary: &risk::SessionRisk) {
     }
 }
 
-fn print_report_failures(risk_summary: &risk::SessionRisk) {
+fn print_report_failures(risk_summary: &risk::SessionRisk, c: bool) {
     if !risk_summary.failed_commands.is_empty() {
-        println!("\x1b[1m───────────────────────────────────────────────────────\x1b[0m");
+        let (b, r) = if c { ("\x1b[1m", "\x1b[0m") } else { ("", "") };
+        let red = if c { "\x1b[31m" } else { "" };
+        println!("{b}───────────────────────────────────────────────────────{r}");
         println!(
-            "\x1b[1m  \x1b[31m✘ FAILED COMMANDS ({})\x1b[0m",
+            "{b}  {red}✘ FAILED COMMANDS ({}){r}",
             risk_summary.failed_commands.len()
         );
-        println!("\x1b[1m───────────────────────────────────────────────────────\x1b[0m");
+        println!("{b}───────────────────────────────────────────────────────{r}");
         for fc in risk_summary.failed_commands.iter().take(15) {
             let time_str = format_timestamp_time(fc.timestamp);
             let cmd_trunc = truncate_str(&fc.command, 40, "…");
             println!(
-                "  \x1b[31m[{}]\x1b[0m  {:<42} exit {}  {time_str}",
+                "  {red}[{}]{r}  {:<42} exit {}  {time_str}",
                 fc.executor, cmd_trunc, fc.exit_code
             );
         }
@@ -282,11 +297,13 @@ fn print_report_failures(risk_summary: &risk::SessionRisk) {
     }
 }
 
-fn print_report_agent_breakdown(agents_sorted: &[(&String, &usize)], total: usize) {
+fn print_report_agent_breakdown(agents_sorted: &[(&String, &usize)], total: usize, c: bool) {
     if agents_sorted.len() > 1 {
-        println!("\x1b[1m───────────────────────────────────────────────────────\x1b[0m");
-        println!("\x1b[1m  BREAKDOWN BY AGENT\x1b[0m");
-        println!("\x1b[1m───────────────────────────────────────────────────────\x1b[0m");
+        let (b, r) = if c { ("\x1b[1m", "\x1b[0m") } else { ("", "") };
+        let green = if c { "\x1b[32m" } else { "" };
+        println!("{b}───────────────────────────────────────────────────────{r}");
+        println!("{b}  BREAKDOWN BY AGENT{r}");
+        println!("{b}───────────────────────────────────────────────────────{r}");
         let max_count = agents_sorted.first().map_or(1, |(_, c)| **c);
         for (name, count) in agents_sorted {
             #[allow(clippy::cast_precision_loss)]
@@ -298,7 +315,7 @@ fn print_report_agent_breakdown(agents_sorted: &[(&String, &usize)], total: usiz
             )]
             let bar_len = (**count as f64 / max_count as f64 * 24.0) as usize;
             let bar: String = "█".repeat(bar_len);
-            println!("  {name:<13} \x1b[32m{bar:<24}\x1b[0m  {count:>4}  ({pct:>4.1}%)",);
+            println!("  {name:<13} {green}{bar:<24}{r}  {count:>4}  ({pct:>4.1}%)",);
         }
         println!();
     }
@@ -479,27 +496,29 @@ fn handle_agent_stats_text(
     agents.sort();
 
     let home = dirs_home();
+    let c = util::color_enabled();
 
+    let (b, r) = if c { ("\x1b[1m", "\x1b[0m") } else { ("", "") };
     println!();
-    println!("\x1b[1mAgent Analytics (last {days} days)\x1b[0m");
-    println!("\x1b[1m═══════════════════════════════════════════\x1b[0m");
+    println!("{b}Agent Analytics (last {days} days){r}");
+    println!("{b}═══════════════════════════════════════════{r}");
     println!();
 
     for agent in &agents {
         let cmds = &by_agent[agent];
-        print_stats_agent_summary(agent, cmds);
+        print_stats_agent_summary(agent, cmds, c);
         print_stats_top_dirs(agent, cmds, &home);
-        print_stats_high_risk_cmds(agent, cmds, &home);
+        print_stats_high_risk_cmds(agent, cmds, &home, c);
     }
 
-    print_stats_overall_risk(&entries, &home);
+    print_stats_overall_risk(&entries, &home, c);
 
-    println!("\x1b[1m═══════════════════════════════════════════\x1b[0m");
+    println!("{b}═══════════════════════════════════════════{r}");
     println!();
     Ok(())
 }
 
-fn print_stats_agent_summary(agent: &str, cmds: &[&Entry]) {
+fn print_stats_agent_summary(agent: &str, cmds: &[&Entry], c: bool) {
     let total = cmds.len();
     let success = cmds.iter().filter(|e| e.exit_code == Some(0)).count();
     #[allow(clippy::cast_precision_loss)]
@@ -520,7 +539,8 @@ fn print_stats_agent_summary(agent: &str, cmds: &[&Entry]) {
     let risk_entries: Vec<Entry> = cmds.iter().map(|e| (*e).clone()).collect();
     let risk_summary = risk::session_risk(&risk_entries);
 
-    println!("  \x1b[1m{agent}\x1b[0m");
+    let (b, r) = if c { ("\x1b[1m", "\x1b[0m") } else { ("", "") };
+    println!("  {b}{agent}{r}");
     println!("  {}", "─".repeat(agent.len() + 2));
     println!("  Commands:     {total}");
     println!("  Success:      {rate:.1}%");
@@ -559,7 +579,7 @@ fn print_stats_top_dirs(agent: &str, cmds: &[&Entry], home: &str) {
     println!();
 }
 
-fn print_stats_high_risk_cmds(agent: &str, cmds: &[&Entry], home: &str) {
+fn print_stats_high_risk_cmds(agent: &str, cmds: &[&Entry], home: &str, c: bool) {
     let mut high_risk_cmds: Vec<_> = cmds
         .iter()
         .filter_map(|e| {
@@ -576,19 +596,30 @@ fn print_stats_high_risk_cmds(agent: &str, cmds: &[&Entry], home: &str) {
     high_risk_cmds.truncate(20);
 
     if !high_risk_cmds.is_empty() {
-        println!("  \x1b[33mHigh Risk Commands ({agent})\x1b[0m");
+        let r = if c { "\x1b[0m" } else { "" };
+        let yellow = if c { "\x1b[33m" } else { "" };
+        let dim = if c { "\x1b[90m" } else { "" };
+        println!("  {yellow}High Risk Commands ({agent}){r}");
         println!("  {}", "─".repeat(50));
         for (e, a) in &high_risk_cmds {
-            let color = a.level.ansi_color();
+            let color = if c { a.level.ansi_color() } else { "" };
             let path = shorten_path(&e.cwd, home);
             let time = format_timestamp_time(e.started_at);
-            let status = match e.exit_code {
-                Some(0) => "\x1b[32mok\x1b[0m".to_string(),
-                Some(c) => format!("\x1b[31mE{c}\x1b[0m"),
-                None => "??".to_string(),
+            let status = if c {
+                match e.exit_code {
+                    Some(0) => "\x1b[32mok\x1b[0m".to_string(),
+                    Some(code) => format!("\x1b[31mE{code}\x1b[0m"),
+                    None => "??".to_string(),
+                }
+            } else {
+                match e.exit_code {
+                    Some(0) => "ok".to_string(),
+                    Some(code) => format!("E{code}"),
+                    None => "??".to_string(),
+                }
             };
             println!(
-                "  {color}{:<9}\x1b[0m {}  \x1b[90m{path}  {time}  {status}\x1b[0m",
+                "  {color}{:<9}{r} {}  {dim}{path}  {time}  {status}{r}",
                 format!("{}", a.level),
                 e.command
             );
@@ -597,10 +628,11 @@ fn print_stats_high_risk_cmds(agent: &str, cmds: &[&Entry], home: &str) {
     }
 }
 
-fn print_stats_overall_risk(entries: &[Entry], home: &str) {
+fn print_stats_overall_risk(entries: &[Entry], home: &str, c: bool) {
     let overall = risk::session_risk(entries);
     if overall.critical_count + overall.high_count > 0 {
-        println!("\x1b[1m  High Risk Summary\x1b[0m");
+        let (b, r) = if c { ("\x1b[1m", "\x1b[0m") } else { ("", "") };
+        println!("{b}  High Risk Summary{r}");
         println!("  {}", "─".repeat(20));
         for e in entries {
             let assessment = risk::assess_risk(&e.command);
@@ -608,8 +640,8 @@ fn print_stats_overall_risk(entries: &[Entry], home: &str) {
                 if a.level >= risk::RiskLevel::High {
                     let executor = e.executor.as_deref().unwrap_or("?");
                     let path = shorten_path(&e.cwd, home);
-                    let color = a.level.ansi_color();
-                    println!("  {color}[{executor}]\x1b[0m  {}  ({path})", e.command);
+                    let color = if c { a.level.ansi_color() } else { "" };
+                    println!("  {color}[{executor}]{r}  {}  ({path})", e.command);
                 }
             }
         }

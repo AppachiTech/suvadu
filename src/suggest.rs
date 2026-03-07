@@ -177,7 +177,13 @@ pub fn handle_suggest_aliases_text(
         return Ok(());
     }
 
-    println!("\n\x1b[1m── Suggested Aliases ──────────────────────────────\x1b[0m\n");
+    let c = crate::util::color_enabled();
+    let (b, r) = if c { ("\x1b[1m", "\x1b[0m") } else { ("", "") };
+    let cyan = if c { "\x1b[36m" } else { "" };
+    let dim = if c { "\x1b[90m" } else { "" };
+    let faint = if c { "\x1b[2m" } else { "" };
+
+    println!("\n{b}── Suggested Aliases ──────────────────────────────{r}\n");
 
     let max_name_len = suggestions.iter().map(|s| s.name.len()).max().unwrap_or(4);
     for s in &suggestions {
@@ -187,7 +193,7 @@ pub fn handle_suggest_aliases_text(
             String::new()
         };
         println!(
-            "  alias \x1b[36m{:<width$}\x1b[0m='{}'\x1b[90m  # {} uses{dir_info}\x1b[0m",
+            "  alias {cyan}{:<width$}{r}='{}'{dim}  # {} uses{dir_info}{r}",
             s.name,
             shell_quote(&s.command),
             s.count,
@@ -197,12 +203,12 @@ pub fn handle_suggest_aliases_text(
 
     if !skipped.is_empty() {
         println!(
-            "\n\x1b[90m  Skipped (already aliased): {}\x1b[0m",
+            "\n{dim}  Skipped (already aliased): {}{r}",
             skipped.join(", ")
         );
     }
 
-    println!("\n\x1b[2m  Add these to your ~/.zshrc or ~/.bashrc\x1b[0m\n");
+    println!("\n{faint}  Add these to your ~/.zshrc or ~/.bashrc{r}\n");
 
     Ok(())
 }
@@ -235,7 +241,11 @@ pub fn handle_suggest_aliases_tui(
                 for s in &selected {
                     println!("alias {}='{}'", s.name, shell_quote(&s.command));
                 }
-                println!("\n\x1b[2m  Add these to your ~/.zshrc or ~/.bashrc\x1b[0m\n");
+                if crate::util::color_enabled() {
+                    println!("\n\x1b[2m  Add these to your ~/.zshrc or ~/.bashrc\x1b[0m\n");
+                } else {
+                    println!("\n  Add these to your ~/.zshrc or ~/.bashrc\n");
+                }
             }
         }
         Ok(None) => {

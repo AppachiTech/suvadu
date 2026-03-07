@@ -15,7 +15,11 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
         println!();
         println!("Suvadu was installed via Homebrew. To update, run:");
         println!();
-        println!("  \x1b[36mbrew upgrade suvadu\x1b[0m");
+        if crate::util::color_enabled() {
+            println!("  \x1b[36mbrew upgrade suvadu\x1b[0m");
+        } else {
+            println!("  brew upgrade suvadu");
+        }
         println!();
         println!("Using 'suv update' with Homebrew installs can cause version conflicts.");
         return Ok(());

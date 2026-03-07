@@ -16,7 +16,7 @@ name = "suv"
 path = "src/main.rs"
 
 [dependencies]
-rusqlite = { version = "0.38", features = ["bundled"] }
+rusqlite = { version = "0.38", features = ["bundled", "functions"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = "0.4"

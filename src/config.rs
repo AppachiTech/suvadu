@@ -198,7 +198,30 @@ pub fn load_config() -> ConfigResult<Config> {
 
     let contents = std::fs::read_to_string(path)?;
     let config: Config = toml::from_str(&contents)?;
+    validate_config(&config)?;
     Ok(config)
+}
+
+/// Validate config values after loading.
+fn validate_config(config: &Config) -> ConfigResult<()> {
+    if config.search.page_limit == 0 {
+        return Err(ConfigError::Path(
+            "search.page_limit must be at least 1".into(),
+        ));
+    }
+    if config.search.page_limit > 10_000 {
+        return Err(ConfigError::Path(
+            "search.page_limit exceeds maximum of 10000".into(),
+        ));
+    }
+    for pattern in &config.exclusions {
+        if pattern.is_empty() {
+            return Err(ConfigError::Path(
+                "exclusion patterns must not be empty".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Save configuration to file atomically (temp file + rename).

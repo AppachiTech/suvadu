@@ -64,7 +64,11 @@ pub fn handle_replay(p: &ReplayParams) -> Result<(), Box<dyn std::error::Error>>
 
     // Header
     let total = entries.len();
-    println!("\n\x1b[1m── Replay: {label} ─────────────────────────────────\x1b[0m");
+    if util::color_enabled() {
+        println!("\n\x1b[1m── Replay: {label} ─────────────────────────────────\x1b[0m");
+    } else {
+        println!("\n── Replay: {label} ─────────────────────────────────");
+    }
 
     // Session info if scoped to a session
     if let Some(ref sid) = session_filter {
@@ -145,6 +149,7 @@ fn resolve_replay_scope(s: &ReplayScope) -> (Option<String>, Option<i64>, String
 /// Print replay entries with status indicators and a footer summary.
 fn print_replay_entries(entries: &[Entry]) {
     let home = dirs_home();
+    let color = util::color_enabled();
     let total = entries.len();
     let mut success_count: usize = 0;
     let mut total_duration: i64 = 0;
@@ -173,10 +178,17 @@ fn print_replay_entries(entries: &[Entry]) {
 
         total_duration += entry.duration_ms;
 
-        println!(
-            " {time}  {dir:<20}  \x1b[{status_color}m{status:<4}\x1b[0m \x1b[2m{duration:>7}\x1b[0m  {cmd}",
-            cmd = entry.command
-        );
+        if color {
+            println!(
+                " {time}  {dir:<20}  \x1b[{status_color}m{status:<4}\x1b[0m \x1b[2m{duration:>7}\x1b[0m  {cmd}",
+                cmd = entry.command
+            );
+        } else {
+            println!(
+                " {time}  {dir:<20}  {status:<4} {duration:>7}  {cmd}",
+                cmd = entry.command
+            );
+        }
     }
 
     // Footer summary
@@ -187,13 +199,12 @@ fn print_replay_entries(entries: &[Entry]) {
     } else {
         0
     };
-    println!(
-        "\n\x1b[1m── {} commands  │  {} passed  │  {} failed  │  Avg {} ──\x1b[0m\n",
-        total,
-        success_count,
-        failed,
-        format_duration_ms(avg_duration)
-    );
+    let avg = format_duration_ms(avg_duration);
+    if color {
+        println!("\n\x1b[1m── {total} commands  │  {success_count} passed  │  {failed} failed  │  Avg {avg} ──\x1b[0m\n");
+    } else {
+        println!("\n── {total} commands  │  {success_count} passed  │  {failed} failed  │  Avg {avg} ──\n");
+    }
 }
 
 #[cfg(test)]

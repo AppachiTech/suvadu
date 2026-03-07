@@ -59,6 +59,7 @@ impl AppState {
     const fn next_tab(&mut self) {
         self.current_tab = (self.current_tab + 1) % self.tab_items.len();
         self.selected_item = 0;
+        self.reset_list_states();
     }
 
     const fn prev_tab(&mut self) {
@@ -68,6 +69,13 @@ impl AppState {
             self.current_tab = self.tab_items.len() - 1;
         }
         self.selected_item = 0;
+        self.reset_list_states();
+    }
+
+    /// Reset list state selections on tab switch to avoid stale out-of-bounds indices.
+    const fn reset_list_states(&mut self) {
+        self.exclusion_list_state.select(None);
+        self.auto_tag_list_state.select(None);
     }
 
     fn next_item(&mut self) {

@@ -132,11 +132,7 @@ pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Returns `true` if `id` contains only safe characters for use in file names.
 fn is_valid_session_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 256
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    crate::util::is_valid_session_id(id)
 }
 
 /// Get the directory for cached agent prompts (uses cached project dirs)
@@ -210,11 +206,11 @@ pub fn handle_init_claude_code() -> Result<(), Box<dyn std::error::Error>> {
     {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(&hook_script_path)?.permissions();
-        perms.set_mode(0o755);
+        perms.set_mode(0o700);
         std::fs::set_permissions(&hook_script_path, perms)?;
 
         let mut perms = std::fs::metadata(&prompt_hook_path)?.permissions();
-        perms.set_mode(0o755);
+        perms.set_mode(0o700);
         std::fs::set_permissions(&prompt_hook_path, perms)?;
     }
 
@@ -227,7 +223,14 @@ pub fn handle_init_claude_code() -> Result<(), Box<dyn std::error::Error>> {
     let auto_configured =
         try_merge_claude_settings(&settings_path, &hook_path_str, &prompt_hook_path_str);
 
-    println!("\x1b[1mSuvadu — Claude Code Integration\x1b[0m");
+    let color = crate::util::color_enabled();
+    let (b, r) = if color {
+        ("\x1b[1m", "\x1b[0m")
+    } else {
+        ("", "")
+    };
+    let green = if color { "\x1b[32m" } else { "" };
+    println!("{b}Suvadu — Claude Code Integration{r}");
     println!();
     println!("Hook scripts installed:");
     println!("  {hook_path_str}");
@@ -236,7 +239,7 @@ pub fn handle_init_claude_code() -> Result<(), Box<dyn std::error::Error>> {
 
     if matches!(auto_configured, Ok(true)) {
         println!(
-            "\x1b[32m✓\x1b[0m Settings auto-configured: {}",
+            "{green}✓{r} Settings auto-configured: {}",
             settings_path.display()
         );
         println!();
@@ -458,7 +461,17 @@ pub fn handle_init_ide(
     detection_info: &str,
     verify_executor: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\x1b[1mSuvadu \u{2014} {name} Integration\x1b[0m");
+    let color = crate::util::color_enabled();
+    let (b, r) = if color {
+        ("\x1b[1m", "\x1b[0m")
+    } else {
+        ("", "")
+    };
+    let green = if color { "\x1b[32m" } else { "" };
+    let yellow = if color { "\x1b[33m" } else { "" };
+    let cyan = if color { "\x1b[36m" } else { "" };
+
+    println!("{b}Suvadu \u{2014} {name} Integration{r}");
     println!();
 
     // Check if shell hooks are configured
@@ -479,7 +492,7 @@ pub fn handle_init_ide(
         .is_some_and(|c| c.contains("suv init bash"));
 
     if zsh_ok || bash_ok {
-        println!("\x1b[32m\u{2713}\x1b[0m Shell hooks detected:");
+        println!("{green}\u{2713}{r} Shell hooks detected:");
         if zsh_ok {
             println!("    Zsh:  ~/.zshrc");
         }
@@ -487,14 +500,14 @@ pub fn handle_init_ide(
             println!("    Bash: ~/.bashrc");
         }
         println!();
-        println!("\x1b[32m\u{2713}\x1b[0m {name} commands are automatically tracked when you");
+        println!("{green}\u{2713}{r} {name} commands are automatically tracked when you");
         println!("  run commands in {name}'s integrated terminal.");
         println!();
         for line in detection_info.lines() {
             println!("  {line}");
         }
     } else {
-        println!("\x1b[33m!\x1b[0m Shell hooks not found. Set them up first:");
+        println!("{yellow}!{r} Shell hooks not found. Set them up first:");
         println!();
         println!("  For Zsh:");
         println!("    echo 'eval \"$(suv init zsh)\"' >> ~/.zshrc && source ~/.zshrc");
@@ -506,7 +519,7 @@ pub fn handle_init_ide(
     }
 
     println!();
-    println!("Verify with: \x1b[36msuv search --executor {verify_executor}\x1b[0m");
+    println!("Verify with: {cyan}suv search --executor {verify_executor}{r}");
 
     Ok(())
 }

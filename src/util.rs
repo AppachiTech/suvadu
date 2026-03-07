@@ -1,7 +1,7 @@
 use chrono::{Local, NaiveDate, NaiveTime, TimeZone};
 use directories::BaseDirs;
 use regex::Regex;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
 // ── Cached project directories ──────────────────────────────
 
@@ -13,6 +13,33 @@ static PROJECT_DIRS: LazyLock<Option<directories::ProjectDirs>> =
 pub fn project_dirs() -> Option<&'static directories::ProjectDirs> {
     PROJECT_DIRS.as_ref()
 }
+
+// ── Color / TTY detection ──────────────────────────────
+
+static COLOR_STDOUT: OnceLock<bool> = OnceLock::new();
+
+/// Returns `true` if stdout is connected to a terminal (not piped/redirected).
+/// Result is cached after the first call.
+pub fn color_enabled() -> bool {
+    *COLOR_STDOUT.get_or_init(|| {
+        use std::io::IsTerminal;
+        std::io::stdout().is_terminal()
+    })
+}
+
+// ── Session ID validation ──────────────────────────────
+
+/// Returns `true` if `id` contains only safe characters for use as a session
+/// identifier (alphanumeric, hyphens, underscores) and is within length limits.
+pub fn is_valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 256
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+// ── Timestamps ─────────────────────────────────────────
 
 /// Threshold above which a timestamp is treated as microseconds (not milliseconds).
 /// `9_999_999_999_999` is ~Nov 2286 in milliseconds, so any value above it is certainly

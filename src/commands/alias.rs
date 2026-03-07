@@ -69,13 +69,18 @@ fn handle_list() -> Result<(), Box<dyn std::error::Error>> {
 
     let max_name = aliases.iter().map(|a| a.name.len()).max().unwrap_or(4);
     println!();
+    let color = crate::util::color_enabled();
     for a in &aliases {
-        println!(
-            "  \x1b[36m{:<width$}\x1b[0m  →  {}",
-            a.name,
-            a.command,
-            width = max_name
-        );
+        if color {
+            println!(
+                "  \x1b[36m{:<width$}\x1b[0m  →  {}",
+                a.name,
+                a.command,
+                width = max_name
+            );
+        } else {
+            println!("  {:<width$}  →  {}", a.name, a.command, width = max_name);
+        }
     }
     println!();
     println!(

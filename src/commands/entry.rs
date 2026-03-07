@@ -43,6 +43,11 @@ pub struct AddParams {
     pub context: Option<std::collections::HashMap<String, String>>,
 }
 
+/// Maximum lengths for input fields (defense against malicious/buggy hooks).
+const MAX_SESSION_ID_LEN: usize = 256;
+const MAX_COMMAND_LEN: usize = 65536; // 64 KB — long pipe chains, heredocs
+const MAX_CWD_LEN: usize = 4096; // PATH_MAX on most systems
+
 pub fn handle_add_with_context(params: AddParams) -> Result<(), Box<dyn std::error::Error>> {
     let AddParams {
         session_id,
@@ -60,6 +65,19 @@ pub fn handle_add_with_context(params: AddParams) -> Result<(), Box<dyn std::err
         return Ok(());
     }
     if command.starts_with(' ') {
+        return Ok(());
+    }
+
+    // Input length validation (defense against malicious/buggy shell hooks)
+    if session_id.len() > MAX_SESSION_ID_LEN
+        || command.len() > MAX_COMMAND_LEN
+        || cwd.len() > MAX_CWD_LEN
+    {
+        return Ok(()); // Silently drop oversized inputs
+    }
+
+    // Session ID character validation (consistent with integrations.rs)
+    if !util::is_valid_session_id(&session_id) {
         return Ok(());
     }
 
@@ -223,7 +241,11 @@ pub fn handle_bookmark(
             if bookmarks.is_empty() {
                 println!("No bookmarks yet. Use `suv bookmark add <command>` to save one.");
             } else {
-                println!("\x1b[1m{:<50} {:<20} Added\x1b[0m", "Command", "Label");
+                if util::color_enabled() {
+                    println!("\x1b[1m{:<50} {:<20} Added\x1b[0m", "Command", "Label");
+                } else {
+                    println!("{:<50} {:<20} Added", "Command", "Label");
+                }
                 for bm in &bookmarks {
                     let date = chrono::DateTime::from_timestamp_millis(bm.created_at)
                         .map(|dt| dt.format("%Y-%m-%d").to_string())

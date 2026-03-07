@@ -96,6 +96,8 @@ pub fn handle_export(
 }
 
 pub fn handle_import(file: &str, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+    const BATCH_SIZE: u64 = 10_000;
+
     let f = std::fs::File::open(file)?;
     let reader = std::io::BufReader::new(f);
 
@@ -127,10 +129,14 @@ pub fn handle_import(file: &str, dry_run: bool) -> Result<(), Box<dyn std::error
 
     let repo = Repository::init()?;
 
-    // Collect and parse all entries first so parse errors
-    // don't leave partial data in a committed transaction.
-    let mut entries: Vec<Entry> = Vec::new();
+    // Stream entries in batches to avoid loading entire file into memory.
+    // Each batch is committed independently; a parse error skips the line,
+    // an insert error rolls back only the current batch and aborts.
+    let mut imported = 0u64;
     let mut parse_errors = 0u64;
+    let mut batch_count = 0u64;
+
+    repo.begin_transaction()?;
 
     for (line_num, line) in reader.lines().enumerate() {
         let line = line?;
@@ -138,27 +144,33 @@ pub fn handle_import(file: &str, dry_run: bool) -> Result<(), Box<dyn std::error
         if trimmed.is_empty() {
             continue;
         }
-        match serde_json::from_str(trimmed) {
-            Ok(e) => entries.push(e),
+        let entry: Entry = match serde_json::from_str(trimmed) {
+            Ok(e) => e,
             Err(err) => {
                 eprintln!("Line {}: parse error: {err}", line_num + 1);
                 parse_errors += 1;
+                continue;
             }
-        }
-    }
+        };
 
-    repo.begin_transaction()?;
-
-    let mut imported = 0u64;
-    for entry in &entries {
-        match repo.insert_entry(entry) {
-            Ok(_) => imported += 1,
+        match repo.insert_entry(&entry) {
+            Ok(_) => {
+                imported += 1;
+                batch_count += 1;
+            }
             Err(e) => {
-                eprintln!("Insert failed: {e}");
-                eprintln!("Rolling back — no entries were written.");
+                eprintln!("Insert failed at line {}: {e}", line_num + 1);
+                eprintln!("Rolling back — no entries from this batch were written.");
                 let _ = repo.rollback();
                 return Err(e.into());
             }
+        }
+
+        // Commit in batches to bound memory and WAL growth
+        if batch_count >= BATCH_SIZE {
+            repo.commit()?;
+            repo.begin_transaction()?;
+            batch_count = 0;
         }
     }
 

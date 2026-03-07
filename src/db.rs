@@ -235,6 +235,10 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
     // Retry on SQLITE_BUSY for up to 5 seconds (concurrent shell sessions)
     conn.busy_timeout(std::time::Duration::from_millis(5000))?;
 
+    // Register a REGEXP function so `WHERE command REGEXP ?` works in SQL.
+    // This avoids loading all rows into memory for regex-based delete/count.
+    register_regexp(&conn)?;
+
     // WAL mode is persistent — only set if not already active.
     let current_mode: String = conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
     if current_mode != "wal" {
@@ -269,6 +273,34 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
     }
 
     Ok(conn)
+}
+
+/// Register a `REGEXP(pattern, value)` scalar function with `SQLite`.
+///
+/// This enables `WHERE column REGEXP ?` in SQL, letting the database engine
+/// filter rows instead of loading them all into Rust for regex matching.
+fn register_regexp(conn: &Connection) -> DbResult<()> {
+    use rusqlite::functions::FunctionFlags;
+
+    conn.create_scalar_function(
+        "regexp",
+        2,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let pattern = ctx
+                .get_raw(0)
+                .as_str()
+                .map_err(|e| rusqlite::Error::UserFunctionError(e.into()))?;
+            let value = ctx
+                .get_raw(1)
+                .as_str()
+                .map_err(|e| rusqlite::Error::UserFunctionError(e.into()))?;
+            let re = regex::Regex::new(pattern)
+                .map_err(|e| rusqlite::Error::UserFunctionError(e.into()))?;
+            Ok(re.is_match(value))
+        },
+    )?;
+    Ok(())
 }
 
 /// Migration v4: composite index for pattern-based deletion and counting.
