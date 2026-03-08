@@ -5,7 +5,7 @@ mod render;
 #[cfg(test)]
 mod tests;
 
-use crate::models::{Entry, Tag};
+use crate::models::{Entry, SearchField, Tag};
 use crate::repository::{QueryFilter, Repository};
 use crate::util;
 use arboard::Clipboard;
@@ -60,7 +60,7 @@ pub struct SearchConfig {
     pub context_boost: bool,
     pub show_detail_pane: bool,
     pub show_risk_in_search: bool,
-    pub search_field: String,
+    pub search_field: SearchField,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -131,7 +131,7 @@ pub struct SearchApp {
     fuzzy_results: Vec<Entry>,
 
     // Field-specific search (command, cwd, session, executor)
-    pub search_field: String,
+    pub search_field: SearchField,
 
     // UI Feedback
     status_message: Option<(String, std::time::Instant)>,
@@ -382,7 +382,7 @@ pub struct SearchArgs<'a> {
     pub executor: Option<&'a str>,
     pub prefix_match: bool,
     pub cwd: Option<&'a str>,
-    pub field: &'a str,
+    pub field: SearchField,
 }
 
 pub fn run_search(
@@ -456,7 +456,7 @@ pub fn run_search(
         context_boost: config.search.context_boost,
         show_detail_pane: config.search.show_detail_pane,
         show_risk_in_search: config.agent.show_risk_in_search,
-        search_field: args.field.to_string(),
+        search_field: args.field,
     });
 
     let result = app.run(&mut terminal, repo);

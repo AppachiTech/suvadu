@@ -476,7 +476,7 @@ mod tests {
 
         // Verify the entry was stored correctly
         let entries = repo
-            .get_entries(1, 0, None, None, None, None, None, false, None, None)
+            .get_entries_filtered(1, 0, &crate::repository::QueryFilter::default())
             .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].command, "cargo test");

@@ -1,6 +1,7 @@
 use std::process;
 
 use crate::config;
+use crate::models::SearchField;
 use crate::repository::Repository;
 use crate::search;
 
@@ -13,7 +14,7 @@ pub struct SearchParams<'a> {
     pub exit_code: Option<i32>,
     pub executor: Option<&'a str>,
     pub here: bool,
-    pub field: &'a str,
+    pub field: SearchField,
 }
 
 pub fn handle_search(p: &SearchParams) -> Result<(), Box<dyn std::error::Error>> {

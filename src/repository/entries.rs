@@ -87,39 +87,6 @@ impl Repository {
         Ok(count)
     }
 
-    /// Get entries with optional filters (positional params wrapper for tests)
-    #[cfg(test)]
-    #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
-    pub fn get_entries(
-        &self,
-        limit: usize,
-        offset: usize,
-        after: Option<i64>,
-        before: Option<i64>,
-        tag_id: Option<i64>,
-        exit_code: Option<i32>,
-        query: Option<&str>,
-        prefix_match: bool,
-        executor: Option<&str>,
-        cwd: Option<&str>,
-    ) -> DbResult<Vec<Entry>> {
-        self.get_entries_filtered(
-            limit,
-            offset,
-            &super::QueryFilter {
-                after,
-                before,
-                tag_id,
-                exit_code,
-                query,
-                prefix_match,
-                executor,
-                cwd,
-                field: "command",
-            },
-        )
-    }
-
     /// Get entries with optional filters and field-specific search
     #[allow(clippy::cast_possible_wrap)]
     pub fn get_entries_filtered(
@@ -175,75 +142,6 @@ impl Repository {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(entries)
-    }
-
-    /// Get entries with unique command deduplication
-    #[cfg(test)]
-    #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
-    pub fn get_unique_entries(
-        &self,
-        limit: usize,
-        offset: usize,
-        after: Option<i64>,
-        before: Option<i64>,
-        tag_id: Option<i64>,
-        exit_code: Option<i32>,
-        query: Option<&str>,
-        prefix_match: bool,
-        sort_alphabetically: bool,
-        executor: Option<&str>,
-        cwd: Option<&str>,
-    ) -> DbResult<Vec<(Entry, i64)>> {
-        self.get_unique_entries_field(
-            limit,
-            offset,
-            after,
-            before,
-            tag_id,
-            exit_code,
-            query,
-            prefix_match,
-            sort_alphabetically,
-            executor,
-            cwd,
-            "command",
-        )
-    }
-
-    /// Get unique entries (positional params wrapper)
-    #[cfg(test)]
-    #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
-    pub fn get_unique_entries_field(
-        &self,
-        limit: usize,
-        offset: usize,
-        after: Option<i64>,
-        before: Option<i64>,
-        tag_id: Option<i64>,
-        exit_code: Option<i32>,
-        query: Option<&str>,
-        prefix_match: bool,
-        sort_alphabetically: bool,
-        executor: Option<&str>,
-        cwd: Option<&str>,
-        field: &str,
-    ) -> DbResult<Vec<(Entry, i64)>> {
-        self.get_unique_entries_filtered(
-            limit,
-            offset,
-            &super::QueryFilter {
-                after,
-                before,
-                tag_id,
-                exit_code,
-                query,
-                prefix_match,
-                executor,
-                cwd,
-                field,
-            },
-            sort_alphabetically,
-        )
     }
 
     /// Get entries with unique command deduplication using `QueryFilter`
@@ -339,61 +237,6 @@ impl Repository {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(results)
-    }
-
-    /// Count unique entries matching filters
-    #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn count_unique_entries(
-        &self,
-        after: Option<i64>,
-        before: Option<i64>,
-        tag_id: Option<i64>,
-        exit_code: Option<i32>,
-        query: Option<&str>,
-        prefix_match: bool,
-        executor: Option<&str>,
-        cwd: Option<&str>,
-    ) -> DbResult<i64> {
-        self.count_unique_entries_field(
-            after,
-            before,
-            tag_id,
-            exit_code,
-            query,
-            prefix_match,
-            executor,
-            cwd,
-            "command",
-        )
-    }
-
-    /// Count unique entries (positional params wrapper)
-    #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn count_unique_entries_field(
-        &self,
-        after: Option<i64>,
-        before: Option<i64>,
-        tag_id: Option<i64>,
-        exit_code: Option<i32>,
-        query: Option<&str>,
-        prefix_match: bool,
-        executor: Option<&str>,
-        cwd: Option<&str>,
-        field: &str,
-    ) -> DbResult<i64> {
-        self.count_unique_filtered(&super::QueryFilter {
-            after,
-            before,
-            tag_id,
-            exit_code,
-            query,
-            prefix_match,
-            executor,
-            cwd,
-            field,
-        })
     }
 
     /// Count unique entries matching `QueryFilter`
@@ -562,61 +405,6 @@ impl Repository {
         self.conn
             .execute("DELETE FROM entries WHERE id = ?1", params![id])?;
         Ok(())
-    }
-
-    /// Count entries matching filters
-    #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn count_filtered_entries(
-        &self,
-        after: Option<i64>,
-        before: Option<i64>,
-        tag_id: Option<i64>,
-        exit_code: Option<i32>,
-        query: Option<&str>,
-        prefix_match: bool,
-        executor: Option<&str>,
-        cwd: Option<&str>,
-    ) -> DbResult<i64> {
-        self.count_filtered_entries_field(
-            after,
-            before,
-            tag_id,
-            exit_code,
-            query,
-            prefix_match,
-            executor,
-            cwd,
-            "command",
-        )
-    }
-
-    /// Count entries matching filters (positional params wrapper)
-    #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn count_filtered_entries_field(
-        &self,
-        after: Option<i64>,
-        before: Option<i64>,
-        tag_id: Option<i64>,
-        exit_code: Option<i32>,
-        query: Option<&str>,
-        prefix_match: bool,
-        executor: Option<&str>,
-        cwd: Option<&str>,
-        field: &str,
-    ) -> DbResult<i64> {
-        self.count_filtered(&super::QueryFilter {
-            after,
-            before,
-            tag_id,
-            exit_code,
-            query,
-            prefix_match,
-            executor,
-            cwd,
-            field,
-        })
     }
 
     /// Count entries matching a `QueryFilter`

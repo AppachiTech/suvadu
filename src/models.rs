@@ -96,6 +96,16 @@ pub struct Bookmark {
     pub created_at: i64,
 }
 
+/// Which entry field to search on.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum SearchField {
+    #[default]
+    Command,
+    Cwd,
+    Session,
+    Executor,
+}
+
 /// A managed shell alias
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Alias {

@@ -1,5 +1,5 @@
 use super::*;
-use crate::models::Entry;
+use crate::models::{Entry, SearchField};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 fn create_test_entry(cmd: &str) -> Entry {
@@ -46,7 +46,7 @@ fn test_search_config(entries: Vec<Entry>, total_items: usize) -> SearchConfig {
         context_boost: true,
         show_detail_pane: true,
         show_risk_in_search: false,
-        search_field: "command".to_string(),
+        search_field: SearchField::Command,
     }
 }
 
@@ -97,7 +97,7 @@ fn test_fuzzy_score_ranking() {
     ];
 
     // "gco" should match git commands but not "echo" or "cargo build"
-    let scored = SearchApp::fuzzy_score(entries, "gco", None, "command");
+    let scored = SearchApp::fuzzy_score(entries, "gco", None, SearchField::Command);
     assert!(!scored.is_empty());
     // Both git commands should match, non-git commands should not
     let cmds: Vec<&str> = scored.iter().map(|e| e.command.as_str()).collect();
@@ -110,7 +110,7 @@ fn test_fuzzy_score_ranking() {
 fn test_fuzzy_score_no_match() {
     let entries = vec![create_test_entry("ls -la"), create_test_entry("pwd")];
 
-    let scored = SearchApp::fuzzy_score(entries, "zzzzz", None, "command");
+    let scored = SearchApp::fuzzy_score(entries, "zzzzz", None, SearchField::Command);
     assert!(scored.is_empty());
 }
 
@@ -123,7 +123,7 @@ fn test_fuzzy_score_filters_irrelevant() {
         create_test_entry("cargo test"),
     ];
 
-    let scored = SearchApp::fuzzy_score(entries, "cargo test", None, "command");
+    let scored = SearchApp::fuzzy_score(entries, "cargo test", None, SearchField::Command);
     assert!(!scored.is_empty());
     // Both "cargo test" entries should match, "npm install" should not
     let cmds: Vec<&str> = scored.iter().map(|e| e.command.as_str()).collect();
@@ -142,7 +142,7 @@ fn test_fuzzy_score_length_penalty() {
         ),
     ];
 
-    let scored = SearchApp::fuzzy_score(entries, "git status", None, "command");
+    let scored = SearchApp::fuzzy_score(entries, "git status", None, SearchField::Command);
     assert_eq!(scored.len(), 2);
     // Short command should come first due to length penalty
     assert_eq!(scored[0].command, "git status");
@@ -158,7 +158,7 @@ fn test_fuzzy_score_human_boost() {
 
     let entries = vec![agent_entry, human_entry];
 
-    let scored = SearchApp::fuzzy_score(entries, "cargo build", None, "command");
+    let scored = SearchApp::fuzzy_score(entries, "cargo build", None, SearchField::Command);
     assert_eq!(scored.len(), 2);
     // Human entry should come first
     assert_eq!(scored[0].executor_type.as_deref(), Some("human"));
@@ -174,7 +174,8 @@ fn test_fuzzy_score_cwd_boost() {
 
     let entries = vec![remote_entry, local_entry];
 
-    let scored = SearchApp::fuzzy_score(entries, "make test", Some("/project"), "command");
+    let scored =
+        SearchApp::fuzzy_score(entries, "make test", Some("/project"), SearchField::Command);
     assert_eq!(scored.len(), 2);
     // Local CWD entry should come first
     assert_eq!(scored[0].cwd, "/project");
@@ -185,7 +186,7 @@ fn test_fuzzy_score_empty_query() {
     let entries = vec![create_test_entry("ls"), create_test_entry("pwd")];
 
     // Empty query should match nothing (nucleo needs at least some pattern)
-    let scored = SearchApp::fuzzy_score(entries, "", None, "command");
+    let scored = SearchApp::fuzzy_score(entries, "", None, SearchField::Command);
     // nucleo Pattern::parse("") returns a pattern that matches everything
     // This is fine — the caller gates on query.len() >= 2
     assert!(scored.len() <= 2);
@@ -199,7 +200,7 @@ fn test_fuzzy_score_single_char() {
         create_test_entry("cd /tmp"),
     ];
 
-    let scored = SearchApp::fuzzy_score(entries, "l", None, "command");
+    let scored = SearchApp::fuzzy_score(entries, "l", None, SearchField::Command);
     // Should match "ls -la" at minimum
     let cmds: Vec<&str> = scored.iter().map(|e| e.command.as_str()).collect();
     assert!(cmds.contains(&"ls -la"));

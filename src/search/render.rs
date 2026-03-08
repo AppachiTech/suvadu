@@ -1275,7 +1275,7 @@ mod tests {
             context_boost: false,
             show_detail_pane: false,
             show_risk_in_search: false,
-            search_field: "command".to_string(),
+            search_field: crate::models::SearchField::Command,
         };
 
         (super::SearchApp::new(config), entry)
@@ -1351,7 +1351,7 @@ mod tests {
             context_boost: false,
             show_detail_pane: false,
             show_risk_in_search: false,
-            search_field: "command".to_string(),
+            search_field: crate::models::SearchField::Command,
         };
         let app = super::SearchApp::new(config);
         let title = app.build_table_title();
@@ -1386,7 +1386,7 @@ mod tests {
             context_boost: false,
             show_detail_pane: false,
             show_risk_in_search: false,
-            search_field: "command".to_string(),
+            search_field: crate::models::SearchField::Command,
         };
         let app = super::SearchApp::new(config);
         let title = app.build_table_title();

@@ -1,4 +1,4 @@
-use crate::models::Entry;
+use crate::models::{Entry, SearchField};
 use crate::repository::{QueryFilter, Repository};
 
 use super::SearchApp;
@@ -46,7 +46,7 @@ impl SearchApp {
             prefix_match: false,
             executor: self.filter_executor_type.as_deref(),
             cwd: self.filter_cwd.as_deref(),
-            field: &self.search_field,
+            field: self.search_field,
         }
     }
 
@@ -59,7 +59,7 @@ impl SearchApp {
         entries: Vec<Entry>,
         query: &str,
         boost_cwd: Option<&str>,
-        field: &str,
+        field: SearchField,
     ) -> Vec<Entry> {
         use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
         use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
@@ -84,13 +84,13 @@ impl SearchApp {
             buf.clear();
             let executor_str;
             let field_value: &str = match field {
-                "cwd" => &entry.cwd,
-                "session" => &entry.session_id,
-                "executor" => {
+                SearchField::Cwd => &entry.cwd,
+                SearchField::Session => &entry.session_id,
+                SearchField::Executor => {
                     executor_str = entry.executor_type.as_deref().unwrap_or("").to_string();
                     &executor_str
                 }
-                _ => &entry.command,
+                SearchField::Command => &entry.command,
             };
             let haystack = Utf32Str::new(field_value, &mut buf);
             if let Some(score) = pattern.score(haystack, &mut matcher) {
@@ -180,7 +180,7 @@ impl SearchApp {
                 } else {
                     None
                 };
-                let scored = Self::fuzzy_score(entries, &self.query, boost_cwd, &self.search_field);
+                let scored = Self::fuzzy_score(entries, &self.query, boost_cwd, self.search_field);
                 self.unique_counts = count_map;
                 self.fuzzy_results = scored;
             } else {
@@ -192,7 +192,7 @@ impl SearchApp {
                     None
                 };
                 self.fuzzy_results =
-                    Self::fuzzy_score(entries, &self.query, boost_cwd, &self.search_field);
+                    Self::fuzzy_score(entries, &self.query, boost_cwd, self.search_field);
             }
 
             self.total_items = self.fuzzy_results.len();

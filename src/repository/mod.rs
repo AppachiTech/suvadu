@@ -63,7 +63,7 @@ pub struct QueryFilter<'a> {
     pub prefix_match: bool,
     pub executor: Option<&'a str>,
     pub cwd: Option<&'a str>,
-    pub field: &'a str,
+    pub field: crate::models::SearchField,
 }
 
 impl QueryFilter<'_> {
@@ -78,6 +78,8 @@ impl QueryFilter<'_> {
             .with_cwd(self.cwd)
     }
 }
+
+use crate::models::SearchField;
 
 /// Filter parameters for replay queries.
 #[derive(Default)]
@@ -143,21 +145,21 @@ impl FilterBuilder {
     }
 
     pub fn with_query(self, query: Option<&str>, prefix_match: bool) -> Self {
-        self.with_query_field(query, prefix_match, "command")
+        self.with_query_field(query, prefix_match, SearchField::Command)
     }
 
     pub fn with_query_field(
         mut self,
         query: Option<&str>,
         prefix_match: bool,
-        field: &str,
+        field: SearchField,
     ) -> Self {
         if let Some(q) = query {
             let column = match field {
-                "cwd" => "e.cwd",
-                "session" => "e.session_id",
-                "executor" => "COALESCE(e.executor_type || ' ' || e.executor, '')",
-                _ => "e.command",
+                SearchField::Cwd => "e.cwd",
+                SearchField::Session => "e.session_id",
+                SearchField::Executor => "COALESCE(e.executor_type || ' ' || e.executor, '')",
+                SearchField::Command => "e.command",
             };
             self.clauses.push(format!("{column} LIKE ? ESCAPE '\\'"));
             let escaped = escape_like(q);
@@ -242,6 +244,7 @@ impl FilterBuilder {
 #[cfg(test)]
 mod filter_builder_tests {
     use super::FilterBuilder;
+    use crate::models::SearchField;
 
     #[test]
     fn empty_builder_produces_where_1_eq_1() {
@@ -311,27 +314,22 @@ mod filter_builder_tests {
 
     #[test]
     fn with_query_field_cwd() {
-        let fb = FilterBuilder::new().with_query_field(Some("home"), false, "cwd");
+        let fb = FilterBuilder::new().with_query_field(Some("home"), false, SearchField::Cwd);
         assert_eq!(fb.build_where(), " WHERE e.cwd LIKE ? ESCAPE '\\'");
     }
 
     #[test]
     fn with_query_field_session() {
-        let fb = FilterBuilder::new().with_query_field(Some("abc"), false, "session");
+        let fb = FilterBuilder::new().with_query_field(Some("abc"), false, SearchField::Session);
         assert_eq!(fb.build_where(), " WHERE e.session_id LIKE ? ESCAPE '\\'");
     }
 
     #[test]
     fn with_query_field_executor() {
-        let fb = FilterBuilder::new().with_query_field(Some("claude"), false, "executor");
+        let fb =
+            FilterBuilder::new().with_query_field(Some("claude"), false, SearchField::Executor);
         assert!(fb.build_where().contains("COALESCE"));
         assert!(fb.build_where().contains("ESCAPE '\\'"));
-    }
-
-    #[test]
-    fn with_query_field_unknown_defaults_to_command() {
-        let fb = FilterBuilder::new().with_query_field(Some("test"), false, "unknown_field");
-        assert_eq!(fb.build_where(), " WHERE e.command LIKE ? ESCAPE '\\'");
     }
 
     #[test]

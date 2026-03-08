@@ -226,7 +226,7 @@ fn run_search(cmd: Commands) -> Result<(), Box<dyn std::error::Error>> {
         exit_code,
         executor: executor.as_deref(),
         here,
-        field: field.as_str(),
+        field,
     })
 }
 

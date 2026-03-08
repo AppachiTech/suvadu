@@ -1,5 +1,7 @@
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
+pub use crate::models::SearchField;
+
 #[derive(Parser)]
 #[command(
     name = "suvadu",
@@ -10,26 +12,6 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
-}
-
-/// Search field for filtering entries
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum SearchField {
-    Command,
-    Cwd,
-    Session,
-    Executor,
-}
-
-impl SearchField {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Command => "command",
-            Self::Cwd => "cwd",
-            Self::Session => "session",
-            Self::Executor => "executor",
-        }
-    }
 }
 
 /// Export file format

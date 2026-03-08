@@ -17,7 +17,7 @@ pub enum DbError {
 pub type DbResult<T> = Result<T, DbError>;
 
 /// Current schema version. Increment when adding new migrations.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// Get the path to the suvadu database file
 pub fn get_db_path() -> DbResult<PathBuf> {
@@ -287,6 +287,7 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
         (2, migrate_v2),
         (3, migrate_v3),
         (4, migrate_v4),
+        (5, migrate_v5),
     ];
 
     for &(target_version, migrate_fn) in migrations {
@@ -333,6 +334,17 @@ fn register_regexp(conn: &Connection) -> DbResult<()> {
 fn migrate_v4(conn: &Connection) -> DbResult<()> {
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_entries_command_started ON entries(command, started_at);",
+    )?;
+    Ok(())
+}
+
+/// Migration v5: composite indexes for stats GROUP BY queries with date range filters.
+/// `(started_at, command)` covers `WHERE started_at >= ? GROUP BY command`.
+/// `(started_at, cwd)` covers `WHERE started_at >= ? GROUP BY cwd`.
+fn migrate_v5(conn: &Connection) -> DbResult<()> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_entries_started_command ON entries(started_at, command);
+         CREATE INDEX IF NOT EXISTS idx_entries_started_cwd     ON entries(started_at, cwd);",
     )?;
     Ok(())
 }

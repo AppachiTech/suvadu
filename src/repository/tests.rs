@@ -205,46 +205,41 @@ fn test_entries_filtering_by_tag() {
     repo.insert_entry(&entry_untagged).unwrap();
 
     let work_entries = repo
-        .get_entries(
+        .get_entries_filtered(
             10,
             0,
-            None,
-            None,
-            Some(work_tag),
-            None,
-            None,
-            false,
-            None,
-            None,
+            &QueryFilter {
+                tag_id: Some(work_tag),
+                ..Default::default()
+            },
         )
         .unwrap();
     assert_eq!(work_entries.len(), 1);
     assert_eq!(work_entries[0].command, "git commit");
 
     let work_count = repo
-        .count_filtered_entries(None, None, Some(work_tag), None, None, false, None, None)
+        .count_filtered(&QueryFilter {
+            tag_id: Some(work_tag),
+            ..Default::default()
+        })
         .unwrap();
     assert_eq!(work_count, 1);
 
     let personal_entries = repo
-        .get_entries(
+        .get_entries_filtered(
             10,
             0,
-            None,
-            None,
-            Some(personal_tag),
-            None,
-            None,
-            false,
-            None,
-            None,
+            &QueryFilter {
+                tag_id: Some(personal_tag),
+                ..Default::default()
+            },
         )
         .unwrap();
     assert_eq!(personal_entries.len(), 1);
     assert_eq!(personal_entries[0].command, "steam");
 
     let all = repo
-        .get_entries(10, 0, None, None, None, None, None, false, None, None)
+        .get_entries_filtered(10, 0, &QueryFilter::default())
         .unwrap();
     assert_eq!(all.len(), 3);
 }
@@ -299,18 +294,14 @@ fn test_unique_entries_filtering_by_tag() {
     .unwrap();
 
     let unique_work = repo
-        .get_unique_entries(
+        .get_unique_entries_filtered(
             10,
             0,
-            None,
-            None,
-            Some(work_tag),
-            None,
-            None,
+            &QueryFilter {
+                tag_id: Some(work_tag),
+                ..Default::default()
+            },
             false,
-            false,
-            None,
-            None,
         )
         .unwrap();
     assert_eq!(unique_work.len(), 2);
@@ -319,14 +310,15 @@ fn test_unique_entries_filtering_by_tag() {
     assert_eq!(ls_entry.1, 2);
 
     let unique_count = repo
-        .count_unique_entries(None, None, Some(work_tag), None, None, false, None, None)
+        .count_unique_filtered(&QueryFilter {
+            tag_id: Some(work_tag),
+            ..Default::default()
+        })
         .unwrap();
     assert_eq!(unique_count, 2);
 
     let unique_global = repo
-        .get_unique_entries(
-            10, 0, None, None, None, None, None, false, false, None, None,
-        )
+        .get_unique_entries_filtered(10, 0, &QueryFilter::default(), false)
         .unwrap();
     assert_eq!(unique_global.len(), 2);
     let ls_global = unique_global
@@ -408,9 +400,7 @@ fn test_unique_entries_query() {
     .unwrap();
 
     let entries = repo
-        .get_unique_entries(
-            10, 0, None, None, None, None, None, false, false, None, None,
-        )
+        .get_unique_entries_filtered(10, 0, &QueryFilter::default(), false)
         .unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].0.command, "ls");
@@ -444,18 +434,14 @@ fn test_unique_entries_pagination_and_query() {
     }
 
     let unique_git = repo
-        .get_unique_entries(
+        .get_unique_entries_filtered(
             10,
             0,
-            None,
-            None,
-            None,
-            None,
-            Some("git"),
+            &QueryFilter {
+                query: Some("git"),
+                ..Default::default()
+            },
             false,
-            false,
-            None,
-            None,
         )
         .unwrap();
     assert_eq!(unique_git.len(), 2);
@@ -463,54 +449,42 @@ fn test_unique_entries_pagination_and_query() {
     assert_eq!(unique_git[1].0.command, "git status");
 
     let page1 = repo
-        .get_unique_entries(
+        .get_unique_entries_filtered(
             1,
             0,
-            None,
-            None,
-            None,
-            None,
-            Some("git"),
+            &QueryFilter {
+                query: Some("git"),
+                ..Default::default()
+            },
             false,
-            false,
-            None,
-            None,
         )
         .unwrap();
     assert_eq!(page1.len(), 1);
     assert_eq!(page1[0].0.command, "git commit");
 
     let page2 = repo
-        .get_unique_entries(
+        .get_unique_entries_filtered(
             1,
             1,
-            None,
-            None,
-            None,
-            None,
-            Some("git"),
+            &QueryFilter {
+                query: Some("git"),
+                ..Default::default()
+            },
             false,
-            false,
-            None,
-            None,
         )
         .unwrap();
     assert_eq!(page2.len(), 1);
     assert_eq!(page2[0].0.command, "git status");
 
     let page3 = repo
-        .get_unique_entries(
+        .get_unique_entries_filtered(
             1,
             2,
-            None,
-            None,
-            None,
-            None,
-            Some("git"),
+            &QueryFilter {
+                query: Some("git"),
+                ..Default::default()
+            },
             false,
-            false,
-            None,
-            None,
         )
         .unwrap();
     assert_eq!(page3.len(), 0);
@@ -553,19 +527,19 @@ fn test_unique_entries_recency_priority() {
     .unwrap();
 
     let page1 = repo
-        .get_unique_entries(1, 0, None, None, None, None, None, false, false, None, None)
+        .get_unique_entries_filtered(1, 0, &QueryFilter::default(), false)
         .unwrap();
     assert_eq!(page1.len(), 1);
     assert_eq!(page1[0].0.command, "cmd_C");
 
     let page2 = repo
-        .get_unique_entries(1, 1, None, None, None, None, None, false, false, None, None)
+        .get_unique_entries_filtered(1, 1, &QueryFilter::default(), false)
         .unwrap();
     assert_eq!(page2.len(), 1);
     assert_eq!(page2[0].0.command, "cmd_B");
 
     let page3 = repo
-        .get_unique_entries(1, 2, None, None, None, None, None, false, false, None, None)
+        .get_unique_entries_filtered(1, 2, &QueryFilter::default(), false)
         .unwrap();
     assert_eq!(page3.len(), 1);
     assert_eq!(page3[0].0.command, "cmd_A");
@@ -608,13 +582,13 @@ fn test_unique_entries_reexecution() {
     .unwrap();
 
     let page1 = repo
-        .get_unique_entries(1, 0, None, None, None, None, None, false, false, None, None)
+        .get_unique_entries_filtered(1, 0, &QueryFilter::default(), false)
         .unwrap();
     assert_eq!(page1.len(), 1);
     assert_eq!(page1[0].0.command, "cmd_A");
 
     let page2 = repo
-        .get_unique_entries(1, 1, None, None, None, None, None, false, false, None, None)
+        .get_unique_entries_filtered(1, 1, &QueryFilter::default(), false)
         .unwrap();
     assert_eq!(page2.len(), 1);
     assert_eq!(page2[0].0.command, "cmd_B");
@@ -843,20 +817,24 @@ fn test_executor_filter_in_count() {
     repo.insert_entry(&entry2).unwrap();
 
     // Count all
-    let total = repo
-        .count_filtered_entries(None, None, None, None, None, false, None, None)
-        .unwrap();
+    let total = repo.count_filtered(&QueryFilter::default()).unwrap();
     assert_eq!(total, 2);
 
     // Count only human
     let human_count = repo
-        .count_filtered_entries(None, None, None, None, None, false, Some("human"), None)
+        .count_filtered(&QueryFilter {
+            executor: Some("human"),
+            ..Default::default()
+        })
         .unwrap();
     assert_eq!(human_count, 1);
 
     // Count only bot
     let bot_count = repo
-        .count_filtered_entries(None, None, None, None, None, false, Some("bot"), None)
+        .count_filtered(&QueryFilter {
+            executor: Some("bot"),
+            ..Default::default()
+        })
         .unwrap();
     assert_eq!(bot_count, 1);
 }
@@ -1082,17 +1060,13 @@ fn test_filter_by_cwd() {
 
     // Filter by cwd
     let project_entries = repo
-        .get_entries(
+        .get_entries_filtered(
             10,
             0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            Some("/home/user/project"),
+            &QueryFilter {
+                cwd: Some("/home/user/project"),
+                ..Default::default()
+            },
         )
         .unwrap();
     assert_eq!(project_entries.len(), 2);
@@ -1101,17 +1075,13 @@ fn test_filter_by_cwd() {
         .all(|e| e.cwd == "/home/user/project"));
 
     let webapp_entries = repo
-        .get_entries(
+        .get_entries_filtered(
             10,
             0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            Some("/home/user/webapp"),
+            &QueryFilter {
+                cwd: Some("/home/user/webapp"),
+                ..Default::default()
+            },
         )
         .unwrap();
     assert_eq!(webapp_entries.len(), 1);
@@ -1119,22 +1089,16 @@ fn test_filter_by_cwd() {
 
     // No filter returns all
     let all_entries = repo
-        .get_entries(10, 0, None, None, None, None, None, false, None, None)
+        .get_entries_filtered(10, 0, &QueryFilter::default())
         .unwrap();
     assert_eq!(all_entries.len(), 3);
 
     // Count with cwd filter
     let project_count = repo
-        .count_filtered_entries(
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            Some("/home/user/project"),
-        )
+        .count_filtered(&QueryFilter {
+            cwd: Some("/home/user/project"),
+            ..Default::default()
+        })
         .unwrap();
     assert_eq!(project_count, 2);
 }
@@ -1169,17 +1133,14 @@ fn test_cwd_filter_with_other_filters() {
 
     // cwd + executor filter
     let human_project = repo
-        .get_entries(
+        .get_entries_filtered(
             10,
             0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            Some("human"),
-            Some("/home/user/project"),
+            &QueryFilter {
+                executor: Some("human"),
+                cwd: Some("/home/user/project"),
+                ..Default::default()
+            },
         )
         .unwrap();
     assert_eq!(human_project.len(), 1);
@@ -1187,17 +1148,14 @@ fn test_cwd_filter_with_other_filters() {
 
     // cwd + exit code filter
     let failed_project = repo
-        .get_entries(
+        .get_entries_filtered(
             10,
             0,
-            None,
-            None,
-            None,
-            Some(1),
-            None,
-            false,
-            None,
-            Some("/home/user/project"),
+            &QueryFilter {
+                exit_code: Some(1),
+                cwd: Some("/home/user/project"),
+                ..Default::default()
+            },
         )
         .unwrap();
     assert_eq!(failed_project.len(), 1);
