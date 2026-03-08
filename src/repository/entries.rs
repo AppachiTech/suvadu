@@ -672,10 +672,6 @@ impl Repository {
     }
 
     /// List recent sessions with summary stats (only sessions that have entries).
-    ///
-    /// Uses hand-built WHERE clauses instead of `FilterBuilder` because the
-    /// primary table here is `sessions` (not `entries`) and the filters are on
-    /// `s.created_at` / `s.tag_id` — columns `FilterBuilder` doesn't cover.
     #[allow(clippy::cast_possible_wrap)]
     pub fn list_sessions(
         &self,
@@ -683,23 +679,11 @@ impl Repository {
         tag_id: Option<i64>,
         limit: usize,
     ) -> DbResult<Vec<SessionSummary>> {
-        let mut conditions = Vec::new();
-        let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        let mut fb = super::FilterBuilder::new()
+            .with_session_created_after(after)
+            .with_session_tag(tag_id);
 
-        if let Some(ts) = after {
-            conditions.push("s.created_at >= ?".to_string());
-            param_values.push(Box::new(ts));
-        }
-        if let Some(tid) = tag_id {
-            conditions.push("s.tag_id = ?".to_string());
-            param_values.push(Box::new(tid));
-        }
-
-        let where_clause = if conditions.is_empty() {
-            String::new()
-        } else {
-            format!(" WHERE {}", conditions.join(" AND "))
-        };
+        let where_clause = fb.build_where();
 
         let sql = format!(
             "SELECT s.id, s.hostname, s.created_at, COALESCE(t.name, '') as tag_name,
@@ -715,10 +699,9 @@ impl Repository {
              ORDER BY s.created_at DESC
              LIMIT ?"
         );
-        param_values.push(Box::new(limit as i64));
+        fb.push_param(Box::new(limit as i64));
 
-        let param_refs: Vec<&dyn rusqlite::ToSql> =
-            param_values.iter().map(AsRef::as_ref).collect();
+        let param_refs = fb.params_refs();
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(param_refs.as_slice(), |row| {
             let tag: String = row.get(3)?;

@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use crate::config;
 use crate::models::{Entry, Session};
 use crate::repository::Repository;
@@ -48,6 +50,39 @@ const MAX_SESSION_ID_LEN: usize = 256;
 const MAX_COMMAND_LEN: usize = 65536; // 64 KB — long pipe chains, heredocs
 const MAX_CWD_LEN: usize = 4096; // PATH_MAX on most systems
 
+// ── Exclusion pattern cache ─────────────────────────────────
+// Compiled regex exclusions are cached and only recompiled when the
+// source patterns change (i.e. when the config file is edited).
+
+struct CachedExclusions {
+    source_patterns: Vec<String>,
+    compiled: Arc<Vec<util::CompiledExclusion>>,
+}
+
+static EXCLUSION_CACHE: Mutex<Option<CachedExclusions>> = Mutex::new(None);
+
+/// Return compiled exclusion patterns, reusing the cache when patterns are unchanged.
+fn get_compiled_exclusions(patterns: &[String]) -> Arc<Vec<util::CompiledExclusion>> {
+    if let Ok(guard) = EXCLUSION_CACHE.lock() {
+        if let Some(cached) = guard.as_ref() {
+            if cached.source_patterns == *patterns {
+                return Arc::clone(&cached.compiled);
+            }
+        }
+    }
+
+    let compiled = Arc::new(util::compile_exclusions(patterns));
+
+    if let Ok(mut guard) = EXCLUSION_CACHE.lock() {
+        *guard = Some(CachedExclusions {
+            source_patterns: patterns.to_vec(),
+            compiled: Arc::clone(&compiled),
+        });
+    }
+
+    compiled
+}
+
 pub fn handle_add_with_context(params: AddParams) -> Result<(), Box<dyn std::error::Error>> {
     let AddParams {
         session_id,
@@ -87,9 +122,9 @@ pub fn handle_add_with_context(params: AddParams) -> Result<(), Box<dyn std::err
         return Ok(());
     }
 
-    // Check exclusions — skip compilation entirely when no patterns configured
+    // Check exclusions — cached compiled patterns, only recompiled when config changes
     if !config.exclusions.is_empty() {
-        let compiled = util::compile_exclusions(&config.exclusions);
+        let compiled = get_compiled_exclusions(&config.exclusions);
         if util::is_excluded_compiled(&command, &compiled) {
             return Ok(());
         }
@@ -530,5 +565,31 @@ mod tests {
         // Same in milliseconds
         let ts_ms = 1_709_683_200_000;
         assert_eq!(normalize_timestamp(ts_ms), ts_ms);
+    }
+
+    #[test]
+    fn test_exclusion_cache_reuses_compiled() {
+        let patterns = vec!["^ls$".to_string(), "password".to_string()];
+
+        // First call compiles and caches
+        let compiled1 = get_compiled_exclusions(&patterns);
+        assert_eq!(compiled1.len(), 2);
+
+        // Second call with same patterns returns cached version (same Arc)
+        let compiled2 = get_compiled_exclusions(&patterns);
+        assert!(Arc::ptr_eq(&compiled1, &compiled2));
+
+        // Different patterns trigger recompilation
+        let new_patterns = vec!["^cd".to_string()];
+        let compiled3 = get_compiled_exclusions(&new_patterns);
+        assert_eq!(compiled3.len(), 1);
+        assert!(!Arc::ptr_eq(&compiled1, &compiled3));
+    }
+
+    #[test]
+    fn test_exclusion_cache_empty_patterns() {
+        let empty: Vec<String> = vec![];
+        let compiled = get_compiled_exclusions(&empty);
+        assert!(compiled.is_empty());
     }
 }

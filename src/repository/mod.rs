@@ -186,6 +186,25 @@ impl FilterBuilder {
         self
     }
 
+    /// Filter on `s.created_at >= ?` — for session-centric queries
+    /// where the primary table is `sessions s`.
+    pub fn with_session_created_after(mut self, after: Option<i64>) -> Self {
+        if let Some(ts) = after {
+            self.clauses.push("s.created_at >= ?".into());
+            self.params.push(Box::new(ts));
+        }
+        self
+    }
+
+    /// Filter on `s.tag_id = ?` — for session-centric queries.
+    pub fn with_session_tag(mut self, tag_id: Option<i64>) -> Self {
+        if let Some(tid) = tag_id {
+            self.clauses.push("s.tag_id = ?".into());
+            self.params.push(Box::new(tid));
+        }
+        self
+    }
+
     pub fn with_executor(mut self, executor: Option<&str>) -> Self {
         if let Some(exec) = executor {
             self.clauses.push(
@@ -371,6 +390,45 @@ mod filter_builder_tests {
             .with_executor(None);
         assert_eq!(fb.build_where(), " WHERE 1=1");
         assert!(fb.params_refs().is_empty());
+    }
+
+    #[test]
+    fn with_session_created_after() {
+        let fb = FilterBuilder::new().with_session_created_after(Some(5000));
+        assert_eq!(fb.build_where(), " WHERE s.created_at >= ?");
+        assert_eq!(fb.params_refs().len(), 1);
+    }
+
+    #[test]
+    fn with_session_created_after_none_is_noop() {
+        let fb = FilterBuilder::new().with_session_created_after(None);
+        assert_eq!(fb.build_where(), " WHERE 1=1");
+        assert!(fb.params_refs().is_empty());
+    }
+
+    #[test]
+    fn with_session_tag() {
+        let fb = FilterBuilder::new().with_session_tag(Some(7));
+        assert_eq!(fb.build_where(), " WHERE s.tag_id = ?");
+        assert_eq!(fb.params_refs().len(), 1);
+    }
+
+    #[test]
+    fn with_session_tag_none_is_noop() {
+        let fb = FilterBuilder::new().with_session_tag(None);
+        assert_eq!(fb.build_where(), " WHERE 1=1");
+        assert!(fb.params_refs().is_empty());
+    }
+
+    #[test]
+    fn chained_session_filters() {
+        let fb = FilterBuilder::new()
+            .with_session_created_after(Some(1000))
+            .with_session_tag(Some(3));
+        let where_clause = fb.build_where();
+        assert!(where_clause.contains("s.created_at >= ?"));
+        assert!(where_clause.contains("s.tag_id = ?"));
+        assert_eq!(fb.params_refs().len(), 2);
     }
 }
 

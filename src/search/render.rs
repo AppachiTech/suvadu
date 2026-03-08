@@ -370,9 +370,9 @@ impl SearchApp {
         let executor_display = format_executor(entry);
         let cmd_text = build_command_text(self, entry);
         let command_display = if is_selected {
-            Self::highlight_command(&cmd_text, true, command_col_width as usize)
+            Self::highlight_command(&cmd_text, command_col_width as usize)
         } else {
-            Self::highlight_command(&cmd_text, false, 0)
+            Self::highlight_command(&cmd_text, 0)
         };
 
         let cmd_height = u16::try_from(command_display.lines.len())
@@ -609,9 +609,10 @@ impl SearchApp {
             .border_style(Style::default().fg(t.primary).add_modifier(Modifier::BOLD))
             .style(Style::default().bg(t.bg_elevated));
 
-        // Cap popup height to available terminal rows (minimum 16 rows for all fields)
-        let popup_height = area.height.clamp(16, 50);
-        let popup_area = centered_rect(60, popup_height, area);
+        // On small terminals (<40 rows), use 90% of height to avoid clipping filter fields.
+        // On larger terminals, 50% is sufficient.
+        let popup_pct = if area.height < 40 { 90 } else { 50 };
+        let popup_area = centered_rect(60, popup_pct, area);
         f.render_widget(Clear, popup_area);
         f.render_widget(block, popup_area);
 
@@ -902,11 +903,7 @@ impl SearchApp {
         f.render_widget(hint, inner_layout[1]);
     }
 
-    fn highlight_command(
-        command: &str,
-        _is_selected: bool,
-        width: usize,
-    ) -> ratatui::text::Text<'static> {
+    fn highlight_command(command: &str, width: usize) -> ratatui::text::Text<'static> {
         crate::util::highlight_command(command, width)
     }
 }
@@ -1150,5 +1147,249 @@ mod tests {
         let e = make_entry(None, None, None);
         let (display, _style) = format_exit_code(&e, Style::default());
         assert!(display.contains('○'));
+    }
+
+    // --- ColumnLayout tests ---
+
+    #[test]
+    fn test_column_layout_compact() {
+        let layout = ColumnLayout::from_width(60);
+        assert!(matches!(layout, ColumnLayout::Compact));
+    }
+
+    #[test]
+    fn test_column_layout_semi_compact() {
+        let layout = ColumnLayout::from_width(100);
+        assert!(matches!(layout, ColumnLayout::SemiCompact));
+    }
+
+    #[test]
+    fn test_column_layout_full() {
+        let layout = ColumnLayout::from_width(150);
+        assert!(matches!(layout, ColumnLayout::Full));
+    }
+
+    #[test]
+    fn test_column_layout_constraints_compact() {
+        let layout = ColumnLayout::Compact;
+        let constraints = layout.constraints();
+        assert_eq!(constraints.len(), 1);
+    }
+
+    #[test]
+    fn test_column_layout_constraints_full() {
+        let layout = ColumnLayout::Full;
+        let constraints = layout.constraints();
+        assert_eq!(constraints.len(), 7);
+    }
+
+    #[test]
+    fn test_column_layout_header_compact() {
+        let layout = ColumnLayout::Compact;
+        // header_row() uses Row::new(vec![...]) — just verify it doesn't panic
+        // and the constraints count matches (1 column = 1 header cell)
+        let _header = layout.header_row();
+        assert_eq!(layout.constraints().len(), 1);
+    }
+
+    #[test]
+    fn test_column_layout_header_full() {
+        let layout = ColumnLayout::Full;
+        let _header = layout.header_row();
+        // Full layout has 7 columns = 7 header cells
+        assert_eq!(layout.constraints().len(), 7);
+    }
+
+    #[test]
+    fn test_column_layout_command_width() {
+        // Compact: table_width - 6
+        assert_eq!(ColumnLayout::Compact.command_col_width(80), 74);
+
+        // SemiCompact: table_width - (12 + 6) - 6 = table_width - 24
+        assert_eq!(ColumnLayout::SemiCompact.command_col_width(100), 76);
+
+        // Full: table_width - 64 - 6 = table_width - 70
+        assert_eq!(ColumnLayout::Full.command_col_width(150), 80);
+    }
+
+    // --- build_command_text tests ---
+
+    fn make_search_app_for_build_text(
+        bookmarked: bool,
+        unique: bool,
+        noted: bool,
+    ) -> (super::SearchApp, Entry) {
+        use std::collections::{HashMap, HashSet};
+
+        let entry = Entry {
+            id: Some(42),
+            session_id: "s1".to_string(),
+            command: "cargo test".to_string(),
+            cwd: "/tmp".to_string(),
+            exit_code: Some(0),
+            started_at: 1_700_000_000_000,
+            ended_at: 1_700_000_001_000,
+            duration_ms: 1000,
+            context: None,
+            tag_name: None,
+            tag_id: None,
+            executor_type: Some("human".to_string()),
+            executor: Some("terminal".to_string()),
+        };
+
+        let mut bookmarked_commands = HashSet::new();
+        if bookmarked {
+            bookmarked_commands.insert("cargo test".to_string());
+        }
+
+        let mut noted_entry_ids = HashSet::new();
+        if noted {
+            noted_entry_ids.insert(42);
+        }
+
+        let mut unique_counts = HashMap::new();
+        unique_counts.insert(42, 5);
+
+        let config = super::super::SearchConfig {
+            entries: vec![entry.clone()],
+            initial_query: None,
+            total_items: 1,
+            page: 1,
+            page_size: 50,
+            tags: vec![],
+            unique_mode: unique,
+            unique_counts,
+            filter_after: None,
+            filter_before: None,
+            filter_tag_id: None,
+            filter_exit_code: None,
+            filter_executor_type: None,
+            start_date_input: None,
+            end_date_input: None,
+            tag_filter_input: None,
+            exit_code_input: None,
+            executor_filter_input: None,
+            bookmarked_commands,
+            filter_cwd: None,
+            noted_entry_ids,
+            context_boost: false,
+            show_detail_pane: false,
+            show_risk_in_search: false,
+            search_field: "command".to_string(),
+        };
+
+        (super::SearchApp::new(config), entry)
+    }
+
+    #[test]
+    fn test_build_command_text_plain() {
+        let (app, entry) = make_search_app_for_build_text(false, false, false);
+        let text = build_command_text(&app, &entry);
+        assert_eq!(text, "cargo test");
+    }
+
+    #[test]
+    fn test_build_command_text_bookmarked() {
+        let (app, entry) = make_search_app_for_build_text(true, false, false);
+        let text = build_command_text(&app, &entry);
+        assert!(text.contains('★'));
+        assert!(text.contains("cargo test"));
+    }
+
+    #[test]
+    fn test_build_command_text_unique_mode() {
+        let (app, entry) = make_search_app_for_build_text(false, true, false);
+        let text = build_command_text(&app, &entry);
+        assert!(text.contains("(5)"));
+        assert!(text.contains("cargo test"));
+    }
+
+    // --- entry_row_styles tests ---
+
+    #[test]
+    fn test_entry_row_styles_selected() {
+        let t = crate::theme::theme();
+        let styles = entry_row_styles(t, true, false);
+        // When selected, bg should use the selection background color
+        assert_eq!(styles.bg, Style::default().bg(t.selection_bg));
+    }
+
+    #[test]
+    fn test_entry_row_styles_not_selected() {
+        let t = crate::theme::theme();
+        let styles = entry_row_styles(t, false, false);
+        // When not selected, bg should be the default style (no background)
+        assert_eq!(styles.bg, Style::default());
+    }
+
+    // --- build_table_title tests ---
+
+    #[test]
+    fn test_build_table_title_empty() {
+        let config = super::super::SearchConfig {
+            entries: vec![],
+            initial_query: None,
+            total_items: 0,
+            page: 1,
+            page_size: 50,
+            tags: vec![],
+            unique_mode: false,
+            unique_counts: std::collections::HashMap::new(),
+            filter_after: None,
+            filter_before: None,
+            filter_tag_id: None,
+            filter_exit_code: None,
+            filter_executor_type: None,
+            start_date_input: None,
+            end_date_input: None,
+            tag_filter_input: None,
+            exit_code_input: None,
+            executor_filter_input: None,
+            bookmarked_commands: std::collections::HashSet::new(),
+            filter_cwd: None,
+            noted_entry_ids: std::collections::HashSet::new(),
+            context_boost: false,
+            show_detail_pane: false,
+            show_risk_in_search: false,
+            search_field: "command".to_string(),
+        };
+        let app = super::SearchApp::new(config);
+        let title = app.build_table_title();
+        assert_eq!(title, "History (0/0)");
+    }
+
+    #[test]
+    fn test_build_table_title_with_items() {
+        let entries: Vec<Entry> = (0..50).map(|i| make_entry(None, None, Some(i))).collect();
+        let config = super::super::SearchConfig {
+            entries,
+            initial_query: None,
+            total_items: 100,
+            page: 1,
+            page_size: 50,
+            tags: vec![],
+            unique_mode: false,
+            unique_counts: std::collections::HashMap::new(),
+            filter_after: None,
+            filter_before: None,
+            filter_tag_id: None,
+            filter_exit_code: None,
+            filter_executor_type: None,
+            start_date_input: None,
+            end_date_input: None,
+            tag_filter_input: None,
+            exit_code_input: None,
+            executor_filter_input: None,
+            bookmarked_commands: std::collections::HashSet::new(),
+            filter_cwd: None,
+            noted_entry_ids: std::collections::HashSet::new(),
+            context_boost: false,
+            show_detail_pane: false,
+            show_risk_in_search: false,
+            search_field: "command".to_string(),
+        };
+        let app = super::SearchApp::new(config);
+        let title = app.build_table_title();
+        assert_eq!(title, "History (1-50 / 100)");
     }
 }

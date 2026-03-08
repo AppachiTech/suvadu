@@ -18,7 +18,7 @@ use ratatui::{
 };
 use std::io;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum SearchAction {
     Continue,
     Select(String),

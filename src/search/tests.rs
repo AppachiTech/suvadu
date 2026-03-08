@@ -1,6 +1,6 @@
 use super::*;
 use crate::models::Entry;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 fn create_test_entry(cmd: &str) -> Entry {
     Entry {
@@ -324,4 +324,236 @@ fn test_combined_sort_empty() {
     let mut entries: Vec<Entry> = vec![];
     SearchApp::apply_combined_sort(&mut entries, Some("/project"));
     assert!(entries.is_empty());
+}
+
+// ── Input handler tests ──
+
+fn ctrl_key(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+}
+
+#[test]
+fn test_handle_input_escape_exits() {
+    let entries = vec![create_test_entry("ls")];
+    let mut app = SearchApp::new(test_search_config(entries, 1));
+
+    let key = KeyEvent::from(KeyCode::Esc);
+    let action = app.handle_input(key);
+    assert!(matches!(action, SearchAction::Exit));
+}
+
+#[test]
+fn test_handle_input_enter_selects() {
+    let entries = vec![create_test_entry("echo hello")];
+    let mut app = SearchApp::new(test_search_config(entries, 1));
+    app.table_state.select(Some(0));
+
+    let key = KeyEvent::from(KeyCode::Enter);
+    let action = app.handle_input(key);
+    match action {
+        SearchAction::Select(cmd) => assert_eq!(cmd, "echo hello"),
+        _ => panic!("Expected SearchAction::Select"),
+    }
+}
+
+#[test]
+fn test_handle_input_char_reloads() {
+    let entries = vec![create_test_entry("ls")];
+    let mut app = SearchApp::new(test_search_config(entries, 1));
+
+    let key = KeyEvent::from(KeyCode::Char('a'));
+    let action = app.handle_input(key);
+    assert!(matches!(action, SearchAction::Reload));
+    assert!(app.query.contains('a'));
+}
+
+#[test]
+fn test_handle_input_backspace_reloads() {
+    let entries = vec![create_test_entry("ls")];
+    let mut config = test_search_config(entries, 1);
+    config.initial_query = Some("abc".to_string());
+    let mut app = SearchApp::new(config);
+
+    let key = KeyEvent::from(KeyCode::Backspace);
+    let action = app.handle_input(key);
+    assert!(matches!(action, SearchAction::Reload));
+}
+
+#[test]
+fn test_handle_input_ctrl_f_opens_filter() {
+    let entries = vec![create_test_entry("ls")];
+    let mut app = SearchApp::new(test_search_config(entries, 1));
+
+    let key = ctrl_key('f');
+    let action = app.handle_input(key);
+    assert!(matches!(action, SearchAction::Continue));
+    assert!(app.filter_mode);
+}
+
+#[test]
+fn test_handle_input_ctrl_u_toggles_unique() {
+    let entries = vec![create_test_entry("ls")];
+    let mut app = SearchApp::new(test_search_config(entries, 1));
+
+    assert!(!app.unique_mode);
+    let key = ctrl_key('u');
+    let action = app.handle_input(key);
+    assert!(matches!(action, SearchAction::Reload));
+    assert!(app.unique_mode);
+}
+
+#[test]
+fn test_handle_input_tab_toggles_detail() {
+    let entries = vec![create_test_entry("ls")];
+    let mut config = test_search_config(entries, 1);
+    config.show_detail_pane = false;
+    let mut app = SearchApp::new(config);
+
+    assert!(!app.detail_pane_open);
+    let key = KeyEvent::from(KeyCode::Tab);
+    let action = app.handle_input(key);
+    assert!(matches!(action, SearchAction::Continue));
+    assert!(app.detail_pane_open);
+
+    // Toggle back
+    let action = app.handle_input(KeyEvent::from(KeyCode::Tab));
+    assert!(matches!(action, SearchAction::Continue));
+    assert!(!app.detail_pane_open);
+}
+
+#[test]
+fn test_handle_input_delete_dialog_yes() {
+    let mut entry = create_test_entry("rm -rf /");
+    entry.id = Some(99);
+    let entries = vec![entry];
+    let mut app = SearchApp::new(test_search_config(entries, 1));
+    app.table_state.select(Some(0));
+
+    // Open the delete dialog via Ctrl+D
+    let action = app.handle_input(ctrl_key('d'));
+    assert!(matches!(action, SearchAction::Continue));
+    assert!(app.delete_dialog_open);
+
+    // Press 'y' to confirm
+    let key = KeyEvent::from(KeyCode::Char('y'));
+    let action = app.handle_input(key);
+    match action {
+        SearchAction::Delete(id) => assert_eq!(id, 99),
+        _ => panic!("Expected SearchAction::Delete(99)"),
+    }
+}
+
+#[test]
+fn test_handle_input_delete_dialog_no() {
+    let mut entry = create_test_entry("rm -rf /");
+    entry.id = Some(99);
+    let entries = vec![entry];
+    let mut app = SearchApp::new(test_search_config(entries, 1));
+    app.table_state.select(Some(0));
+
+    // Open the delete dialog
+    app.handle_input(ctrl_key('d'));
+    assert!(app.delete_dialog_open);
+
+    // Press 'n' to cancel
+    let key = KeyEvent::from(KeyCode::Char('n'));
+    let action = app.handle_input(key);
+    assert!(matches!(action, SearchAction::Continue));
+    assert!(!app.delete_dialog_open);
+}
+
+#[test]
+fn test_handle_input_goto_enter() {
+    let entries = vec![create_test_entry("ls")];
+    let mut app = SearchApp::new(test_search_config(entries.clone(), 500));
+
+    // Open goto dialog
+    app.handle_input(ctrl_key('g'));
+    assert!(app.goto_dialog_open);
+
+    // Type page number "3"
+    app.handle_input(KeyEvent::from(KeyCode::Char('3')));
+
+    // Press Enter
+    let action = app.handle_input(KeyEvent::from(KeyCode::Enter));
+    match action {
+        SearchAction::SetPage(p) => assert_eq!(p, 3),
+        _ => panic!("Expected SearchAction::SetPage(3)"),
+    }
+}
+
+#[test]
+fn test_handle_input_filter_enter() {
+    let entries = vec![create_test_entry("ls")];
+    let mut app = SearchApp::new(test_search_config(entries, 1));
+
+    // Open filter mode
+    app.handle_input(ctrl_key('f'));
+    assert!(app.filter_mode);
+
+    // Press Enter to apply (empty filters)
+    let action = app.handle_input(KeyEvent::from(KeyCode::Enter));
+    assert!(matches!(action, SearchAction::Reload));
+    assert!(!app.filter_mode);
+}
+
+#[test]
+fn test_handle_input_up_down_navigation() {
+    let entries = vec![
+        create_test_entry("first"),
+        create_test_entry("second"),
+        create_test_entry("third"),
+    ];
+    let mut app = SearchApp::new(test_search_config(entries, 3));
+    app.table_state.select(Some(0));
+
+    // Move down
+    app.handle_input(KeyEvent::from(KeyCode::Down));
+    assert_eq!(app.table_state.selected(), Some(1));
+
+    // Move down again
+    app.handle_input(KeyEvent::from(KeyCode::Down));
+    assert_eq!(app.table_state.selected(), Some(2));
+
+    // Move down at bottom should stay at 2 (last index)
+    app.handle_input(KeyEvent::from(KeyCode::Down));
+    assert_eq!(app.table_state.selected(), Some(2));
+
+    // Move up
+    app.handle_input(KeyEvent::from(KeyCode::Up));
+    assert_eq!(app.table_state.selected(), Some(1));
+
+    // Move up again
+    app.handle_input(KeyEvent::from(KeyCode::Up));
+    assert_eq!(app.table_state.selected(), Some(0));
+
+    // Move up at top should stay at 0
+    app.handle_input(KeyEvent::from(KeyCode::Up));
+    assert_eq!(app.table_state.selected(), Some(0));
+}
+
+#[test]
+fn test_handle_input_left_right_pages() {
+    let entries = vec![create_test_entry("cmd")];
+    let mut app = SearchApp::new(test_search_config(entries, 200));
+
+    // Page 1, press Right -> page 2
+    let action = app.handle_input(KeyEvent::from(KeyCode::Right));
+    match action {
+        SearchAction::SetPage(p) => assert_eq!(p, 2),
+        _ => panic!("Expected SearchAction::SetPage(2)"),
+    }
+
+    // Simulate being on page 3, press Left -> page 2
+    app.page = 3;
+    let action = app.handle_input(KeyEvent::from(KeyCode::Left));
+    match action {
+        SearchAction::SetPage(p) => assert_eq!(p, 2),
+        _ => panic!("Expected SearchAction::SetPage(2)"),
+    }
+
+    // At page 1, Left should not change page
+    app.page = 1;
+    let action = app.handle_input(KeyEvent::from(KeyCode::Left));
+    assert!(matches!(action, SearchAction::Continue));
 }
