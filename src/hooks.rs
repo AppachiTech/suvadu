@@ -1,12 +1,9 @@
 use crate::config;
 
 /// Executor-detection function for **zsh** shell scripts.
-///
-/// Returns the body of `__suvadu_detect_executor()` ready for embedding inside
-/// a `format!()` string (literal braces are doubled).
 const fn zsh_executor_detection_script() -> &'static str {
     r#"# Detect executor type and name
-__suvadu_detect_executor() {{
+__suvadu_detect_executor() {
     local executor_type="unknown"
     local executor="unknown"
 
@@ -68,7 +65,7 @@ __suvadu_detect_executor() {{
     fi
 
     echo "$executor_type:$executor"
-}}
+}
 "#
 }
 
@@ -77,7 +74,7 @@ __suvadu_detect_executor() {{
 /// The bash variant has a slightly different set of detections compared to zsh.
 const fn bash_executor_detection_script() -> &'static str {
     r#"# Detect executor type and name
-__suvadu_detect_executor() {{
+__suvadu_detect_executor() {
     local executor_type="unknown"
     local executor="unknown"
 
@@ -123,7 +120,7 @@ __suvadu_detect_executor() {{
     fi
 
     echo "$executor_type:$executor"
-}}
+}
 "#
 }
 
@@ -164,15 +161,15 @@ _SUVADU_BIN="{bin_path}"
 /// Zsh preexec/precmd function bodies and hook registration.
 const fn zsh_hook_functions() -> &'static str {
     r#"# Capture command start time (registered via add-zsh-hook)
-_suvadu_preexec() {{
+_suvadu_preexec() {
     _SUVADU_CMD="$1"
-    _SUVADU_START_TIME=$(( ${{EPOCHREALTIME%.*}} * 1000 + ${{${{EPOCHREALTIME#*.}}:0:3}} ))
-}}
+    _SUVADU_START_TIME=$(( ${EPOCHREALTIME%.*} * 1000 + ${${EPOCHREALTIME#*.}:0:3} ))
+}
 
 # Capture command completion and save to DB (registered via add-zsh-hook)
-_suvadu_precmd() {{
+_suvadu_precmd() {
     local exit_code=$?
-    local end_time=$(( ${{EPOCHREALTIME%.*}} * 1000 + ${{${{EPOCHREALTIME#*.}}:0:3}} ))
+    local end_time=$(( ${EPOCHREALTIME%.*} * 1000 + ${${EPOCHREALTIME#*.}:0:3} ))
 
     # Reset history offset for new prompt
     _SUVADU_OFFSET=-1
@@ -184,8 +181,8 @@ _suvadu_precmd() {{
 
     # Detect executor
     local executor_info=$(__suvadu_detect_executor)
-    local executor_type="${{executor_info%%:*}}"
-    local executor="${{executor_info##*:}}"
+    local executor_type="${executor_info%%:*}"
+    local executor="${executor_info##*:}"
 
     # Synchronous add to avoid race conditions with immediate Up arrow
     $_SUVADU_BIN add \
@@ -200,7 +197,7 @@ _suvadu_precmd() {{
 
     # Clear captured command so empty enters don't duplicated
     _SUVADU_CMD=""
-}}
+}
 
 # Register hooks properly (cooperates with oh-my-zsh, zsh-autosuggestions, etc.)
 add-zsh-hook preexec _suvadu_preexec
@@ -213,7 +210,7 @@ add-zsh-hook precmd _suvadu_precmd
 /// registration and the Ctrl+R binding.
 const fn zsh_widgets_script() -> &'static str {
     r#"# Interactive Search Widget
-_suvadu_search_widget() {{
+_suvadu_search_widget() {
     local selected tty_dev
 
     # Prefer $TTY (zsh sets this to the actual device, e.g. /dev/ttys003).
@@ -242,10 +239,10 @@ _suvadu_search_widget() {{
         CURSOR=$#BUFFER
     fi
     zle reset-prompt
-}}
+}
 
 # Up Arrow Widget (Native Cycling)
-_suvadu_up_arrow_widget() {{
+_suvadu_up_arrow_widget() {
     # If starting fresh, reset state
     if [[ "$LASTWIDGET" != suvadu-* && "$LASTWIDGET" != *autosuggest* && "$LASTWIDGET" != zle-line-* && "$LASTWIDGET" != *highlight* ]]; then
         _SUVADU_OFFSET=0
@@ -269,10 +266,10 @@ _suvadu_up_arrow_widget() {{
         # No more results, stay at the last found or current
         [[ $_SUVADU_OFFSET -gt 0 ]] && ((_SUVADU_OFFSET--))
     fi
-}}
+}
 
 # Down Arrow Widget (Native Cycling)
-_suvadu_down_arrow_widget() {{
+_suvadu_down_arrow_widget() {
     # If not already in history mode, use standard down-line-or-history
     if [[ "$LASTWIDGET" != suvadu-* && "$LASTWIDGET" != *autosuggest* && "$LASTWIDGET" != zle-line-* && "$LASTWIDGET" != *highlight* ]]; then
         zle down-line-or-history
@@ -296,7 +293,7 @@ _suvadu_down_arrow_widget() {{
         # We are at prompt (-1), pass through
         zle down-line-or-history
     fi
-}}
+}
 
 
 # Register widget and bind to Ctrl+R
@@ -342,19 +339,19 @@ _SUVADU_BIN="{bin_path}"
 /// hook installation.
 const fn bash_hook_functions() -> &'static str {
     r#"# Get current time in milliseconds (Bash 5+ has EPOCHREALTIME, fallback to date)
-__suvadu_time_ms() {{
+__suvadu_time_ms() {
     if [[ -n "$EPOCHREALTIME" ]]; then
-        local secs="${{EPOCHREALTIME%%.*}}"
-        local frac="${{EPOCHREALTIME##*.}}"
-        echo "$(( secs * 1000 + ${{frac:0:3}} ))"
+        local secs="${EPOCHREALTIME%%.*}"
+        local frac="${EPOCHREALTIME##*.}"
+        echo "$(( secs * 1000 + ${frac:0:3} ))"
     else
         # Fallback: date +%s gives seconds, multiply by 1000
         echo "$(( $(date +%s) * 1000 ))"
     fi
-}}
+}
 
 # Capture command via DEBUG trap (preexec equivalent)
-__suvadu_preexec() {{
+__suvadu_preexec() {
     # Don't capture PROMPT_COMMAND itself or empty commands
     if [[ "$BASH_COMMAND" == "$PROMPT_COMMAND" ]] || [[ -z "$BASH_COMMAND" ]]; then
         return
@@ -364,16 +361,16 @@ __suvadu_preexec() {{
         return
     fi
     # Don't capture during tab completion (COMP_LINE is set by readline)
-    if [[ -n "${{COMP_LINE+x}}" ]]; then
+    if [[ -n "${COMP_LINE+x}" ]]; then
         return
     fi
 
     _SUVADU_CMD="$BASH_COMMAND"
     _SUVADU_START_TIME=$(__suvadu_time_ms)
-}}
+}
 
 # Capture command completion (precmd equivalent via PROMPT_COMMAND)
-__suvadu_precmd() {{
+__suvadu_precmd() {
     local exit_code=$?
     local end_time=$(__suvadu_time_ms)
 
@@ -384,8 +381,8 @@ __suvadu_precmd() {{
 
     # Detect executor
     local executor_info=$(__suvadu_detect_executor)
-    local executor_type="${{executor_info%%:*}}"
-    local executor="${{executor_info##*:}}"
+    local executor_type="${executor_info%%:*}"
+    local executor="${executor_info##*:}"
 
     "$_SUVADU_BIN" add \
         --session-id "$SUVADU_SESSION_ID" \
@@ -398,7 +395,7 @@ __suvadu_precmd() {{
         --executor "$executor" >/dev/null 2>&1
 
     _SUVADU_CMD=""
-}}
+}
 
 # Install hooks (preserve any existing DEBUG trap)
 _suvadu_old_debug_trap=$(trap -p DEBUG | sed "s/^trap -- '\\(.*\\)' DEBUG$/\\1/")
@@ -422,7 +419,7 @@ fi
 /// Bash interactive search widget and Ctrl+R binding.
 const fn bash_search_widget() -> &'static str {
     r#"# Interactive Search Widget (Ctrl+R replacement)
-__suvadu_search_widget() {{
+__suvadu_search_widget() {
     local selected tty_dev
 
     # Find a readable TTY for the TUI.
@@ -447,9 +444,9 @@ __suvadu_search_widget() {{
 
     if [[ -n "$selected" ]]; then
         READLINE_LINE="$selected"
-        READLINE_POINT=${{#READLINE_LINE}}
+        READLINE_POINT=${#READLINE_LINE}
     fi
-}}
+}
 
 # Bind Ctrl+R to suvadu search
 bind -x '"\C-r": __suvadu_search_widget'
@@ -631,6 +628,34 @@ mod tests {
 
         // But Ctrl+R should still be bound
         assert!(hook.contains("bindkey '^R' suvadu-search"));
+    }
+
+    /// Regression: const fn hook strings were using `{{`/`}}` (format! escapes)
+    /// but were emitted via push_str, producing literal doubled braces in the
+    /// shell output and causing `bad substitution` errors.
+    #[test]
+    fn test_no_doubled_braces_in_output() {
+        let config = config::Config::default();
+
+        let zsh = get_zsh_hook(&config).unwrap();
+        assert!(
+            !zsh.contains("{{"),
+            "Zsh hook must not contain '{{{{' (doubled braces)"
+        );
+        assert!(
+            !zsh.contains("}}"),
+            "Zsh hook must not contain '}}}}' (doubled braces)"
+        );
+
+        let bash = get_bash_hook(&config).unwrap();
+        assert!(
+            !bash.contains("{{"),
+            "Bash hook must not contain '{{{{' (doubled braces)"
+        );
+        assert!(
+            !bash.contains("}}"),
+            "Bash hook must not contain '}}}}' (doubled braces)"
+        );
     }
 
     #[test]
