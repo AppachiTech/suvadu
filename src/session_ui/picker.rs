@@ -5,7 +5,7 @@ use ratatui::backend::Backend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table, TableState};
 use ratatui::Terminal;
 
 use crate::models::SessionSummary;
@@ -16,18 +16,18 @@ use chrono::{Local, TimeZone};
 
 struct PickerApp {
     sessions: Vec<SessionSummary>,
-    list_state: ListState,
+    table_state: TableState,
 }
 
 impl PickerApp {
     fn new(sessions: Vec<SessionSummary>) -> Self {
-        let mut list_state = ListState::default();
+        let mut table_state = TableState::default();
         if !sessions.is_empty() {
-            list_state.select(Some(0));
+            table_state.select(Some(0));
         }
         Self {
             sessions,
-            list_state,
+            table_state,
         }
     }
 
@@ -36,29 +36,30 @@ impl PickerApp {
             return;
         }
         let i = self
-            .list_state
+            .table_state
             .selected()
             .map_or(0, |i| (i + 1) % self.sessions.len());
-        self.list_state.select(Some(i));
+        self.table_state.select(Some(i));
     }
 
     fn prev(&mut self) {
         if self.sessions.is_empty() {
             return;
         }
-        let i = self.list_state.selected().map_or(0, |i| {
+        let i = self.table_state.selected().map_or(0, |i| {
             if i > 0 {
                 i - 1
             } else {
                 self.sessions.len() - 1
             }
         });
-        self.list_state.select(Some(i));
+        self.table_state.select(Some(i));
     }
 }
 
 impl PickerApp {
-    fn build_session_item<'a>(s: &SessionSummary, t: &crate::theme::Theme) -> ListItem<'a> {
+    #[allow(clippy::cast_precision_loss)]
+    fn build_session_row<'a>(s: &SessionSummary, t: &crate::theme::Theme) -> Row<'a> {
         let time = Local
             .timestamp_millis_opt(crate::util::normalize_display_ms(s.created_at))
             .single()
@@ -72,11 +73,17 @@ impl PickerApp {
             .as_deref()
             .map_or_else(|| "—".to_string(), std::string::ToString::to_string);
 
-        #[allow(clippy::cast_precision_loss)]
         let rate = if s.cmd_count > 0 {
             s.success_count as f64 / s.cmd_count as f64 * 100.0
         } else {
             0.0
+        };
+        let rate_style = if rate >= 90.0 {
+            Style::default().fg(t.success)
+        } else if rate >= 70.0 {
+            Style::default().fg(t.warning)
+        } else {
+            Style::default().fg(t.error)
         };
 
         let duration = if s.last_cmd_at > s.first_cmd_at {
@@ -87,30 +94,15 @@ impl PickerApp {
 
         let id_short: String = s.id.chars().take(8).collect();
 
-        ListItem::new(Line::from(vec![
-            Span::styled(format!("  {time}  "), Style::default().fg(t.text_muted)),
-            Span::styled(
-                format!("{id_short}  "),
-                Style::default().fg(t.info).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("{:<12}", s.hostname), Style::default().fg(t.text)),
-            Span::styled(format!("{tag_str:<10}"), Style::default().fg(t.primary)),
-            Span::styled(
-                format!("{:>4} cmds  ", s.cmd_count),
-                Style::default().fg(t.text_secondary),
-            ),
-            Span::styled(
-                format!("{rate:>3.0}%  "),
-                if rate >= 90.0 {
-                    Style::default().fg(t.success)
-                } else if rate >= 70.0 {
-                    Style::default().fg(t.warning)
-                } else {
-                    Style::default().fg(t.error)
-                },
-            ),
-            Span::styled(format!("{duration:>7}"), Style::default().fg(t.text_muted)),
-        ]))
+        Row::new(vec![
+            Cell::from(time).style(Style::default().fg(t.text_muted)),
+            Cell::from(id_short).style(Style::default().fg(t.info).add_modifier(Modifier::BOLD)),
+            Cell::from(s.hostname.clone()).style(Style::default().fg(t.text)),
+            Cell::from(tag_str).style(Style::default().fg(t.primary)),
+            Cell::from(format!("{}", s.cmd_count)).style(Style::default().fg(t.text_secondary)),
+            Cell::from(format!("{rate:.0}%")).style(rate_style),
+            Cell::from(duration).style(Style::default().fg(t.text_muted)),
+        ])
     }
 
     fn render_picker(&mut self, f: &mut ratatui::Frame) {
@@ -122,13 +114,40 @@ impl PickerApp {
             .constraints([Constraint::Min(5), Constraint::Length(2)])
             .split(size);
 
-        let items: Vec<ListItem> = self
+        let header = Row::new(vec![
+            Cell::from("Time"),
+            Cell::from("ID"),
+            Cell::from("Host"),
+            Cell::from("Tag"),
+            Cell::from("Cmds"),
+            Cell::from("Rate"),
+            Cell::from("Duration"),
+        ])
+        .style(
+            Style::default()
+                .fg(t.text_secondary)
+                .add_modifier(Modifier::BOLD),
+        )
+        .bottom_margin(1);
+
+        let rows: Vec<Row> = self
             .sessions
             .iter()
-            .map(|s| Self::build_session_item(s, t))
+            .map(|s| Self::build_session_row(s, t))
             .collect();
 
-        let list = List::new(items)
+        let widths = [
+            Constraint::Length(16),
+            Constraint::Length(10),
+            Constraint::Length(12),
+            Constraint::Length(10),
+            Constraint::Length(6),
+            Constraint::Length(5),
+            Constraint::Min(7),
+        ];
+
+        let table = Table::new(rows, widths)
+            .header(header)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -139,7 +158,7 @@ impl PickerApp {
                         Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
                     )),
             )
-            .highlight_style(
+            .row_highlight_style(
                 Style::default()
                     .bg(t.selection_bg)
                     .fg(t.selection_fg)
@@ -147,7 +166,7 @@ impl PickerApp {
             )
             .highlight_symbol(" > ");
 
-        f.render_stateful_widget(list, chunks[0], &mut self.list_state);
+        f.render_stateful_widget(table, chunks[0], &mut self.table_state);
 
         let footer = Paragraph::new(Line::from(vec![
             Span::styled(" ↑↓", Style::default().fg(t.info)),
@@ -181,7 +200,7 @@ where
                 KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
                 KeyCode::Enter => {
                     return Ok(app
-                        .list_state
+                        .table_state
                         .selected()
                         .and_then(|i| app.sessions.get(i))
                         .map(|s| s.id.clone()));

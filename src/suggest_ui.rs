@@ -222,23 +222,23 @@ fn render_suggestion_list(
             let name_padded = format!("{name_text:<8}");
             let name_span = Span::styled(name_padded, name_style);
 
-            // Command text — truncate if needed
+            // Command text — truncate and highlight like search
             let max_cmd_len = total_width.saturating_sub(40) as usize;
             let cmd_display = crate::util::truncate_str(&s.command, max_cmd_len, "...");
-            let cmd_span = Span::styled(cmd_display, Style::default().fg(t.text));
+            let cmd_highlighted = crate::util::highlight_command(&cmd_display, 0);
+            let cmd_spans: Vec<Span> = cmd_highlighted
+                .lines
+                .into_iter()
+                .next()
+                .map_or_else(Vec::new, |line| line.spans);
 
             // Count + dir diversity
             let count_str = format!("  {} uses", s.count);
             let count_span = Span::styled(count_str, Style::default().fg(t.text_muted));
 
-            let mut spans = vec![
-                Span::raw("  "),
-                checkbox,
-                name_span,
-                Span::raw("  "),
-                cmd_span,
-                count_span,
-            ];
+            let mut spans = vec![Span::raw("  "), checkbox, name_span, Span::raw("  ")];
+            spans.extend(cmd_spans);
+            spans.push(count_span);
 
             if s.dir_count > 1 {
                 let dir_color = if s.dir_count >= 5 {

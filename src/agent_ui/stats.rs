@@ -553,13 +553,18 @@ impl AgentStatsApp {
                     None => "○",
                 };
 
+                let cmd_cell = if is_sel {
+                    Cell::from(truncate(&hr.command, 30)).style(base)
+                } else {
+                    Cell::from(crate::util::highlight_command(
+                        &truncate(&hr.command, 30),
+                        0,
+                    ))
+                };
+
                 Row::new(vec![
                     Cell::from(format!("{:>8}", hr.level)).style(level_style),
-                    Cell::from(truncate(&hr.command, 30)).style(if is_sel {
-                        base
-                    } else {
-                        Style::default().fg(t.text)
-                    }),
+                    cmd_cell,
                     Cell::from(format_datetime(hr.started_at)).style(if is_sel {
                         base
                     } else {
@@ -625,12 +630,12 @@ impl AgentStatsApp {
             None => Style::default().fg(t.text_muted),
         };
 
-        let lines = vec![
-            Line::from(Span::styled("Command", label)),
-            Line::from(Span::styled(
-                hr.command.clone(),
-                Style::default().fg(t.primary),
-            )),
+        let cmd_width = detail_inner.width.saturating_sub(2) as usize;
+        let cmd_highlighted = crate::util::highlight_command(&hr.command, cmd_width);
+
+        let mut lines = vec![Line::from(Span::styled("Command", label))];
+        lines.extend(cmd_highlighted.lines);
+        lines.extend([
             Line::from(""),
             Line::from(vec![
                 Span::styled("Path  ", label),
@@ -656,7 +661,7 @@ impl AgentStatsApp {
                 "^Y Copy command",
                 Style::default().fg(t.text_muted),
             )),
-        ];
+        ]);
 
         f.render_widget(
             Paragraph::new(lines).wrap(Wrap { trim: false }),
