@@ -264,12 +264,18 @@ impl Repository {
                     .saturating_mul(86_400_000)
         });
 
-        let mut conditions = vec!["LENGTH(e.command) >= ?1".to_string()];
-        let mut param_idx: usize = 2;
+        let min_len_i64 = i64::try_from(min_length).unwrap_or(i64::MAX);
+        let min_cnt_i64 = i64::try_from(min_count).unwrap_or(i64::MAX);
+        // Fetch more candidates than needed, then rank in Rust
+        let fetch_limit = i64::try_from(limit).unwrap_or(i64::MAX).saturating_mul(3);
 
-        if time_filter.is_some() {
-            conditions.push(format!("e.started_at >= ?{param_idx}"));
-            param_idx += 1;
+        // Collect bind values in order — eliminates dual-counter bookkeeping
+        let mut params: Vec<i64> = vec![min_len_i64];
+        let mut conditions = vec!["LENGTH(e.command) >= ?1".to_string()];
+
+        if let Some(ts) = time_filter {
+            params.push(ts);
+            conditions.push(format!("e.started_at >= ?{}", params.len()));
         }
 
         if human_only {
@@ -280,8 +286,11 @@ impl Repository {
         }
 
         let where_clause = format!(" WHERE {}", conditions.join(" AND "));
-        let having_idx = param_idx;
-        let limit_idx = param_idx + 1;
+
+        params.push(min_cnt_i64);
+        let having_idx = params.len();
+        params.push(fetch_limit);
+        let limit_idx = params.len();
 
         // Fetch candidates with MAX(started_at) for recency weighting
         let sql = format!(
@@ -293,21 +302,9 @@ impl Repository {
         );
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let min_len_i64 = i64::try_from(min_length).unwrap_or(i64::MAX);
-        let min_cnt_i64 = i64::try_from(min_count).unwrap_or(i64::MAX);
-        // Fetch more candidates than needed, then rank in Rust
-        let fetch_limit = i64::try_from(limit).unwrap_or(i64::MAX).saturating_mul(3);
-
-        let mut bind_idx: usize = 1;
-        stmt.raw_bind_parameter(bind_idx, min_len_i64)?;
-        bind_idx += 1;
-        if let Some(ts) = time_filter {
-            stmt.raw_bind_parameter(bind_idx, ts)?;
-            bind_idx += 1;
+        for (i, val) in params.iter().enumerate() {
+            stmt.raw_bind_parameter(i + 1, *val)?;
         }
-        stmt.raw_bind_parameter(bind_idx, min_cnt_i64)?;
-        bind_idx += 1;
-        stmt.raw_bind_parameter(bind_idx, fetch_limit)?;
 
         let mut rows = stmt.raw_query();
         let mut candidates: Vec<(String, i64, i64, i64)> = Vec::new();

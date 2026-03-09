@@ -336,7 +336,9 @@ fn register_regexp(conn: &Connection) -> DbResult<()> {
                 None => true,
             };
             if needs_compile {
-                let re = regex::Regex::new(pattern)
+                let re = regex::RegexBuilder::new(pattern)
+                    .size_limit(1_000_000) // 1 MB NFA limit — prevents ReDoS
+                    .build()
                     .map_err(|e| rusqlite::Error::UserFunctionError(e.into()))?;
                 *cached = Some((pattern.to_string(), re));
             }
