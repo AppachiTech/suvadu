@@ -614,18 +614,32 @@ impl SearchApp {
             .border_style(Style::default().fg(t.primary).add_modifier(Modifier::BOLD))
             .style(Style::default().bg(t.bg_elevated));
 
-        // On small terminals (<40 rows), use 90% of height to avoid clipping filter fields.
-        // On larger terminals, 50% is sufficient.
-        let popup_pct = if area.height < 40 { 90 } else { 50 };
-        let popup_area = centered_rect(60, popup_pct, area);
+        // The filter layout needs: 2 (border) + 2+2 (margin) + 1 (progress)
+        // + 5*3 (fields) + 1 (help) = 23 rows ideal.
+        // On small terminals, use all available height; on larger ones cap at 50%.
+        let popup_height = 23u16.min(area.height.saturating_sub(2));
+        let popup_width = (area.width * 60 / 100).max(30).min(area.width);
+        let popup_area = Rect {
+            x: area.x + (area.width.saturating_sub(popup_width)) / 2,
+            y: area.y + (area.height.saturating_sub(popup_height)) / 2,
+            width: popup_width,
+            height: popup_height,
+        };
         f.render_widget(Clear, popup_area);
         f.render_widget(block, popup_area);
 
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .margin(2)
-            .constraints(
-                [
+        // Available inner height after border (2) + margin (4)
+        let inner_height = popup_height.saturating_sub(6);
+        // Each filter field is 3 rows; progress is 1; help is 1.
+        // With ≤12 inner rows we can't fit all fields — show only the
+        // focused field and its neighbors to avoid clipping.
+        let show_all = inner_height >= 17; // 1 + 5*3 + 1
+
+        if show_all {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .margin(2)
+                .constraints([
                     Constraint::Length(1), // Progress indicator
                     Constraint::Length(3), // Start Date
                     Constraint::Length(3), // End Date
@@ -633,18 +647,38 @@ impl SearchApp {
                     Constraint::Length(3), // Exit Code
                     Constraint::Length(3), // Executor
                     Constraint::Min(0),    // Help
-                ]
-                .as_ref(),
-            )
-            .split(popup_area);
+                ])
+                .split(popup_area);
 
-        self.render_filter_progress(f, chunks[0]);
-        self.render_filter_fields(f, &chunks);
+            self.render_filter_progress(f, chunks[0]);
+            self.render_filter_fields(f, &chunks);
 
-        let help_text = Paragraph::new("Tab/S-Tab: switch fields  |  Enter: apply  |  Esc: cancel")
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(t.text_muted));
-        f.render_widget(help_text, chunks[6]);
+            let help_text =
+                Paragraph::new("Tab/S-Tab: switch fields  |  Enter: apply  |  Esc: cancel")
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(t.text_muted));
+            f.render_widget(help_text, chunks[6]);
+        } else {
+            // Compact mode: show progress + only the focused field + help.
+            // This fits in as little as 7 inner rows (1 + 3 + 1 + margin).
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .margin(2)
+                .constraints([
+                    Constraint::Length(1), // Progress indicator
+                    Constraint::Length(3), // Focused field
+                    Constraint::Min(0),    // Help
+                ])
+                .split(popup_area);
+
+            self.render_filter_progress(f, chunks[0]);
+            self.render_single_filter_field(f, chunks[1]);
+
+            let help_text = Paragraph::new("Tab/S-Tab: switch  |  Enter: apply  |  Esc: cancel")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(t.text_muted));
+            f.render_widget(help_text, chunks[2]);
+        }
     }
 
     fn render_filter_progress(&self, f: &mut ratatui::Frame, area: Rect) {
@@ -728,6 +762,63 @@ impl SearchApp {
                 .style(text_style);
             f.render_widget(input, chunks[i + 1]);
         }
+    }
+
+    /// Compact mode: render only the currently focused filter field.
+    fn render_single_filter_field(&self, f: &mut ratatui::Frame, area: Rect) {
+        let t = theme();
+        let fields: [(&str, &str, &str); 5] = [
+            (
+                "Start Date (After)",
+                &self.filters.start_date_input,
+                "e.g. today, yesterday, 2024-01-15",
+            ),
+            (
+                "End Date (Before)",
+                &self.filters.end_date_input,
+                "e.g. today, 3 days ago, 2024-12-31",
+            ),
+            (
+                "Tag Name",
+                &self.filters.tag_filter_input,
+                "e.g. work, personal",
+            ),
+            (
+                "Exit Code",
+                &self.filters.exit_code_input,
+                "e.g. 0 (success), 1 (failure)",
+            ),
+            (
+                "Executor",
+                &self.filters.executor_filter_input,
+                "e.g. human, agent, ide, ci, vscode",
+            ),
+        ];
+
+        let i = self.filters.focus_index.min(fields.len() - 1);
+        let (title, value, hint) = fields[i];
+
+        let display_text = if value.is_empty() {
+            hint.to_string()
+        } else {
+            value.to_string()
+        };
+        let text_style = if value.is_empty() {
+            Style::default().fg(t.text_muted)
+        } else {
+            Style::default().fg(t.text)
+        };
+
+        let input = Paragraph::new(display_text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(t.border_focus))
+                    .title(format!("{title} *")),
+            )
+            .style(text_style);
+        f.render_widget(input, area);
     }
 
     // --- Unchanged dialog functions ---

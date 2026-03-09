@@ -117,13 +117,13 @@ pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Store prompt in cache file
+    // Store prompt in cache file (atomic write to avoid corruption on crash)
     let prompts_dir = get_prompts_dir()?;
     std::fs::create_dir_all(&prompts_dir)?;
     let prompt_file = prompts_dir.join(format!("claude-{session_id}.prompt"));
     // Truncate to 500 chars to keep cache lightweight
     let truncated = crate::util::truncate_str(prompt, 500, "...");
-    std::fs::write(&prompt_file, truncated)?;
+    atomic_write(&prompt_file, &truncated)?;
 
     // Restrict prompt cache file to owner-only (contains user prompts)
     #[cfg(unix)]
