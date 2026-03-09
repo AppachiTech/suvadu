@@ -28,7 +28,6 @@ fn test_search_config(entries: Vec<Entry>, total_items: usize) -> SearchConfig {
         page: 1,
         page_size: 50,
         tags: vec![],
-        unique_mode: false,
         unique_counts: std::collections::HashMap::new(),
         filter_after: None,
         filter_before: None,
@@ -43,10 +42,14 @@ fn test_search_config(entries: Vec<Entry>, total_items: usize) -> SearchConfig {
         bookmarked_commands: std::collections::HashSet::new(),
         filter_cwd: None,
         noted_entry_ids: std::collections::HashSet::new(),
-        context_boost: true,
-        show_detail_pane: true,
         show_risk_in_search: false,
-        search_field: SearchField::Command,
+        view: ViewOptions {
+            unique_mode: false,
+            context_boost: true,
+            detail_pane_open: true,
+            search_field: SearchField::Command,
+            current_cwd: None,
+        },
     }
 }
 
@@ -396,30 +399,30 @@ fn test_handle_input_ctrl_u_toggles_unique() {
     let entries = vec![create_test_entry("ls")];
     let mut app = SearchApp::new(test_search_config(entries, 1));
 
-    assert!(!app.unique_mode);
+    assert!(!app.view.unique_mode);
     let key = ctrl_key('u');
     let action = app.handle_input(key);
     assert!(matches!(action, SearchAction::Reload));
-    assert!(app.unique_mode);
+    assert!(app.view.unique_mode);
 }
 
 #[test]
 fn test_handle_input_tab_toggles_detail() {
     let entries = vec![create_test_entry("ls")];
     let mut config = test_search_config(entries, 1);
-    config.show_detail_pane = false;
+    config.view.detail_pane_open = false;
     let mut app = SearchApp::new(config);
 
-    assert!(!app.detail_pane_open);
+    assert!(!app.view.detail_pane_open);
     let key = KeyEvent::from(KeyCode::Tab);
     let action = app.handle_input(key);
     assert!(matches!(action, SearchAction::Continue));
-    assert!(app.detail_pane_open);
+    assert!(app.view.detail_pane_open);
 
     // Toggle back
     let action = app.handle_input(KeyEvent::from(KeyCode::Tab));
     assert!(matches!(action, SearchAction::Continue));
-    assert!(!app.detail_pane_open);
+    assert!(!app.view.detail_pane_open);
 }
 
 #[test]
@@ -789,16 +792,16 @@ fn test_ctrl_n_no_entry_id() {
 #[test]
 fn test_ctrl_s_toggles_context_boost() {
     let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
-    assert!(app.context_boost); // default is true from test config
+    assert!(app.view.context_boost); // default is true from test config
 
     let action = app.handle_input(ctrl_key('s'));
     assert!(matches!(action, SearchAction::Reload));
-    assert!(!app.context_boost);
+    assert!(!app.view.context_boost);
     assert!(app.status_message.is_some());
 
     let action = app.handle_input(ctrl_key('s'));
     assert!(matches!(action, SearchAction::Reload));
-    assert!(app.context_boost);
+    assert!(app.view.context_boost);
 }
 
 #[test]

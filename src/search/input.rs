@@ -43,7 +43,7 @@ impl SearchApp {
                 }
             }
             KeyCode::Tab => {
-                self.detail_pane_open = !self.detail_pane_open;
+                self.view.detail_pane_open = !self.view.detail_pane_open;
             }
             KeyCode::Char(c) if self.query.len() < MAX_INPUT_LEN => {
                 self.query.push(c);
@@ -94,7 +94,7 @@ impl SearchApp {
                 }
             }
             KeyCode::Char('u') => {
-                self.unique_mode = !self.unique_mode;
+                self.view.unique_mode = !self.view.unique_mode;
                 self.pagination.page = 1;
                 return Some(SearchAction::Reload);
             }
@@ -130,9 +130,9 @@ impl SearchApp {
                 }
             }
             KeyCode::Char('s') => {
-                self.context_boost = !self.context_boost;
+                self.view.context_boost = !self.view.context_boost;
                 self.status_message = Some((
-                    if self.context_boost {
+                    if self.view.context_boost {
                         "Smart mode ON".into()
                     } else {
                         "Smart mode OFF".into()

@@ -53,7 +53,11 @@ impl SearchApp {
             } else {
                 String::new()
             };
-            let unique_badge = if self.unique_mode { " [unique]" } else { "" };
+            let unique_badge = if self.view.unique_mode {
+                " [unique]"
+            } else {
+                ""
+            };
 
             let in_filter = matches!(self.dialog, DialogState::Filter);
             let search_border_color = if in_filter { t.border } else { t.border_focus };
@@ -75,7 +79,7 @@ impl SearchApp {
             f.render_widget(query, chunks[1]);
 
             // Results Table + Optional Detail Pane
-            if self.detail_pane_open {
+            if self.view.detail_pane_open {
                 let result_chunks = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([
@@ -176,7 +180,7 @@ impl SearchApp {
             Span::styled(" Goto  ", badge_label_style),
             Span::styled(" ^U ", badge_key_style),
             Span::styled(
-                if self.unique_mode {
+                if self.view.unique_mode {
                     " All  "
                 } else {
                     " Unique  "
@@ -200,7 +204,7 @@ impl SearchApp {
             ),
             Span::styled(" ^S ", badge_key_style),
             Span::styled(
-                if self.context_boost {
+                if self.view.context_boost {
                     " Recent  "
                 } else {
                     " Smart  "
@@ -209,7 +213,7 @@ impl SearchApp {
             ),
             Span::styled(" Tab ", badge_key_style),
             Span::styled(
-                if self.detail_pane_open {
+                if self.view.detail_pane_open {
                     " Hide  "
                 } else {
                     " Detail  "
@@ -257,7 +261,7 @@ impl SearchApp {
             ));
             badges.push(Span::raw(" "));
         }
-        if self.context_boost {
+        if self.view.context_boost {
             badges.push(Span::styled(
                 " smart ",
                 Style::default().bg(t.success).fg(Color::Black),
@@ -282,7 +286,7 @@ impl SearchApp {
             ..area
         };
 
-        let layout = if self.unique_mode {
+        let layout = if self.view.unique_mode {
             ColumnLayout::Compact
         } else {
             ColumnLayout::from_width(table_area.width)
@@ -388,8 +392,9 @@ impl SearchApp {
             .max(1);
         let height = cmd_height.max(st_height);
 
-        let is_local = self.context_boost
+        let is_local = self.view.context_boost
             && self
+                .view
                 .current_cwd
                 .as_deref()
                 .is_some_and(|cwd| entry.cwd == cwd);
@@ -1163,7 +1168,7 @@ fn format_exit_code(entry: &crate::models::Entry, bg_style: Style) -> (String, S
 }
 
 fn build_command_text(app: &SearchApp, entry: &crate::models::Entry) -> String {
-    let count_display = if app.unique_mode {
+    let count_display = if app.view.unique_mode {
         format!(
             "({}) ",
             app.unique_counts.get(&entry.id.unwrap_or(0)).unwrap_or(&1)
@@ -1368,7 +1373,6 @@ mod tests {
             page: 1,
             page_size: 50,
             tags: vec![],
-            unique_mode: unique,
             unique_counts,
             filter_after: None,
             filter_before: None,
@@ -1383,10 +1387,14 @@ mod tests {
             bookmarked_commands,
             filter_cwd: None,
             noted_entry_ids,
-            context_boost: false,
-            show_detail_pane: false,
             show_risk_in_search: false,
-            search_field: crate::models::SearchField::Command,
+            view: super::super::ViewOptions {
+                unique_mode: unique,
+                context_boost: false,
+                detail_pane_open: false,
+                search_field: crate::models::SearchField::Command,
+                current_cwd: None,
+            },
         };
 
         (super::SearchApp::new(config), entry)
@@ -1444,7 +1452,6 @@ mod tests {
             page: 1,
             page_size: 50,
             tags: vec![],
-            unique_mode: false,
             unique_counts: std::collections::HashMap::new(),
             filter_after: None,
             filter_before: None,
@@ -1459,10 +1466,14 @@ mod tests {
             bookmarked_commands: std::collections::HashSet::new(),
             filter_cwd: None,
             noted_entry_ids: std::collections::HashSet::new(),
-            context_boost: false,
-            show_detail_pane: false,
             show_risk_in_search: false,
-            search_field: crate::models::SearchField::Command,
+            view: super::super::ViewOptions {
+                unique_mode: false,
+                context_boost: false,
+                detail_pane_open: false,
+                search_field: crate::models::SearchField::Command,
+                current_cwd: None,
+            },
         };
         let app = super::SearchApp::new(config);
         let title = app.build_table_title();
@@ -1479,7 +1490,6 @@ mod tests {
             page: 1,
             page_size: 50,
             tags: vec![],
-            unique_mode: false,
             unique_counts: std::collections::HashMap::new(),
             filter_after: None,
             filter_before: None,
@@ -1494,10 +1504,14 @@ mod tests {
             bookmarked_commands: std::collections::HashSet::new(),
             filter_cwd: None,
             noted_entry_ids: std::collections::HashSet::new(),
-            context_boost: false,
-            show_detail_pane: false,
             show_risk_in_search: false,
-            search_field: crate::models::SearchField::Command,
+            view: super::super::ViewOptions {
+                unique_mode: false,
+                context_boost: false,
+                detail_pane_open: false,
+                search_field: crate::models::SearchField::Command,
+                current_cwd: None,
+            },
         };
         let app = super::SearchApp::new(config);
         let title = app.build_table_title();

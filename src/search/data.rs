@@ -46,7 +46,7 @@ impl SearchApp {
             prefix_match: false,
             executor: self.filters.executor_type.as_deref(),
             cwd: self.filters.cwd.as_deref(),
-            field: self.search_field,
+            field: self.view.search_field,
         }
     }
 
@@ -163,7 +163,7 @@ impl SearchApp {
             const MAX_FUZZY_CANDIDATES: usize = 5_000;
             let qf = self.build_query_filter(None); // No SQL query — nucleo handles matching
 
-            if self.unique_mode {
+            if self.view.unique_mode {
                 let unique_res =
                     repo.get_unique_entries_filtered(MAX_FUZZY_CANDIDATES, 0, &qf, false)?;
                 let (entries, counts): (Vec<Entry>, Vec<i64>) = unique_res.into_iter().unzip();
@@ -175,24 +175,25 @@ impl SearchApp {
                     }
                 }
 
-                let boost_cwd = if self.context_boost {
-                    self.current_cwd.as_deref()
+                let boost_cwd = if self.view.context_boost {
+                    self.view.current_cwd.as_deref()
                 } else {
                     None
                 };
-                let scored = Self::fuzzy_score(entries, &self.query, boost_cwd, self.search_field);
+                let scored =
+                    Self::fuzzy_score(entries, &self.query, boost_cwd, self.view.search_field);
                 self.unique_counts = count_map;
                 self.fuzzy_results = scored;
             } else {
                 let entries = repo.get_entries_filtered(MAX_FUZZY_CANDIDATES, 0, &qf)?;
 
-                let boost_cwd = if self.context_boost {
-                    self.current_cwd.as_deref()
+                let boost_cwd = if self.view.context_boost {
+                    self.view.current_cwd.as_deref()
                 } else {
                     None
                 };
                 self.fuzzy_results =
-                    Self::fuzzy_score(entries, &self.query, boost_cwd, self.search_field);
+                    Self::fuzzy_score(entries, &self.query, boost_cwd, self.view.search_field);
             }
 
             self.pagination.total_items = self.fuzzy_results.len();
@@ -209,7 +210,7 @@ impl SearchApp {
             };
             let qf = self.build_query_filter(query_param);
 
-            if self.unique_mode {
+            if self.view.unique_mode {
                 let new_count = repo.count_unique_filtered(&qf)?;
                 let unique_res =
                     repo.get_unique_entries_filtered(self.pagination.page_size, 0, &qf, true)?;
@@ -259,7 +260,7 @@ impl SearchApp {
             };
             let qf = self.build_query_filter(query_param);
 
-            if self.unique_mode {
+            if self.view.unique_mode {
                 let unique_res =
                     repo.get_unique_entries_filtered(self.pagination.page_size, offset, &qf, true)?;
                 let (entries, counts): (Vec<Entry>, Vec<i64>) = unique_res.into_iter().unzip();

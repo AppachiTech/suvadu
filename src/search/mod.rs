@@ -52,6 +52,15 @@ pub enum DialogState {
     },
 }
 
+/// Display/mode options that control how search results are presented.
+pub struct ViewOptions {
+    pub unique_mode: bool,
+    pub context_boost: bool,
+    pub detail_pane_open: bool,
+    pub search_field: SearchField,
+    pub current_cwd: Option<String>,
+}
+
 /// Active filter values and filter-dialog text inputs.
 pub struct FilterState {
     // Applied filter values
@@ -79,7 +88,6 @@ pub struct PaginationState {
 }
 
 /// Configuration bundle for constructing a `SearchApp`, reducing constructor parameter count.
-#[allow(clippy::struct_excessive_bools)]
 pub struct SearchConfig {
     pub entries: Vec<Entry>,
     pub initial_query: Option<String>,
@@ -87,7 +95,6 @@ pub struct SearchConfig {
     pub page: usize,
     pub page_size: usize,
     pub tags: Vec<Tag>,
-    pub unique_mode: bool,
     pub unique_counts: std::collections::HashMap<i64, i64>,
     pub filter_after: Option<i64>,
     pub filter_before: Option<i64>,
@@ -102,13 +109,10 @@ pub struct SearchConfig {
     pub bookmarked_commands: std::collections::HashSet<String>,
     pub filter_cwd: Option<String>,
     pub noted_entry_ids: std::collections::HashSet<i64>,
-    pub context_boost: bool,
-    pub show_detail_pane: bool,
     pub show_risk_in_search: bool,
-    pub search_field: SearchField,
+    pub view: ViewOptions,
 }
 
-#[allow(clippy::struct_excessive_bools)]
 pub struct SearchApp {
     query: String,
     entries: Vec<Entry>,
@@ -117,34 +121,22 @@ pub struct SearchApp {
     pub pagination: PaginationState,
     pub filters: FilterState,
     dialog: DialogState,
+    pub view: ViewOptions,
+    show_risk_in_search: bool,
 
-    // Unique Mode
-    pub unique_mode: bool,
+    // Unique mode counts (keyed by entry ID)
     pub unique_counts: std::collections::HashMap<i64, i64>,
 
     // Tags (for tag association dialog)
     tags: Vec<Tag>,
     tag_list_state: ListState,
 
-    // Notes
+    // Annotations
     noted_entry_ids: std::collections::HashSet<i64>,
-
-    // Context-aware boost
-    context_boost: bool,
-    current_cwd: Option<String>,
-
-    // Detail preview pane
-    detail_pane_open: bool,
-    show_risk_in_search: bool,
-
-    // Bookmarks
     bookmarked_commands: std::collections::HashSet<String>,
 
     // Fuzzy search: cached scored results for pagination
     fuzzy_results: Vec<Entry>,
-
-    // Field-specific search (command, cwd, session, executor)
-    pub search_field: SearchField,
 
     // UI Feedback
     status_message: Option<(String, std::time::Instant)>,
@@ -160,6 +152,11 @@ impl SearchApp {
             .start_date_input
             .unwrap_or_else(|| five_days_ago.format("%Y-%m-%d").to_string());
         let end_default = cfg.end_date_input.unwrap_or_else(|| "today".to_string());
+
+        let mut view = cfg.view;
+        view.current_cwd = std::env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().to_string());
 
         let mut app = Self {
             query,
@@ -188,28 +185,18 @@ impl SearchApp {
             },
 
             dialog: DialogState::None,
+            view,
+            show_risk_in_search: cfg.show_risk_in_search,
 
-            unique_mode: cfg.unique_mode,
             unique_counts: cfg.unique_counts,
 
             tags: cfg.tags,
             tag_list_state: ListState::default(),
 
             noted_entry_ids: cfg.noted_entry_ids,
-
-            detail_pane_open: cfg.show_detail_pane,
-            show_risk_in_search: cfg.show_risk_in_search,
-
-            context_boost: cfg.context_boost,
-            current_cwd: std::env::current_dir()
-                .ok()
-                .map(|p| p.to_string_lossy().to_string()),
-
             bookmarked_commands: cfg.bookmarked_commands,
 
             fuzzy_results: Vec::new(),
-
-            search_field: cfg.search_field,
 
             status_message: None,
         };
@@ -444,7 +431,6 @@ pub fn run_search(
         page: 1,
         page_size,
         tags,
-        unique_mode: effective_unique,
         unique_counts,
         filter_after,
         filter_before,
@@ -459,10 +445,14 @@ pub fn run_search(
         bookmarked_commands,
         filter_cwd: args.cwd.map(String::from),
         noted_entry_ids,
-        context_boost: config.search.context_boost,
-        show_detail_pane: config.search.show_detail_pane,
         show_risk_in_search: config.agent.show_risk_in_search,
-        search_field: args.field,
+        view: ViewOptions {
+            unique_mode: effective_unique,
+            context_boost: config.search.context_boost,
+            detail_pane_open: config.search.show_detail_pane,
+            search_field: args.field,
+            current_cwd: None, // set in SearchApp::new
+        },
     });
 
     let result = app.run(&mut terminal, repo);
