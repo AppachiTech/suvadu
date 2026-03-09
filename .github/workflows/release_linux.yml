@@ -44,7 +44,14 @@ jobs:
             cargo build --release --target ${{ matrix.target }}
           fi
 
+      - name: Install minisign
+        run: |
+          curl -fsSL https://github.com/jedisct1/minisign/releases/download/0.11/minisign-0.11-linux.tar.gz | tar xz
+          sudo cp minisign-linux/x86_64/minisign /usr/local/bin/
+
       - name: Prepare Artifacts
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
           # Create directory structure for R2
           mkdir -p artifacts/linux/archive
@@ -58,9 +65,16 @@ jobs:
           # Generate SHA256 checksums
           sha256sum artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz | awk '{print $1}' > artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.sha256
 
+          # Sign with minisign (secret key from GitHub Secrets)
+          echo "$MINISIGN_SECRET_KEY" > /tmp/minisign.key
+          minisign -S -s /tmp/minisign.key -m artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz \
+            -t "suvadu ${{ github.ref_name }} linux${{ matrix.suffix }}" -x artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.minisig
+          rm -f /tmp/minisign.key
+
           # Create versioned tarball
           cp artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz
           cp artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.sha256 artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.sha256
+          cp artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.minisig artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.minisig
 
       - name: Upload to Cloudflare R2
         uses: ryand56/r2-upload-action@latest
@@ -81,7 +95,8 @@ jobs:
             -d '{
               "files": [
                 "https://downloads.appachi.tech/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz",
-                "https://downloads.appachi.tech/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.sha256"
+                "https://downloads.appachi.tech/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.sha256",
+                "https://downloads.appachi.tech/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.minisig"
               ]
             }'
 
@@ -92,3 +107,4 @@ jobs:
           files: |
             artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz
             artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.sha256
+            artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.minisig
