@@ -180,6 +180,84 @@ impl PickerApp {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_summary(id: &str, cmd_count: i64) -> SessionSummary {
+        SessionSummary {
+            id: id.to_string(),
+            hostname: "test-host".to_string(),
+            created_at: 1_700_000_000_000,
+            tag_name: None,
+            cmd_count,
+            success_count: cmd_count,
+            first_cmd_at: 1_700_000_000_000,
+            last_cmd_at: 1_700_000_060_000,
+        }
+    }
+
+    #[test]
+    fn new_empty_sessions_no_selection() {
+        let app = PickerApp::new(vec![]);
+        assert!(app.table_state.selected().is_none());
+    }
+
+    #[test]
+    fn new_with_sessions_selects_first() {
+        let app = PickerApp::new(vec![make_summary("s1", 5)]);
+        assert_eq!(app.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn next_wraps_around() {
+        let mut app = PickerApp::new(vec![make_summary("s1", 5), make_summary("s2", 3)]);
+        assert_eq!(app.table_state.selected(), Some(0));
+        app.next();
+        assert_eq!(app.table_state.selected(), Some(1));
+        app.next(); // wraps
+        assert_eq!(app.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn prev_wraps_around() {
+        let mut app = PickerApp::new(vec![make_summary("s1", 5), make_summary("s2", 3)]);
+        assert_eq!(app.table_state.selected(), Some(0));
+        app.prev(); // wraps to last
+        assert_eq!(app.table_state.selected(), Some(1));
+        app.prev();
+        assert_eq!(app.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn next_on_empty_does_nothing() {
+        let mut app = PickerApp::new(vec![]);
+        app.next(); // should not panic
+        assert!(app.table_state.selected().is_none());
+    }
+
+    #[test]
+    fn prev_on_empty_does_nothing() {
+        let mut app = PickerApp::new(vec![]);
+        app.prev(); // should not panic
+        assert!(app.table_state.selected().is_none());
+    }
+
+    #[test]
+    fn next_single_element_stays() {
+        let mut app = PickerApp::new(vec![make_summary("s1", 5)]);
+        app.next();
+        assert_eq!(app.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn prev_single_element_stays() {
+        let mut app = PickerApp::new(vec![make_summary("s1", 5)]);
+        app.prev();
+        assert_eq!(app.table_state.selected(), Some(0));
+    }
+}
+
 pub fn run_session_picker<B: Backend>(
     terminal: &mut Terminal<B>,
     sessions: Vec<SessionSummary>,

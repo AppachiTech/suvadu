@@ -77,7 +77,7 @@ impl SessionApp {
         for (i, entry) in entries.iter().enumerate() {
             if i > 0 {
                 let prev_ended = entries[i - 1].ended_at;
-                let gap = entry.started_at - prev_ended;
+                let gap = entry.started_at.saturating_sub(prev_ended);
                 if gap >= GAP_THRESHOLD_MS {
                     rows.push(TimelineRow::Gap(gap));
                 }
@@ -693,6 +693,225 @@ fn render_entry_row(
 }
 
 // ── Public entry ────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_entry(started_at: i64, ended_at: i64) -> Entry {
+        Entry::new(
+            "sess1".into(),
+            "echo hi".into(),
+            "/tmp".into(),
+            Some(0),
+            started_at,
+            ended_at,
+        )
+    }
+
+    fn make_session() -> Session {
+        Session::new("test-host".into(), 1_000_000)
+    }
+
+    // ── build_timeline ──
+
+    #[test]
+    fn build_timeline_empty_entries() {
+        let rows = SessionApp::build_timeline(&[]);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn build_timeline_single_entry() {
+        let entries = vec![make_entry(1000, 2000)];
+        let rows = SessionApp::build_timeline(&entries);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0], TimelineRow::Entry(0)));
+    }
+
+    #[test]
+    fn build_timeline_no_gap_below_threshold() {
+        // Two entries 1 minute apart — below GAP_THRESHOLD_MS (2 min)
+        let entries = vec![
+            make_entry(1_000_000, 1_010_000),
+            make_entry(1_070_000, 1_080_000), // 60s gap
+        ];
+        let rows = SessionApp::build_timeline(&entries);
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(rows[0], TimelineRow::Entry(0)));
+        assert!(matches!(rows[1], TimelineRow::Entry(1)));
+    }
+
+    #[test]
+    fn build_timeline_inserts_gap_above_threshold() {
+        // Two entries 3 minutes apart — above GAP_THRESHOLD_MS
+        let entries = vec![
+            make_entry(1_000_000, 1_010_000),
+            make_entry(1_200_000, 1_210_000), // 190s gap > 120s threshold
+        ];
+        let rows = SessionApp::build_timeline(&entries);
+        assert_eq!(rows.len(), 3);
+        assert!(matches!(rows[0], TimelineRow::Entry(0)));
+        assert!(matches!(rows[1], TimelineRow::Gap(_)));
+        assert!(matches!(rows[2], TimelineRow::Entry(1)));
+    }
+
+    #[test]
+    fn build_timeline_gap_duration_correct() {
+        let entries = vec![
+            make_entry(1_000_000, 1_010_000),
+            make_entry(1_200_000, 1_210_000),
+        ];
+        let rows = SessionApp::build_timeline(&entries);
+        if let TimelineRow::Gap(gap) = rows[1] {
+            assert_eq!(gap, 1_200_000 - 1_010_000);
+        } else {
+            panic!("Expected Gap row");
+        }
+    }
+
+    #[test]
+    fn build_timeline_saturating_sub_no_underflow() {
+        // ended_at > next started_at (out-of-order timestamps)
+        let entries = vec![
+            make_entry(5_000_000, 6_000_000),
+            make_entry(5_500_000, 5_600_000), // started_at < prev ended_at
+        ];
+        let rows = SessionApp::build_timeline(&entries);
+        // Gap should be 0 (saturating_sub), not inserted since < threshold
+        assert_eq!(rows.len(), 2);
+    }
+
+    // ── SessionApp navigation ──
+
+    #[test]
+    fn total_pages_empty() {
+        let app = SessionApp::new(make_session(), None, vec![], HashSet::new());
+        assert_eq!(app.total_pages(), 1);
+    }
+
+    #[test]
+    fn total_pages_one_page() {
+        let entries: Vec<Entry> = (0..10)
+            .map(|i| make_entry(i * 1000, i * 1000 + 500))
+            .collect();
+        let app = SessionApp::new(make_session(), None, entries, HashSet::new());
+        assert_eq!(app.total_pages(), 1);
+    }
+
+    #[test]
+    fn page_slice_empty() {
+        let app = SessionApp::new(make_session(), None, vec![], HashSet::new());
+        assert!(app.page_slice().is_empty());
+    }
+
+    #[test]
+    fn selected_entry_with_entries() {
+        let entries = vec![make_entry(1000, 2000), make_entry(3000, 4000)];
+        let app = SessionApp::new(make_session(), None, entries, HashSet::new());
+        let sel = app.selected_entry();
+        assert!(sel.is_some());
+        assert_eq!(sel.unwrap().started_at, 1000);
+    }
+
+    #[test]
+    fn selected_entry_empty() {
+        let app = SessionApp::new(make_session(), None, vec![], HashSet::new());
+        assert!(app.selected_entry().is_none());
+    }
+
+    #[test]
+    fn move_down_advances_selection() {
+        let entries = vec![
+            make_entry(1000, 2000),
+            make_entry(3000, 4000),
+            make_entry(5000, 6000),
+        ];
+        let mut app = SessionApp::new(make_session(), None, entries, HashSet::new());
+        assert_eq!(app.table_state.selected(), Some(0));
+        app.move_down();
+        assert_eq!(app.table_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn move_up_at_zero_stays() {
+        let entries = vec![make_entry(1000, 2000), make_entry(3000, 4000)];
+        let mut app = SessionApp::new(make_session(), None, entries, HashSet::new());
+        assert_eq!(app.table_state.selected(), Some(0));
+        app.move_up();
+        assert_eq!(app.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn handle_input_q_returns_false() {
+        let entries = vec![make_entry(1000, 2000)];
+        let mut app = SessionApp::new(make_session(), None, entries, HashSet::new());
+        let key = crossterm::event::KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(!app.handle_input(key));
+    }
+
+    #[test]
+    fn handle_input_esc_returns_false() {
+        let entries = vec![make_entry(1000, 2000)];
+        let mut app = SessionApp::new(make_session(), None, entries, HashSet::new());
+        let key = crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!app.handle_input(key));
+    }
+
+    #[test]
+    fn handle_input_tab_toggles_detail() {
+        let entries = vec![make_entry(1000, 2000)];
+        let mut app = SessionApp::new(make_session(), None, entries, HashSet::new());
+        assert!(app.detail_open);
+        let key = crossterm::event::KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        assert!(app.handle_input(key));
+        assert!(!app.detail_open);
+        assert!(app.handle_input(key));
+        assert!(app.detail_open);
+    }
+
+    #[test]
+    fn handle_input_j_moves_down() {
+        let entries = vec![make_entry(1000, 2000), make_entry(3000, 4000)];
+        let mut app = SessionApp::new(make_session(), None, entries, HashSet::new());
+        let key = crossterm::event::KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+        app.handle_input(key);
+        assert_eq!(app.table_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn handle_input_k_moves_up() {
+        let entries = vec![make_entry(1000, 2000), make_entry(3000, 4000)];
+        let mut app = SessionApp::new(make_session(), None, entries, HashSet::new());
+        // Move to row 1, then back up
+        let j = crossterm::event::KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+        let k = crossterm::event::KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
+        app.handle_input(j);
+        assert_eq!(app.table_state.selected(), Some(1));
+        app.handle_input(k);
+        assert_eq!(app.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn handle_input_g_resets_to_page_one() {
+        let entries = vec![make_entry(1000, 2000)];
+        let mut app = SessionApp::new(make_session(), None, entries, HashSet::new());
+        // Already on page 1 with data, 'g' should keep page 1 and select 0
+        let key = crossterm::event::KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
+        app.handle_input(key);
+        assert_eq!(app.page, 1);
+        assert_eq!(app.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn handle_input_end_goes_to_last_page() {
+        let entries = vec![make_entry(1000, 2000)];
+        let mut app = SessionApp::new(make_session(), None, entries, HashSet::new());
+        let key = crossterm::event::KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
+        app.handle_input(key);
+        assert_eq!(app.page, app.total_pages());
+    }
+}
 
 pub fn run_session_timeline<B: Backend>(
     terminal: &mut Terminal<B>,

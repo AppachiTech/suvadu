@@ -6,8 +6,7 @@ pub fn handle_wrap(
     executor: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if command.is_empty() {
-        eprintln!("Error: No command provided to wrap.");
-        process::exit(1);
+        return Err("No command provided to wrap.".into());
     }
 
     let cmd_str = command.join(" ");

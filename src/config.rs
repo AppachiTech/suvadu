@@ -233,11 +233,12 @@ static CONFIG_CACHE: Mutex<Option<CachedConfig>> = Mutex::new(None);
 /// modification time changes. Optimized for the hot path (called per shell command).
 pub fn load_config_cached() -> ConfigResult<Config> {
     let path = get_config_path()?;
-    let current_mtime = std::fs::metadata(&path)
-        .ok()
-        .and_then(|m| m.modified().ok());
 
+    // Check mtime inside the lock to avoid TOCTOU race between stat and cache read.
     if let Ok(guard) = CONFIG_CACHE.lock() {
+        let current_mtime = std::fs::metadata(&path)
+            .ok()
+            .and_then(|m| m.modified().ok());
         if let Some(cached) = guard.as_ref() {
             if cached.mtime == current_mtime {
                 return Ok(cached.config.clone());
@@ -248,6 +249,9 @@ pub fn load_config_cached() -> ConfigResult<Config> {
     let config = load_config()?;
 
     if let Ok(mut guard) = CONFIG_CACHE.lock() {
+        let current_mtime = std::fs::metadata(&path)
+            .ok()
+            .and_then(|m| m.modified().ok());
         *guard = Some(CachedConfig {
             config: config.clone(),
             mtime: current_mtime,

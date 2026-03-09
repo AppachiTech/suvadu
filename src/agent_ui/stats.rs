@@ -16,7 +16,7 @@ use crate::util::{dirs_home, format_duration_ms, shorten_path};
 
 use super::{format_datetime, format_full_datetime, load_entries, truncate, Period};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StatsFocus {
     Cards,
     HighRisk,
@@ -682,6 +682,119 @@ impl AgentStatsApp {
             Paragraph::new(lines).wrap(Wrap { trim: false }),
             detail_inner,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_stats_app(agents: Vec<AgentStat>) -> AgentStatsApp {
+        AgentStatsApp {
+            agents,
+            period: Period::Days7,
+            selected: 0,
+            focus: StatsFocus::Cards,
+            risk_selected: 0,
+            cli_executor: None,
+            status_message: None,
+        }
+    }
+
+    fn make_agent_stat(name: &str, total: usize, high_risk_count: usize) -> AgentStat {
+        let high_risk_cmds: Vec<HighRiskEntry> = (0..high_risk_count)
+            .map(|i| HighRiskEntry {
+                command: format!("rm -rf /danger{i}"),
+                cwd: "/tmp".into(),
+                started_at: 1_000_000 + i as i64 * 1000,
+                exit_code: Some(0),
+                level: RiskLevel::High,
+            })
+            .collect();
+
+        AgentStat {
+            name: name.into(),
+            total,
+            success: total,
+            avg_duration_ms: 500,
+            high_risk: high_risk_count,
+            pkg_count: 0,
+            top_dirs: vec![("/tmp".into(), total)],
+            high_risk_cmds,
+        }
+    }
+
+    // ── selected_high_risk_count ──
+
+    #[test]
+    fn selected_high_risk_count_no_agents() {
+        let app = make_stats_app(vec![]);
+        assert_eq!(app.selected_high_risk_count(), 0);
+    }
+
+    #[test]
+    fn selected_high_risk_count_with_agents() {
+        let app = make_stats_app(vec![make_agent_stat("claude", 10, 3)]);
+        assert_eq!(app.selected_high_risk_count(), 3);
+    }
+
+    #[test]
+    fn selected_high_risk_count_second_agent() {
+        let mut app = make_stats_app(vec![
+            make_agent_stat("claude", 10, 2),
+            make_agent_stat("cursor", 5, 4),
+        ]);
+        app.selected = 1;
+        assert_eq!(app.selected_high_risk_count(), 4);
+    }
+
+    // ── Focus and navigation ──
+
+    #[test]
+    fn focus_starts_on_cards() {
+        let app = make_stats_app(vec![make_agent_stat("claude", 10, 0)]);
+        assert_eq!(app.focus, StatsFocus::Cards);
+    }
+
+    #[test]
+    fn selected_starts_at_zero() {
+        let app = make_stats_app(vec![
+            make_agent_stat("claude", 10, 0),
+            make_agent_stat("cursor", 5, 0),
+        ]);
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn risk_selected_starts_at_zero() {
+        let app = make_stats_app(vec![make_agent_stat("claude", 10, 5)]);
+        assert_eq!(app.risk_selected, 0);
+    }
+
+    // ── AgentStat construction ──
+
+    #[test]
+    fn agent_stat_top_dirs_populated() {
+        let stat = make_agent_stat("test", 5, 0);
+        assert_eq!(stat.top_dirs.len(), 1);
+        assert_eq!(stat.top_dirs[0].0, "/tmp");
+        assert_eq!(stat.top_dirs[0].1, 5);
+    }
+
+    #[test]
+    fn agent_stat_high_risk_cmds_match_count() {
+        let stat = make_agent_stat("test", 10, 3);
+        assert_eq!(stat.high_risk_cmds.len(), 3);
+    }
+
+    // ── Empty state ──
+
+    #[test]
+    fn empty_agents_app() {
+        let app = make_stats_app(vec![]);
+        assert!(app.agents.is_empty());
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.selected_high_risk_count(), 0);
     }
 }
 
