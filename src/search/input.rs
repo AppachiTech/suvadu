@@ -20,11 +20,12 @@ impl SearchApp {
     }
 
     fn handle_normal_input(&mut self, key: KeyEvent) -> SearchAction {
-        // Handle Ctrl+key shortcuts first
+        // Handle Ctrl+key shortcuts first; ignore unrecognized Ctrl combos
+        // to prevent them from falling through to the character input handler.
         if key.modifiers.contains(KeyModifiers::CONTROL) {
-            if let Some(action) = self.handle_ctrl_shortcut(key.code) {
-                return action;
-            }
+            return self
+                .handle_ctrl_shortcut(key.code)
+                .unwrap_or(SearchAction::Continue);
         }
 
         match key.code {

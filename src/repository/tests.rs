@@ -2048,7 +2048,7 @@ fn test_begin_and_commit_transaction() {
     let session = Session::new("host".to_string(), 100);
     repo.insert_session(&session).unwrap();
 
-    repo.begin_transaction().unwrap();
+    let tx = repo.transaction().unwrap();
     repo.insert_entry(&Entry::new(
         session.id.clone(),
         "in_transaction".into(),
@@ -2058,9 +2058,69 @@ fn test_begin_and_commit_transaction() {
         1100,
     ))
     .unwrap();
-    repo.commit().unwrap();
+    tx.commit().unwrap();
 
     assert_eq!(repo.count_entries().unwrap(), 1);
+}
+
+#[test]
+fn test_transaction_guard_rollback_on_drop() {
+    let (_dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    // Start a transaction, insert, but drop without committing
+    {
+        let _tx = repo.transaction().unwrap();
+        repo.insert_entry(&Entry::new(
+            session.id.clone(),
+            "should_be_rolled_back".into(),
+            "/tmp".into(),
+            Some(0),
+            2000,
+            2100,
+        ))
+        .unwrap();
+        // _tx drops here — should auto-rollback
+    }
+
+    assert_eq!(
+        repo.count_entries().unwrap(),
+        0,
+        "Entry should be rolled back when TransactionGuard drops without commit"
+    );
+}
+
+#[test]
+fn test_transaction_guard_recommit() {
+    let (_dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    let tx = repo.transaction().unwrap();
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "batch1".into(),
+        "/tmp".into(),
+        Some(0),
+        1000,
+        1100,
+    ))
+    .unwrap();
+    tx.recommit().unwrap();
+
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "batch2".into(),
+        "/tmp".into(),
+        Some(0),
+        2000,
+        2100,
+    ))
+    .unwrap();
+    tx.commit().unwrap();
+
+    assert_eq!(repo.count_entries().unwrap(), 2);
 }
 
 // ── GC Tests ────────────────────────────────────────────

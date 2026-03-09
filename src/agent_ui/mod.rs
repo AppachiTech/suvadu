@@ -42,6 +42,21 @@ impl Period {
         }
     }
 
+    /// Derive the closest matching period from an `after_ms` timestamp.
+    pub(super) fn from_after_ms(after_ms: Option<i64>) -> Self {
+        let Some(ts) = after_ms else {
+            return Self::AllTime;
+        };
+        let now = chrono::Utc::now().timestamp_millis();
+        let age_days = (now - ts) / (24 * 60 * 60 * 1000);
+        match age_days {
+            0..=1 => Self::Today,
+            2..=7 => Self::Days7,
+            8..=30 => Self::Days30,
+            _ => Self::AllTime,
+        }
+    }
+
     pub(super) const fn label(self) -> &'static str {
         match self {
             Self::Today => "Today",

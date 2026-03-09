@@ -18,6 +18,7 @@ pub trait RepositoryApi {
     fn begin_transaction(&self) -> DbResult<()>;
     fn commit(&self) -> DbResult<()>;
     fn rollback(&self) -> DbResult<()>;
+    fn transaction(&self) -> DbResult<super::TransactionGuard<'_>>;
     fn entry_exists(&self, command: &str, started_at: i64) -> DbResult<bool>;
 
     // ── entries.rs ──────────────────────────────────────────────────────
@@ -146,6 +147,10 @@ impl RepositoryApi for Repository {
 
     fn rollback(&self) -> DbResult<()> {
         Self::rollback(self)
+    }
+
+    fn transaction(&self) -> DbResult<super::TransactionGuard<'_>> {
+        Self::transaction(self)
     }
 
     fn entry_exists(&self, command: &str, started_at: i64) -> DbResult<bool> {

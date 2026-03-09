@@ -136,7 +136,7 @@ pub fn handle_import(file: &str, dry_run: bool) -> Result<(), Box<dyn std::error
     let mut parse_errors = 0u64;
     let mut batch_count = 0u64;
 
-    repo.begin_transaction()?;
+    let tx = repo.transaction()?;
 
     for (line_num, line) in reader.lines().enumerate() {
         let line = line?;
@@ -161,20 +161,19 @@ pub fn handle_import(file: &str, dry_run: bool) -> Result<(), Box<dyn std::error
             Err(e) => {
                 eprintln!("Insert failed at line {}: {e}", line_num + 1);
                 eprintln!("Rolling back — no entries from this batch were written.");
-                let _ = repo.rollback();
+                // tx drops here, auto-rolling back
                 return Err(e.into());
             }
         }
 
         // Commit in batches to bound memory and WAL growth
         if batch_count >= BATCH_SIZE {
-            repo.commit()?;
-            repo.begin_transaction()?;
+            tx.recommit()?;
             batch_count = 0;
         }
     }
 
-    repo.commit()?;
+    tx.commit()?;
     println!("Imported {imported} entries ({parse_errors} skipped).");
     Ok(())
 }
@@ -232,26 +231,16 @@ pub fn handle_import_zsh_history(
     };
     repo.insert_session(&session)?;
 
-    // Phase 3: Insert in a transaction for performance + atomicity
-    repo.begin_transaction()?;
+    // Phase 3: Insert in a transaction for performance + atomicity.
+    // TransactionGuard auto-rolls back on drop if commit() is not called.
+    let tx = repo.transaction()?;
 
-    let result = import_entries_batch(&repo, &parsed, &session_id, now);
-
-    match result {
-        Ok((imported, skipped)) => {
-            repo.commit()?;
-            println!("\n✓ Import complete:");
-            println!("  Imported: {imported}");
-            println!("  Skipped:  {skipped} (duplicates/empty)");
-            println!("  Session:  {session_id}");
-        }
-        Err(e) => {
-            eprintln!("\nImport failed: {e}");
-            eprintln!("Rolling back — no entries were written.");
-            let _ = repo.rollback();
-            return Err(e);
-        }
-    }
+    let (imported, skipped) = import_entries_batch(&repo, &parsed, &session_id, now)?;
+    tx.commit()?;
+    println!("\n✓ Import complete:");
+    println!("  Imported: {imported}");
+    println!("  Skipped:  {skipped} (duplicates/empty)");
+    println!("  Session:  {session_id}");
 
     Ok(())
 }
@@ -570,10 +559,10 @@ mod tests {
             ("ls -la".to_string(), 1_700_000_010_000, 0),
         ];
 
-        repo.begin_transaction().unwrap();
+        let tx = repo.transaction().unwrap();
         let (imported, skipped) =
             import_entries_batch(&repo, &parsed, &session.id, 9_999_999).unwrap();
-        repo.commit().unwrap();
+        tx.commit().unwrap();
 
         assert_eq!(imported, 2);
         assert_eq!(skipped, 0);
@@ -606,16 +595,16 @@ mod tests {
         ];
 
         // First import
-        repo.begin_transaction().unwrap();
+        let tx = repo.transaction().unwrap();
         let (imported, _) = import_entries_batch(&repo, &parsed, &session.id, 9_999_999).unwrap();
-        repo.commit().unwrap();
+        tx.commit().unwrap();
         assert_eq!(imported, 2);
 
         // Second import of the same data — should be skipped as duplicates
-        repo.begin_transaction().unwrap();
+        let tx = repo.transaction().unwrap();
         let (imported2, skipped2) =
             import_entries_batch(&repo, &parsed, &session.id, 9_999_999).unwrap();
-        repo.commit().unwrap();
+        tx.commit().unwrap();
         assert_eq!(imported2, 0, "Duplicates should not be imported again");
         assert_eq!(skipped2, 2, "Both entries should be skipped as duplicates");
     }
@@ -639,10 +628,10 @@ mod tests {
             ("valid-cmd".to_string(), 1_700_000_003_000, 0), // should be imported
         ];
 
-        repo.begin_transaction().unwrap();
+        let tx = repo.transaction().unwrap();
         let (imported, skipped) =
             import_entries_batch(&repo, &parsed, &session.id, 9_999_999).unwrap();
-        repo.commit().unwrap();
+        tx.commit().unwrap();
 
         assert_eq!(imported, 1, "Only the valid command should be imported");
         assert_eq!(

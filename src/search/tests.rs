@@ -832,13 +832,16 @@ fn test_ctrl_d_no_entry_id() {
 }
 
 #[test]
-fn test_unknown_ctrl_key_falls_through() {
+fn test_unknown_ctrl_key_ignored() {
     let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
 
-    // Ctrl+Z is unhandled → returns None from handle_ctrl_shortcut →
-    // falls through to normal input which treats Char('z') as query input
+    // Ctrl+Z is unhandled → returns Continue without inserting 'z' into query
     let action = app.handle_input(ctrl_key('z'));
-    assert!(matches!(action, SearchAction::Reload));
+    assert!(matches!(action, SearchAction::Continue));
+    assert!(
+        app.query.is_empty(),
+        "Unrecognized Ctrl+key should not insert characters"
+    );
 }
 
 // ── handle_delete_dialog_input tests ──

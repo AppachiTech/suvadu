@@ -130,7 +130,7 @@ fn critical_pattern_defs() -> Vec<PatternDef> {
             "Recursive delete",
         ),
         (
-            r"^git\s+push\s+.*--force",
+            r"^git\s+push\s+.*--force(\s|$)",
             RiskLevel::Critical,
             "destructive",
             "Force push",
@@ -315,6 +315,11 @@ pub fn assess_risk(command: &str) -> Option<RiskAssessment> {
     let patterns = &*RISK_PATTERNS;
     let cmd = command.trim();
 
+    // Skip commands that don't actually execute the matched operation
+    if is_non_executing(cmd) {
+        return None;
+    }
+
     // Find the highest-risk matching pattern
     let mut best: Option<&RiskPattern> = None;
 
@@ -333,6 +338,32 @@ pub fn assess_risk(command: &str) -> Option<RiskAssessment> {
         category: p.category,
         description: p.description,
     })
+}
+
+/// Returns true if the command doesn't actually execute the matched operation.
+/// Catches false positives like comments, echo output, and alias definitions.
+fn is_non_executing(cmd: &str) -> bool {
+    // Shell comments
+    if cmd.starts_with('#') {
+        return true;
+    }
+
+    // echo/printf — output only, unless chained to another command
+    if (cmd.starts_with("echo ") || cmd.starts_with("printf ")) && !has_shell_chaining(cmd) {
+        return true;
+    }
+
+    // alias definitions — setting up an alias, not executing the aliased command
+    if cmd.starts_with("alias ") {
+        return true;
+    }
+
+    false
+}
+
+/// Check if the command contains shell operators that chain execution
+fn has_shell_chaining(cmd: &str) -> bool {
+    cmd.contains(" | ") || cmd.contains(" && ") || cmd.contains(" || ") || cmd.contains(';')
 }
 
 /// Get the risk level for a command (convenience wrapper)
@@ -622,6 +653,70 @@ mod tests {
             "Expected at least 33 risk patterns, got {}. Some patterns may have failed to compile.",
             patterns.len()
         );
+    }
+
+    // ── False positive tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_echo_rm_is_safe() {
+        // echo just prints text — not destructive
+        assert_eq!(risk_level(r#"echo "rm -rf /""#), RiskLevel::None);
+        assert_eq!(risk_level("echo rm -rf /tmp"), RiskLevel::None);
+        assert_eq!(risk_level("printf 'rm -rf /'"), RiskLevel::None);
+    }
+
+    #[test]
+    fn test_echo_with_chaining_is_risky() {
+        // echo piped/chained to something else — could be dangerous
+        assert_ne!(
+            risk_level("echo test && rm -rf /"),
+            RiskLevel::None,
+            "Chained commands should still be assessed"
+        );
+    }
+
+    #[test]
+    fn test_alias_definition_is_safe() {
+        assert_eq!(risk_level("alias rm='rm -i'"), RiskLevel::None);
+        assert_eq!(risk_level("alias gp='git push --force'"), RiskLevel::None);
+    }
+
+    #[test]
+    fn test_comment_is_safe() {
+        assert_eq!(risk_level("# rm -rf /tmp"), RiskLevel::None);
+        assert_eq!(risk_level("# sudo apt install foo"), RiskLevel::None);
+    }
+
+    #[test]
+    fn test_force_with_lease_is_not_critical() {
+        // --force-with-lease is the safe variant of --force
+        assert_ne!(
+            risk_level("git push --force-with-lease"),
+            RiskLevel::Critical,
+            "force-with-lease should not trigger critical force-push"
+        );
+        // But plain --force is still critical
+        assert_eq!(
+            risk_level("git push origin main --force"),
+            RiskLevel::Critical
+        );
+        assert_eq!(
+            risk_level("git push --force origin main"),
+            RiskLevel::Critical
+        );
+    }
+
+    #[test]
+    fn test_is_non_executing() {
+        assert!(is_non_executing("# this is a comment"));
+        assert!(is_non_executing("echo hello world"));
+        assert!(is_non_executing("printf 'test'"));
+        assert!(is_non_executing("alias ll='ls -la'"));
+
+        assert!(!is_non_executing("rm -rf /tmp"));
+        assert!(!is_non_executing("echo test && rm -rf /"));
+        assert!(!is_non_executing("echo test | sh"));
+        assert!(!is_non_executing("git push --force"));
     }
 
     fn make_entry(command: &str, exit_code: Option<i32>) -> Entry {

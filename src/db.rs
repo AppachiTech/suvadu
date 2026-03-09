@@ -306,14 +306,21 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
 ///
 /// This enables `WHERE column REGEXP ?` in SQL, letting the database engine
 /// filter rows instead of loading them all into Rust for regex matching.
+///
+/// The compiled regex is cached in a `RefCell` so that the same pattern is only
+/// compiled once per query (not once per row). `SQLite` scalar-function callbacks
+/// run single-threaded, so `RefCell` is safe here.
 fn register_regexp(conn: &Connection) -> DbResult<()> {
     use rusqlite::functions::FunctionFlags;
+    use std::cell::RefCell;
+
+    let cache: RefCell<Option<(String, regex::Regex)>> = RefCell::new(None);
 
     conn.create_scalar_function(
         "regexp",
         2,
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
-        |ctx| {
+        move |ctx| {
             let pattern = ctx
                 .get_raw(0)
                 .as_str()
@@ -322,9 +329,19 @@ fn register_regexp(conn: &Connection) -> DbResult<()> {
                 .get_raw(1)
                 .as_str()
                 .map_err(|e| rusqlite::Error::UserFunctionError(e.into()))?;
-            let re = regex::Regex::new(pattern)
-                .map_err(|e| rusqlite::Error::UserFunctionError(e.into()))?;
-            Ok(re.is_match(value))
+
+            let mut cached = cache.borrow_mut();
+            let needs_compile = match &*cached {
+                Some((p, _)) => p != pattern,
+                None => true,
+            };
+            if needs_compile {
+                let re = regex::Regex::new(pattern)
+                    .map_err(|e| rusqlite::Error::UserFunctionError(e.into()))?;
+                *cached = Some((pattern.to_string(), re));
+            }
+
+            Ok(cached.as_ref().unwrap().1.is_match(value))
         },
     )?;
     Ok(())

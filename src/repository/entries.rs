@@ -126,19 +126,26 @@ impl Repository {
             .with_executor(filter.executor)
             .with_cwd(filter.cwd);
 
-        let limit_clause = filter
-            .limit
-            .map(|n| format!(" LIMIT {n}"))
-            .unwrap_or_default();
+        let limit_clause = if filter.limit.is_some() {
+            " LIMIT ?"
+        } else {
+            ""
+        };
 
         let sql = format!(
             "SELECT {ENTRY_COLUMNS} {ENTRY_JOINS}{} ORDER BY e.started_at ASC{limit_clause}",
             fb.build_where()
         );
 
+        let limit_val = filter.limit.map(|n| i64::try_from(n).unwrap_or(i64::MAX));
+        let mut params = fb.params_refs();
+        if let Some(ref val) = limit_val {
+            params.push(val);
+        }
+
         let mut stmt = self.conn.prepare(&sql)?;
         let entries = stmt
-            .query_map(fb.params_refs().as_slice(), |row| entry_from_row(row, 10))?
+            .query_map(params.as_slice(), |row| entry_from_row(row, 10))?
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(entries)

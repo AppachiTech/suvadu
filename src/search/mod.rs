@@ -221,95 +221,109 @@ impl SearchApp {
                     match self.handle_input(key) {
                         SearchAction::Select(cmd) => return Ok(Some(cmd)),
                         SearchAction::Exit => return Ok(None),
-                        SearchAction::Reload => {
-                            self.reload_entries(repo)?;
-                        }
-                        SearchAction::SetPage(page) => {
-                            self.set_page(repo, page)?;
-                        }
-                        SearchAction::Copy(cmd) => match Clipboard::new() {
-                            Ok(mut clipboard) => {
-                                if clipboard.set_text(cmd.clone()).is_ok() {
-                                    self.status_message =
-                                        Some(("Copied!".to_string(), std::time::Instant::now()));
-                                } else {
-                                    self.status_message = Some((
-                                        "Copy failed".to_string(),
-                                        std::time::Instant::now(),
-                                    ));
-                                }
-                            }
-                            Err(_) => {
-                                self.status_message = Some((
-                                    "Clipboard unavailable".to_string(),
-                                    std::time::Instant::now(),
-                                ));
-                            }
-                        },
-                        SearchAction::Delete(id) => {
-                            if repo.delete_entry(id).is_ok() {
-                                self.reload_entries(repo)?;
-                                self.status_message =
-                                    Some(("Deleted!".to_string(), std::time::Instant::now()));
-                            }
-                        }
-                        SearchAction::SaveNote(entry_id, text) => {
-                            if repo.upsert_note(entry_id, &text).is_ok() {
-                                self.noted_entry_ids.insert(entry_id);
-                                self.status_message =
-                                    Some(("Note saved!".to_string(), std::time::Instant::now()));
-                            }
-                        }
-                        SearchAction::DeleteNote(entry_id) => {
-                            if repo.delete_note(entry_id).is_ok() {
-                                self.noted_entry_ids.remove(&entry_id);
-                                self.status_message =
-                                    Some(("Note deleted".to_string(), std::time::Instant::now()));
-                            }
-                        }
-                        SearchAction::ToggleBookmark(cmd) => {
-                            if self.bookmarked_commands.contains(&cmd) {
-                                if repo.remove_bookmark(&cmd).is_ok() {
-                                    self.bookmarked_commands.remove(&cmd);
-                                    self.status_message = Some((
-                                        "Bookmark removed".to_string(),
-                                        std::time::Instant::now(),
-                                    ));
-                                }
-                            } else if repo.add_bookmark(&cmd, None).is_ok() {
-                                self.bookmarked_commands.insert(cmd);
-                                self.status_message =
-                                    Some(("Bookmarked!".to_string(), std::time::Instant::now()));
-                            }
-                        }
-                        SearchAction::AssociateSession(tag_id) => {
-                            let sid = std::env::var("SUVADU_SESSION_ID").unwrap_or_default();
-                            if sid.is_empty() {
-                                self.status_message = Some((
-                                    "No session ID found".to_string(),
-                                    std::time::Instant::now(),
-                                ));
-                            } else if let Err(e) = repo.tag_session(&sid, Some(tag_id)) {
-                                self.status_message =
-                                    Some((format!("Error: {e}"), std::time::Instant::now()));
-                            } else {
-                                let tag_name = self
-                                    .tags
-                                    .iter()
-                                    .find(|t| t.id == tag_id)
-                                    .map(|t| t.name.clone())
-                                    .unwrap_or_default();
-                                self.status_message = Some((
-                                    format!("Session tagged: {tag_name}"),
-                                    std::time::Instant::now(),
-                                ));
-                            }
-                        }
-                        SearchAction::Continue => {}
+                        SearchAction::Reload => self.reload_entries(repo)?,
+                        SearchAction::SetPage(page) => self.set_page(repo, page)?,
+                        other => self.dispatch_action(other, repo)?,
                     }
                 }
             }
         }
+    }
+
+    /// Handle side-effecting actions (copy, delete, notes, bookmarks, tags).
+    fn dispatch_action(
+        &mut self,
+        action: SearchAction,
+        repo: &Repository,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let now = std::time::Instant::now;
+        match action {
+            SearchAction::Copy(cmd) => match Clipboard::new() {
+                Ok(mut clipboard) => {
+                    if clipboard.set_text(cmd).is_ok() {
+                        self.status_message = Some(("Copied!".into(), now()));
+                    } else {
+                        self.status_message = Some(("Copy failed".into(), now()));
+                    }
+                }
+                Err(_) => {
+                    self.status_message = Some(("Clipboard unavailable".into(), now()));
+                }
+            },
+            SearchAction::Delete(id) => match repo.delete_entry(id) {
+                Ok(()) => {
+                    self.reload_entries(repo)?;
+                    self.status_message = Some(("Deleted!".into(), now()));
+                }
+                Err(e) => {
+                    self.status_message = Some((format!("Delete failed: {e}"), now()));
+                }
+            },
+            SearchAction::SaveNote(entry_id, text) => match repo.upsert_note(entry_id, &text) {
+                Ok(()) => {
+                    self.noted_entry_ids.insert(entry_id);
+                    self.status_message = Some(("Note saved!".into(), now()));
+                }
+                Err(e) => {
+                    self.status_message = Some((format!("Note save failed: {e}"), now()));
+                }
+            },
+            SearchAction::DeleteNote(entry_id) => match repo.delete_note(entry_id) {
+                Ok(_) => {
+                    self.noted_entry_ids.remove(&entry_id);
+                    self.status_message = Some(("Note deleted".into(), now()));
+                }
+                Err(e) => {
+                    self.status_message = Some((format!("Note delete failed: {e}"), now()));
+                }
+            },
+            SearchAction::ToggleBookmark(cmd) => {
+                if self.bookmarked_commands.contains(&cmd) {
+                    match repo.remove_bookmark(&cmd) {
+                        Ok(_) => {
+                            self.bookmarked_commands.remove(&cmd);
+                            self.status_message = Some(("Bookmark removed".into(), now()));
+                        }
+                        Err(e) => {
+                            self.status_message =
+                                Some((format!("Bookmark remove failed: {e}"), now()));
+                        }
+                    }
+                } else {
+                    match repo.add_bookmark(&cmd, None) {
+                        Ok(_) => {
+                            self.bookmarked_commands.insert(cmd);
+                            self.status_message = Some(("Bookmarked!".into(), now()));
+                        }
+                        Err(e) => {
+                            self.status_message = Some((format!("Bookmark failed: {e}"), now()));
+                        }
+                    }
+                }
+            }
+            SearchAction::AssociateSession(tag_id) => {
+                let sid = std::env::var("SUVADU_SESSION_ID").unwrap_or_default();
+                if sid.is_empty() {
+                    self.status_message = Some(("No session ID found".into(), now()));
+                } else if let Err(e) = repo.tag_session(&sid, Some(tag_id)) {
+                    self.status_message = Some((format!("Error: {e}"), now()));
+                } else {
+                    let tag_name = self
+                        .tags
+                        .iter()
+                        .find(|t| t.id == tag_id)
+                        .map(|t| t.name.clone())
+                        .unwrap_or_default();
+                    self.status_message = Some((format!("Session tagged: {tag_name}"), now()));
+                }
+            }
+            SearchAction::Continue
+            | SearchAction::Select(_)
+            | SearchAction::Exit
+            | SearchAction::Reload
+            | SearchAction::SetPage(_) => {}
+        }
+        Ok(())
     }
 }
 
@@ -382,17 +396,21 @@ pub fn run_search(
     repo: &Repository,
     args: &SearchArgs,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let config = crate::config::load_config().unwrap_or_default();
+    let config = crate::config::load_config().unwrap_or_else(|e| {
+        eprintln!("suvadu: config load failed, using defaults: {e}");
+        crate::config::Config::default()
+    });
     let page_size = config.search.page_limit;
     let effective_unique = args.unique_mode || config.search.show_unique_by_default;
     let tags = repo.get_tags().unwrap_or_default();
 
-    let tag_id = args
-        .tag
-        .map(|t| repo.get_tag_id_by_name(t))
-        .transpose()
-        .unwrap_or(None)
-        .flatten();
+    let tag_id = match args.tag.map(|t| repo.get_tag_id_by_name(t)).transpose() {
+        Ok(opt) => opt.flatten(),
+        Err(e) => {
+            eprintln!("suvadu: tag lookup failed: {e}");
+            None
+        }
+    };
 
     let filter_after = args.after.and_then(|s| util::parse_date_input(s, false));
     let filter_before = args.before.and_then(|s| util::parse_date_input(s, true));

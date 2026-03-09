@@ -181,7 +181,8 @@ pub fn init_theme(name: ThemeName) {
 
 /// Get the global theme. Falls back to dark theme if `init_theme` was not called.
 pub fn theme() -> &'static Theme {
-    &THEMES[THEME_INDEX.load(Ordering::Relaxed) as usize]
+    let idx = THEME_INDEX.load(Ordering::Relaxed).min(2) as usize;
+    &THEMES[idx]
 }
 
 #[cfg(test)]

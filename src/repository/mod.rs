@@ -435,6 +435,45 @@ mod filter_builder_tests {
     }
 }
 
+/// RAII guard for a database transaction. Automatically rolls back on drop
+/// unless `commit()` is called, preventing dangling transactions on error or panic.
+pub struct TransactionGuard<'a> {
+    repo: &'a Repository,
+    committed: bool,
+}
+
+impl<'a> TransactionGuard<'a> {
+    fn new(repo: &'a Repository) -> DbResult<Self> {
+        repo.begin_transaction()?;
+        Ok(Self {
+            repo,
+            committed: false,
+        })
+    }
+
+    /// Commit the current transaction.
+    pub fn commit(mut self) -> DbResult<()> {
+        self.committed = true;
+        self.repo.commit()
+    }
+
+    /// Commit the current batch and start a new transaction.
+    /// Useful for batched imports where periodic commits bound WAL growth.
+    pub fn recommit(&self) -> DbResult<()> {
+        self.repo.commit()?;
+        self.repo.begin_transaction()?;
+        Ok(())
+    }
+}
+
+impl Drop for TransactionGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = self.repo.rollback();
+        }
+    }
+}
+
 /// Repository for managing history entries and sessions
 pub struct Repository {
     conn: Connection,
@@ -503,6 +542,12 @@ impl Repository {
     pub fn rollback(&self) -> DbResult<()> {
         self.conn.execute_batch("ROLLBACK")?;
         Ok(())
+    }
+
+    /// Start a RAII-guarded transaction. The transaction is automatically rolled
+    /// back if the guard is dropped without calling `commit()` (e.g. on error or panic).
+    pub fn transaction(&self) -> DbResult<TransactionGuard<'_>> {
+        TransactionGuard::new(self)
     }
 
     /// Check if a (command, `started_at`) pair already exists in the database.

@@ -61,11 +61,7 @@ impl AgentApp {
         cwd: Option<&str>,
     ) -> Self {
         let home = dirs_home();
-        let period = if initial_after_ms.is_none() {
-            Period::AllTime
-        } else {
-            Period::Today
-        };
+        let period = Period::from_after_ms(initial_after_ms);
 
         let entries = load_entries(repo, initial_after_ms, executor, cwd);
         let risk_summary = risk::session_risk(&entries);
