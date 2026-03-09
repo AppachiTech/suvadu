@@ -1,5 +1,12 @@
 use crate::config;
 
+/// Shell-safe single-quoting: wraps `value` in single quotes,
+/// escaping any embedded single quotes as `'\''`.
+fn shell_quote_single(value: &str) -> String {
+    let escaped = value.replace('\'', "'\\''");
+    format!("'{escaped}'")
+}
+
 /// Executor-detection function for **zsh** shell scripts.
 const fn zsh_executor_detection_script() -> &'static str {
     r#"# Detect executor type and name
@@ -128,6 +135,7 @@ __suvadu_detect_executor() {
 ///
 /// `bin_path` is interpolated into the script via `format!()`.
 fn zsh_preexec_script(bin_path: &str) -> String {
+    let escaped = shell_quote_single(bin_path);
     format!(
         r#"# Suvadu - Shell History Integration
 # Add this to your ~/.zshrc:
@@ -152,7 +160,7 @@ alias suvadu="suv"
 export SUVADU_SESSION_ID="${{SUVADU_SESSION_ID:-$(uuidgen)}}"
 _SUVADU_START_TIME=0
 _SUVADU_OFFSET=-1
-_SUVADU_BIN="{bin_path}"
+_SUVADU_BIN={escaped}
 
 "#
     )
@@ -312,6 +320,7 @@ zle -N suvadu-down-arrow _suvadu_down_arrow_widget
 ///
 /// `bin_path` is interpolated into the script via `format!()`.
 fn bash_preexec_script(bin_path: &str) -> String {
+    let escaped = shell_quote_single(bin_path);
     format!(
         r#"# Suvadu - Bash Shell History Integration
 # Add this to your ~/.bashrc:
@@ -329,7 +338,7 @@ alias suvadu="suv"
 export SUVADU_SESSION_ID="${{SUVADU_SESSION_ID:-$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null || head -c16 /dev/urandom 2>/dev/null | od -A n -t x1 | tr -d ' \n' || echo "bash-$$-$RANDOM")}}"
 _SUVADU_START_TIME=0
 _SUVADU_CMD=""
-_SUVADU_BIN="{bin_path}"
+_SUVADU_BIN={escaped}
 
 "#
     )
@@ -520,6 +529,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_shell_quote_simple_path() {
+        assert_eq!(
+            shell_quote_single("/usr/local/bin/suv"),
+            "'/usr/local/bin/suv'"
+        );
+    }
+
+    #[test]
+    fn test_shell_quote_path_with_spaces() {
+        assert_eq!(shell_quote_single("/my path/to/suv"), "'/my path/to/suv'");
+    }
+
+    #[test]
+    fn test_shell_quote_path_with_single_quote() {
+        assert_eq!(shell_quote_single("/it's/a/path"), "'/it'\\''s/a/path'");
+    }
+
+    #[test]
+    fn test_shell_quote_path_with_dollar() {
+        // Single quotes prevent shell expansion of $
+        assert_eq!(shell_quote_single("/path/$HOME/suv"), "'/path/$HOME/suv'");
+    }
+
+    #[test]
     fn test_zsh_hook_generation() {
         let config = config::Config::default();
         let hook = get_zsh_hook(&config).expect("Failed to generate zsh hook");
@@ -577,8 +610,8 @@ mod tests {
         let config = config::Config::default();
         let hook = get_zsh_hook(&config).expect("Failed to generate zsh hook");
 
-        // Verify the binary path is set correctly
-        assert!(hook.contains("_SUVADU_BIN=\""));
+        // Verify the binary path is single-quoted for shell safety
+        assert!(hook.contains("_SUVADU_BIN='"));
     }
 
     #[test]

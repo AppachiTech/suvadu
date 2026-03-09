@@ -53,7 +53,7 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let arch_suffix = if platform == "linux" && std::env::consts::ARCH == "aarch64" {
+    let arch_suffix = if std::env::consts::ARCH == "aarch64" {
         "-aarch64"
     } else {
         ""

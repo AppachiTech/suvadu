@@ -156,7 +156,7 @@ impl SearchApp {
         &mut self,
         repo: &Repository,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let use_fuzzy = self.query.len() >= 2;
+        let use_fuzzy = !self.query.is_empty();
 
         if use_fuzzy {
             // Fuzzy path: fetch broad candidates from DB, then score + rank
