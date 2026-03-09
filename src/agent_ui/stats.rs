@@ -812,6 +812,14 @@ where
     loop {
         terminal.draw(|f| app.render(f))?;
 
+        let timeout = if app.status_message.is_some() {
+            std::time::Duration::from_secs(2)
+        } else {
+            std::time::Duration::from_secs(60)
+        };
+        if !event::poll(timeout)? {
+            continue;
+        }
         if let Event::Key(key) = event::read()? {
             if key.kind != KeyEventKind::Press {
                 continue;

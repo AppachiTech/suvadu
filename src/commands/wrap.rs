@@ -43,7 +43,8 @@ pub fn handle_wrap(
         eprintln!("suvadu: failed to record command: {e}");
     }
 
-    // Exit with the command's exit code
+    // Flush stderr before exiting — process::exit skips destructors and buffer flushes
+    let _ = std::io::Write::flush(&mut std::io::stderr());
     process::exit(exit_code);
 }
 

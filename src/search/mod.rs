@@ -216,6 +216,14 @@ impl SearchApp {
         loop {
             self.render(terminal)?;
 
+            let timeout = if self.status_message.is_some() {
+                std::time::Duration::from_secs(2)
+            } else {
+                std::time::Duration::from_secs(60)
+            };
+            if !event::poll(timeout)? {
+                continue;
+            }
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     match self.handle_input(key) {

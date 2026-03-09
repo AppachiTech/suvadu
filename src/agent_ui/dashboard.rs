@@ -1165,6 +1165,15 @@ where
     loop {
         terminal.draw(|f| app.render(f))?;
 
+        // Poll with timeout so stale status messages get cleared even without user input
+        let timeout = if app.status_message.is_some() {
+            std::time::Duration::from_secs(2)
+        } else {
+            std::time::Duration::from_secs(60)
+        };
+        if !event::poll(timeout)? {
+            continue; // timeout — re-render to clear stale status
+        }
         if let Event::Key(key) = event::read()? {
             if key.kind != KeyEventKind::Press {
                 continue;

@@ -68,6 +68,28 @@ impl Entry {
         self.tag_id = tag_id;
         self
     }
+
+    /// Test helper: create an entry with sensible defaults.
+    /// Reduces duplicated `make_entry`/`create_test_entry` helpers across test modules.
+    #[cfg(test)]
+    pub fn test(command: &str) -> Self {
+        Self::new(
+            "test-session".to_string(),
+            command.to_string(),
+            "/test".to_string(),
+            Some(0),
+            1_000_000,
+            1_000_050,
+        )
+    }
+
+    /// Test helper: create an entry with a specific exit code.
+    #[cfg(test)]
+    pub fn test_with_exit(command: &str, exit_code: Option<i32>) -> Self {
+        let mut entry = Self::test(command);
+        entry.exit_code = exit_code;
+        entry
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

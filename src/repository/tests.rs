@@ -2186,3 +2186,220 @@ fn test_vacuum() {
     let (_dir, repo) = setup_test_db();
     repo.vacuum().unwrap();
 }
+
+// ── Stats Tests ──────────────────────────────────────────
+
+/// Insert a batch of entries with varying commands, times, and exit codes for stats tests.
+fn populate_stats_data(repo: &Repository) {
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    let now = chrono::Utc::now().timestamp_millis();
+    let day_ms = 86_400_000i64;
+
+    let entries = vec![
+        // Recent commands (today)
+        ("git status", Some(0), now - 1000, None, None),
+        ("git status", Some(0), now - 2000, None, None),
+        ("git diff", Some(0), now - 3000, None, None),
+        (
+            "cargo test",
+            Some(0),
+            now - 4000,
+            Some("human"),
+            Some("terminal"),
+        ),
+        (
+            "cargo test",
+            Some(1),
+            now - 5000,
+            Some("human"),
+            Some("terminal"),
+        ),
+        // Older commands (10 days ago)
+        (
+            "npm install",
+            Some(0),
+            now - 10 * day_ms,
+            Some("agent"),
+            Some("claude-code"),
+        ),
+        ("ls -la", Some(0), now - 10 * day_ms + 1000, None, None),
+        // Very old commands (60 days ago)
+        ("old-command", Some(0), now - 60 * day_ms, None, None),
+    ];
+
+    for (cmd, exit_code, started_at, etype, exec) in entries {
+        let mut entry = Entry::new(
+            session.id.clone(),
+            cmd.to_string(),
+            "/test".to_string(),
+            exit_code,
+            started_at,
+            started_at + 500,
+        );
+        entry.executor_type = etype.map(String::from);
+        entry.executor = exec.map(String::from);
+        repo.insert_entry(&entry).unwrap();
+    }
+}
+
+#[test]
+fn test_get_stats_all_time() {
+    let (_dir, repo) = setup_test_db();
+    populate_stats_data(&repo);
+
+    let stats = repo.get_stats(None, 5, None).unwrap();
+    assert_eq!(stats.total_commands, 8);
+    assert_eq!(stats.unique_commands, 6);
+    assert!(stats.success_count >= 6);
+    assert!(stats.failure_count >= 1);
+    assert!(!stats.top_commands.is_empty());
+    // Both "git status" and "cargo test" have count=2; either can be first
+    assert_eq!(
+        stats.top_commands[0].1, 2,
+        "Top command should have count 2"
+    );
+}
+
+#[test]
+fn test_get_stats_with_day_filter() {
+    let (_dir, repo) = setup_test_db();
+    populate_stats_data(&repo);
+
+    // Only last 7 days — should exclude 10-day-old and 60-day-old entries
+    let stats = repo.get_stats(Some(7), 5, None).unwrap();
+    assert_eq!(stats.total_commands, 5, "Only recent entries within 7 days");
+    assert_eq!(stats.period_days, Some(7));
+}
+
+#[test]
+fn test_get_stats_with_tag_filter() {
+    let (_dir, repo) = setup_test_db();
+    populate_stats_data(&repo);
+
+    let tag_id = repo.create_tag("work", None).unwrap();
+    // Tag the session
+    let sessions = repo.list_sessions(None, None, 1).unwrap();
+    repo.tag_session(&sessions[0].id, Some(tag_id)).unwrap();
+
+    let stats = repo.get_stats(None, 5, Some(tag_id)).unwrap();
+    assert_eq!(
+        stats.total_commands, 8,
+        "All entries belong to the tagged session"
+    );
+}
+
+#[test]
+fn test_get_stats_empty_db() {
+    let (_dir, repo) = setup_test_db();
+    let stats = repo.get_stats(None, 5, None).unwrap();
+    assert_eq!(stats.total_commands, 0);
+    assert_eq!(stats.unique_commands, 0);
+    assert!(stats.top_commands.is_empty());
+    assert!(stats.hourly_distribution.is_empty());
+}
+
+#[test]
+fn test_get_stats_executor_breakdown() {
+    let (_dir, repo) = setup_test_db();
+    populate_stats_data(&repo);
+
+    let stats = repo.get_stats(None, 5, None).unwrap();
+    assert!(
+        !stats.executor_breakdown.is_empty(),
+        "Should have executor breakdown"
+    );
+    // Entries without executor_type default to 'human'
+    let total: i64 = stats.executor_breakdown.iter().map(|(_, c)| c).sum();
+    assert_eq!(total, 8);
+}
+
+#[test]
+fn test_get_daily_activity() {
+    let (_dir, repo) = setup_test_db();
+    populate_stats_data(&repo);
+
+    let activity = repo.get_daily_activity(30, None).unwrap();
+    assert!(!activity.is_empty(), "Should have daily activity data");
+
+    // Each row is (date_string, day_of_week, count)
+    for (date, dow, count) in &activity {
+        assert!(!date.is_empty());
+        assert!(*dow <= 6, "Day of week should be 0-6");
+        assert!(*count > 0);
+    }
+}
+
+#[test]
+fn test_get_daily_activity_with_tag() {
+    let (_dir, repo) = setup_test_db();
+    populate_stats_data(&repo);
+
+    let tag_id = repo.create_tag("test-tag", None).unwrap();
+    let sessions = repo.list_sessions(None, None, 1).unwrap();
+    repo.tag_session(&sessions[0].id, Some(tag_id)).unwrap();
+
+    let activity = repo.get_daily_activity(30, Some(tag_id)).unwrap();
+    assert!(!activity.is_empty());
+}
+
+#[test]
+fn test_get_frequent_commands_basic() {
+    let (_dir, repo) = setup_test_db();
+    populate_stats_data(&repo);
+
+    let frequent = repo
+        .get_frequent_commands_filtered(None, 2, 1, 10, false)
+        .unwrap();
+    assert!(!frequent.is_empty(), "Should find frequently used commands");
+
+    // "git status" appears 2 times → should be in results
+    let git_status = frequent.iter().find(|(cmd, _, _)| cmd == "git status");
+    assert!(
+        git_status.is_some(),
+        "git status (count=2) should appear with min_count=2"
+    );
+}
+
+#[test]
+fn test_get_frequent_commands_human_only() {
+    let (_dir, repo) = setup_test_db();
+    populate_stats_data(&repo);
+
+    let all = repo
+        .get_frequent_commands_filtered(None, 1, 1, 50, false)
+        .unwrap();
+    let human = repo
+        .get_frequent_commands_filtered(None, 1, 1, 50, true)
+        .unwrap();
+
+    // human_only should exclude agent-typed entries (npm install by claude-code)
+    let has_npm_all = all.iter().any(|(cmd, _, _)| cmd == "npm install");
+    let has_npm_human = human.iter().any(|(cmd, _, _)| cmd == "npm install");
+    assert!(
+        has_npm_all,
+        "npm install should appear in unfiltered results"
+    );
+    assert!(
+        !has_npm_human,
+        "npm install (agent executor) should be excluded in human_only mode"
+    );
+}
+
+#[test]
+fn test_get_frequent_commands_with_day_filter() {
+    let (_dir, repo) = setup_test_db();
+    populate_stats_data(&repo);
+
+    let frequent = repo
+        .get_frequent_commands_filtered(Some(7), 1, 1, 50, false)
+        .unwrap();
+
+    // Should exclude entries older than 7 days
+    let has_old = frequent.iter().any(|(cmd, _, _)| cmd == "old-command");
+    assert!(
+        !has_old,
+        "old-command (60 days ago) should be excluded with 7-day filter"
+    );
+}

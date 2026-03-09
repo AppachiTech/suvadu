@@ -46,7 +46,7 @@ impl SearchApp {
             KeyCode::Tab => {
                 self.view.detail_pane_open = !self.view.detail_pane_open;
             }
-            KeyCode::Char(c) if self.query.len() < MAX_INPUT_LEN => {
+            KeyCode::Char(c) if self.query.len() + c.len_utf8() <= MAX_INPUT_LEN => {
                 self.query.push(c);
                 return SearchAction::Reload;
             }
@@ -210,7 +210,7 @@ impl SearchApp {
             }
             KeyCode::Char(c) => {
                 if let DialogState::Note { ref mut input, .. } = self.dialog {
-                    if input.len() < MAX_INPUT_LEN {
+                    if input.len() + c.len_utf8() <= MAX_INPUT_LEN {
                         input.push(c);
                     }
                 }
@@ -266,7 +266,7 @@ impl SearchApp {
             }
             KeyCode::Char(c) if c.is_ascii_digit() => {
                 if let DialogState::GoToPage { ref mut input } = self.dialog {
-                    if input.len() < MAX_INPUT_LEN {
+                    if input.len() + c.len_utf8() <= MAX_INPUT_LEN {
                         input.push(c);
                     }
                 }
@@ -354,19 +354,19 @@ impl SearchApp {
                 _ => {}
             },
             KeyCode::Char(c) => match self.filters.focus_index {
-                0 if self.filters.start_date_input.len() < MAX_INPUT_LEN => {
+                0 if self.filters.start_date_input.len() + c.len_utf8() <= MAX_INPUT_LEN => {
                     self.filters.start_date_input.push(c);
                 }
-                1 if self.filters.end_date_input.len() < MAX_INPUT_LEN => {
+                1 if self.filters.end_date_input.len() + c.len_utf8() <= MAX_INPUT_LEN => {
                     self.filters.end_date_input.push(c);
                 }
-                2 if self.filters.tag_filter_input.len() < MAX_INPUT_LEN => {
+                2 if self.filters.tag_filter_input.len() + c.len_utf8() <= MAX_INPUT_LEN => {
                     self.filters.tag_filter_input.push(c);
                 }
-                3 if self.filters.exit_code_input.len() < MAX_INPUT_LEN => {
+                3 if self.filters.exit_code_input.len() + c.len_utf8() <= MAX_INPUT_LEN => {
                     self.filters.exit_code_input.push(c);
                 }
-                4 if self.filters.executor_filter_input.len() < MAX_INPUT_LEN => {
+                4 if self.filters.executor_filter_input.len() + c.len_utf8() <= MAX_INPUT_LEN => {
                     self.filters.executor_filter_input.push(c);
                 }
                 _ => {}
