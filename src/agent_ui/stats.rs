@@ -9,7 +9,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table, Wrap};
 use ratatui::Terminal;
 
-use crate::models::Entry;
 use crate::repository::Repository;
 use crate::risk::{self, RiskLevel};
 use crate::theme::theme;
@@ -42,6 +41,17 @@ struct AgentStat {
     high_risk_cmds: Vec<HighRiskEntry>,
 }
 
+/// Per-executor accumulator for single-pass stats aggregation.
+struct AgentStatBuilder {
+    total: usize,
+    success: usize,
+    total_duration: i64,
+    high_risk: usize,
+    pkg_count: usize,
+    dir_counts: HashMap<String, usize>,
+    high_risk_cmds: Vec<HighRiskEntry>,
+}
+
 struct AgentStatsApp {
     agents: Vec<AgentStat>,
     period: Period,
@@ -71,74 +81,79 @@ impl AgentStatsApp {
         }
     }
 
+    /// Single-pass streaming aggregation: iterates entries once, accumulating
+    /// per-executor stats without cloning entries into a `HashMap<String, Vec<Entry>>`.
     fn compute(repo: &Repository, period: Period, executor: Option<&str>) -> Vec<AgentStat> {
         let entries = load_entries(repo, period.after_ms(), executor, None);
-        let mut by_agent: HashMap<String, Vec<Entry>> = HashMap::new();
-        for e in entries {
-            let name = e.executor.clone().unwrap_or_else(|| "unknown".into());
-            by_agent.entry(name).or_default().push(e);
+
+        let mut builders: HashMap<String, AgentStatBuilder> = HashMap::new();
+
+        for e in &entries {
+            let name = e.executor.as_deref().unwrap_or("unknown");
+            let b = builders
+                .entry(name.to_string())
+                .or_insert_with(|| AgentStatBuilder {
+                    total: 0,
+                    success: 0,
+                    total_duration: 0,
+                    high_risk: 0,
+                    pkg_count: 0,
+                    dir_counts: HashMap::new(),
+                    high_risk_cmds: Vec::new(),
+                });
+
+            b.total += 1;
+            if e.exit_code == Some(0) {
+                b.success += 1;
+            }
+            b.total_duration = b.total_duration.saturating_add(e.duration_ms);
+
+            // Risk assessment (single call gives both level + details)
+            if let Some(a) = risk::assess_risk(&e.command) {
+                if a.level >= RiskLevel::High {
+                    b.high_risk += 1;
+                    b.high_risk_cmds.push(HighRiskEntry {
+                        command: e.command.clone(),
+                        cwd: e.cwd.clone(),
+                        started_at: e.started_at,
+                        exit_code: e.exit_code,
+                        level: a.level,
+                    });
+                }
+            }
+
+            // Package extraction (avoids needing session_risk per group)
+            if let Some(pkg) = risk::extract_packages(&e.command) {
+                b.pkg_count += pkg.packages.len();
+            }
+
+            *b.dir_counts.entry(e.cwd.clone()).or_default() += 1;
         }
 
-        let mut result: Vec<AgentStat> = by_agent
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_wrap)]
+        let mut result: Vec<AgentStat> = builders
             .into_iter()
-            .map(|(name, cmds)| {
-                let total = cmds.len();
-                let success = cmds.iter().filter(|e| e.exit_code == Some(0)).count();
-                #[allow(clippy::cast_precision_loss, clippy::cast_possible_wrap)]
-                let avg_duration_ms = if total > 0 {
-                    cmds.iter()
-                        .fold(0i64, |acc, e| acc.saturating_add(e.duration_ms))
-                        / total as i64
+            .map(|(name, b)| {
+                let avg_duration_ms = if b.total > 0 {
+                    b.total_duration / b.total as i64
                 } else {
                     0
                 };
-                let high_risk = cmds
-                    .iter()
-                    .filter(|e| risk::risk_level(&e.command) >= RiskLevel::High)
-                    .count();
-                let rsummary = risk::session_risk(&cmds);
-                let pkg_count: usize = rsummary
-                    .packages_installed
-                    .iter()
-                    .map(|p| p.packages.len())
-                    .sum();
-
-                let mut dir_counts: HashMap<String, usize> = HashMap::new();
-                for e in &cmds {
-                    *dir_counts.entry(e.cwd.clone()).or_default() += 1;
-                }
-                let mut top_dirs: Vec<_> = dir_counts.into_iter().collect();
+                let mut top_dirs: Vec<_> = b.dir_counts.into_iter().collect();
                 top_dirs.sort_by(|a, b| b.1.cmp(&a.1));
                 top_dirs.truncate(10);
 
-                let mut high_risk_cmds: Vec<HighRiskEntry> = cmds
-                    .iter()
-                    .filter_map(|e| {
-                        risk::assess_risk(&e.command).and_then(|a| {
-                            if a.level >= RiskLevel::High {
-                                Some(HighRiskEntry {
-                                    command: e.command.clone(),
-                                    cwd: e.cwd.clone(),
-                                    started_at: e.started_at,
-                                    exit_code: e.exit_code,
-                                    level: a.level,
-                                })
-                            } else {
-                                None
-                            }
-                        })
-                    })
-                    .collect();
+                let mut high_risk_cmds = b.high_risk_cmds;
                 high_risk_cmds.sort_by(|a, b| b.started_at.cmp(&a.started_at));
                 high_risk_cmds.truncate(20);
 
                 AgentStat {
                     name,
-                    total,
-                    success,
+                    total: b.total,
+                    success: b.success,
                     avg_duration_ms,
-                    high_risk,
-                    pkg_count,
+                    high_risk: b.high_risk,
+                    pkg_count: b.pkg_count,
                     top_dirs,
                     high_risk_cmds,
                 }

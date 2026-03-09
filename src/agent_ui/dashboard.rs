@@ -18,8 +18,7 @@ use crate::theme::theme;
 use crate::util::{dirs_home, shorten_path};
 
 use super::{
-    compute_agent_counts, compute_risk_levels, format_datetime, format_full_datetime, load_entries,
-    truncate, Period,
+    compute_agent_counts, format_datetime, format_full_datetime, load_entries, truncate, Period,
 };
 
 const PAGE_SIZE: usize = 50;
@@ -28,10 +27,12 @@ struct AgentApp {
     entries: Vec<Entry>,
     /// Filtered indices into `entries`, recent first
     visible: Vec<usize>,
-    risk_levels: Vec<RiskLevel>,
     risk_summary: SessionRisk,
     agent_counts: Vec<(String, usize)>,
     agent_names: Vec<String>,
+
+    /// Precomputed count of high-risk entries in `visible` (for header display).
+    visible_high_risk_count: usize,
 
     // Filters
     period: Period,
@@ -67,20 +68,23 @@ impl AgentApp {
         };
 
         let entries = load_entries(repo, initial_after_ms, executor, cwd);
-        let risk_levels = compute_risk_levels(&entries);
         let risk_summary = risk::session_risk(&entries);
         let agent_counts = compute_agent_counts(&entries);
         let agent_names: Vec<String> = agent_counts.iter().map(|(n, _)| n.clone()).collect();
         // Recent first
         let visible: Vec<usize> = (0..entries.len()).rev().collect();
+        let visible_high_risk_count = visible
+            .iter()
+            .filter(|&&i| risk::risk_level(&entries[i].command) >= RiskLevel::High)
+            .count();
 
         let mut app = Self {
             entries,
             visible,
-            risk_levels,
             risk_summary,
             agent_counts,
             agent_names,
+            visible_high_risk_count,
             period,
             agent_filter: None,
             risk_filter: false,
@@ -107,7 +111,6 @@ impl AgentApp {
             self.cli_executor.as_deref(),
             self.cwd_filter.as_deref(),
         );
-        self.risk_levels = compute_risk_levels(&self.entries);
         self.risk_summary = risk::session_risk(&self.entries);
         self.agent_counts = compute_agent_counts(&self.entries);
         self.agent_names = self.agent_counts.iter().map(|(n, _)| n.clone()).collect();
@@ -124,7 +127,9 @@ impl AgentApp {
             .agent_filter
             .and_then(|i| self.agent_names.get(i).cloned());
 
-        // Recent first
+        let mut high_risk_count = 0usize;
+
+        // Recent first — compute risk on-demand during filter pass
         self.visible = (0..self.entries.len())
             .rev()
             .filter(|&i| {
@@ -134,13 +139,24 @@ impl AgentApp {
                         return false;
                     }
                 }
-                if self.risk_filter && self.risk_levels[i] < RiskLevel::Medium {
-                    return false;
+                if self.risk_filter {
+                    let rl = risk::risk_level(&self.entries[i].command);
+                    if rl < RiskLevel::Medium {
+                        return false;
+                    }
+                    if rl >= RiskLevel::High {
+                        high_risk_count += 1;
+                    }
+                    return true;
+                }
+                if risk::risk_level(&self.entries[i].command) >= RiskLevel::High {
+                    high_risk_count += 1;
                 }
                 true
             })
             .collect();
 
+        self.visible_high_risk_count = high_risk_count;
         self.page = 1;
         if self.visible.is_empty() {
             self.table_state.select(None);
@@ -173,11 +189,8 @@ impl AgentApp {
     }
 
     fn selected_risk(&self) -> RiskLevel {
-        let page_offset = (self.page - 1) * self.page_size;
-        self.table_state
-            .selected()
-            .and_then(|i| self.visible.get(page_offset + i))
-            .map_or(RiskLevel::None, |&idx| self.risk_levels[idx])
+        self.selected_entry()
+            .map_or(RiskLevel::None, |e| risk::risk_level(&e.command))
     }
 
     // ── Input ────────────────────────────────────────────────
@@ -327,11 +340,7 @@ impl AgentApp {
 
     fn render_header(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
         let total = self.visible.len();
-        let risk_count = self
-            .visible
-            .iter()
-            .filter(|&&i| self.risk_levels[i] >= RiskLevel::High)
-            .count();
+        let risk_count = self.visible_high_risk_count;
 
         let agent_label = self
             .agent_filter
@@ -548,8 +557,7 @@ impl AgentApp {
         };
 
         let page_items: Vec<usize> = self.page_slice().to_vec();
-        let rows =
-            Self::build_table_rows(&self.entries, &self.risk_levels, &self.home, &page_items, t);
+        let rows = Self::build_table_rows(&self.entries, &self.home, &page_items, t);
         let title = self.build_table_title(&page_items);
 
         let header = Row::new(vec![
@@ -623,7 +631,6 @@ impl AgentApp {
 
     fn build_table_rows<'a>(
         entries: &'a [Entry],
-        risk_levels: &[RiskLevel],
         home: &str,
         page_items: &[usize],
         t: &crate::theme::Theme,
@@ -632,7 +639,7 @@ impl AgentApp {
             .iter()
             .map(|&idx| {
                 let entry = &entries[idx];
-                let rl = risk_levels[idx];
+                let rl = risk::risk_level(&entry.command);
 
                 let time = format_datetime(entry.started_at);
                 let executor = entry.executor.as_deref().unwrap_or("unknown");

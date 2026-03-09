@@ -376,7 +376,7 @@ pub fn session_risk(entries: &[Entry]) -> SessionRisk {
 }
 
 /// Best-effort extraction of package names from install commands
-fn extract_packages(command: &str) -> Option<PackageInstall> {
+pub fn extract_packages(command: &str) -> Option<PackageInstall> {
     let cmd = command.trim();
 
     // npm/yarn/pnpm install <packages>

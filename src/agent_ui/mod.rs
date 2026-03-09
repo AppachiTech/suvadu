@@ -10,9 +10,6 @@ use chrono::{Local, TimeZone};
 
 use crate::models::Entry;
 use crate::repository::Repository;
-use crate::risk;
-use crate::risk::RiskLevel;
-
 // ── Period selector ──────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -84,13 +81,6 @@ pub fn load_entries(
     } else {
         all.into_iter().filter(Entry::is_agent).collect()
     }
-}
-
-pub fn compute_risk_levels(entries: &[Entry]) -> Vec<RiskLevel> {
-    entries
-        .iter()
-        .map(|e| risk::risk_level(&e.command))
-        .collect()
 }
 
 pub fn compute_agent_counts(entries: &[Entry]) -> Vec<(String, usize)> {
