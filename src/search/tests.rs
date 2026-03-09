@@ -59,8 +59,8 @@ fn test_search_app_initialization() {
     let app = SearchApp::new(test_search_config(entries, 2));
 
     assert_eq!(app.entries.len(), 2);
-    assert_eq!(app.page, 1);
-    assert_eq!(app.total_items, 2);
+    assert_eq!(app.pagination.page, 1);
+    assert_eq!(app.pagination.total_items, 2);
 }
 
 #[test]
@@ -78,7 +78,7 @@ fn test_pagination_logic() {
     }
 
     // Prev page (from page 2)
-    app.page = 2;
+    app.pagination.page = 2;
     let key = KeyEvent::from(KeyCode::Left);
     let action = app.handle_input(key);
     match action {
@@ -213,19 +213,19 @@ fn test_active_filter_count() {
 
     assert_eq!(app.active_filter_count(), 0);
 
-    app.filter_exit_code = Some(0);
+    app.filters.exit_code = Some(0);
     assert_eq!(app.active_filter_count(), 1);
 
-    app.filter_after = Some(1000);
+    app.filters.after = Some(1000);
     assert_eq!(app.active_filter_count(), 2);
 
-    app.filter_before = Some(2000);
+    app.filters.before = Some(2000);
     assert_eq!(app.active_filter_count(), 3);
 
-    app.filter_tag_id = Some(1);
+    app.filters.tag_id = Some(1);
     assert_eq!(app.active_filter_count(), 4);
 
-    app.filter_executor_type = Some("human".to_string());
+    app.filters.executor_type = Some("human".to_string());
     assert_eq!(app.active_filter_count(), 5);
 }
 
@@ -388,7 +388,7 @@ fn test_handle_input_ctrl_f_opens_filter() {
     let key = ctrl_key('f');
     let action = app.handle_input(key);
     assert!(matches!(action, SearchAction::Continue));
-    assert!(app.filter_mode);
+    assert!(matches!(app.dialog, DialogState::Filter));
 }
 
 #[test]
@@ -433,7 +433,7 @@ fn test_handle_input_delete_dialog_yes() {
     // Open the delete dialog via Ctrl+D
     let action = app.handle_input(ctrl_key('d'));
     assert!(matches!(action, SearchAction::Continue));
-    assert!(app.delete_dialog_open);
+    assert!(matches!(app.dialog, DialogState::Delete { .. }));
 
     // Press 'y' to confirm
     let key = KeyEvent::from(KeyCode::Char('y'));
@@ -454,13 +454,13 @@ fn test_handle_input_delete_dialog_no() {
 
     // Open the delete dialog
     app.handle_input(ctrl_key('d'));
-    assert!(app.delete_dialog_open);
+    assert!(matches!(app.dialog, DialogState::Delete { .. }));
 
     // Press 'n' to cancel
     let key = KeyEvent::from(KeyCode::Char('n'));
     let action = app.handle_input(key);
     assert!(matches!(action, SearchAction::Continue));
-    assert!(!app.delete_dialog_open);
+    assert!(matches!(app.dialog, DialogState::None));
 }
 
 #[test]
@@ -470,7 +470,7 @@ fn test_handle_input_goto_enter() {
 
     // Open goto dialog
     app.handle_input(ctrl_key('g'));
-    assert!(app.goto_dialog_open);
+    assert!(matches!(app.dialog, DialogState::GoToPage { .. }));
 
     // Type page number "3"
     app.handle_input(KeyEvent::from(KeyCode::Char('3')));
@@ -490,12 +490,12 @@ fn test_handle_input_filter_enter() {
 
     // Open filter mode
     app.handle_input(ctrl_key('f'));
-    assert!(app.filter_mode);
+    assert!(matches!(app.dialog, DialogState::Filter));
 
     // Press Enter to apply (empty filters)
     let action = app.handle_input(KeyEvent::from(KeyCode::Enter));
     assert!(matches!(action, SearchAction::Reload));
-    assert!(!app.filter_mode);
+    assert!(matches!(app.dialog, DialogState::None));
 }
 
 #[test]
@@ -546,7 +546,7 @@ fn test_handle_input_left_right_pages() {
     }
 
     // Simulate being on page 3, press Left -> page 2
-    app.page = 3;
+    app.pagination.page = 3;
     let action = app.handle_input(KeyEvent::from(KeyCode::Left));
     match action {
         SearchAction::SetPage(p) => assert_eq!(p, 2),
@@ -554,7 +554,7 @@ fn test_handle_input_left_right_pages() {
     }
 
     // At page 1, Left should not change page
-    app.page = 1;
+    app.pagination.page = 1;
     let action = app.handle_input(KeyEvent::from(KeyCode::Left));
     assert!(matches!(action, SearchAction::Continue));
 }

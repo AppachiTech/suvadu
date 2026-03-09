@@ -14,7 +14,7 @@ use ratatui::{
 };
 use std::io;
 
-use super::{centered_rect, fill_text, SearchApp};
+use super::{centered_rect, fill_text, DialogState, SearchApp};
 
 impl SearchApp {
     pub(super) fn render(
@@ -55,12 +55,9 @@ impl SearchApp {
             };
             let unique_badge = if self.unique_mode { " [unique]" } else { "" };
 
-            let search_border_color = if self.filter_mode {
-                t.border
-            } else {
-                t.border_focus
-            };
-            let search_title = if self.filter_mode {
+            let in_filter = matches!(self.dialog, DialogState::Filter);
+            let search_border_color = if in_filter { t.border } else { t.border_focus };
+            let search_title = if in_filter {
                 "Search"
             } else {
                 "Search (Typing)"
@@ -96,16 +93,13 @@ impl SearchApp {
             self.render_footer(f, chunks[3]);
 
             // Render Overlays
-            if self.filter_mode {
-                self.render_filter_popup(f, f.area());
-            } else if self.goto_dialog_open {
-                self.render_goto_dialog(f, f.area());
-            } else if self.delete_dialog_open {
-                self.render_delete_dialog(f, f.area());
-            } else if self.tag_dialog_open {
-                self.render_tag_dialog(f, f.area());
-            } else if self.note_dialog_open {
-                self.render_note_dialog(f, f.area());
+            match self.dialog {
+                DialogState::Filter => self.render_filter_popup(f, f.area()),
+                DialogState::GoToPage { .. } => self.render_goto_dialog(f, f.area()),
+                DialogState::Delete { .. } => self.render_delete_dialog(f, f.area()),
+                DialogState::TagAssociation => self.render_tag_dialog(f, f.area()),
+                DialogState::Note { .. } => self.render_note_dialog(f, f.area()),
+                DialogState::None => {}
             }
         })?;
 
@@ -116,9 +110,13 @@ impl SearchApp {
 
     pub(super) fn render_footer(&self, f: &mut ratatui::Frame, area: Rect) {
         let t = theme();
-        let total_pages = self.total_items.div_ceil(self.page_size).max(1);
+        let total_pages = self
+            .pagination
+            .total_items
+            .div_ceil(self.pagination.page_size)
+            .max(1);
         let progress_pct = if total_pages > 0 {
-            (self.page * 100) / total_pages
+            (self.pagination.page * 100) / total_pages
         } else {
             0
         };
@@ -137,7 +135,10 @@ impl SearchApp {
         self.append_active_filter_badges(&mut help_badges);
 
         // Page progress
-        let page_info = format!(" {}/{} ({progress_pct}%) ", self.page, total_pages);
+        let page_info = format!(
+            " {}/{} ({progress_pct}%) ",
+            self.pagination.page, total_pages
+        );
         help_badges.push(Span::styled(page_info, Style::default().fg(t.text_muted)));
 
         if let Some(msg) = status_text {
@@ -190,7 +191,7 @@ impl SearchApp {
             Span::styled(" Note  ", badge_label_style),
             Span::styled(" ^L ", badge_key_style),
             Span::styled(
-                if self.filter_cwd.is_some() {
+                if self.filters.cwd.is_some() {
                     " All Dirs  "
                 } else {
                     " Here  "
@@ -221,35 +222,35 @@ impl SearchApp {
     fn append_active_filter_badges(&self, badges: &mut Vec<Span<'static>>) {
         let t = theme();
 
-        if self.filter_after.is_some() || self.filter_before.is_some() {
+        if self.filters.after.is_some() || self.filters.before.is_some() {
             badges.push(Span::styled(
                 " date ",
                 Style::default().bg(t.info).fg(Color::Black),
             ));
             badges.push(Span::raw(" "));
         }
-        if self.filter_tag_id.is_some() {
+        if self.filters.tag_id.is_some() {
             badges.push(Span::styled(
                 " tag ",
                 Style::default().bg(t.warning).fg(Color::Black),
             ));
             badges.push(Span::raw(" "));
         }
-        if self.filter_exit_code.is_some() {
+        if self.filters.exit_code.is_some() {
             badges.push(Span::styled(
                 " exit ",
                 Style::default().bg(t.error).fg(Color::White),
             ));
             badges.push(Span::raw(" "));
         }
-        if self.filter_executor_type.is_some() {
+        if self.filters.executor_type.is_some() {
             badges.push(Span::styled(
                 " exec ",
                 Style::default().bg(t.badge_executor).fg(Color::White),
             ));
             badges.push(Span::raw(" "));
         }
-        if self.filter_cwd.is_some() {
+        if self.filters.cwd.is_some() {
             badges.push(Span::styled(
                 " dir ",
                 Style::default().bg(t.badge_path).fg(Color::Black),
@@ -324,9 +325,13 @@ impl SearchApp {
         f.render_stateful_widget(table, table_area, &mut self.table_state);
 
         // Scrollbar
-        let total_pages = self.total_items.div_ceil(self.page_size).max(1);
+        let total_pages = self
+            .pagination
+            .total_items
+            .div_ceil(self.pagination.page_size)
+            .max(1);
         let mut scrollbar_state =
-            ScrollbarState::new(total_pages).position(self.page.saturating_sub(1));
+            ScrollbarState::new(total_pages).position(self.pagination.page.saturating_sub(1));
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .thumb_style(Style::default().fg(t.primary_dim))
             .track_style(Style::default().fg(t.border));
@@ -418,14 +423,14 @@ impl SearchApp {
     }
 
     fn build_table_title(&self) -> String {
-        if self.total_items == 0 {
+        if self.pagination.total_items == 0 {
             "History (0/0)".to_string()
         } else {
-            let start_index = (self.page - 1) * self.page_size + 1;
+            let start_index = (self.pagination.page - 1) * self.pagination.page_size + 1;
             let end_index = start_index + self.entries.len().saturating_sub(1);
             format!(
                 "History ({}-{} / {})",
-                start_index, end_index, self.total_items
+                start_index, end_index, self.pagination.total_items
             )
         }
     }
@@ -644,9 +649,10 @@ impl SearchApp {
 
     fn render_filter_progress(&self, f: &mut ratatui::Frame, area: Rect) {
         let t = theme();
+        let focus = self.filters.focus_index;
         let mut progress_line: Vec<Span> = (0..5)
             .map(|i| {
-                if i == self.focus_index {
+                if i == focus {
                     Span::styled(" ■ ", Style::default().fg(t.primary))
                 } else {
                     Span::styled(" □ ", Style::default().fg(t.text_muted))
@@ -655,11 +661,7 @@ impl SearchApp {
             .collect();
         let field_names = ["Start Date", "End Date", "Tag", "Exit Code", "Executor"];
         progress_line.push(Span::styled(
-            format!(
-                "  Field {} of 5: {}",
-                self.focus_index + 1,
-                field_names[self.focus_index]
-            ),
+            format!("  Field {} of 5: {}", focus + 1, field_names[focus]),
             Style::default().fg(t.text_secondary),
         ));
         f.render_widget(
@@ -673,29 +675,33 @@ impl SearchApp {
         let fields: Vec<(&str, &str, &str)> = vec![
             (
                 "Start Date (After)",
-                &self.start_date_input,
+                &self.filters.start_date_input,
                 "e.g. today, yesterday, 2024-01-15",
             ),
             (
                 "End Date (Before)",
-                &self.end_date_input,
+                &self.filters.end_date_input,
                 "e.g. today, 3 days ago, 2024-12-31",
             ),
-            ("Tag Name", &self.tag_filter_input, "e.g. work, personal"),
+            (
+                "Tag Name",
+                &self.filters.tag_filter_input,
+                "e.g. work, personal",
+            ),
             (
                 "Exit Code",
-                &self.exit_code_input,
+                &self.filters.exit_code_input,
                 "e.g. 0 (success), 1 (failure)",
             ),
             (
                 "Executor",
-                &self.executor_filter_input,
+                &self.filters.executor_filter_input,
                 "e.g. human, agent, ide, ci, vscode",
             ),
         ];
 
         for (i, (title, value, hint)) in fields.iter().enumerate() {
-            let is_focused = self.focus_index == i;
+            let is_focused = self.filters.focus_index == i;
             let border_color = if is_focused { t.border_focus } else { t.border };
             let text_color = if is_focused { t.text } else { t.text_secondary };
 
@@ -828,7 +834,11 @@ impl SearchApp {
 
     pub(super) fn render_goto_dialog(&self, f: &mut ratatui::Frame, area: Rect) {
         let t = theme();
-        let total_pages = self.total_items.div_ceil(self.page_size).max(1);
+        let total_pages = self
+            .pagination
+            .total_items
+            .div_ceil(self.pagination.page_size)
+            .max(1);
 
         let block = Block::default()
             .title(" Go To Page ")
@@ -847,7 +857,12 @@ impl SearchApp {
             .constraints([Constraint::Length(3), Constraint::Length(1)].as_ref())
             .split(popup_area);
 
-        let input = Paragraph::new(self.goto_input.as_str())
+        let goto_text = if let DialogState::GoToPage { ref input } = self.dialog {
+            input.as_str()
+        } else {
+            ""
+        };
+        let input = Paragraph::new(goto_text)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -885,7 +900,12 @@ impl SearchApp {
             .constraints([Constraint::Length(3), Constraint::Length(1)].as_ref())
             .split(popup_area);
 
-        let input = Paragraph::new(self.note_input.as_str())
+        let note_text = if let DialogState::Note { ref input, .. } = self.dialog {
+            input.as_str()
+        } else {
+            ""
+        };
+        let input = Paragraph::new(note_text)
             .block(
                 Block::default()
                     .borders(Borders::ALL)

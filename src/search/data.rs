@@ -17,19 +17,19 @@ impl SearchApp {
     /// Count active filters for badge display
     pub(super) const fn active_filter_count(&self) -> usize {
         let mut count = 0;
-        if self.filter_after.is_some() {
+        if self.filters.after.is_some() {
             count += 1;
         }
-        if self.filter_before.is_some() {
+        if self.filters.before.is_some() {
             count += 1;
         }
-        if self.filter_tag_id.is_some() {
+        if self.filters.tag_id.is_some() {
             count += 1;
         }
-        if self.filter_exit_code.is_some() {
+        if self.filters.exit_code.is_some() {
             count += 1;
         }
-        if self.filter_executor_type.is_some() {
+        if self.filters.executor_type.is_some() {
             count += 1;
         }
         count
@@ -38,14 +38,14 @@ impl SearchApp {
     /// Build a `QueryFilter` from the current search state.
     fn build_query_filter<'a>(&'a self, query: Option<&'a str>) -> QueryFilter<'a> {
         QueryFilter {
-            after: self.filter_after,
-            before: self.filter_before,
-            tag_id: self.filter_tag_id,
-            exit_code: self.filter_exit_code,
+            after: self.filters.after,
+            before: self.filters.before,
+            tag_id: self.filters.tag_id,
+            exit_code: self.filters.exit_code,
             query,
             prefix_match: false,
-            executor: self.filter_executor_type.as_deref(),
-            cwd: self.filter_cwd.as_deref(),
+            executor: self.filters.executor_type.as_deref(),
+            cwd: self.filters.cwd.as_deref(),
             field: self.search_field,
         }
     }
@@ -195,9 +195,9 @@ impl SearchApp {
                     Self::fuzzy_score(entries, &self.query, boost_cwd, self.search_field);
             }
 
-            self.total_items = self.fuzzy_results.len();
-            self.page = 1;
-            let end = self.page_size.min(self.fuzzy_results.len());
+            self.pagination.total_items = self.fuzzy_results.len();
+            self.pagination.page = 1;
+            let end = self.pagination.page_size.min(self.fuzzy_results.len());
             self.entries = self.fuzzy_results[..end].to_vec();
         } else {
             // Non-fuzzy path: use DB-level LIKE filtering + pagination
@@ -211,10 +211,11 @@ impl SearchApp {
 
             if self.unique_mode {
                 let new_count = repo.count_unique_filtered(&qf)?;
-                let unique_res = repo.get_unique_entries_filtered(self.page_size, 0, &qf, true)?;
+                let unique_res =
+                    repo.get_unique_entries_filtered(self.pagination.page_size, 0, &qf, true)?;
                 // qf no longer needed — safe to mutate self
-                self.total_items = usize::try_from(new_count)?;
-                self.page = 1;
+                self.pagination.total_items = usize::try_from(new_count)?;
+                self.pagination.page = 1;
                 let (entries, counts): (Vec<Entry>, Vec<i64>) = unique_res.into_iter().unzip();
                 self.unique_counts.clear();
                 for (entry, count) in entries.iter().zip(counts.iter()) {
@@ -225,10 +226,10 @@ impl SearchApp {
                 self.entries = entries;
             } else {
                 let new_count = repo.count_filtered(&qf)?;
-                let new_entries = repo.get_entries_filtered(self.page_size, 0, &qf)?;
+                let new_entries = repo.get_entries_filtered(self.pagination.page_size, 0, &qf)?;
                 // qf no longer needed — safe to mutate self
-                self.total_items = usize::try_from(new_count)?;
-                self.page = 1;
+                self.pagination.total_items = usize::try_from(new_count)?;
+                self.pagination.page = 1;
                 self.entries = new_entries;
             }
         }
@@ -246,8 +247,8 @@ impl SearchApp {
         repo: &Repository,
         page: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.page = page;
-        let offset = (self.page - 1) * self.page_size;
+        self.pagination.page = page;
+        let offset = (self.pagination.page - 1) * self.pagination.page_size;
 
         if self.fuzzy_results.is_empty() {
             // Standard DB-level pagination
@@ -260,7 +261,7 @@ impl SearchApp {
 
             if self.unique_mode {
                 let unique_res =
-                    repo.get_unique_entries_filtered(self.page_size, offset, &qf, true)?;
+                    repo.get_unique_entries_filtered(self.pagination.page_size, offset, &qf, true)?;
                 let (entries, counts): (Vec<Entry>, Vec<i64>) = unique_res.into_iter().unzip();
                 self.unique_counts.clear();
                 for (entry, count) in entries.iter().zip(counts.iter()) {
@@ -270,11 +271,11 @@ impl SearchApp {
                 }
                 self.entries = entries;
             } else {
-                self.entries = repo.get_entries_filtered(self.page_size, offset, &qf)?;
+                self.entries = repo.get_entries_filtered(self.pagination.page_size, offset, &qf)?;
             }
         } else {
             // Fuzzy mode: paginate from in-memory scored results
-            let end = (offset + self.page_size).min(self.fuzzy_results.len());
+            let end = (offset + self.pagination.page_size).min(self.fuzzy_results.len());
             self.entries = if offset < self.fuzzy_results.len() {
                 self.fuzzy_results[offset..end].to_vec()
             } else {

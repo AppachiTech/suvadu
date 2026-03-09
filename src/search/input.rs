@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::{SearchAction, SearchApp};
+use super::{DialogState, SearchAction, SearchApp};
 use crate::util;
 
 /// Maximum length for any text input field (query, filters, notes, etc.).
@@ -8,20 +8,13 @@ const MAX_INPUT_LEN: usize = 2000;
 
 impl SearchApp {
     pub(super) fn handle_input(&mut self, key: KeyEvent) -> SearchAction {
-        if self.delete_dialog_open {
-            return self.handle_delete_dialog_input(key);
-        }
-        if self.goto_dialog_open {
-            return self.handle_goto_dialog_input(key);
-        }
-        if self.tag_dialog_open {
-            return self.handle_tag_dialog_input(key);
-        }
-        if self.note_dialog_open {
-            return self.handle_note_dialog_input(key);
-        }
-        if self.filter_mode {
-            return self.handle_filter_input(key);
+        match self.dialog {
+            DialogState::Delete { .. } => return self.handle_delete_dialog_input(key),
+            DialogState::GoToPage { .. } => return self.handle_goto_dialog_input(key),
+            DialogState::TagAssociation => return self.handle_tag_dialog_input(key),
+            DialogState::Note { .. } => return self.handle_note_dialog_input(key),
+            DialogState::Filter => return self.handle_filter_input(key),
+            DialogState::None => {}
         }
         self.handle_normal_input(key)
     }
@@ -36,14 +29,17 @@ impl SearchApp {
 
         match key.code {
             KeyCode::Left => {
-                if self.page > 1 {
-                    return SearchAction::SetPage(self.page - 1);
+                if self.pagination.page > 1 {
+                    return SearchAction::SetPage(self.pagination.page - 1);
                 }
             }
             KeyCode::Right => {
-                let total_pages = self.total_items.div_ceil(self.page_size);
-                if self.page < total_pages {
-                    return SearchAction::SetPage(self.page + 1);
+                let total_pages = self
+                    .pagination
+                    .total_items
+                    .div_ceil(self.pagination.page_size);
+                if self.pagination.page < total_pages {
+                    return SearchAction::SetPage(self.pagination.page + 1);
                 }
             }
             KeyCode::Tab => {
@@ -87,23 +83,24 @@ impl SearchApp {
     fn handle_ctrl_shortcut(&mut self, code: KeyCode) -> Option<SearchAction> {
         match code {
             KeyCode::Char('g') => {
-                self.goto_dialog_open = true;
-                self.goto_input.clear();
+                self.dialog = DialogState::GoToPage {
+                    input: String::new(),
+                };
             }
             KeyCode::Char('t') => {
-                self.tag_dialog_open = true;
+                self.dialog = DialogState::TagAssociation;
                 if !self.tags.is_empty() {
                     self.tag_list_state.select(Some(0));
                 }
             }
             KeyCode::Char('u') => {
                 self.unique_mode = !self.unique_mode;
-                self.page = 1;
+                self.pagination.page = 1;
                 return Some(SearchAction::Reload);
             }
             KeyCode::Char('f') => {
-                self.filter_mode = true;
-                self.focus_index = 0;
+                self.dialog = DialogState::Filter;
+                self.filters.focus_index = 0;
             }
             KeyCode::Char('y') => {
                 if let Some(cmd) = self.get_selected_command() {
@@ -113,8 +110,7 @@ impl SearchApp {
             KeyCode::Char('d') => {
                 if let Some(entry) = self.get_selected_entry() {
                     if let Some(id) = entry.id {
-                        self.pending_delete_id = Some(id);
-                        self.delete_dialog_open = true;
+                        self.dialog = DialogState::Delete { entry_id: id };
                     }
                 }
             }
@@ -126,9 +122,10 @@ impl SearchApp {
             KeyCode::Char('n') => {
                 if let Some(entry) = self.get_selected_entry() {
                     if let Some(id) = entry.id {
-                        self.note_entry_id = Some(id);
-                        self.note_input.clear();
-                        self.note_dialog_open = true;
+                        self.dialog = DialogState::Note {
+                            entry_id: id,
+                            input: String::new(),
+                        };
                     }
                 }
             }
@@ -145,12 +142,12 @@ impl SearchApp {
                 return Some(SearchAction::Reload);
             }
             KeyCode::Char('l') => {
-                if self.filter_cwd.is_some() {
-                    self.filter_cwd = None;
+                if self.filters.cwd.is_some() {
+                    self.filters.cwd = None;
                 } else if let Ok(cwd) = std::env::current_dir() {
-                    self.filter_cwd = Some(cwd.to_string_lossy().to_string());
+                    self.filters.cwd = Some(cwd.to_string_lossy().to_string());
                 }
-                self.page = 1;
+                self.pagination.page = 1;
                 return Some(SearchAction::Reload);
             }
             _ => return None,
@@ -160,7 +157,7 @@ impl SearchApp {
 
     fn handle_tag_dialog_input(&mut self, key: KeyEvent) -> SearchAction {
         match key.code {
-            KeyCode::Esc => self.tag_dialog_open = false,
+            KeyCode::Esc => self.dialog = DialogState::None,
             KeyCode::Up => {
                 if let Some(selected) = self.tag_list_state.selected() {
                     if selected > 0 {
@@ -180,11 +177,11 @@ impl SearchApp {
             KeyCode::Enter => {
                 if let Some(selected) = self.tag_list_state.selected() {
                     if let Some(tag) = self.tags.get(selected) {
-                        self.tag_dialog_open = false;
+                        self.dialog = DialogState::None;
                         return SearchAction::AssociateSession(tag.id);
                     }
                 }
-                self.tag_dialog_open = false;
+                self.dialog = DialogState::None;
             }
             _ => {}
         }
@@ -194,46 +191,44 @@ impl SearchApp {
     fn handle_note_dialog_input(&mut self, key: KeyEvent) -> SearchAction {
         match key.code {
             KeyCode::Esc => {
-                self.note_dialog_open = false;
-                self.note_input.clear();
-                self.note_entry_id = None;
+                self.dialog = DialogState::None;
             }
             KeyCode::Enter => {
-                if let Some(entry_id) = self.note_entry_id {
-                    self.note_dialog_open = false;
-                    let text = self.note_input.clone();
-                    self.note_input.clear();
-                    self.note_entry_id = None;
-                    if text.is_empty() {
+                let old = std::mem::take(&mut self.dialog);
+                if let DialogState::Note { input, entry_id } = old {
+                    if input.is_empty() {
                         return SearchAction::DeleteNote(entry_id);
                     }
-                    return SearchAction::SaveNote(entry_id, text);
+                    return SearchAction::SaveNote(entry_id, input);
                 }
-                self.note_dialog_open = false;
             }
             KeyCode::Backspace => {
-                self.note_input.pop();
+                if let DialogState::Note { ref mut input, .. } = self.dialog {
+                    input.pop();
+                }
             }
-            KeyCode::Char(c) if self.note_input.len() < MAX_INPUT_LEN => {
-                self.note_input.push(c);
+            KeyCode::Char(c) => {
+                if let DialogState::Note { ref mut input, .. } = self.dialog {
+                    if input.len() < MAX_INPUT_LEN {
+                        input.push(c);
+                    }
+                }
             }
             _ => {}
         }
         SearchAction::Continue
     }
 
-    const fn handle_delete_dialog_input(&mut self, key: KeyEvent) -> SearchAction {
+    fn handle_delete_dialog_input(&mut self, key: KeyEvent) -> SearchAction {
         match key.code {
             KeyCode::Char('y') | KeyCode::Enter => {
-                if let Some(id) = self.pending_delete_id {
-                    self.delete_dialog_open = false;
-                    self.pending_delete_id = None;
-                    return SearchAction::Delete(id);
+                if let DialogState::Delete { entry_id } = self.dialog {
+                    self.dialog = DialogState::None;
+                    return SearchAction::Delete(entry_id);
                 }
             }
             KeyCode::Char('n') | KeyCode::Esc => {
-                self.delete_dialog_open = false;
-                self.pending_delete_id = None;
+                self.dialog = DialogState::None;
             }
             _ => {}
         }
@@ -243,24 +238,37 @@ impl SearchApp {
     fn handle_goto_dialog_input(&mut self, key: KeyEvent) -> SearchAction {
         match key.code {
             KeyCode::Enter => {
-                if let Ok(page_num) = self.goto_input.parse::<usize>() {
-                    let total_pages = self.total_items.div_ceil(self.page_size);
+                let parsed = if let DialogState::GoToPage { ref input } = self.dialog {
+                    input.parse::<usize>().ok()
+                } else {
+                    None
+                };
+                self.dialog = DialogState::None;
+                if let Some(page_num) = parsed {
+                    let total_pages = self
+                        .pagination
+                        .total_items
+                        .div_ceil(self.pagination.page_size);
                     if total_pages > 0 {
                         let page_num = page_num.max(1).min(total_pages);
-                        self.goto_dialog_open = false;
                         return SearchAction::SetPage(page_num);
                     }
                 }
-                self.goto_dialog_open = false;
             }
             KeyCode::Esc => {
-                self.goto_dialog_open = false;
+                self.dialog = DialogState::None;
             }
             KeyCode::Backspace => {
-                self.goto_input.pop();
+                if let DialogState::GoToPage { ref mut input } = self.dialog {
+                    input.pop();
+                }
             }
-            KeyCode::Char(c) if c.is_ascii_digit() && self.goto_input.len() < MAX_INPUT_LEN => {
-                self.goto_input.push(c);
+            KeyCode::Char(c) if c.is_ascii_digit() => {
+                if let DialogState::GoToPage { ref mut input } = self.dialog {
+                    if input.len() < MAX_INPUT_LEN {
+                        input.push(c);
+                    }
+                }
             }
             _ => {}
         }
@@ -270,37 +278,37 @@ impl SearchApp {
     fn handle_filter_input(&mut self, key: KeyEvent) -> SearchAction {
         match key.code {
             KeyCode::Esc => {
-                self.filter_mode = false;
+                self.dialog = DialogState::None;
             }
             KeyCode::Tab => {
-                self.focus_index = (self.focus_index + 1) % 5;
+                self.filters.focus_index = (self.filters.focus_index + 1) % 5;
             }
             KeyCode::BackTab => {
-                self.focus_index = if self.focus_index == 0 {
+                self.filters.focus_index = if self.filters.focus_index == 0 {
                     4
                 } else {
-                    self.focus_index - 1
+                    self.filters.focus_index - 1
                 };
             }
             KeyCode::Enter => {
                 // Apply filters
-                self.filter_after = if self.start_date_input.is_empty() {
+                self.filters.after = if self.filters.start_date_input.is_empty() {
                     None
                 } else {
-                    util::parse_date_input(&self.start_date_input, false)
+                    util::parse_date_input(&self.filters.start_date_input, false)
                 };
 
-                self.filter_before = if self.end_date_input.is_empty() {
+                self.filters.before = if self.filters.end_date_input.is_empty() {
                     None
                 } else {
-                    util::parse_date_input(&self.end_date_input, true)
+                    util::parse_date_input(&self.filters.end_date_input, true)
                 };
 
                 // Resolve tag name to ID
-                self.filter_tag_id = if self.tag_filter_input.is_empty() {
+                self.filters.tag_id = if self.filters.tag_filter_input.is_empty() {
                     None
                 } else {
-                    let input_lower = self.tag_filter_input.to_lowercase();
+                    let input_lower = self.filters.tag_filter_input.to_lowercase();
                     self.tags
                         .iter()
                         .find(|t| t.name == input_lower)
@@ -308,57 +316,57 @@ impl SearchApp {
                 };
 
                 // Parse exit code
-                self.filter_exit_code = if self.exit_code_input.is_empty() {
+                self.filters.exit_code = if self.filters.exit_code_input.is_empty() {
                     None
                 } else {
-                    self.exit_code_input.trim().parse::<i32>().ok()
+                    self.filters.exit_code_input.trim().parse::<i32>().ok()
                 };
 
                 // Parse executor filter
-                self.filter_executor_type = if self.executor_filter_input.is_empty() {
+                self.filters.executor_type = if self.filters.executor_filter_input.is_empty() {
                     None
                 } else {
-                    Some(self.executor_filter_input.trim().to_lowercase())
+                    Some(self.filters.executor_filter_input.trim().to_lowercase())
                 };
 
-                self.filter_mode = false;
+                self.dialog = DialogState::None;
                 // Reset to page 1 on new filter
-                self.page = 1;
+                self.pagination.page = 1;
                 return SearchAction::Reload;
             }
-            KeyCode::Backspace => match self.focus_index {
+            KeyCode::Backspace => match self.filters.focus_index {
                 0 => {
-                    self.start_date_input.pop();
+                    self.filters.start_date_input.pop();
                 }
                 1 => {
-                    self.end_date_input.pop();
+                    self.filters.end_date_input.pop();
                 }
                 2 => {
-                    self.tag_filter_input.pop();
+                    self.filters.tag_filter_input.pop();
                 }
                 3 => {
-                    self.exit_code_input.pop();
+                    self.filters.exit_code_input.pop();
                 }
                 4 => {
-                    self.executor_filter_input.pop();
+                    self.filters.executor_filter_input.pop();
                 }
                 _ => {}
             },
-            KeyCode::Char(c) => match self.focus_index {
-                0 if self.start_date_input.len() < MAX_INPUT_LEN => {
-                    self.start_date_input.push(c);
+            KeyCode::Char(c) => match self.filters.focus_index {
+                0 if self.filters.start_date_input.len() < MAX_INPUT_LEN => {
+                    self.filters.start_date_input.push(c);
                 }
-                1 if self.end_date_input.len() < MAX_INPUT_LEN => {
-                    self.end_date_input.push(c);
+                1 if self.filters.end_date_input.len() < MAX_INPUT_LEN => {
+                    self.filters.end_date_input.push(c);
                 }
-                2 if self.tag_filter_input.len() < MAX_INPUT_LEN => {
-                    self.tag_filter_input.push(c);
+                2 if self.filters.tag_filter_input.len() < MAX_INPUT_LEN => {
+                    self.filters.tag_filter_input.push(c);
                 }
-                3 if self.exit_code_input.len() < MAX_INPUT_LEN => {
-                    self.exit_code_input.push(c);
+                3 if self.filters.exit_code_input.len() < MAX_INPUT_LEN => {
+                    self.filters.exit_code_input.push(c);
                 }
-                4 if self.executor_filter_input.len() < MAX_INPUT_LEN => {
-                    self.executor_filter_input.push(c);
+                4 if self.filters.executor_filter_input.len() < MAX_INPUT_LEN => {
+                    self.filters.executor_filter_input.push(c);
                 }
                 _ => {}
             },

@@ -33,6 +33,51 @@ pub enum SearchAction {
     DeleteNote(i64),
 }
 
+/// Mutually exclusive dialog overlay states.
+#[derive(Default)]
+pub enum DialogState {
+    #[default]
+    None,
+    Filter,
+    Delete {
+        entry_id: i64,
+    },
+    GoToPage {
+        input: String,
+    },
+    TagAssociation,
+    Note {
+        entry_id: i64,
+        input: String,
+    },
+}
+
+/// Active filter values and filter-dialog text inputs.
+pub struct FilterState {
+    // Applied filter values
+    pub after: Option<i64>,
+    pub before: Option<i64>,
+    pub tag_id: Option<i64>,
+    pub exit_code: Option<i32>,
+    pub executor_type: Option<String>,
+    pub cwd: Option<String>,
+
+    // Dialog text inputs (persist across filter-dialog open/close)
+    pub start_date_input: String,
+    pub end_date_input: String,
+    pub tag_filter_input: String,
+    pub exit_code_input: String,
+    pub executor_filter_input: String,
+    pub focus_index: usize, // 0=start, 1=end, 2=tag, 3=exit, 4=executor
+}
+
+/// Pagination state.
+pub struct PaginationState {
+    pub page: usize, // 1-based index
+    pub total_items: usize,
+    pub page_size: usize,
+}
+
 /// Configuration bundle for constructing a `SearchApp`, reducing constructor parameter count.
 #[allow(clippy::struct_excessive_bools)]
 pub struct SearchConfig {
@@ -69,52 +114,20 @@ pub struct SearchApp {
     entries: Vec<Entry>,
     table_state: TableState,
 
-    // Pagination State
-    pub page: usize, // 1-based index
-    pub total_items: usize,
-    pub page_size: usize,
-
-    // Filter Mode State
-    filter_mode: bool,
-    start_date_input: String,
-    end_date_input: String,
-    tag_filter_input: String,      // Tag name to filter by
-    exit_code_input: String,       // Exit code to filter by
-    executor_filter_input: String, // Executor type/name to filter by
-    focus_index: usize,            // 0=start, 1=end, 2=tag, 3=exit, 4=executor
-
-    // Active Filters
-    pub filter_after: Option<i64>,
-    pub filter_before: Option<i64>,
-    pub filter_tag_id: Option<i64>,
-    pub filter_exit_code: Option<i32>,
-    pub filter_executor_type: Option<String>,
+    pub pagination: PaginationState,
+    pub filters: FilterState,
+    dialog: DialogState,
 
     // Unique Mode
     pub unique_mode: bool,
-    pub unique_counts: std::collections::HashMap<i64, i64>, // entry_id -> count
+    pub unique_counts: std::collections::HashMap<i64, i64>,
 
-    // Delete Dialog State
-    delete_dialog_open: bool,
-    pending_delete_id: Option<i64>,
-
-    // Go To Page Dialog
-    goto_dialog_open: bool,
-    goto_input: String,
-
-    // Tag Association Dialog
-    tag_dialog_open: bool,
+    // Tags (for tag association dialog)
     tags: Vec<Tag>,
     tag_list_state: ListState,
 
     // Notes
     noted_entry_ids: std::collections::HashSet<i64>,
-    note_dialog_open: bool,
-    note_input: String,
-    note_entry_id: Option<i64>,
-
-    // Directory filter
-    pub filter_cwd: Option<String>,
 
     // Context-aware boost
     context_boost: bool,
@@ -153,43 +166,36 @@ impl SearchApp {
             entries: cfg.entries,
             table_state: TableState::default(),
 
-            page: cfg.page,
-            total_items: cfg.total_items,
-            page_size: cfg.page_size.max(1),
+            pagination: PaginationState {
+                page: cfg.page,
+                total_items: cfg.total_items,
+                page_size: cfg.page_size.max(1),
+            },
 
-            filter_mode: false,
-            start_date_input: start_default,
-            end_date_input: end_default,
-            tag_filter_input: cfg.tag_filter_input.unwrap_or_default(),
-            exit_code_input: cfg.exit_code_input.unwrap_or_default(),
-            executor_filter_input: cfg.executor_filter_input.unwrap_or_default(),
-            focus_index: 0,
+            filters: FilterState {
+                after: cfg.filter_after,
+                before: cfg.filter_before,
+                tag_id: cfg.filter_tag_id,
+                exit_code: cfg.filter_exit_code,
+                executor_type: cfg.filter_executor_type,
+                cwd: cfg.filter_cwd,
+                start_date_input: start_default,
+                end_date_input: end_default,
+                tag_filter_input: cfg.tag_filter_input.unwrap_or_default(),
+                exit_code_input: cfg.exit_code_input.unwrap_or_default(),
+                executor_filter_input: cfg.executor_filter_input.unwrap_or_default(),
+                focus_index: 0,
+            },
 
-            filter_after: cfg.filter_after,
-            filter_before: cfg.filter_before,
-            filter_tag_id: cfg.filter_tag_id,
-            filter_exit_code: cfg.filter_exit_code,
-            filter_executor_type: cfg.filter_executor_type,
+            dialog: DialogState::None,
 
             unique_mode: cfg.unique_mode,
             unique_counts: cfg.unique_counts,
 
-            delete_dialog_open: false,
-            pending_delete_id: None,
-
-            goto_dialog_open: false,
-            goto_input: String::new(),
-
-            tag_dialog_open: false,
             tags: cfg.tags,
             tag_list_state: ListState::default(),
 
             noted_entry_ids: cfg.noted_entry_ids,
-            note_dialog_open: false,
-            note_input: String::new(),
-            note_entry_id: None,
-
-            filter_cwd: cfg.filter_cwd,
 
             detail_pane_open: cfg.show_detail_pane,
             show_risk_in_search: cfg.show_risk_in_search,
