@@ -361,9 +361,75 @@ fn is_non_executing(cmd: &str) -> bool {
     false
 }
 
-/// Check if the command contains shell operators that chain execution
+/// Check if the command contains shell operators that chain execution.
+/// Quote-aware: ignores operators inside single or double-quoted strings.
 fn has_shell_chaining(cmd: &str) -> bool {
-    cmd.contains(" | ") || cmd.contains(" && ") || cmd.contains(" || ") || cmd.contains(';')
+    let bytes = cmd.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while i < len {
+        let b = bytes[i];
+
+        // Backslash escaping (not inside single quotes — bash single quotes are fully literal)
+        if b == b'\\' && !in_single && i + 1 < len {
+            i += 2;
+            continue;
+        }
+
+        // Toggle single quote state (ignored inside double quotes)
+        if b == b'\'' && !in_double {
+            in_single = !in_single;
+            i += 1;
+            continue;
+        }
+
+        // Toggle double quote state (ignored inside single quotes)
+        if b == b'"' && !in_single {
+            in_double = !in_double;
+            i += 1;
+            continue;
+        }
+
+        // Only detect operators when outside all quotes
+        if !in_single && !in_double {
+            // Semicolon (no surrounding spaces required)
+            if b == b';' {
+                return true;
+            }
+
+            if b == b' ' {
+                // " | " — pipe (3 chars)
+                if i + 2 < len && bytes[i + 1] == b'|' && bytes[i + 2] == b' ' {
+                    return true;
+                }
+
+                // " && " — logical and (4 chars)
+                if i + 3 < len
+                    && bytes[i + 1] == b'&'
+                    && bytes[i + 2] == b'&'
+                    && bytes[i + 3] == b' '
+                {
+                    return true;
+                }
+
+                // " || " — logical or (4 chars)
+                if i + 3 < len
+                    && bytes[i + 1] == b'|'
+                    && bytes[i + 2] == b'|'
+                    && bytes[i + 3] == b' '
+                {
+                    return true;
+                }
+            }
+        }
+
+        i += 1;
+    }
+
+    false
 }
 
 /// Get the risk level for a command (convenience wrapper)
@@ -717,6 +783,114 @@ mod tests {
         assert!(!is_non_executing("echo test && rm -rf /"));
         assert!(!is_non_executing("echo test | sh"));
         assert!(!is_non_executing("git push --force"));
+    }
+
+    // ── has_shell_chaining quote-awareness tests ────────────────────────
+
+    #[test]
+    fn test_chaining_unquoted_pipe() {
+        assert!(has_shell_chaining("echo test | sh"));
+        assert!(has_shell_chaining("cat file | grep foo"));
+    }
+
+    #[test]
+    fn test_chaining_unquoted_and() {
+        assert!(has_shell_chaining("echo test && rm -rf /"));
+        assert!(has_shell_chaining("make && make install"));
+    }
+
+    #[test]
+    fn test_chaining_unquoted_or() {
+        assert!(has_shell_chaining("test -f file || exit 1"));
+    }
+
+    #[test]
+    fn test_chaining_unquoted_semicolon() {
+        assert!(has_shell_chaining("cd /tmp; rm -rf build"));
+        assert!(has_shell_chaining("echo hi;echo bye"));
+    }
+
+    #[test]
+    fn test_chaining_none() {
+        assert!(!has_shell_chaining("echo hello world"));
+        assert!(!has_shell_chaining("ls -la"));
+        assert!(!has_shell_chaining("git status"));
+    }
+
+    #[test]
+    fn test_chaining_double_quoted_pipe_ignored() {
+        assert!(!has_shell_chaining(r#"echo "hello | world""#));
+        assert!(!has_shell_chaining(r#"echo "a | b | c""#));
+    }
+
+    #[test]
+    fn test_chaining_single_quoted_pipe_ignored() {
+        assert!(!has_shell_chaining("echo 'hello | world'"));
+    }
+
+    #[test]
+    fn test_chaining_double_quoted_and_ignored() {
+        assert!(!has_shell_chaining(r#"echo "foo && bar""#));
+    }
+
+    #[test]
+    fn test_chaining_single_quoted_and_ignored() {
+        assert!(!has_shell_chaining("echo 'foo && bar'"));
+    }
+
+    #[test]
+    fn test_chaining_double_quoted_semicolon_ignored() {
+        assert!(!has_shell_chaining(r#"echo "hello;world""#));
+    }
+
+    #[test]
+    fn test_chaining_single_quoted_semicolon_ignored() {
+        assert!(!has_shell_chaining("echo 'hello;world'"));
+    }
+
+    #[test]
+    fn test_chaining_mixed_quoted_and_unquoted() {
+        // Unquoted pipe after a quoted section → should detect
+        assert!(has_shell_chaining(r#"echo "safe text" | sh"#));
+        // Pipe only inside quotes → should NOT detect
+        assert!(!has_shell_chaining(r#"echo "a | b" c"#));
+    }
+
+    #[test]
+    fn test_chaining_escaped_quote_inside_double_quotes() {
+        // Escaped quote doesn't end the double-quoted string
+        assert!(!has_shell_chaining(r#"echo "it\"s a | test""#));
+    }
+
+    #[test]
+    fn test_chaining_single_quote_inside_double_quotes() {
+        // Single quote inside double quotes is literal
+        assert!(!has_shell_chaining(r#"echo "it's a | test""#));
+    }
+
+    #[test]
+    fn test_chaining_double_quote_inside_single_quotes() {
+        // Double quote inside single quotes is literal
+        assert!(!has_shell_chaining(r#"echo '"hello | world"'"#));
+    }
+
+    #[test]
+    fn test_chaining_echo_with_quoted_operators_is_safe() {
+        // These were false positives before the fix
+        assert_eq!(risk_level(r#"echo "rm -rf / | sh""#), RiskLevel::None);
+        assert_eq!(risk_level("echo 'foo && bar'"), RiskLevel::None);
+        assert_eq!(risk_level(r#"echo "test;done""#), RiskLevel::None);
+        assert_eq!(risk_level(r#"printf "a | b""#), RiskLevel::None);
+    }
+
+    #[test]
+    fn test_chaining_echo_with_real_chain_still_detected() {
+        // Real chaining after echo — the chained part contains a dangerous pattern
+        assert_ne!(risk_level("echo ok && rm -rf /"), RiskLevel::None);
+        assert_ne!(risk_level("echo ok; rm -rf /"), RiskLevel::None);
+        // echo piped to sh: not flagged because no pattern matches "echo X | sh"
+        // (only curl/wget | sh are patterned), but chaining IS correctly detected
+        assert!(has_shell_chaining("echo done | sh"));
     }
 
     fn make_entry(command: &str, exit_code: Option<i32>) -> Entry {
