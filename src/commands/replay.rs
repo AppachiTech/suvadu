@@ -15,7 +15,13 @@ pub struct ReplayParams<'a> {
 
 pub fn handle_replay(p: &ReplayParams) -> Result<(), Box<dyn std::error::Error>> {
     let repo = repository::Repository::init()?;
+    handle_replay_with_repo(&repo, p)
+}
 
+fn handle_replay_with_repo(
+    repo: &repository::Repository,
+    p: &ReplayParams,
+) -> Result<(), Box<dyn std::error::Error>> {
     let tag_id = p
         .tag
         .map(|t| repo.get_tag_id_by_name(t))
@@ -210,6 +216,7 @@ fn print_replay_entries(entries: &[Entry]) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::models::{Entry, Session};
     use crate::repository::{ReplayFilter, Repository};
     use crate::test_utils::test_repo;
@@ -338,5 +345,149 @@ mod tests {
             .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].command, "make");
+    }
+
+    #[test]
+    fn test_resolve_replay_scope_explicit_session() {
+        let scope = ReplayScope {
+            session: Some("abc12345-full-uuid"),
+            after: None,
+            after_ms: None,
+            before: None,
+            before_ms: None,
+            tag: None,
+            here: false,
+            cwd: None,
+        };
+        let (session_filter, _, label) = resolve_replay_scope(&scope);
+        assert_eq!(session_filter, Some("abc12345-full-uuid".to_string()));
+        assert!(label.contains("abc12345"));
+    }
+
+    #[test]
+    fn test_resolve_replay_scope_date_flags() {
+        let scope = ReplayScope {
+            session: None,
+            after: Some("2024-01-01"),
+            after_ms: Some(1_704_067_200_000),
+            before: None,
+            before_ms: None,
+            tag: None,
+            here: false,
+            cwd: None,
+        };
+        let (session_filter, effective_after, label) = resolve_replay_scope(&scope);
+        assert!(session_filter.is_none());
+        assert_eq!(effective_after, Some(1_704_067_200_000));
+        assert!(label.contains("after 2024-01-01"));
+    }
+
+    #[test]
+    fn test_resolve_replay_scope_tag_flag() {
+        let scope = ReplayScope {
+            session: None,
+            after: None,
+            after_ms: None,
+            before: None,
+            before_ms: None,
+            tag: Some("work"),
+            here: false,
+            cwd: None,
+        };
+        let (session_filter, _, label) = resolve_replay_scope(&scope);
+        assert!(session_filter.is_none());
+        assert!(label.contains("tag:work"));
+    }
+
+    #[test]
+    fn test_resolve_replay_scope_here_flag() {
+        let scope = ReplayScope {
+            session: None,
+            after: None,
+            after_ms: None,
+            before: None,
+            before_ms: None,
+            tag: None,
+            here: true,
+            cwd: None,
+        };
+        let (session_filter, _, label) = resolve_replay_scope(&scope);
+        assert!(session_filter.is_none());
+        assert!(label.contains("current dir"));
+    }
+
+    #[test]
+    fn test_resolve_replay_scope_cwd_flag() {
+        let scope = ReplayScope {
+            session: None,
+            after: None,
+            after_ms: None,
+            before: None,
+            before_ms: None,
+            tag: None,
+            here: false,
+            cwd: Some("/project"),
+        };
+        let (session_filter, _, label) = resolve_replay_scope(&scope);
+        assert!(session_filter.is_none());
+        assert!(label.contains("dir:/project"));
+    }
+
+    #[test]
+    fn test_resolve_replay_scope_no_flags_no_env() {
+        // Clear the env var so it falls through
+        std::env::remove_var("SUVADU_SESSION_ID");
+        let scope = ReplayScope {
+            session: None,
+            after: None,
+            after_ms: None,
+            before: None,
+            before_ms: None,
+            tag: None,
+            here: false,
+            cwd: None,
+        };
+        let (session_filter, effective_after, label) = resolve_replay_scope(&scope);
+        assert!(session_filter.is_none());
+        assert!(effective_after.is_some()); // 24h fallback
+        assert!(label.contains("24 hours"));
+    }
+
+    #[test]
+    fn test_resolve_replay_scope_combined_flags() {
+        let scope = ReplayScope {
+            session: None,
+            after: Some("2024-01-01"),
+            after_ms: Some(1_704_067_200_000),
+            before: Some("2024-12-31"),
+            before_ms: Some(1_735_689_599_000),
+            tag: Some("work"),
+            here: false,
+            cwd: None,
+        };
+        let (_, _, label) = resolve_replay_scope(&scope);
+        assert!(label.contains("after 2024-01-01"));
+        assert!(label.contains("before 2024-12-31"));
+        assert!(label.contains("tag:work"));
+    }
+
+    #[test]
+    fn test_replay_full_flow() {
+        let (_dir, repo) = test_repo();
+        seed_session(&repo, "replay-sess");
+        seed_entry(&repo, "replay-sess", "echo hello", 0, 1_700_000_001_000);
+        seed_entry(&repo, "replay-sess", "echo world", 0, 1_700_000_002_000);
+
+        let p = ReplayParams {
+            session: Some("replay-sess"),
+            after: None,
+            before: None,
+            tag: None,
+            exit_code: None,
+            executor: None,
+            here: false,
+            cwd: None,
+        };
+        handle_replay_with_repo(&repo, &p).unwrap();
     }
 }

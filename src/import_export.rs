@@ -458,4 +458,273 @@ mod tests {
             "Command should preserve trailing backslash: {cmd}"
         );
     }
+
+    // ── csv_safe tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_csv_safe_plain_string() {
+        assert_eq!(csv_safe("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_csv_safe_escapes_double_quotes() {
+        assert_eq!(csv_safe(r#"echo "hi""#), r#"echo ""hi"""#);
+    }
+
+    #[test]
+    fn test_csv_safe_formula_injection_prefixes() {
+        // Each formula-triggering character should get a leading single-quote
+        for prefix in &["=", "+", "-", "@", "\t", "\r"] {
+            let input = format!("{prefix}dangerous");
+            let result = csv_safe(&input);
+            assert!(
+                result.starts_with('\''),
+                "Expected leading quote for prefix {prefix:?}, got: {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_csv_safe_formula_injection_with_quotes() {
+        // Both protections should compose: quotes escaped AND leading single-quote
+        let result = csv_safe("=SUM(A1:A10)\"injected\"");
+        assert!(result.starts_with('\''), "Should start with single-quote");
+        assert!(result.contains("\"\""), "Internal quotes should be doubled");
+    }
+
+    // ── parse_zsh_history tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_parse_zsh_history_extended_format() {
+        let text = "\
+: 1700000000:5;git status
+: 1700000010:0;ls -la
+";
+        let parsed = parse_zsh_history(text);
+        assert_eq!(parsed.len(), 2);
+
+        assert_eq!(parsed[0].0, "git status");
+        assert_eq!(parsed[0].1, 1_700_000_000_000); // seconds → ms
+        assert_eq!(parsed[0].2, 5_000); // duration seconds → ms
+
+        assert_eq!(parsed[1].0, "ls -la");
+        assert_eq!(parsed[1].1, 1_700_000_010_000);
+        assert_eq!(parsed[1].2, 0);
+    }
+
+    #[test]
+    fn test_parse_zsh_history_plain_format() {
+        let text = "echo hello\nls\n";
+        let parsed = parse_zsh_history(text);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].0, "echo hello");
+        assert_eq!(parsed[0].1, 0, "Plain format has no timestamp");
+        assert_eq!(parsed[1].0, "ls");
+    }
+
+    #[test]
+    fn test_parse_zsh_history_multiline_command() {
+        // Backslash at end of line signals continuation
+        let text = "\
+: 1700000000:2;echo hello \\\nworld\n\
+: 1700000010:0;ls\n";
+        let parsed = parse_zsh_history(text);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].0, "echo hello \nworld");
+        assert_eq!(parsed[1].0, "ls");
+    }
+
+    #[test]
+    fn test_parse_zsh_history_skips_blank_lines() {
+        let text = "\n\n: 1700000000:0;git diff\n\n\n";
+        let parsed = parse_zsh_history(text);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].0, "git diff");
+    }
+
+    #[test]
+    fn test_parse_zsh_history_multiline_plain_format() {
+        let text = "echo start \\\ncontinued\ndone\n";
+        let parsed = parse_zsh_history(text);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].0, "echo start \ncontinued");
+        assert_eq!(parsed[1].0, "done");
+    }
+
+    // ── import_entries_batch + deduplication tests ───────────────────────
+
+    #[test]
+    fn test_import_entries_batch_inserts_entries() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+
+        let session = Session {
+            id: "test-import-session".to_string(),
+            hostname: "test-host".to_string(),
+            created_at: 1_000,
+            tag_id: None,
+        };
+        repo.insert_session(&session).unwrap();
+
+        let parsed = vec![
+            ("git status".to_string(), 1_700_000_000_000i64, 5_000i64),
+            ("ls -la".to_string(), 1_700_000_010_000, 0),
+        ];
+
+        repo.begin_transaction().unwrap();
+        let (imported, skipped) =
+            import_entries_batch(&repo, &parsed, &session.id, 9_999_999).unwrap();
+        repo.commit().unwrap();
+
+        assert_eq!(imported, 2);
+        assert_eq!(skipped, 0);
+
+        // Verify entries are actually in the database
+        let mut count = 0u64;
+        repo.stream_export_entries(None, None, |_entry| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_import_entries_batch_deduplicates() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+
+        let session = Session {
+            id: "test-dedup-session".to_string(),
+            hostname: "test-host".to_string(),
+            created_at: 1_000,
+            tag_id: None,
+        };
+        repo.insert_session(&session).unwrap();
+
+        let parsed = vec![
+            ("git status".to_string(), 1_700_000_000_000i64, 5_000i64),
+            ("ls -la".to_string(), 1_700_000_010_000, 0),
+        ];
+
+        // First import
+        repo.begin_transaction().unwrap();
+        let (imported, _) = import_entries_batch(&repo, &parsed, &session.id, 9_999_999).unwrap();
+        repo.commit().unwrap();
+        assert_eq!(imported, 2);
+
+        // Second import of the same data — should be skipped as duplicates
+        repo.begin_transaction().unwrap();
+        let (imported2, skipped2) =
+            import_entries_batch(&repo, &parsed, &session.id, 9_999_999).unwrap();
+        repo.commit().unwrap();
+        assert_eq!(imported2, 0, "Duplicates should not be imported again");
+        assert_eq!(skipped2, 2, "Both entries should be skipped as duplicates");
+    }
+
+    #[test]
+    fn test_import_entries_batch_skips_empty_and_space_prefixed() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+
+        let session = Session {
+            id: "test-skip-session".to_string(),
+            hostname: "test-host".to_string(),
+            created_at: 1_000,
+            tag_id: None,
+        };
+        repo.insert_session(&session).unwrap();
+
+        let parsed = vec![
+            ("".to_string(), 1_700_000_000_000i64, 0i64), // empty
+            ("   ".to_string(), 1_700_000_001_000, 0),    // whitespace-only
+            (" secret-cmd".to_string(), 1_700_000_002_000, 0), // space-prefixed (private)
+            ("valid-cmd".to_string(), 1_700_000_003_000, 0), // should be imported
+        ];
+
+        repo.begin_transaction().unwrap();
+        let (imported, skipped) =
+            import_entries_batch(&repo, &parsed, &session.id, 9_999_999).unwrap();
+        repo.commit().unwrap();
+
+        assert_eq!(imported, 1, "Only the valid command should be imported");
+        assert_eq!(
+            skipped, 3,
+            "Empty, whitespace, and space-prefixed should be skipped"
+        );
+    }
+
+    // ── JSONL roundtrip test ────────────────────────────────────────────
+
+    #[test]
+    fn test_jsonl_roundtrip() {
+        // Create an entry, serialize to JSONL, deserialize back, and verify fields match.
+        let mut entry = Entry::new(
+            "session-rt".to_string(),
+            "cargo test --release".to_string(),
+            "/home/dev/project".to_string(),
+            Some(0),
+            1_700_000_000_000,
+            1_700_000_005_000,
+        );
+        entry.executor_type = Some("human".to_string());
+        entry.executor = Some("zsh".to_string());
+
+        let json_line = serde_json::to_string(&entry).unwrap();
+        let deserialized: Entry = serde_json::from_str(&json_line).unwrap();
+
+        assert_eq!(deserialized.command, entry.command);
+        assert_eq!(deserialized.cwd, entry.cwd);
+        assert_eq!(deserialized.exit_code, entry.exit_code);
+        assert_eq!(deserialized.started_at, entry.started_at);
+        assert_eq!(deserialized.ended_at, entry.ended_at);
+        assert_eq!(deserialized.duration_ms, entry.duration_ms);
+        assert_eq!(deserialized.session_id, entry.session_id);
+        assert_eq!(deserialized.executor_type, entry.executor_type);
+        assert_eq!(deserialized.executor, entry.executor);
+    }
+
+    // ── CSV formatting test ─────────────────────────────────────────────
+
+    #[test]
+    fn test_csv_row_formatting() {
+        // Verify that a complete CSV row is formatted correctly by replicating
+        // the formatting logic from handle_export's CSV branch.
+        let mut entry = Entry::new(
+            "sess-csv".to_string(),
+            "echo \"hello, world\"".to_string(),
+            "/home/user".to_string(),
+            Some(0),
+            1_700_000_000_000,
+            1_700_000_001_000,
+        );
+        entry.executor_type = Some("human".to_string());
+        entry.executor = None;
+
+        let cmd = csv_safe(&entry.command);
+        let cwd = csv_safe(&entry.cwd);
+        let sid = csv_safe(&entry.session_id);
+        let etype = csv_safe(entry.executor_type.as_deref().unwrap_or(""));
+        let exec = csv_safe(entry.executor.as_deref().unwrap_or(""));
+        let row = format!(
+            "\"{cmd}\",\"{cwd}\",{},{},{},{},\"{sid}\",\"{etype}\",\"{exec}\"",
+            entry.exit_code.map_or(String::new(), |c| c.to_string()),
+            entry.started_at,
+            entry.ended_at,
+            entry.duration_ms,
+        );
+
+        // Internal double-quotes should be doubled
+        assert!(
+            row.contains("\"\"hello, world\"\""),
+            "Embedded quotes should be doubled in CSV: {row}"
+        );
+        // Verify field count by counting commas outside quotes (simple check: 8 commas for 9 fields)
+        // The exit_code, started_at, ended_at, duration_ms are unquoted numerics
+        assert!(
+            row.contains(",0,"),
+            "Exit code should appear as unquoted 0: {row}"
+        );
+        assert!(
+            row.contains(",1000,"),
+            "Duration should appear as unquoted 1000: {row}"
+        );
+    }
 }

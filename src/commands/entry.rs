@@ -212,13 +212,23 @@ pub fn handle_delete(
     skip_confirm: bool,
     before: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let repo = Repository::init()?;
+    handle_delete_with_repo(&repo, pattern, is_regex, dry_run, skip_confirm, before)
+}
+
+fn handle_delete_with_repo(
+    repo: &Repository,
+    pattern: &str,
+    is_regex: bool,
+    dry_run: bool,
+    skip_confirm: bool,
+    before: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     if pattern.trim().is_empty() {
         return Err(
             "Empty pattern would match all entries. Please provide a specific pattern.".into(),
         );
     }
-
-    let repo = Repository::init()?;
 
     let before_timestamp: Option<i64> = if let Some(date_str) = before {
         Some(util::parse_date_input(date_str, false).ok_or_else(|| {
@@ -268,7 +278,13 @@ pub fn handle_bookmark(
     cmd: crate::cli::BookmarkCommands,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = Repository::init()?;
+    handle_bookmark_with_repo(&repo, cmd)
+}
 
+fn handle_bookmark_with_repo(
+    repo: &Repository,
+    cmd: crate::cli::BookmarkCommands,
+) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
         crate::cli::BookmarkCommands::Add { command, label } => {
             repo.add_bookmark(&command, label.as_deref())?;
@@ -314,7 +330,15 @@ pub fn handle_note(
     delete: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = Repository::init()?;
+    handle_note_with_repo(&repo, entry_id, content, delete)
+}
 
+fn handle_note_with_repo(
+    repo: &Repository,
+    entry_id: i64,
+    content: Option<String>,
+    delete: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if delete {
         if repo.delete_note(entry_id)? {
             println!("Note deleted for entry {entry_id}.");
@@ -336,11 +360,10 @@ pub fn handle_note(
 pub fn handle_gc(dry_run: bool, vacuum: bool) -> Result<(), Box<dyn std::error::Error>> {
     let repo = Repository::init()?;
 
-    let orphaned_sessions = repo.count_orphaned_sessions()?;
-    let orphaned_notes = repo.count_orphaned_notes()?;
     let stale_prompts = count_stale_prompt_caches();
 
     if dry_run {
+        let (orphaned_sessions, orphaned_notes) = count_gc_candidates(&repo)?;
         println!("Dry run — nothing will be deleted.\n");
         println!("  Orphaned sessions (no entries): {orphaned_sessions}");
         println!("  Orphaned notes (missing entry): {orphaned_notes}");
@@ -351,8 +374,7 @@ pub fn handle_gc(dry_run: bool, vacuum: bool) -> Result<(), Box<dyn std::error::
         return Ok(());
     }
 
-    let deleted_notes = repo.delete_orphaned_notes()?;
-    let deleted_sessions = repo.delete_orphaned_sessions()?;
+    let (deleted_sessions, deleted_notes) = handle_gc_with_repo(&repo, false, vacuum)?;
     let deleted_prompts = clean_prompt_caches();
 
     if deleted_sessions > 0 {
@@ -368,13 +390,41 @@ pub fn handle_gc(dry_run: bool, vacuum: bool) -> Result<(), Box<dyn std::error::
         println!("Nothing to clean up.");
     }
 
+    Ok(())
+}
+
+/// Count repo-level GC candidates (orphaned sessions and notes).
+fn count_gc_candidates(repo: &Repository) -> Result<(i64, i64), Box<dyn std::error::Error>> {
+    let orphaned_sessions = repo.count_orphaned_sessions()?;
+    let orphaned_notes = repo.count_orphaned_notes()?;
+    Ok((orphaned_sessions, orphaned_notes))
+}
+
+/// Perform repo-level garbage collection. Returns `(deleted_sessions, deleted_notes)`.
+fn handle_gc_with_repo(
+    repo: &Repository,
+    dry_run: bool,
+    vacuum: bool,
+) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    if dry_run {
+        let orphaned_sessions = repo.count_orphaned_sessions()?;
+        let orphaned_notes = repo.count_orphaned_notes()?;
+        println!("Dry run — repo cleanup preview:");
+        println!("  Orphaned sessions (no entries): {orphaned_sessions}");
+        println!("  Orphaned notes (missing entry): {orphaned_notes}");
+        return Ok((0, 0));
+    }
+
+    let deleted_notes = repo.delete_orphaned_notes()?;
+    let deleted_sessions = repo.delete_orphaned_sessions()?;
+
     if vacuum {
         println!("Running VACUUM...");
         repo.vacuum()?;
         println!("Database compacted.");
     }
 
-    Ok(())
+    Ok((deleted_sessions, deleted_notes))
 }
 
 /// Maximum age for prompt cache files (7 days).
@@ -591,5 +641,293 @@ mod tests {
         let empty: Vec<String> = vec![];
         let compiled = get_compiled_exclusions(&empty);
         assert!(compiled.is_empty());
+    }
+
+    // ── Test helpers ────────────────────────────────────────────
+
+    use crate::cli::BookmarkCommands;
+    use crate::test_utils::test_repo;
+
+    /// Seed a session and a set of command entries, returning the entry IDs.
+    fn seed_entries(repo: &Repository, commands: &[&str]) -> Vec<i64> {
+        let session_id = "test-session";
+        let session = Session {
+            id: session_id.to_string(),
+            hostname: "test-host".to_string(),
+            created_at: 1_700_000_000_000,
+            tag_id: None,
+        };
+        repo.insert_session(&session).unwrap();
+
+        let mut ids = Vec::new();
+        for (i, cmd) in commands.iter().enumerate() {
+            let ts = 1_700_000_000_000 + (i as i64 * 1000);
+            let entry = Entry::new(
+                session_id.to_string(),
+                cmd.to_string(),
+                "/tmp".to_string(),
+                Some(0),
+                ts,
+                ts + 100,
+            );
+            let id = repo.insert_entry(&entry).unwrap();
+            ids.push(id);
+        }
+        ids
+    }
+
+    // ── handle_delete tests ─────────────────────────────────────
+
+    #[test]
+    fn test_handle_delete_dry_run() {
+        let (_dir, repo) = test_repo();
+        seed_entries(&repo, &["git status", "git commit", "cargo build"]);
+
+        // dry_run should not delete anything
+        handle_delete_with_repo(&repo, "git", false, true, true, None).unwrap();
+
+        // Verify all entries still exist
+        let entries = repo
+            .get_entries_filtered(100, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        assert_eq!(entries.len(), 3);
+    }
+
+    #[test]
+    fn test_handle_delete_no_match() {
+        let (_dir, repo) = test_repo();
+        seed_entries(&repo, &["git status", "cargo build"]);
+
+        let result =
+            handle_delete_with_repo(&repo, "nonexistent_pattern", false, false, true, None);
+        assert!(result.is_ok());
+
+        let entries = repo
+            .get_entries_filtered(100, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn test_handle_delete_regex_pattern() {
+        let (_dir, repo) = test_repo();
+        seed_entries(&repo, &["git status", "git commit", "cargo build"]);
+
+        // Delete entries matching "^git" regex, skip confirmation
+        handle_delete_with_repo(&repo, "^git", true, false, true, None).unwrap();
+
+        let entries = repo
+            .get_entries_filtered(100, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].command, "cargo build");
+    }
+
+    #[test]
+    fn test_handle_delete_empty_pattern_error() {
+        let (_dir, repo) = test_repo();
+        let result = handle_delete_with_repo(&repo, "", false, false, true, None);
+        assert!(result.is_err());
+    }
+
+    // ── handle_bookmark tests ───────────────────────────────────
+
+    #[test]
+    fn test_handle_bookmark_add_and_list() {
+        let (_dir, repo) = test_repo();
+        repo.add_bookmark("git status", None).unwrap();
+        let bookmarks = repo.list_bookmarks().unwrap();
+        assert_eq!(bookmarks.len(), 1);
+        assert_eq!(bookmarks[0].command, "git status");
+    }
+
+    #[test]
+    fn test_handle_bookmark_remove() {
+        let (_dir, repo) = test_repo();
+        repo.add_bookmark("git status", None).unwrap();
+        assert!(repo.remove_bookmark("git status").unwrap());
+        assert!(repo.list_bookmarks().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_handle_bookmark_remove_nonexistent() {
+        let (_dir, repo) = test_repo();
+        assert!(!repo.remove_bookmark("nonexistent").unwrap());
+    }
+
+    #[test]
+    fn test_handle_bookmark_with_repo_add() {
+        let (_dir, repo) = test_repo();
+        handle_bookmark_with_repo(
+            &repo,
+            BookmarkCommands::Add {
+                command: "cargo test".to_string(),
+                label: Some("run tests".to_string()),
+            },
+        )
+        .unwrap();
+        let bookmarks = repo.list_bookmarks().unwrap();
+        assert_eq!(bookmarks.len(), 1);
+        assert_eq!(bookmarks[0].command, "cargo test");
+        assert_eq!(bookmarks[0].label.as_deref(), Some("run tests"));
+    }
+
+    #[test]
+    fn test_handle_bookmark_with_repo_list() {
+        let (_dir, repo) = test_repo();
+        repo.add_bookmark("git status", None).unwrap();
+        // Should not error
+        handle_bookmark_with_repo(&repo, BookmarkCommands::List { json: false }).unwrap();
+        handle_bookmark_with_repo(&repo, BookmarkCommands::List { json: true }).unwrap();
+    }
+
+    #[test]
+    fn test_handle_bookmark_with_repo_remove() {
+        let (_dir, repo) = test_repo();
+        repo.add_bookmark("git status", None).unwrap();
+        handle_bookmark_with_repo(
+            &repo,
+            BookmarkCommands::Remove {
+                command: "git status".to_string(),
+            },
+        )
+        .unwrap();
+        assert!(repo.list_bookmarks().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_handle_bookmark_with_repo_remove_nonexistent_errors() {
+        let (_dir, repo) = test_repo();
+        let result = handle_bookmark_with_repo(
+            &repo,
+            BookmarkCommands::Remove {
+                command: "nonexistent".to_string(),
+            },
+        );
+        assert!(result.is_err());
+    }
+
+    // ── handle_note tests ───────────────────────────────────────
+
+    #[test]
+    fn test_handle_note_upsert_and_read() {
+        let (_dir, repo) = test_repo();
+        let ids = seed_entries(&repo, &["git status"]);
+        let entry_id = ids[0];
+
+        // Upsert a note
+        handle_note_with_repo(
+            &repo,
+            entry_id,
+            Some("important command".to_string()),
+            false,
+        )
+        .unwrap();
+
+        // Read it back via repo
+        let note = repo.get_note(entry_id).unwrap().unwrap();
+        assert_eq!(note.content, "important command");
+
+        // Read it back via handler (should print, not error)
+        handle_note_with_repo(&repo, entry_id, None, false).unwrap();
+    }
+
+    #[test]
+    fn test_handle_note_delete() {
+        let (_dir, repo) = test_repo();
+        let ids = seed_entries(&repo, &["git status"]);
+        let entry_id = ids[0];
+
+        // Add and then delete
+        repo.upsert_note(entry_id, "a note").unwrap();
+        handle_note_with_repo(&repo, entry_id, None, true).unwrap();
+
+        // Verify note is gone
+        assert!(repo.get_note(entry_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_handle_note_read_nonexistent() {
+        let (_dir, repo) = test_repo();
+        // Read note for non-existent entry_id
+        let result = handle_note_with_repo(&repo, 9999, None, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_handle_note_delete_nonexistent() {
+        let (_dir, repo) = test_repo();
+        let result = handle_note_with_repo(&repo, 9999, None, true);
+        assert!(result.is_err());
+    }
+
+    // ── handle_gc tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_handle_gc_dry_run_no_orphans() {
+        let (_dir, repo) = test_repo();
+        seed_entries(&repo, &["git status"]);
+        // dry_run should succeed and not delete anything
+        let (sessions, notes) = handle_gc_with_repo(&repo, true, false).unwrap();
+        assert_eq!(sessions, 0);
+        assert_eq!(notes, 0);
+    }
+
+    #[test]
+    fn test_handle_gc_cleans_orphan_sessions() {
+        let (_dir, repo) = test_repo();
+        // Insert an orphaned session (no entries)
+        let orphan = Session {
+            id: "orphan-session".to_string(),
+            hostname: "test-host".to_string(),
+            created_at: 1_700_000_000_000,
+            tag_id: None,
+        };
+        repo.insert_session(&orphan).unwrap();
+
+        // Verify session exists
+        assert!(repo.get_session("orphan-session").unwrap().is_some());
+
+        let (deleted_sessions, _) = handle_gc_with_repo(&repo, false, false).unwrap();
+        assert_eq!(deleted_sessions, 1);
+
+        // Session should be gone now
+        assert!(repo.get_session("orphan-session").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_handle_gc_cleans_orphan_notes() {
+        // CASCADE means normal deletion cascades notes too,
+        // so we simulate an orphan by inserting a note with FK checks off.
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let conn = crate::db::init_db(&db_path).unwrap();
+        let repo = Repository::new(conn);
+
+        seed_entries(&repo, &["git status"]);
+
+        // Open a second connection with FK off to insert an orphaned note
+        {
+            let raw = rusqlite::Connection::open(&db_path).unwrap();
+            raw.pragma_update(None, "foreign_keys", "OFF").unwrap();
+            raw.execute(
+                "INSERT INTO notes (entry_id, note, created_at, updated_at) VALUES (9999, 'orphan', 0, 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Verify the orphan is detected
+        assert_eq!(repo.count_orphaned_notes().unwrap(), 1);
+
+        let (_, deleted_notes) = handle_gc_with_repo(&repo, false, false).unwrap();
+        assert_eq!(deleted_notes, 1);
+    }
+
+    #[test]
+    fn test_handle_gc_vacuum() {
+        let (_dir, repo) = test_repo();
+        // Just verify vacuum doesn't error
+        handle_gc_with_repo(&repo, false, true).unwrap();
     }
 }

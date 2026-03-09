@@ -11,7 +11,7 @@ use ratatui::{
 };
 use std::io;
 
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 enum InputMode {
     Normal,
     Editing,
@@ -921,6 +921,7 @@ use crate::util::centered_rect;
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crossterm::event::KeyEvent;
 
     #[test]
     fn test_app_state_navigation() {
@@ -1000,5 +1001,363 @@ mod tests {
 
         app.toggle_bool();
         assert_eq!(app.config.theme, ThemeName::Dark);
+    }
+
+    #[test]
+    fn test_initial_state() {
+        let config = Config::default();
+        let app = AppState::new(config);
+
+        assert_eq!(app.current_tab, 0);
+        assert_eq!(app.selected_item, 0);
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.input_buffer.is_empty());
+        assert!(app.auto_tag_path_input.is_empty());
+        assert!(app.auto_tag_name_input.is_empty());
+        assert_eq!(app.auto_tag_focus, 0);
+        assert_eq!(app.tab_items, vec![5, 3, 0, 0]);
+        assert!(app.save_status.is_none());
+        assert!(!app.dirty);
+    }
+
+    #[test]
+    fn test_prev_tab_navigation() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+
+        // From tab 0, prev_tab wraps to last tab
+        app.prev_tab();
+        assert_eq!(app.current_tab, 3);
+        assert_eq!(app.selected_item, 0);
+
+        app.prev_tab();
+        assert_eq!(app.current_tab, 2);
+
+        app.prev_tab();
+        assert_eq!(app.current_tab, 1);
+
+        app.prev_tab();
+        assert_eq!(app.current_tab, 0);
+    }
+
+    #[test]
+    fn test_tab_navigation_resets_selected_item() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+
+        // Move to item 3 in tab 0
+        app.next_item();
+        app.next_item();
+        app.next_item();
+        assert_eq!(app.selected_item, 3);
+
+        // Switching tab resets selected_item to 0
+        app.next_tab();
+        assert_eq!(app.current_tab, 1);
+        assert_eq!(app.selected_item, 0);
+    }
+
+    #[test]
+    fn test_item_selection_prev_wraps() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+
+        // Tab 0 has 5 items; going prev from 0 wraps to 4
+        assert_eq!(app.selected_item, 0);
+        app.prev_item();
+        assert_eq!(app.selected_item, 4);
+
+        // And going next from 4 wraps to 0
+        app.next_item();
+        assert_eq!(app.selected_item, 0);
+    }
+
+    #[test]
+    fn test_toggle_all_search_bools() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+
+        // Tab 0, Item 2: filter_by_current_session_tag (default false)
+        app.current_tab = 0;
+        app.selected_item = 2;
+        assert!(!app.config.search.filter_by_current_session_tag);
+        app.toggle_bool();
+        assert!(app.config.search.filter_by_current_session_tag);
+        assert!(app.dirty);
+
+        // Tab 0, Item 3: context_boost (default true)
+        app.selected_item = 3;
+        assert!(app.config.search.context_boost);
+        app.toggle_bool();
+        assert!(!app.config.search.context_boost);
+
+        // Tab 0, Item 4: show_detail_pane (default true)
+        app.selected_item = 4;
+        assert!(app.config.search.show_detail_pane);
+        app.toggle_bool();
+        assert!(!app.config.search.show_detail_pane);
+    }
+
+    #[test]
+    fn test_toggle_show_risk_in_search() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+
+        // Tab 1, Item 1: show_risk_in_search (default true)
+        app.current_tab = 1;
+        app.selected_item = 1;
+        assert!(app.config.agent.show_risk_in_search);
+        app.toggle_bool();
+        assert!(!app.config.agent.show_risk_in_search);
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn test_edit_page_limit_via_handle_input() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+
+        // Tab 0, Item 0 is Page Limit; Enter enters edit mode
+        app.current_tab = 0;
+        app.selected_item = 0;
+
+        let cont = app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert!(cont);
+        assert_eq!(app.input_mode, InputMode::Editing);
+
+        // Clear the buffer and type "200"
+        app.input_buffer.clear();
+        app.handle_input(KeyEvent::from(KeyCode::Char('2')));
+        app.handle_input(KeyEvent::from(KeyCode::Char('0')));
+        app.handle_input(KeyEvent::from(KeyCode::Char('0')));
+        assert_eq!(app.input_buffer, "200");
+
+        // Confirm with Enter
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.config.search.page_limit, 200);
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn test_edit_page_limit_clamps() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+
+        // Enter edit mode for page limit
+        app.current_tab = 0;
+        app.selected_item = 0;
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+
+        // Type a value below minimum (10)
+        app.input_buffer.clear();
+        app.handle_input(KeyEvent::from(KeyCode::Char('3')));
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.config.search.page_limit, 10); // Clamped to min
+
+        // Enter edit mode again and type a value above max (5000)
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        app.input_buffer.clear();
+        app.input_buffer.push_str("9999");
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.config.search.page_limit, 5000); // Clamped to max
+    }
+
+    #[test]
+    fn test_escape_from_editing() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+
+        // Enter edit mode
+        app.current_tab = 0;
+        app.selected_item = 0;
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Editing);
+
+        // Type something then escape
+        app.input_buffer.clear();
+        app.handle_input(KeyEvent::from(KeyCode::Char('9')));
+        app.handle_input(KeyEvent::from(KeyCode::Char('9')));
+        app.handle_input(KeyEvent::from(KeyCode::Esc));
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        // Original page_limit should be unchanged (default is 50)
+        assert_eq!(app.config.search.page_limit, 50);
+        assert!(!app.dirty);
+    }
+
+    #[test]
+    fn test_add_exclusion_pattern() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+
+        // Switch to exclusions tab
+        app.current_tab = 2;
+        app.selected_item = 0;
+        assert!(app.config.exclusions.is_empty());
+
+        // Press 'a' to enter edit mode for adding an exclusion
+        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        assert_eq!(app.input_mode, InputMode::Editing);
+        assert!(app.input_buffer.is_empty());
+
+        // Type "^ls$"
+        app.handle_input(KeyEvent::from(KeyCode::Char('^')));
+        app.handle_input(KeyEvent::from(KeyCode::Char('l')));
+        app.handle_input(KeyEvent::from(KeyCode::Char('s')));
+        app.handle_input(KeyEvent::from(KeyCode::Char('$')));
+        assert_eq!(app.input_buffer, "^ls$");
+
+        // Confirm
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.config.exclusions, vec!["^ls$"]);
+        assert!(app.dirty);
+        assert_eq!(app.selected_item, 0); // points to the new item
+    }
+
+    #[test]
+    fn test_remove_exclusion_pattern() {
+        let mut config = Config::default();
+        config.exclusions = vec!["^ls$".to_string(), "password".to_string()];
+
+        let mut app = AppState::new(config);
+        app.current_tab = 2;
+        app.selected_item = 0;
+
+        // Delete first exclusion
+        app.handle_input(KeyEvent::from(KeyCode::Char('d')));
+        assert_eq!(app.config.exclusions, vec!["password"]);
+        assert!(app.dirty);
+        assert_eq!(app.selected_item, 0);
+
+        // Delete last remaining exclusion
+        app.handle_input(KeyEvent::from(KeyCode::Char('d')));
+        assert!(app.config.exclusions.is_empty());
+        assert_eq!(app.selected_item, 0);
+    }
+
+    #[test]
+    fn test_confirm_quit_save_discard() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+
+        // Quit when not dirty exits immediately
+        let cont = app.handle_input(KeyEvent::from(KeyCode::Char('q')));
+        assert!(!cont); // false = quit
+
+        // Reset: make the state dirty
+        let mut app = AppState::new(Config::default());
+        app.dirty = true;
+
+        // Quit when dirty enters confirm mode
+        let cont = app.handle_input(KeyEvent::from(KeyCode::Char('q')));
+        assert!(cont);
+        assert_eq!(app.input_mode, InputMode::ConfirmQuit);
+
+        // Pressing 'n' discards and quits
+        let cont = app.handle_input(KeyEvent::from(KeyCode::Char('n')));
+        assert!(!cont);
+    }
+
+    #[test]
+    fn test_confirm_quit_esc_cancels() {
+        let mut app = AppState::new(Config::default());
+        app.dirty = true;
+
+        // Enter confirm quit mode
+        app.handle_input(KeyEvent::from(KeyCode::Char('q')));
+        assert_eq!(app.input_mode, InputMode::ConfirmQuit);
+
+        // Escape goes back to normal
+        let cont = app.handle_input(KeyEvent::from(KeyCode::Esc));
+        assert!(cont);
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn test_handle_input_via_key_events() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+
+        // Tab key cycles tabs
+        app.handle_input(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.current_tab, 1);
+
+        // BackTab goes back
+        app.handle_input(KeyEvent::from(KeyCode::BackTab));
+        assert_eq!(app.current_tab, 0);
+
+        // Down/j moves selection
+        app.handle_input(KeyEvent::from(KeyCode::Down));
+        assert_eq!(app.selected_item, 1);
+        app.handle_input(KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(app.selected_item, 2);
+
+        // Up/k moves selection back
+        app.handle_input(KeyEvent::from(KeyCode::Up));
+        assert_eq!(app.selected_item, 1);
+        app.handle_input(KeyEvent::from(KeyCode::Char('k')));
+        assert_eq!(app.selected_item, 0);
+
+        // Space toggles (Item 1 is show_unique_by_default, default false)
+        app.handle_input(KeyEvent::from(KeyCode::Down)); // item 1
+        app.handle_input(KeyEvent::from(KeyCode::Char(' ')));
+        assert!(app.config.search.show_unique_by_default);
+    }
+
+    #[test]
+    fn test_exclusion_item_navigation() {
+        let mut config = Config::default();
+        config.exclusions = vec![
+            "pattern1".to_string(),
+            "pattern2".to_string(),
+            "pattern3".to_string(),
+        ];
+
+        let mut app = AppState::new(config);
+        app.current_tab = 2;
+        app.selected_item = 0;
+
+        // Navigate through exclusion items
+        app.next_item();
+        assert_eq!(app.selected_item, 1);
+        assert_eq!(app.exclusion_list_state.selected(), Some(1));
+
+        app.next_item();
+        assert_eq!(app.selected_item, 2);
+
+        // Wraps around
+        app.next_item();
+        assert_eq!(app.selected_item, 0);
+        assert_eq!(app.exclusion_list_state.selected(), Some(0));
+
+        // Prev from 0 wraps to last
+        app.prev_item();
+        assert_eq!(app.selected_item, 2);
+        assert_eq!(app.exclusion_list_state.selected(), Some(2));
+    }
+
+    #[test]
+    fn test_backspace_in_editing_mode() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+
+        // Enter edit mode for exclusion
+        app.current_tab = 2;
+        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        assert_eq!(app.input_mode, InputMode::Editing);
+
+        // Type and backspace
+        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_input(KeyEvent::from(KeyCode::Char('b')));
+        app.handle_input(KeyEvent::from(KeyCode::Char('c')));
+        assert_eq!(app.input_buffer, "abc");
+
+        app.handle_input(KeyEvent::from(KeyCode::Backspace));
+        assert_eq!(app.input_buffer, "ab");
+
+        app.handle_input(KeyEvent::from(KeyCode::Backspace));
+        assert_eq!(app.input_buffer, "a");
     }
 }

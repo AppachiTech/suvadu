@@ -1,9 +1,14 @@
 mod aliases;
+mod api;
 mod bookmarks;
 mod entries;
 mod notes;
 mod stats;
 mod tags;
+
+// Re-exported for use as a mockable trait boundary in tests and downstream consumers.
+#[allow(unused_imports)]
+pub use api::RepositoryApi;
 
 #[cfg(test)]
 mod tests;

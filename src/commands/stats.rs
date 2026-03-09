@@ -46,7 +46,16 @@ pub fn handle_stats_json(
     tag: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = repository::Repository::init()?;
-    let tag_id = resolve_tag(&repo, tag)?;
+    handle_stats_json_with_repo(&repo, days, top, tag)
+}
+
+fn handle_stats_json_with_repo(
+    repo: &repository::Repository,
+    days: Option<usize>,
+    top: usize,
+    tag: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let tag_id = resolve_tag(repo, tag)?;
     let stats = repo.get_stats(days, top, tag_id)?;
     println!("{}", serde_json::to_string_pretty(&stats)?);
     Ok(())
@@ -59,8 +68,17 @@ pub fn handle_stats_text(
     tag: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = repository::Repository::init()?;
+    handle_stats_text_with_repo(&repo, days, top, tag)
+}
 
-    let tag_id = resolve_tag(&repo, tag)?;
+#[allow(clippy::cast_precision_loss)]
+fn handle_stats_text_with_repo(
+    repo: &repository::Repository,
+    days: Option<usize>,
+    top: usize,
+    tag: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let tag_id = resolve_tag(repo, tag)?;
     let stats = repo.get_stats(days, top, tag_id)?;
 
     // Header
@@ -197,6 +215,7 @@ fn print_executor_breakdown(stats: &Stats) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::models::{Entry, Session};
     use crate::test_utils::test_repo;
 
@@ -352,5 +371,104 @@ mod tests {
         assert_eq!(tag_stats.success_count, 3);
         assert_eq!(tag_stats.top_commands[0].0, "cargo build");
         assert_eq!(tag_stats.top_directories[0].0, "/project");
+    }
+
+    fn seed_stats_data(repo: &crate::repository::Repository) {
+        let session = Session {
+            id: "test-sess".to_string(),
+            hostname: "host".to_string(),
+            created_at: 1_000_000,
+            tag_id: None,
+        };
+        repo.insert_session(&session).unwrap();
+        for i in 0..5 {
+            let entry = Entry::new(
+                "test-sess".to_string(),
+                "git status".to_string(),
+                "/home/user".to_string(),
+                Some(0),
+                1_000_000 + i * 1000,
+                1_000_000 + i * 1000 + 100,
+            );
+            repo.insert_entry(&entry).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_resolve_tag_not_found() {
+        let (_dir, repo) = test_repo();
+        let result = resolve_tag(&repo, Some("nonexistent"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_resolve_tag_none() {
+        let (_dir, repo) = test_repo();
+        let result = resolve_tag(&repo, None).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_resolve_tag_found() {
+        let (_dir, repo) = test_repo();
+        repo.create_tag("work", None).unwrap();
+        let result = resolve_tag(&repo, Some("work")).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_stats_text_empty_db() {
+        let (_dir, repo) = test_repo();
+        // Should not error on empty DB
+        handle_stats_text_with_repo(&repo, None, 10, None).unwrap();
+    }
+
+    #[test]
+    fn test_stats_text_with_data() {
+        let (_dir, repo) = test_repo();
+        seed_stats_data(&repo);
+        handle_stats_text_with_repo(&repo, None, 10, None).unwrap();
+    }
+
+    #[test]
+    fn test_stats_json_output() {
+        let (_dir, repo) = test_repo();
+        seed_stats_data(&repo);
+        handle_stats_json_with_repo(&repo, None, 10, None).unwrap();
+    }
+
+    #[test]
+    fn test_stats_json_empty_db() {
+        let (_dir, repo) = test_repo();
+        handle_stats_json_with_repo(&repo, None, 10, None).unwrap();
+    }
+
+    #[test]
+    fn test_stats_text_with_tag_filter() {
+        let (_dir, repo) = test_repo();
+        // Create tag and tagged session
+        repo.create_tag("work", None).unwrap();
+        let tag_id = repo.get_tag_id_by_name("work").unwrap().unwrap();
+        let session = Session {
+            id: "tagged-sess".to_string(),
+            hostname: "host".to_string(),
+            created_at: 1_000_000,
+            tag_id: Some(tag_id),
+        };
+        repo.insert_session(&session).unwrap();
+        repo.tag_session("tagged-sess", Some(tag_id)).unwrap();
+        for i in 0..3 {
+            let entry = Entry::new(
+                "tagged-sess".to_string(),
+                "cargo test".to_string(),
+                "/project".to_string(),
+                Some(0),
+                1_000_000 + i * 1000,
+                1_000_000 + i * 1000 + 100,
+            );
+            repo.insert_entry(&entry).unwrap();
+        }
+        handle_stats_text_with_repo(&repo, None, 10, Some("work")).unwrap();
     }
 }

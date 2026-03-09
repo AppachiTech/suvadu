@@ -20,7 +20,7 @@ use crate::util::{dirs_home, format_count, format_duration_ms, shorten_path};
 
 // ── Period selector ──────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Period {
     Days7,
     Days30,
@@ -59,7 +59,7 @@ impl Period {
 
 // ── Focus management ─────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
     Hourly,
     TopPrograms,
@@ -1108,5 +1108,280 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, "ls");
         assert_eq!(groups[0].1, 10);
+    }
+
+    #[test]
+    fn test_period_days() {
+        assert_eq!(Period::Days7.days(), Some(7));
+        assert_eq!(Period::Days30.days(), Some(30));
+        assert_eq!(Period::Days90.days(), Some(90));
+        assert_eq!(Period::AllTime.days(), None);
+    }
+
+    #[test]
+    fn test_period_labels() {
+        assert_eq!(Period::Days7.label(), "7d");
+        assert_eq!(Period::Days30.label(), "30d");
+        assert_eq!(Period::Days90.label(), "90d");
+        assert_eq!(Period::AllTime.label(), "All");
+    }
+
+    #[test]
+    fn test_period_heatmap_days() {
+        assert_eq!(Period::Days7.heatmap_days(), 30);
+        assert_eq!(Period::Days30.heatmap_days(), 90);
+        assert_eq!(Period::Days90.heatmap_days(), 180);
+        assert_eq!(Period::AllTime.heatmap_days(), 365);
+    }
+
+    #[test]
+    fn test_focus_next_cycle() {
+        let f = Focus::Hourly;
+        let f = f.next();
+        assert_eq!(f, Focus::TopPrograms);
+        let f = f.next();
+        assert_eq!(f, Focus::TopCommands);
+        let f = f.next();
+        assert_eq!(f, Focus::TopDirs);
+        let f = f.next();
+        assert_eq!(f, Focus::Hourly); // wraps
+    }
+
+    #[test]
+    fn test_focus_prev_cycle() {
+        let f = Focus::Hourly;
+        let f = f.prev();
+        assert_eq!(f, Focus::TopDirs);
+        let f = f.prev();
+        assert_eq!(f, Focus::TopCommands);
+        let f = f.prev();
+        assert_eq!(f, Focus::TopPrograms);
+        let f = f.prev();
+        assert_eq!(f, Focus::Hourly); // wraps
+    }
+
+    #[test]
+    fn test_stats_app_initial_state() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let app = StatsApp::new(&repo, Period::Days30, 10, None, None);
+
+        assert_eq!(app.period, Period::Days30);
+        assert_eq!(app.focus, Focus::TopCommands);
+        assert!(!app.show_executor);
+        assert_eq!(app.top_n, 10);
+        assert!(app.tag_id.is_none());
+        assert!(app.tag_name.is_none());
+    }
+
+    #[test]
+    fn test_stats_app_focus_via_handle_input() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+
+        assert_eq!(app.focus, Focus::TopCommands);
+
+        // Tab cycles focus forward
+        let cont = app.handle_input(KeyEvent::from(KeyCode::Tab), &repo);
+        assert!(cont);
+        assert_eq!(app.focus, Focus::TopDirs);
+
+        let cont = app.handle_input(KeyEvent::from(KeyCode::Tab), &repo);
+        assert!(cont);
+        assert_eq!(app.focus, Focus::Hourly);
+
+        let cont = app.handle_input(KeyEvent::from(KeyCode::Tab), &repo);
+        assert!(cont);
+        assert_eq!(app.focus, Focus::TopPrograms);
+
+        let cont = app.handle_input(KeyEvent::from(KeyCode::Tab), &repo);
+        assert!(cont);
+        assert_eq!(app.focus, Focus::TopCommands); // wraps
+
+        // BackTab cycles focus backward
+        let cont = app.handle_input(KeyEvent::from(KeyCode::BackTab), &repo);
+        assert!(cont);
+        assert_eq!(app.focus, Focus::TopPrograms);
+    }
+
+    #[test]
+    fn test_stats_app_period_change() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+
+        assert_eq!(app.period, Period::Days7);
+
+        app.handle_input(KeyEvent::from(KeyCode::Char('2')), &repo);
+        assert_eq!(app.period, Period::Days30);
+
+        app.handle_input(KeyEvent::from(KeyCode::Char('3')), &repo);
+        assert_eq!(app.period, Period::Days90);
+
+        app.handle_input(KeyEvent::from(KeyCode::Char('4')), &repo);
+        assert_eq!(app.period, Period::AllTime);
+
+        app.handle_input(KeyEvent::from(KeyCode::Char('1')), &repo);
+        assert_eq!(app.period, Period::Days7);
+    }
+
+    #[test]
+    fn test_stats_app_toggle_executor() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+
+        assert!(!app.show_executor);
+
+        app.handle_input(KeyEvent::from(KeyCode::Char('e')), &repo);
+        assert!(app.show_executor);
+
+        app.handle_input(KeyEvent::from(KeyCode::Char('e')), &repo);
+        assert!(!app.show_executor);
+    }
+
+    #[test]
+    fn test_stats_app_quit() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+
+        let cont = app.handle_input(KeyEvent::from(KeyCode::Char('q')), &repo);
+        assert!(!cont); // false = quit
+
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+        let cont = app.handle_input(KeyEvent::from(KeyCode::Esc), &repo);
+        assert!(!cont);
+    }
+
+    #[test]
+    fn test_stats_app_selection_movement() {
+        use crate::models::{Entry, Session};
+
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let now = chrono::Local::now().timestamp_millis();
+
+        // Insert a session first (entries have a FK on session_id)
+        let session = Session::new("test-host".to_string(), now);
+        repo.insert_session(&session).unwrap();
+        let sid = session.id.clone();
+
+        // Insert some commands so the tables are non-empty
+        repo.insert_entry(&Entry::new(
+            sid.clone(),
+            "git status".to_string(),
+            "/tmp".to_string(),
+            Some(0),
+            now - 300,
+            now - 200,
+        ))
+        .unwrap();
+        repo.insert_entry(&Entry::new(
+            sid.clone(),
+            "cargo build".to_string(),
+            "/tmp".to_string(),
+            Some(0),
+            now - 200,
+            now - 100,
+        ))
+        .unwrap();
+        repo.insert_entry(&Entry::new(
+            sid,
+            "ls -la".to_string(),
+            "/home".to_string(),
+            Some(0),
+            now - 100,
+            now - 50,
+        ))
+        .unwrap();
+
+        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+
+        // Focus is on TopCommands by default; table should have selection at 0
+        assert_eq!(app.focus, Focus::TopCommands);
+        assert_eq!(app.commands_table_state.selected(), Some(0));
+
+        // Move down
+        app.handle_input(KeyEvent::from(KeyCode::Down), &repo);
+        assert_eq!(app.commands_table_state.selected(), Some(1));
+
+        // Move up back to 0
+        app.handle_input(KeyEvent::from(KeyCode::Up), &repo);
+        assert_eq!(app.commands_table_state.selected(), Some(0));
+
+        // Move up at 0 stays at 0 (saturating)
+        app.handle_input(KeyEvent::from(KeyCode::Up), &repo);
+        assert_eq!(app.commands_table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_stats_app_selection_on_different_panels() {
+        use crate::models::{Entry, Session};
+
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let now = chrono::Local::now().timestamp_millis();
+
+        let session = Session::new("test-host".to_string(), now);
+        repo.insert_session(&session).unwrap();
+        let sid = session.id.clone();
+
+        repo.insert_entry(&Entry::new(
+            sid.clone(),
+            "git status".to_string(),
+            "/tmp/a".to_string(),
+            Some(0),
+            now - 300,
+            now - 200,
+        ))
+        .unwrap();
+        repo.insert_entry(&Entry::new(
+            sid,
+            "cargo test".to_string(),
+            "/tmp/b".to_string(),
+            Some(0),
+            now - 200,
+            now - 100,
+        ))
+        .unwrap();
+
+        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+
+        // Switch to TopDirs
+        app.focus = Focus::TopDirs;
+        assert_eq!(app.dirs_table_state.selected(), Some(0));
+
+        app.handle_input(KeyEvent::from(KeyCode::Down), &repo);
+        assert_eq!(app.dirs_table_state.selected(), Some(1));
+
+        // Switch to TopPrograms
+        app.focus = Focus::TopPrograms;
+        assert_eq!(app.programs_table_state.selected(), Some(0));
+
+        app.handle_input(KeyEvent::from(KeyCode::Down), &repo);
+        assert_eq!(app.programs_table_state.selected(), Some(1));
+
+        // Hourly focus: Up/Down have no effect (no selection state for hourly)
+        app.focus = Focus::Hourly;
+        app.handle_input(KeyEvent::from(KeyCode::Down), &repo);
+        app.handle_input(KeyEvent::from(KeyCode::Up), &repo);
+        // No assertion needed - just confirming no panic
+    }
+
+    #[test]
+    fn test_build_daily_counts() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+
+        let counts = app.build_daily_counts();
+        // heatmap_days for Days7 = 30
+        assert_eq!(counts.len(), 30);
+        // With an empty repo, all counts should be 0
+        assert!(counts.iter().all(|&c| c == 0));
+    }
+
+    #[test]
+    fn test_stats_app_with_tag() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let app = StatsApp::new(&repo, Period::Days30, 5, Some(42), Some("work".to_string()));
+
+        assert_eq!(app.tag_id, Some(42));
+        assert_eq!(app.tag_name, Some("work".to_string()));
+        assert_eq!(app.top_n, 5);
     }
 }
