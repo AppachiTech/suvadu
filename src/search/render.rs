@@ -1517,4 +1517,1195 @@ mod tests {
         let title = app.build_table_title();
         assert_eq!(title, "History (1-50 / 100)");
     }
+
+    // ========================================================================
+    // Additional tests
+    // ========================================================================
+
+    // --- active_filter_count tests ---
+
+    fn make_search_app_with_filters(
+        after: Option<i64>,
+        before: Option<i64>,
+        tag_id: Option<i64>,
+        exit_code: Option<i32>,
+        executor_type: Option<String>,
+    ) -> super::SearchApp {
+        let config = super::super::SearchConfig {
+            entries: vec![],
+            initial_query: None,
+            total_items: 0,
+            page: 1,
+            page_size: 50,
+            tags: vec![],
+            unique_counts: std::collections::HashMap::new(),
+            filter_after: after,
+            filter_before: before,
+            filter_tag_id: tag_id,
+            filter_exit_code: exit_code,
+            filter_executor_type: executor_type,
+            start_date_input: None,
+            end_date_input: None,
+            tag_filter_input: None,
+            exit_code_input: None,
+            executor_filter_input: None,
+            bookmarked_commands: std::collections::HashSet::new(),
+            filter_cwd: None,
+            noted_entry_ids: std::collections::HashSet::new(),
+            show_risk_in_search: false,
+            view: super::super::ViewOptions {
+                unique_mode: false,
+                context_boost: false,
+                detail_pane_open: false,
+                search_field: crate::models::SearchField::Command,
+                current_cwd: None,
+            },
+        };
+        super::SearchApp::new(config)
+    }
+
+    #[test]
+    fn test_active_filter_count_none() {
+        let app = make_search_app_with_filters(None, None, None, None, None);
+        assert_eq!(app.active_filter_count(), 0);
+    }
+
+    #[test]
+    fn test_active_filter_count_one_after() {
+        let app = make_search_app_with_filters(Some(1_700_000_000), None, None, None, None);
+        assert_eq!(app.active_filter_count(), 1);
+    }
+
+    #[test]
+    fn test_active_filter_count_one_before() {
+        let app = make_search_app_with_filters(None, Some(1_700_000_000), None, None, None);
+        assert_eq!(app.active_filter_count(), 1);
+    }
+
+    #[test]
+    fn test_active_filter_count_one_tag() {
+        let app = make_search_app_with_filters(None, None, Some(1), None, None);
+        assert_eq!(app.active_filter_count(), 1);
+    }
+
+    #[test]
+    fn test_active_filter_count_one_exit_code() {
+        let app = make_search_app_with_filters(None, None, None, Some(0), None);
+        assert_eq!(app.active_filter_count(), 1);
+    }
+
+    #[test]
+    fn test_active_filter_count_one_executor() {
+        let app = make_search_app_with_filters(None, None, None, None, Some("human".to_string()));
+        assert_eq!(app.active_filter_count(), 1);
+    }
+
+    #[test]
+    fn test_active_filter_count_two() {
+        let app = make_search_app_with_filters(Some(1_700_000_000), None, Some(5), None, None);
+        assert_eq!(app.active_filter_count(), 2);
+    }
+
+    #[test]
+    fn test_active_filter_count_all_five() {
+        let app = make_search_app_with_filters(
+            Some(1_700_000_000),
+            Some(1_800_000_000),
+            Some(1),
+            Some(0),
+            Some("agent".to_string()),
+        );
+        assert_eq!(app.active_filter_count(), 5);
+    }
+
+    // --- build_command_text with noted entry ---
+
+    #[test]
+    fn test_build_command_text_noted() {
+        let (app, entry) = make_search_app_for_build_text(false, false, true);
+        let text = build_command_text(&app, &entry);
+        // The note prefix is "📝"
+        assert!(text.contains('📝'));
+        assert!(text.contains("cargo test"));
+    }
+
+    // --- build_command_text with all three decorations ---
+
+    #[test]
+    fn test_build_command_text_bookmarked_unique_noted() {
+        let (app, entry) = make_search_app_for_build_text(true, true, true);
+        let text = build_command_text(&app, &entry);
+        assert!(text.contains('📝'));
+        assert!(text.contains('★'));
+        assert!(text.contains("(5)"));
+        assert!(text.contains("cargo test"));
+    }
+
+    // --- build_table_title page 2 ---
+
+    #[test]
+    fn test_build_table_title_page_two() {
+        let entries: Vec<Entry> = (0..50).map(|i| make_entry(None, None, Some(i))).collect();
+        let config = super::super::SearchConfig {
+            entries,
+            initial_query: None,
+            total_items: 120,
+            page: 2,
+            page_size: 50,
+            tags: vec![],
+            unique_counts: std::collections::HashMap::new(),
+            filter_after: None,
+            filter_before: None,
+            filter_tag_id: None,
+            filter_exit_code: None,
+            filter_executor_type: None,
+            start_date_input: None,
+            end_date_input: None,
+            tag_filter_input: None,
+            exit_code_input: None,
+            executor_filter_input: None,
+            bookmarked_commands: std::collections::HashSet::new(),
+            filter_cwd: None,
+            noted_entry_ids: std::collections::HashSet::new(),
+            show_risk_in_search: false,
+            view: super::super::ViewOptions {
+                unique_mode: false,
+                context_boost: false,
+                detail_pane_open: false,
+                search_field: crate::models::SearchField::Command,
+                current_cwd: None,
+            },
+        };
+        let app = super::SearchApp::new(config);
+        let title = app.build_table_title();
+        // page=2, page_size=50: start_index = (2-1)*50+1 = 51, end_index = 51+50-1 = 100
+        assert_eq!(title, "History (51-100 / 120)");
+    }
+
+    // --- build_table_title single item ---
+
+    #[test]
+    fn test_build_table_title_single_item() {
+        let entries = vec![make_entry(None, None, Some(0))];
+        let config = super::super::SearchConfig {
+            entries,
+            initial_query: None,
+            total_items: 1,
+            page: 1,
+            page_size: 50,
+            tags: vec![],
+            unique_counts: std::collections::HashMap::new(),
+            filter_after: None,
+            filter_before: None,
+            filter_tag_id: None,
+            filter_exit_code: None,
+            filter_executor_type: None,
+            start_date_input: None,
+            end_date_input: None,
+            tag_filter_input: None,
+            exit_code_input: None,
+            executor_filter_input: None,
+            bookmarked_commands: std::collections::HashSet::new(),
+            filter_cwd: None,
+            noted_entry_ids: std::collections::HashSet::new(),
+            show_risk_in_search: false,
+            view: super::super::ViewOptions {
+                unique_mode: false,
+                context_boost: false,
+                detail_pane_open: false,
+                search_field: crate::models::SearchField::Command,
+                current_cwd: None,
+            },
+        };
+        let app = super::SearchApp::new(config);
+        let title = app.build_table_title();
+        // page=1, page_size=50, 1 entry: start=1, end=1
+        assert_eq!(title, "History (1-1 / 1)");
+    }
+
+    // --- build_table_title exact page boundary ---
+
+    #[test]
+    fn test_build_table_title_exact_page_boundary() {
+        let entries: Vec<Entry> = (0..50).map(|i| make_entry(None, None, Some(i))).collect();
+        let config = super::super::SearchConfig {
+            entries,
+            initial_query: None,
+            total_items: 50,
+            page: 1,
+            page_size: 50,
+            tags: vec![],
+            unique_counts: std::collections::HashMap::new(),
+            filter_after: None,
+            filter_before: None,
+            filter_tag_id: None,
+            filter_exit_code: None,
+            filter_executor_type: None,
+            start_date_input: None,
+            end_date_input: None,
+            tag_filter_input: None,
+            exit_code_input: None,
+            executor_filter_input: None,
+            bookmarked_commands: std::collections::HashSet::new(),
+            filter_cwd: None,
+            noted_entry_ids: std::collections::HashSet::new(),
+            show_risk_in_search: false,
+            view: super::super::ViewOptions {
+                unique_mode: false,
+                context_boost: false,
+                detail_pane_open: false,
+                search_field: crate::models::SearchField::Command,
+                current_cwd: None,
+            },
+        };
+        let app = super::SearchApp::new(config);
+        let title = app.build_table_title();
+        assert_eq!(title, "History (1-50 / 50)");
+    }
+
+    // --- ColumnLayout::from_width boundary values ---
+
+    #[test]
+    fn test_column_layout_boundary_79_compact() {
+        // 79 < 80 → Compact
+        assert!(matches!(
+            ColumnLayout::from_width(79),
+            ColumnLayout::Compact
+        ));
+    }
+
+    #[test]
+    fn test_column_layout_boundary_80_semi_compact() {
+        // 80 >= 80 and < 130 → SemiCompact
+        assert!(matches!(
+            ColumnLayout::from_width(80),
+            ColumnLayout::SemiCompact
+        ));
+    }
+
+    #[test]
+    fn test_column_layout_boundary_129_semi_compact() {
+        // 129 < 130 → SemiCompact
+        assert!(matches!(
+            ColumnLayout::from_width(129),
+            ColumnLayout::SemiCompact
+        ));
+    }
+
+    #[test]
+    fn test_column_layout_boundary_130_full() {
+        // 130 >= 130 → Full
+        assert!(matches!(ColumnLayout::from_width(130), ColumnLayout::Full));
+    }
+
+    #[test]
+    fn test_column_layout_boundary_0_compact() {
+        // 0 < 80 → Compact
+        assert!(matches!(ColumnLayout::from_width(0), ColumnLayout::Compact));
+    }
+
+    #[test]
+    fn test_column_layout_boundary_u16_max_full() {
+        // u16::MAX >= 130 → Full
+        assert!(matches!(
+            ColumnLayout::from_width(u16::MAX),
+            ColumnLayout::Full
+        ));
+    }
+
+    // --- ColumnLayout::SemiCompact constraints count ---
+
+    #[test]
+    fn test_column_layout_constraints_semi_compact() {
+        let layout = ColumnLayout::SemiCompact;
+        let constraints = layout.constraints();
+        assert_eq!(constraints.len(), 3);
+    }
+
+    // --- format_executor with unknown type ---
+
+    #[test]
+    fn test_format_executor_unknown_type_no_executor() {
+        let e = make_entry(Some("unknown"), None, None);
+        let result = format_executor(&e);
+        // unknown falls into _ => "❓", and executor is None so just icon
+        assert!(result.contains('❓'));
+    }
+
+    #[test]
+    fn test_format_executor_unknown_type_with_executor() {
+        let e = make_entry(Some("unknown"), Some("custom-shell"), None);
+        // The executor_type is "unknown" → icon = "❓"
+        // executor = Some("custom-shell") → format is "❓ custom-shell"
+        let result = format_executor(&e);
+        assert!(result.contains('❓'));
+        assert!(result.contains("custom-shell"));
+    }
+
+    #[test]
+    fn test_format_executor_ide() {
+        let e = make_entry(Some("ide"), Some("vscode"), None);
+        let result = format_executor(&e);
+        assert!(result.contains('💻'));
+        assert!(result.contains("vscode"));
+    }
+
+    #[test]
+    fn test_format_executor_ci() {
+        let e = make_entry(Some("ci"), Some("github-actions"), None);
+        let result = format_executor(&e);
+        assert!(result.contains("github-actions"));
+    }
+
+    #[test]
+    fn test_format_executor_programmatic() {
+        let e = make_entry(Some("programmatic"), Some("script"), None);
+        let result = format_executor(&e);
+        assert!(result.contains("script"));
+    }
+
+    #[test]
+    fn test_format_executor_bot() {
+        let e = make_entry(Some("bot"), Some("mybot"), None);
+        let result = format_executor(&e);
+        // "bot" matches "bot" | "agent" arm → "🤖"
+        assert!(result.contains('🤖'));
+        assert!(result.contains("mybot"));
+    }
+
+    // --- format_exit_code for signal codes ---
+
+    #[test]
+    fn test_format_exit_code_127_command_not_found() {
+        let e = make_entry(None, None, Some(127));
+        let (display, _style) = format_exit_code(&e, Style::default());
+        assert!(display.contains('✘'));
+        assert!(display.contains("127"));
+    }
+
+    #[test]
+    fn test_format_exit_code_130_sigint() {
+        let e = make_entry(None, None, Some(130));
+        let (display, _style) = format_exit_code(&e, Style::default());
+        assert!(display.contains('✘'));
+        assert!(display.contains("130"));
+    }
+
+    #[test]
+    fn test_format_exit_code_137_sigkill() {
+        let e = make_entry(None, None, Some(137));
+        let (display, _style) = format_exit_code(&e, Style::default());
+        assert!(display.contains('✘'));
+        assert!(display.contains("137"));
+    }
+
+    #[test]
+    fn test_format_exit_code_failure_style_uses_error_color() {
+        let t = crate::theme::theme();
+        let e = make_entry(None, None, Some(1));
+        let (_display, style) = format_exit_code(&e, Style::default());
+        let expected = Style::default().fg(t.error);
+        assert_eq!(style, expected);
+    }
+
+    #[test]
+    fn test_format_exit_code_success_style_uses_success_color() {
+        let t = crate::theme::theme();
+        let e = make_entry(None, None, Some(0));
+        let (_display, style) = format_exit_code(&e, Style::default());
+        let expected = Style::default().fg(t.success);
+        assert_eq!(style, expected);
+    }
+
+    #[test]
+    fn test_format_exit_code_none_style_uses_muted_color() {
+        let t = crate::theme::theme();
+        let e = make_entry(None, None, None);
+        let (_display, style) = format_exit_code(&e, Style::default());
+        let expected = Style::default().fg(t.text_muted);
+        assert_eq!(style, expected);
+    }
+
+    // --- entry_row_styles with is_local ---
+
+    #[test]
+    fn test_entry_row_styles_selected_local() {
+        let t = crate::theme::theme();
+        let styles = entry_row_styles(t, true, true);
+        // When selected + local, path should be primary color with bold
+        let expected_path = Style::default()
+            .bg(t.selection_bg)
+            .fg(t.primary)
+            .add_modifier(Modifier::BOLD);
+        assert_eq!(styles.path, expected_path);
+    }
+
+    #[test]
+    fn test_entry_row_styles_selected_not_local() {
+        let t = crate::theme::theme();
+        let styles = entry_row_styles(t, true, false);
+        // When selected + not local, path should use selection_fg
+        let expected_path = Style::default().bg(t.selection_bg).fg(t.selection_fg);
+        assert_eq!(styles.path, expected_path);
+    }
+
+    #[test]
+    fn test_entry_row_styles_not_selected_local() {
+        let t = crate::theme::theme();
+        let styles = entry_row_styles(t, false, true);
+        // When not selected + local, path should be primary color (no bold)
+        let expected_path = Style::default().fg(t.primary);
+        assert_eq!(styles.path, expected_path);
+        // bg should be default (no background)
+        assert_eq!(styles.bg, Style::default());
+    }
+
+    #[test]
+    fn test_entry_row_styles_not_selected_not_local() {
+        let t = crate::theme::theme();
+        let styles = entry_row_styles(t, false, false);
+        // When not selected + not local, path should use text_secondary
+        let expected_path = Style::default().fg(t.text_secondary);
+        assert_eq!(styles.path, expected_path);
+    }
+
+    // --- build_command_text with no ID ---
+
+    #[test]
+    fn test_build_command_text_no_id() {
+        use std::collections::{HashMap, HashSet};
+
+        let entry = Entry {
+            id: None,
+            session_id: "s1".to_string(),
+            command: "ls -la".to_string(),
+            cwd: "/tmp".to_string(),
+            exit_code: Some(0),
+            started_at: 1_700_000_000_000,
+            ended_at: 1_700_000_001_000,
+            duration_ms: 1000,
+            context: None,
+            tag_name: None,
+            tag_id: None,
+            executor_type: None,
+            executor: None,
+        };
+
+        // noted_entry_ids has some values, but entry.id is None so no match
+        let mut noted_entry_ids = HashSet::new();
+        noted_entry_ids.insert(42);
+
+        let config = super::super::SearchConfig {
+            entries: vec![entry.clone()],
+            initial_query: None,
+            total_items: 1,
+            page: 1,
+            page_size: 50,
+            tags: vec![],
+            unique_counts: HashMap::new(),
+            filter_after: None,
+            filter_before: None,
+            filter_tag_id: None,
+            filter_exit_code: None,
+            filter_executor_type: None,
+            start_date_input: None,
+            end_date_input: None,
+            tag_filter_input: None,
+            exit_code_input: None,
+            executor_filter_input: None,
+            bookmarked_commands: HashSet::new(),
+            filter_cwd: None,
+            noted_entry_ids,
+            show_risk_in_search: false,
+            view: super::super::ViewOptions {
+                unique_mode: false,
+                context_boost: false,
+                detail_pane_open: false,
+                search_field: crate::models::SearchField::Command,
+                current_cwd: None,
+            },
+        };
+        let app = super::SearchApp::new(config);
+        let text = build_command_text(&app, &entry);
+        // Should just be the command, no decorations, and no panic
+        assert_eq!(text, "ls -la");
+    }
+
+    #[test]
+    fn test_build_command_text_no_id_unique_mode() {
+        use std::collections::{HashMap, HashSet};
+
+        let entry = Entry {
+            id: None,
+            session_id: "s1".to_string(),
+            command: "echo hello".to_string(),
+            cwd: "/tmp".to_string(),
+            exit_code: Some(0),
+            started_at: 1_700_000_000_000,
+            ended_at: 1_700_000_001_000,
+            duration_ms: 1000,
+            context: None,
+            tag_name: None,
+            tag_id: None,
+            executor_type: None,
+            executor: None,
+        };
+
+        let config = super::super::SearchConfig {
+            entries: vec![entry.clone()],
+            initial_query: None,
+            total_items: 1,
+            page: 1,
+            page_size: 50,
+            tags: vec![],
+            unique_counts: HashMap::new(),
+            filter_after: None,
+            filter_before: None,
+            filter_tag_id: None,
+            filter_exit_code: None,
+            filter_executor_type: None,
+            start_date_input: None,
+            end_date_input: None,
+            tag_filter_input: None,
+            exit_code_input: None,
+            executor_filter_input: None,
+            bookmarked_commands: HashSet::new(),
+            filter_cwd: None,
+            noted_entry_ids: HashSet::new(),
+            show_risk_in_search: false,
+            view: super::super::ViewOptions {
+                unique_mode: true,
+                context_boost: false,
+                detail_pane_open: false,
+                search_field: crate::models::SearchField::Command,
+                current_cwd: None,
+            },
+        };
+        let app = super::SearchApp::new(config);
+        let text = build_command_text(&app, &entry);
+        // id=None → unwrap_or(0), unique_counts empty → unwrap_or(&1)
+        // Should show "(1) echo hello"
+        assert!(text.contains("(1)"));
+        assert!(text.contains("echo hello"));
+    }
+
+    // --- fill_text tests ---
+
+    #[test]
+    fn test_fill_text_empty_string() {
+        let result = fill_text("", 40);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_fill_text_shorter_than_width() {
+        let result = fill_text("hello world", 40);
+        // Fits in one line, no wrapping
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_fill_text_needs_wrapping() {
+        let result = fill_text("one two three four five", 10);
+        // Words should wrap at width boundary
+        assert!(result.contains('\n'));
+    }
+
+    #[test]
+    fn test_fill_text_width_zero() {
+        let result = fill_text("hello world", 0);
+        // width=0 returns the text as-is
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_fill_text_single_long_word() {
+        // A single word longer than width should still appear (no infinite loop)
+        let result = fill_text("superlongword", 5);
+        // The word doesn't split mid-word because split_inclusive(' ') won't break it
+        assert!(result.contains("superlongword"));
+    }
+
+    #[test]
+    fn test_fill_text_exact_width() {
+        // "hello " is 6 chars, "world" is 5 chars; total 11
+        let result = fill_text("hello world", 11);
+        // Should fit in one line
+        assert!(!result.contains('\n'));
+    }
+
+    // --- command_col_width with narrow widths (saturating_sub) ---
+
+    #[test]
+    fn test_command_col_width_compact_narrow() {
+        // Compact: table_width.saturating_sub(6)
+        // width=3 → 3-6 would underflow, saturating_sub gives 0
+        assert_eq!(ColumnLayout::Compact.command_col_width(3), 0);
+    }
+
+    #[test]
+    fn test_command_col_width_compact_zero() {
+        assert_eq!(ColumnLayout::Compact.command_col_width(0), 0);
+    }
+
+    #[test]
+    fn test_command_col_width_semi_narrow() {
+        // SemiCompact: table_width.saturating_sub(12 + 6 + 6) = saturating_sub(24)
+        // width=10 → 0
+        assert_eq!(ColumnLayout::SemiCompact.command_col_width(10), 0);
+    }
+
+    #[test]
+    fn test_command_col_width_full_narrow() {
+        // Full: table_width.saturating_sub(64 + 6) = saturating_sub(70)
+        // width=50 → 0
+        assert_eq!(ColumnLayout::Full.command_col_width(50), 0);
+    }
+
+    #[test]
+    fn test_command_col_width_full_exact() {
+        // Full: 70 - 70 = 0
+        assert_eq!(ColumnLayout::Full.command_col_width(70), 0);
+    }
+
+    #[test]
+    fn test_command_col_width_full_one_over() {
+        // Full: 71 - 70 = 1
+        assert_eq!(ColumnLayout::Full.command_col_width(71), 1);
+    }
+
+    // --- SemiCompact header row ---
+
+    #[test]
+    fn test_column_layout_header_semi_compact() {
+        let layout = ColumnLayout::SemiCompact;
+        // Should not panic and constraints should be 3
+        let _header = layout.header_row();
+        assert_eq!(layout.constraints().len(), 3);
+    }
+
+    // ========================================================================
+    // build_detail_lines / append_risk_line / append_bookmark_note_lines tests
+    // ========================================================================
+
+    fn make_default_search_config(
+        entries: Vec<Entry>,
+        bookmarked: std::collections::HashSet<String>,
+        noted: std::collections::HashSet<i64>,
+        show_risk: bool,
+    ) -> super::super::SearchConfig {
+        super::super::SearchConfig {
+            entries,
+            initial_query: None,
+            total_items: 0,
+            page: 1,
+            page_size: 50,
+            tags: vec![],
+            unique_counts: std::collections::HashMap::new(),
+            filter_after: None,
+            filter_before: None,
+            filter_tag_id: None,
+            filter_exit_code: None,
+            filter_executor_type: None,
+            start_date_input: None,
+            end_date_input: None,
+            tag_filter_input: None,
+            exit_code_input: None,
+            executor_filter_input: None,
+            bookmarked_commands: bookmarked,
+            filter_cwd: None,
+            noted_entry_ids: noted,
+            show_risk_in_search: show_risk,
+            view: super::super::ViewOptions {
+                unique_mode: false,
+                context_boost: false,
+                detail_pane_open: false,
+                search_field: crate::models::SearchField::Command,
+                current_cwd: None,
+            },
+        }
+    }
+
+    fn lines_text(lines: &[Line]) -> String {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn test_build_detail_lines_basic() {
+        use std::collections::HashSet;
+
+        let entry = Entry {
+            id: Some(1),
+            session_id: "abcdefgh-1234-5678-9012-345678901234".to_string(),
+            command: "cargo test".to_string(),
+            cwd: "/tmp".to_string(),
+            exit_code: Some(0),
+            started_at: 1_700_000_000_000,
+            ended_at: 1_700_000_001_000,
+            duration_ms: 1000,
+            context: None,
+            tag_name: None,
+            tag_id: None,
+            executor_type: Some("human".to_string()),
+            executor: Some("zsh".to_string()),
+        };
+
+        let config =
+            make_default_search_config(vec![entry.clone()], HashSet::new(), HashSet::new(), false);
+        let app = super::SearchApp::new(config);
+        let lines = app.build_detail_lines(&entry);
+        let text = lines_text(&lines);
+
+        assert!(text.contains("cargo test"), "should contain command");
+        assert!(text.contains("/tmp"), "should contain path");
+        assert!(
+            text.contains("✔ 0 (success)"),
+            "should contain success exit"
+        );
+        assert!(text.contains("human: zsh"), "should contain executor");
+        assert!(text.contains("none"), "should contain tag none");
+        assert!(lines.len() >= 10, "should have at least 10 base lines");
+    }
+
+    #[test]
+    fn test_build_detail_lines_failed_exit() {
+        use std::collections::HashSet;
+
+        let entry = Entry {
+            id: Some(1),
+            session_id: "s1".to_string(),
+            command: "cargo test".to_string(),
+            cwd: "/tmp".to_string(),
+            exit_code: Some(1),
+            started_at: 1_700_000_000_000,
+            ended_at: 1_700_000_001_000,
+            duration_ms: 1000,
+            context: None,
+            tag_name: None,
+            tag_id: None,
+            executor_type: Some("human".to_string()),
+            executor: Some("zsh".to_string()),
+        };
+
+        let config =
+            make_default_search_config(vec![entry.clone()], HashSet::new(), HashSet::new(), false);
+        let app = super::SearchApp::new(config);
+        let lines = app.build_detail_lines(&entry);
+        let text = lines_text(&lines);
+
+        assert!(
+            text.contains("✘ 1 (failed)"),
+            "should contain failed exit code"
+        );
+    }
+
+    #[test]
+    fn test_build_detail_lines_unknown_exit() {
+        use std::collections::HashSet;
+
+        let entry = Entry {
+            id: Some(1),
+            session_id: "s1".to_string(),
+            command: "cargo test".to_string(),
+            cwd: "/tmp".to_string(),
+            exit_code: None,
+            started_at: 1_700_000_000_000,
+            ended_at: 1_700_000_001_000,
+            duration_ms: 1000,
+            context: None,
+            tag_name: None,
+            tag_id: None,
+            executor_type: Some("human".to_string()),
+            executor: Some("zsh".to_string()),
+        };
+
+        let config =
+            make_default_search_config(vec![entry.clone()], HashSet::new(), HashSet::new(), false);
+        let app = super::SearchApp::new(config);
+        let lines = app.build_detail_lines(&entry);
+        let text = lines_text(&lines);
+
+        assert!(text.contains("○ (unknown)"), "should contain unknown exit");
+    }
+
+    #[test]
+    fn test_build_detail_lines_executor_only_type() {
+        use std::collections::HashSet;
+
+        let entry = Entry {
+            id: Some(1),
+            session_id: "s1".to_string(),
+            command: "cargo test".to_string(),
+            cwd: "/tmp".to_string(),
+            exit_code: Some(0),
+            started_at: 1_700_000_000_000,
+            ended_at: 1_700_000_001_000,
+            duration_ms: 1000,
+            context: None,
+            tag_name: None,
+            tag_id: None,
+            executor_type: Some("agent".to_string()),
+            executor: None,
+        };
+
+        let config =
+            make_default_search_config(vec![entry.clone()], HashSet::new(), HashSet::new(), false);
+        let app = super::SearchApp::new(config);
+        let lines = app.build_detail_lines(&entry);
+        let text = lines_text(&lines);
+
+        assert!(
+            text.contains("agent"),
+            "should contain executor type 'agent'"
+        );
+        // executor_type only (no executor name) should NOT produce a colon separator
+        assert!(
+            !text.contains("agent:"),
+            "should not have colon when executor name is absent"
+        );
+    }
+
+    #[test]
+    fn test_build_detail_lines_no_executor() {
+        use std::collections::HashSet;
+
+        let entry = Entry {
+            id: Some(1),
+            session_id: "s1".to_string(),
+            command: "cargo test".to_string(),
+            cwd: "/tmp".to_string(),
+            exit_code: Some(0),
+            started_at: 1_700_000_000_000,
+            ended_at: 1_700_000_001_000,
+            duration_ms: 1000,
+            context: None,
+            tag_name: None,
+            tag_id: None,
+            executor_type: None,
+            executor: None,
+        };
+
+        let config =
+            make_default_search_config(vec![entry.clone()], HashSet::new(), HashSet::new(), false);
+        let app = super::SearchApp::new(config);
+        let lines = app.build_detail_lines(&entry);
+        let text = lines_text(&lines);
+
+        assert!(
+            text.contains("unknown"),
+            "should show 'unknown' when no executor info"
+        );
+    }
+
+    #[test]
+    fn test_build_detail_lines_with_tag() {
+        use std::collections::HashSet;
+
+        let entry = Entry {
+            id: Some(1),
+            session_id: "s1".to_string(),
+            command: "cargo test".to_string(),
+            cwd: "/tmp".to_string(),
+            exit_code: Some(0),
+            started_at: 1_700_000_000_000,
+            ended_at: 1_700_000_001_000,
+            duration_ms: 1000,
+            context: None,
+            tag_name: Some("work".to_string()),
+            tag_id: Some(1),
+            executor_type: Some("human".to_string()),
+            executor: Some("zsh".to_string()),
+        };
+
+        let config =
+            make_default_search_config(vec![entry.clone()], HashSet::new(), HashSet::new(), false);
+        let app = super::SearchApp::new(config);
+        let lines = app.build_detail_lines(&entry);
+        let text = lines_text(&lines);
+
+        assert!(text.contains("work"), "should contain tag name 'work'");
+    }
+
+    #[test]
+    fn test_build_detail_lines_session_truncated() {
+        use std::collections::HashSet;
+
+        let entry = Entry {
+            id: Some(1),
+            session_id: "abcdefgh-1234-5678-9012-345678901234".to_string(),
+            command: "cargo test".to_string(),
+            cwd: "/tmp".to_string(),
+            exit_code: Some(0),
+            started_at: 1_700_000_000_000,
+            ended_at: 1_700_000_001_000,
+            duration_ms: 1000,
+            context: None,
+            tag_name: None,
+            tag_id: None,
+            executor_type: Some("human".to_string()),
+            executor: Some("zsh".to_string()),
+        };
+
+        let config =
+            make_default_search_config(vec![entry.clone()], HashSet::new(), HashSet::new(), false);
+        let app = super::SearchApp::new(config);
+        let lines = app.build_detail_lines(&entry);
+        let text = lines_text(&lines);
+
+        // Session ID should be truncated to first 8 chars
+        assert!(
+            text.contains("abcdefgh"),
+            "should contain truncated session ID"
+        );
+        assert!(
+            !text.contains("abcdefgh-1234"),
+            "should NOT contain full session ID beyond 8 chars"
+        );
+    }
+
+    #[test]
+    fn test_build_detail_lines_risk_disabled() {
+        use std::collections::HashSet;
+
+        let entry = Entry {
+            id: Some(1),
+            session_id: "s1".to_string(),
+            command: "rm -rf /".to_string(),
+            cwd: "/tmp".to_string(),
+            exit_code: Some(0),
+            started_at: 1_700_000_000_000,
+            ended_at: 1_700_000_001_000,
+            duration_ms: 1000,
+            context: None,
+            tag_name: None,
+            tag_id: None,
+            executor_type: Some("human".to_string()),
+            executor: Some("zsh".to_string()),
+        };
+
+        let config = make_default_search_config(
+            vec![entry.clone()],
+            HashSet::new(),
+            HashSet::new(),
+            false, // show_risk disabled
+        );
+        let app = super::SearchApp::new(config);
+        let lines = app.build_detail_lines(&entry);
+        let text = lines_text(&lines);
+
+        assert!(
+            !text.contains("Risk"),
+            "should NOT show Risk line when risk display is disabled"
+        );
+    }
+
+    #[test]
+    fn test_build_detail_lines_risk_enabled_dangerous() {
+        use std::collections::HashSet;
+
+        let entry = Entry {
+            id: Some(1),
+            session_id: "s1".to_string(),
+            command: "rm -rf /".to_string(),
+            cwd: "/tmp".to_string(),
+            exit_code: Some(0),
+            started_at: 1_700_000_000_000,
+            ended_at: 1_700_000_001_000,
+            duration_ms: 1000,
+            context: None,
+            tag_name: None,
+            tag_id: None,
+            executor_type: Some("human".to_string()),
+            executor: Some("zsh".to_string()),
+        };
+
+        let config = make_default_search_config(
+            vec![entry.clone()],
+            HashSet::new(),
+            HashSet::new(),
+            true, // show_risk enabled
+        );
+        let app = super::SearchApp::new(config);
+        let lines = app.build_detail_lines(&entry);
+        let text = lines_text(&lines);
+
+        assert!(
+            text.contains("Risk"),
+            "should show Risk line for dangerous command"
+        );
+    }
+
+    #[test]
+    fn test_build_detail_lines_risk_enabled_safe() {
+        use std::collections::HashSet;
+
+        let entry = Entry {
+            id: Some(1),
+            session_id: "s1".to_string(),
+            command: "ls".to_string(),
+            cwd: "/tmp".to_string(),
+            exit_code: Some(0),
+            started_at: 1_700_000_000_000,
+            ended_at: 1_700_000_001_000,
+            duration_ms: 1000,
+            context: None,
+            tag_name: None,
+            tag_id: None,
+            executor_type: Some("human".to_string()),
+            executor: Some("zsh".to_string()),
+        };
+
+        let config = make_default_search_config(
+            vec![entry.clone()],
+            HashSet::new(),
+            HashSet::new(),
+            true, // show_risk enabled, but safe command
+        );
+        let app = super::SearchApp::new(config);
+        let lines = app.build_detail_lines(&entry);
+        let text = lines_text(&lines);
+
+        assert!(
+            !text.contains("Risk"),
+            "should NOT show Risk line for safe command even when risk display is enabled"
+        );
+    }
+
+    #[test]
+    fn test_build_detail_lines_bookmarked() {
+        use std::collections::HashSet;
+
+        let entry = Entry {
+            id: Some(1),
+            session_id: "s1".to_string(),
+            command: "cargo test".to_string(),
+            cwd: "/tmp".to_string(),
+            exit_code: Some(0),
+            started_at: 1_700_000_000_000,
+            ended_at: 1_700_000_001_000,
+            duration_ms: 1000,
+            context: None,
+            tag_name: None,
+            tag_id: None,
+            executor_type: Some("human".to_string()),
+            executor: Some("zsh".to_string()),
+        };
+
+        let mut bookmarked = HashSet::new();
+        bookmarked.insert("cargo test".to_string());
+
+        let config =
+            make_default_search_config(vec![entry.clone()], bookmarked, HashSet::new(), false);
+        let app = super::SearchApp::new(config);
+        let lines = app.build_detail_lines(&entry);
+        let text = lines_text(&lines);
+
+        assert!(text.contains("★"), "should contain bookmark star");
+        assert!(text.contains("Bookmarked"), "should contain 'Bookmarked'");
+    }
+
+    #[test]
+    fn test_build_detail_lines_noted() {
+        use std::collections::HashSet;
+
+        let entry = Entry {
+            id: Some(42),
+            session_id: "s1".to_string(),
+            command: "cargo test".to_string(),
+            cwd: "/tmp".to_string(),
+            exit_code: Some(0),
+            started_at: 1_700_000_000_000,
+            ended_at: 1_700_000_001_000,
+            duration_ms: 1000,
+            context: None,
+            tag_name: None,
+            tag_id: None,
+            executor_type: Some("human".to_string()),
+            executor: Some("zsh".to_string()),
+        };
+
+        let mut noted = HashSet::new();
+        noted.insert(42_i64);
+
+        let config = make_default_search_config(vec![entry.clone()], HashSet::new(), noted, false);
+        let app = super::SearchApp::new(config);
+        let lines = app.build_detail_lines(&entry);
+        let text = lines_text(&lines);
+
+        assert!(text.contains("📝"), "should contain note emoji");
+        assert!(text.contains("Has note"), "should contain 'Has note'");
+    }
+
+    #[test]
+    fn test_build_detail_lines_bookmarked_and_noted() {
+        use std::collections::HashSet;
+
+        let entry = Entry {
+            id: Some(42),
+            session_id: "s1".to_string(),
+            command: "cargo test".to_string(),
+            cwd: "/tmp".to_string(),
+            exit_code: Some(0),
+            started_at: 1_700_000_000_000,
+            ended_at: 1_700_000_001_000,
+            duration_ms: 1000,
+            context: None,
+            tag_name: None,
+            tag_id: None,
+            executor_type: Some("human".to_string()),
+            executor: Some("zsh".to_string()),
+        };
+
+        let mut bookmarked = HashSet::new();
+        bookmarked.insert("cargo test".to_string());
+        let mut noted = HashSet::new();
+        noted.insert(42_i64);
+
+        let config = make_default_search_config(vec![entry.clone()], bookmarked, noted, false);
+        let app = super::SearchApp::new(config);
+        let lines = app.build_detail_lines(&entry);
+        let text = lines_text(&lines);
+
+        assert!(text.contains("★"), "should contain bookmark star");
+        assert!(text.contains("📝"), "should contain note emoji");
+    }
+
+    #[test]
+    fn test_build_detail_lines_not_bookmarked_not_noted() {
+        use std::collections::HashSet;
+
+        let entry = Entry {
+            id: Some(1),
+            session_id: "s1".to_string(),
+            command: "cargo test".to_string(),
+            cwd: "/tmp".to_string(),
+            exit_code: Some(0),
+            started_at: 1_700_000_000_000,
+            ended_at: 1_700_000_001_000,
+            duration_ms: 1000,
+            context: None,
+            tag_name: None,
+            tag_id: None,
+            executor_type: Some("human".to_string()),
+            executor: Some("zsh".to_string()),
+        };
+
+        let config =
+            make_default_search_config(vec![entry.clone()], HashSet::new(), HashSet::new(), false);
+        let app = super::SearchApp::new(config);
+        let lines = app.build_detail_lines(&entry);
+        let text = lines_text(&lines);
+
+        assert!(!text.contains("★"), "should NOT contain bookmark star");
+        assert!(!text.contains("📝"), "should NOT contain note emoji");
+    }
 }

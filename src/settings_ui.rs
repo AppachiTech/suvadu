@@ -1360,4 +1360,478 @@ mod tests {
         app.handle_input(KeyEvent::from(KeyCode::Backspace));
         assert_eq!(app.input_buffer, "a");
     }
+
+    // ── Auto-tag add flow ──────────────────────────────────────────────
+    #[test]
+    fn test_auto_tag_add_flow() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+
+        // Switch to auto-tags tab (tab 3)
+        app.current_tab = 3;
+        app.selected_item = 0;
+
+        // Press 'a' to start adding an auto-tag
+        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        assert_eq!(app.input_mode, InputMode::Editing);
+        assert_eq!(app.auto_tag_focus, 0);
+        assert!(app.auto_tag_path_input.is_empty());
+        assert!(app.auto_tag_name_input.is_empty());
+
+        // Type path "~/projects"
+        for c in "~/projects".chars() {
+            app.handle_input(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(app.auto_tag_path_input, "~/projects");
+
+        // Press Enter to switch to tag field
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.auto_tag_focus, 1);
+        assert_eq!(app.input_mode, InputMode::Editing); // Still editing
+
+        // Type tag name "work"
+        for c in "work".chars() {
+            app.handle_input(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(app.auto_tag_name_input, "work");
+
+        // Press Enter to submit
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.dirty);
+        assert_eq!(
+            app.config.auto_tags.get("~/projects"),
+            Some(&"work".to_string())
+        );
+    }
+
+    // ── Auto-tag delete flow ───────────────────────────────────────────
+    #[test]
+    fn test_auto_tag_delete_flow() {
+        let mut config = Config::default();
+        config
+            .auto_tags
+            .insert("/home/user".to_string(), "home".to_string());
+        config
+            .auto_tags
+            .insert("/work/repo".to_string(), "work".to_string());
+
+        let mut app = AppState::new(config);
+        app.current_tab = 3;
+        app.selected_item = 0;
+
+        assert_eq!(app.config.auto_tags.len(), 2);
+
+        // Press 'd' to delete the selected auto-tag
+        app.handle_input(KeyEvent::from(KeyCode::Char('d')));
+        assert_eq!(app.config.auto_tags.len(), 1);
+        assert!(app.dirty);
+
+        // Delete the remaining one
+        app.selected_item = 0;
+        app.handle_input(KeyEvent::from(KeyCode::Char('d')));
+        assert!(app.config.auto_tags.is_empty());
+        assert_eq!(app.selected_item, 0);
+        assert_eq!(app.auto_tag_list_state.selected(), None);
+    }
+
+    // ── Auto-tag Tab toggles focus ─────────────────────────────────────
+    #[test]
+    fn test_auto_tag_tab_toggles_focus() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+
+        app.current_tab = 3;
+        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        assert_eq!(app.input_mode, InputMode::Editing);
+        assert_eq!(app.auto_tag_focus, 0);
+
+        // Tab toggles from path (0) to name (1)
+        app.handle_input(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.auto_tag_focus, 1);
+
+        // Tab toggles back from name (1) to path (0)
+        app.handle_input(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.auto_tag_focus, 0);
+    }
+
+    // ── Auto-tag validation - empty fields rejected ────────────────────
+    #[test]
+    fn test_auto_tag_empty_fields_rejected() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+
+        app.current_tab = 3;
+        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        assert_eq!(app.input_mode, InputMode::Editing);
+
+        // Move to tag field with empty path
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.auto_tag_focus, 1);
+
+        // Try to submit with empty path and empty tag
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        // Should show error and stay in editing mode
+        assert_eq!(app.input_mode, InputMode::Editing);
+        assert_eq!(
+            app.save_status,
+            Some("Both Path and Tag are required".to_string())
+        );
+        assert!(app.config.auto_tags.is_empty());
+
+        // Type a tag but path is still empty
+        for c in "mytag".chars() {
+            app.handle_input(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Editing); // Still editing
+        assert!(app.config.auto_tags.is_empty());
+
+        // Now add a path via Tab back to path field
+        app.handle_input(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.auto_tag_focus, 0);
+        for c in "/some/path".chars() {
+            app.handle_input(KeyEvent::from(KeyCode::Char(c)));
+        }
+        // Switch back to tag and submit
+        app.handle_input(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.auto_tag_focus, 1);
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(
+            app.config.auto_tags.get("/some/path"),
+            Some(&"mytag".to_string())
+        );
+    }
+
+    // ── Exclusion delete when list becomes empty ───────────────────────
+    #[test]
+    fn test_exclusion_delete_empties_list() {
+        let mut config = Config::default();
+        config.exclusions = vec!["only_one".to_string()];
+
+        let mut app = AppState::new(config);
+        app.current_tab = 2;
+        app.selected_item = 0;
+        app.exclusion_list_state.select(Some(0));
+
+        app.handle_input(KeyEvent::from(KeyCode::Char('d')));
+        assert!(app.config.exclusions.is_empty());
+        assert_eq!(app.selected_item, 0);
+        assert_eq!(app.exclusion_list_state.selected(), None);
+        assert!(app.dirty);
+    }
+
+    // ── Exclusion delete last item adjusts selected_item ───────────────
+    #[test]
+    fn test_exclusion_delete_last_adjusts_selected() {
+        let mut config = Config::default();
+        config.exclusions = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+
+        let mut app = AppState::new(config);
+        app.current_tab = 2;
+        app.selected_item = 2; // Select last item ("gamma")
+        app.exclusion_list_state.select(Some(2));
+
+        app.handle_input(KeyEvent::from(KeyCode::Char('d')));
+        assert_eq!(app.config.exclusions, vec!["alpha", "beta"]);
+        assert_eq!(app.selected_item, 1); // Adjusted to last valid index
+        assert_eq!(app.exclusion_list_state.selected(), Some(1));
+    }
+
+    // ── handle_input returns false on 'q' when not dirty ───────────────
+    #[test]
+    fn test_handle_input_q_not_dirty_quits() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+        assert!(!app.dirty);
+
+        let cont = app.handle_input(KeyEvent::from(KeyCode::Char('q')));
+        assert!(!cont); // false means quit
+    }
+
+    // ── handle_input returns true on 'q' when dirty, enters ConfirmQuit ─
+    #[test]
+    fn test_handle_input_q_dirty_enters_confirm_quit() {
+        let mut app = AppState::new(Config::default());
+        app.dirty = true;
+
+        let cont = app.handle_input(KeyEvent::from(KeyCode::Char('q')));
+        assert!(cont); // true means continue (showing confirm dialog)
+        assert_eq!(app.input_mode, InputMode::ConfirmQuit);
+    }
+
+    // ── handle_input 's' saves config ──────────────────────────────────
+    #[test]
+    fn test_handle_input_s_attempts_save() {
+        let mut app = AppState::new(Config::default());
+        app.dirty = true;
+
+        app.handle_input(KeyEvent::from(KeyCode::Char('s')));
+        // save_config will either succeed or fail; in either case save_status is set
+        assert!(app.save_status.is_some());
+        let status = app.save_status.as_ref().unwrap();
+        // If save succeeded: "Settings saved!" and dirty is false
+        // If save failed: "Error saving: ..." and dirty remains true
+        if status == "Settings saved!" {
+            assert!(!app.dirty);
+        } else {
+            assert!(status.starts_with("Error saving:"));
+        }
+    }
+
+    // ── Editing mode input length limit ────────────────────────────────
+    #[test]
+    fn test_input_buffer_length_limit() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+
+        // Enter editing mode for exclusion
+        app.current_tab = 2;
+        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        assert_eq!(app.input_mode, InputMode::Editing);
+
+        // Push 501 characters
+        for _ in 0..501 {
+            app.handle_input(KeyEvent::from(KeyCode::Char('x')));
+        }
+        assert_eq!(app.input_buffer.len(), 500);
+    }
+
+    // ── Auto-tag backspace in path field ────────────────────────────────
+    #[test]
+    fn test_auto_tag_backspace_path_field() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+
+        app.current_tab = 3;
+        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        assert_eq!(app.auto_tag_focus, 0);
+
+        // Type "abc" into path
+        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_input(KeyEvent::from(KeyCode::Char('b')));
+        app.handle_input(KeyEvent::from(KeyCode::Char('c')));
+        assert_eq!(app.auto_tag_path_input, "abc");
+
+        // Backspace removes from path
+        app.handle_input(KeyEvent::from(KeyCode::Backspace));
+        assert_eq!(app.auto_tag_path_input, "ab");
+        app.handle_input(KeyEvent::from(KeyCode::Backspace));
+        assert_eq!(app.auto_tag_path_input, "a");
+    }
+
+    // ── Auto-tag backspace in tag field ─────────────────────────────────
+    #[test]
+    fn test_auto_tag_backspace_tag_field() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+
+        app.current_tab = 3;
+        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        // Switch to tag field
+        app.auto_tag_focus = 1;
+
+        // Type "xyz" into tag name
+        app.handle_input(KeyEvent::from(KeyCode::Char('x')));
+        app.handle_input(KeyEvent::from(KeyCode::Char('y')));
+        app.handle_input(KeyEvent::from(KeyCode::Char('z')));
+        assert_eq!(app.auto_tag_name_input, "xyz");
+
+        // Backspace removes from tag name
+        app.handle_input(KeyEvent::from(KeyCode::Backspace));
+        assert_eq!(app.auto_tag_name_input, "xy");
+        app.handle_input(KeyEvent::from(KeyCode::Backspace));
+        assert_eq!(app.auto_tag_name_input, "x");
+    }
+
+    // ── Item navigation on empty tab ───────────────────────────────────
+    #[test]
+    fn test_item_navigation_empty_tab() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+
+        // Tab 2 (exclusions) with no exclusions
+        app.current_tab = 2;
+        app.selected_item = 0;
+
+        // next_item and prev_item should not change selected_item
+        app.next_item();
+        assert_eq!(app.selected_item, 0);
+
+        app.prev_item();
+        assert_eq!(app.selected_item, 0);
+    }
+
+    // ── ConfirmQuit 'y' with save attempt ──────────────────────────────
+    #[test]
+    fn test_confirm_quit_y_save_attempt() {
+        let mut app = AppState::new(Config::default());
+        app.dirty = true;
+
+        // Enter ConfirmQuit
+        app.handle_input(KeyEvent::from(KeyCode::Char('q')));
+        assert_eq!(app.input_mode, InputMode::ConfirmQuit);
+
+        // Press 'y' to attempt save-and-quit
+        let cont = app.handle_input(KeyEvent::from(KeyCode::Char('y')));
+        // If save_config succeeded: cont is false (quit)
+        // If save_config failed: cont is true (stays in Normal mode with error)
+        if cont {
+            // Save failed — should be back in Normal mode with error status
+            assert_eq!(app.input_mode, InputMode::Normal);
+            let status = app.save_status.as_ref().unwrap();
+            assert!(status.starts_with("Error saving:"));
+        } else {
+            // Save succeeded — app is quitting
+            assert!(!cont);
+        }
+    }
+
+    // ── handle_input Enter/Space toggles bool items ────────────────────
+    #[test]
+    fn test_handle_input_enter_space_toggle_bool() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+
+        // Tab 0, Item 1: show_unique_by_default (default false)
+        app.current_tab = 0;
+        app.selected_item = 1;
+        assert!(!app.config.search.show_unique_by_default);
+
+        // Space toggles
+        app.handle_input(KeyEvent::from(KeyCode::Char(' ')));
+        assert!(app.config.search.show_unique_by_default);
+
+        // Enter also toggles
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert!(!app.config.search.show_unique_by_default);
+
+        // Tab 0, Item 3: context_boost (default true)
+        app.selected_item = 3;
+        assert!(app.config.search.context_boost);
+        app.handle_input(KeyEvent::from(KeyCode::Char(' ')));
+        assert!(!app.config.search.context_boost);
+    }
+
+    // ── Multiple exclusion adds in sequence ────────────────────────────
+    #[test]
+    fn test_multiple_exclusion_adds() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+        app.current_tab = 2;
+
+        // Add "pattern1"
+        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        for c in "pattern1".chars() {
+            app.handle_input(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.config.exclusions, vec!["pattern1"]);
+        assert_eq!(app.selected_item, 0);
+
+        // Add "pattern2"
+        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        for c in "pattern2".chars() {
+            app.handle_input(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.config.exclusions, vec!["pattern1", "pattern2"]);
+        assert_eq!(app.selected_item, 1); // Points to latest
+    }
+
+    // ── Edit mode Esc for exclusion add cancels ────────────────────────
+    #[test]
+    fn test_exclusion_add_esc_cancels() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+        app.current_tab = 2;
+
+        // Enter edit mode for adding exclusion
+        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        assert_eq!(app.input_mode, InputMode::Editing);
+
+        // Type some characters
+        for c in "should_not_add".chars() {
+            app.handle_input(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(app.input_buffer, "should_not_add");
+
+        // Press Esc to cancel
+        app.handle_input(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.config.exclusions.is_empty()); // Nothing was added
+        assert!(!app.dirty);
+    }
+
+    // ── Auto-tag Esc cancels add ─────────────────────────────────────
+    #[test]
+    fn test_auto_tag_esc_cancels_add() {
+        let config = Config::default();
+        let mut app = AppState::new(config);
+
+        app.current_tab = 3;
+        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        assert_eq!(app.input_mode, InputMode::Editing);
+
+        // Type path and tag
+        for c in "/some/path".chars() {
+            app.handle_input(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_input(KeyEvent::from(KeyCode::Tab));
+        for c in "mytag".chars() {
+            app.handle_input(KeyEvent::from(KeyCode::Char(c)));
+        }
+
+        // Press Esc to cancel
+        app.handle_input(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.config.auto_tags.is_empty()); // Nothing saved
+        assert!(!app.dirty);
+    }
+
+    // ── Exclusion delete middle item ─────────────────────────────────
+    #[test]
+    fn test_exclusion_delete_middle_item() {
+        let mut config = Config::default();
+        config.exclusions = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+
+        let mut app = AppState::new(config);
+        app.current_tab = 2;
+        app.selected_item = 1; // Select "beta" (middle)
+        app.exclusion_list_state.select(Some(1));
+
+        app.handle_input(KeyEvent::from(KeyCode::Char('d')));
+        assert_eq!(app.config.exclusions, vec!["alpha", "gamma"]);
+        assert_eq!(app.selected_item, 1); // Still at index 1 (now "gamma")
+        assert!(app.dirty);
+    }
+
+    // ── Auto-tag item navigation ─────────────────────────────────────
+    #[test]
+    fn test_auto_tag_item_navigation() {
+        let mut config = Config::default();
+        config
+            .auto_tags
+            .insert("/path/a".to_string(), "tag_a".to_string());
+        config
+            .auto_tags
+            .insert("/path/b".to_string(), "tag_b".to_string());
+
+        let mut app = AppState::new(config);
+        app.current_tab = 3;
+        app.selected_item = 0;
+
+        // Navigate through auto-tag items
+        app.next_item();
+        assert_eq!(app.selected_item, 1);
+        assert_eq!(app.auto_tag_list_state.selected(), Some(1));
+
+        // Wraps around
+        app.next_item();
+        assert_eq!(app.selected_item, 0);
+        assert_eq!(app.auto_tag_list_state.selected(), Some(0));
+    }
 }
