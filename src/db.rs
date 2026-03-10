@@ -343,7 +343,12 @@ fn register_regexp(conn: &Connection) -> DbResult<()> {
                 *cached = Some((pattern.to_string(), re));
             }
 
-            Ok(cached.as_ref().unwrap().1.is_match(value))
+            match cached.as_ref() {
+                Some((_, re)) => Ok(re.is_match(value)),
+                None => Err(rusqlite::Error::UserFunctionError(
+                    "REGEXP: internal cache error".into(),
+                )),
+            }
         },
     )?;
     Ok(())

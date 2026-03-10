@@ -414,21 +414,13 @@ pub fn atomic_write(path: &std::path::Path, data: &str) -> std::io::Result<()> {
 
 // ── Shell RC cleanup ────────────────────────────────────────
 
-/// Remove the Suvadu initialization line from a shell RC file.
-fn cleanup_shell_rc(filename: &str, shell: &str) -> Result<(), std::io::Error> {
-    let home = std::env::var("HOME").map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "HOME environment variable not set",
-        )
-    })?;
-    let rc_path = std::path::PathBuf::from(home).join(filename);
-
+/// Remove the Suvadu initialization line from a shell RC file at the given path.
+fn cleanup_shell_rc_at(rc_path: &std::path::Path, shell: &str) -> Result<(), std::io::Error> {
     if !rc_path.exists() {
         return Ok(());
     }
 
-    let content = std::fs::read_to_string(&rc_path)?;
+    let content = std::fs::read_to_string(rc_path)?;
     let target_line = format!("eval \"$(suv init {shell})\"");
 
     if !content.contains(&target_line) {
@@ -442,9 +434,21 @@ fn cleanup_shell_rc(filename: &str, shell: &str) -> Result<(), std::io::Error> {
         .collect();
 
     let new_content = filtered_content.join("\n") + "\n";
-    atomic_write(&rc_path, &new_content)?;
+    atomic_write(rc_path, &new_content)?;
 
     Ok(())
+}
+
+/// Resolve `~/.<filename>` and clean it.
+fn cleanup_shell_rc(filename: &str, shell: &str) -> Result<(), std::io::Error> {
+    let home = std::env::var("HOME").map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "HOME environment variable not set",
+        )
+    })?;
+    let rc_path = std::path::PathBuf::from(home).join(filename);
+    cleanup_shell_rc_at(&rc_path, shell)
 }
 
 /// Remove the Suvadu initialization line from .zshrc if it exists.
@@ -947,5 +951,70 @@ mod tests {
         assert!(result.starts_with('…'));
         assert!(result.ends_with('こ'));
         assert_eq!(result, "…くけこ");
+    }
+
+    #[test]
+    fn test_cleanup_shell_rc_removes_suvadu_line() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let rc = dir.path().join(".zshrc");
+        std::fs::write(
+            &rc,
+            "# My config\nexport FOO=bar\neval \"$(suv init zsh)\"\nalias ll='ls -la'\n",
+        )
+        .unwrap();
+
+        cleanup_shell_rc_at(&rc, "zsh").unwrap();
+
+        let content = std::fs::read_to_string(&rc).unwrap();
+        assert!(!content.contains("suv init zsh"));
+        assert!(content.contains("export FOO=bar"));
+        assert!(content.contains("alias ll='ls -la'"));
+    }
+
+    #[test]
+    fn test_cleanup_shell_rc_no_suvadu_line() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let rc = dir.path().join(".bashrc");
+        let original = "# My config\nexport FOO=bar\nalias ll='ls -la'\n";
+        std::fs::write(&rc, original).unwrap();
+
+        cleanup_shell_rc_at(&rc, "bash").unwrap();
+
+        let content = std::fs::read_to_string(&rc).unwrap();
+        assert_eq!(content, original);
+    }
+
+    #[test]
+    fn test_cleanup_shell_rc_file_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let rc = dir.path().join(".zshrc");
+
+        // Should be a no-op, not an error
+        cleanup_shell_rc_at(&rc, "zsh").unwrap();
+        assert!(!rc.exists());
+    }
+
+    #[test]
+    fn test_cleanup_shell_rc_only_matches_exact_shell() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let rc = dir.path().join(".zshrc");
+        std::fs::write(&rc, "eval \"$(suv init zsh)\"\neval \"$(suv init bash)\"\n").unwrap();
+
+        // Cleaning zsh should only remove the zsh line
+        cleanup_shell_rc_at(&rc, "zsh").unwrap();
+
+        let content = std::fs::read_to_string(&rc).unwrap();
+        assert!(!content.contains("suv init zsh"));
+        assert!(content.contains("suv init bash"));
+    }
+
+    #[test]
+    fn test_cleanup_claude_settings_no_hooks_key() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"theme": "dark"}"#).unwrap();
+
+        let result = cleanup_claude_settings_at(&path).unwrap();
+        assert!(!result);
     }
 }

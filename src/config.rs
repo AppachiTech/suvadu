@@ -299,14 +299,15 @@ pub fn save_config(config: &Config) -> ConfigResult<()> {
         .ok_or_else(|| ConfigError::Path("config path has no parent directory".into()))?;
     let tmp = tempfile::NamedTempFile::new_in(dir)?;
     std::fs::write(tmp.path(), contents)?;
-    tmp.persist(&path).map_err(std::io::Error::from)?;
 
-    // Restrict config file to owner-only on Unix (may contain exclusion patterns)
+    // Restrict to owner-only BEFORE persist so the file is never world-readable
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o600));
     }
+
+    tmp.persist(&path).map_err(std::io::Error::from)?;
 
     invalidate_cache();
     Ok(())
