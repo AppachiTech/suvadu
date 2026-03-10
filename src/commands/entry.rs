@@ -84,6 +84,49 @@ fn get_compiled_exclusions(patterns: &[String]) -> Arc<Vec<util::CompiledExclusi
 }
 
 pub fn handle_add_with_context(params: AddParams) -> Result<(), Box<dyn std::error::Error>> {
+    // Cheapest checks first — no I/O required
+    if config::is_paused() {
+        return Ok(());
+    }
+    if should_drop_early(&params) {
+        return Ok(());
+    }
+
+    // Load config (cached; re-reads only when file mtime changes)
+    let config = config::load_config_cached()?;
+
+    // Initialize database
+    let repo = Repository::init()?;
+
+    handle_add_inner(params, &config, &repo)
+}
+
+/// Pre-check: returns `true` if the input should be silently dropped
+/// (space-prefixed, oversized, or invalid session ID).
+fn should_drop_early(params: &AddParams) -> bool {
+    if params.command.starts_with(' ') {
+        return true;
+    }
+    if params.session_id.len() > MAX_SESSION_ID_LEN
+        || params.command.len() > MAX_COMMAND_LEN
+        || params.cwd.len() > MAX_CWD_LEN
+    {
+        return true;
+    }
+    if !util::is_valid_session_id(&params.session_id) {
+        return true;
+    }
+    false
+}
+
+/// Core ingestion logic, separated from global state for testability.
+/// Handles: config-enabled check, exclusions, auto-tagging, timestamp
+/// normalization, redaction, session creation, and entry insertion.
+fn handle_add_inner(
+    params: AddParams,
+    config: &config::Config,
+    repo: &Repository,
+) -> Result<(), Box<dyn std::error::Error>> {
     let AddParams {
         session_id,
         command,
@@ -95,29 +138,7 @@ pub fn handle_add_with_context(params: AddParams) -> Result<(), Box<dyn std::err
         executor,
         context,
     } = params;
-    // Cheapest checks first — no I/O required
-    if config::is_paused() {
-        return Ok(());
-    }
-    if command.starts_with(' ') {
-        return Ok(());
-    }
 
-    // Input length validation (defense against malicious/buggy shell hooks)
-    if session_id.len() > MAX_SESSION_ID_LEN
-        || command.len() > MAX_COMMAND_LEN
-        || cwd.len() > MAX_CWD_LEN
-    {
-        return Ok(()); // Silently drop oversized inputs
-    }
-
-    // Session ID character validation (consistent with integrations.rs)
-    if !util::is_valid_session_id(&session_id) {
-        return Ok(());
-    }
-
-    // Load config (cached; re-reads only when file mtime changes)
-    let config = config::load_config_cached()?;
     if !config.enabled {
         return Ok(());
     }
@@ -129,9 +150,6 @@ pub fn handle_add_with_context(params: AddParams) -> Result<(), Box<dyn std::err
             return Ok(());
         }
     }
-
-    // Initialize database
-    let repo = Repository::init()?;
 
     // Auto-Tagging Logic (Path-based)
     let mut matched_tag_id: Option<i64> = None;
@@ -929,5 +947,480 @@ mod tests {
         let (_dir, repo) = test_repo();
         // Just verify vacuum doesn't error
         handle_gc_with_repo(&repo, false, true).unwrap();
+    }
+
+    // ── should_drop_early tests ───────────────────────────────
+
+    fn make_params(command: &str) -> AddParams {
+        AddParams {
+            session_id: "test-session-abc".to_string(),
+            command: command.to_string(),
+            cwd: "/tmp".to_string(),
+            exit_code: Some(0),
+            started_at: 1_709_683_200_000,
+            ended_at: 1_709_683_205_000,
+            executor_type: None,
+            executor: None,
+            context: None,
+        }
+    }
+
+    #[test]
+    fn test_drop_early_space_prefixed_command() {
+        let params = make_params(" secret-command");
+        assert!(should_drop_early(&params));
+    }
+
+    #[test]
+    fn test_drop_early_normal_command_passes() {
+        let params = make_params("git status");
+        assert!(!should_drop_early(&params));
+    }
+
+    #[test]
+    fn test_drop_early_oversized_session_id() {
+        let mut params = make_params("ls");
+        params.session_id = "x".repeat(MAX_SESSION_ID_LEN + 1);
+        assert!(should_drop_early(&params));
+    }
+
+    #[test]
+    fn test_drop_early_max_session_id_ok() {
+        let mut params = make_params("ls");
+        params.session_id = "a".repeat(MAX_SESSION_ID_LEN);
+        assert!(!should_drop_early(&params));
+    }
+
+    #[test]
+    fn test_drop_early_oversized_command() {
+        let mut params = make_params("ls");
+        params.command = "x".repeat(MAX_COMMAND_LEN + 1);
+        assert!(should_drop_early(&params));
+    }
+
+    #[test]
+    fn test_drop_early_oversized_cwd() {
+        let mut params = make_params("ls");
+        params.cwd = "/".repeat(MAX_CWD_LEN + 1);
+        assert!(should_drop_early(&params));
+    }
+
+    #[test]
+    fn test_drop_early_invalid_session_id_chars() {
+        let mut params = make_params("ls");
+        params.session_id = "bad session/id".to_string();
+        assert!(should_drop_early(&params));
+    }
+
+    #[test]
+    fn test_drop_early_empty_session_id() {
+        let mut params = make_params("ls");
+        params.session_id = String::new();
+        assert!(should_drop_early(&params));
+    }
+
+    // ── handle_add_inner end-to-end tests ─────────────────────
+
+    fn default_config() -> config::Config {
+        config::Config::default()
+    }
+
+    #[test]
+    fn test_add_inner_happy_path() {
+        let (_dir, repo) = test_repo();
+        let cfg = default_config();
+
+        handle_add_inner(make_params("cargo build"), &cfg, &repo).unwrap();
+
+        let entries = repo
+            .get_entries_filtered(10, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].command, "cargo build");
+        assert_eq!(entries[0].cwd, "/tmp");
+        assert_eq!(entries[0].exit_code, Some(0));
+    }
+
+    #[test]
+    fn test_add_inner_disabled_config_drops() {
+        let (_dir, repo) = test_repo();
+        let cfg = config::Config {
+            enabled: false,
+            ..default_config()
+        };
+
+        handle_add_inner(make_params("cargo build"), &cfg, &repo).unwrap();
+
+        let entries = repo
+            .get_entries_filtered(10, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        assert_eq!(entries.len(), 0, "disabled config should drop the entry");
+    }
+
+    #[test]
+    fn test_add_inner_exclusion_drops() {
+        let (_dir, repo) = test_repo();
+        let cfg = config::Config {
+            exclusions: vec!["^ls".to_string()],
+            ..default_config()
+        };
+
+        // Excluded command
+        handle_add_inner(make_params("ls -la"), &cfg, &repo).unwrap();
+        // Non-excluded command
+        handle_add_inner(make_params("cargo test"), &cfg, &repo).unwrap();
+
+        let entries = repo
+            .get_entries_filtered(10, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].command, "cargo test");
+    }
+
+    #[test]
+    fn test_add_inner_creates_session_automatically() {
+        let (_dir, repo) = test_repo();
+        let cfg = default_config();
+
+        // No session exists yet
+        assert!(repo.get_session("test-session-abc").unwrap().is_none());
+
+        handle_add_inner(make_params("echo hello"), &cfg, &repo).unwrap();
+
+        // Session should now exist
+        let session = repo.get_session("test-session-abc").unwrap();
+        assert!(session.is_some());
+        assert_eq!(session.unwrap().created_at, 1_709_683_200_000);
+    }
+
+    #[test]
+    fn test_add_inner_reuses_existing_session() {
+        let (_dir, repo) = test_repo();
+        let cfg = default_config();
+
+        // Pre-create the session
+        let session = Session {
+            id: "test-session-abc".to_string(),
+            hostname: "pre-existing".to_string(),
+            created_at: 1_000_000,
+            tag_id: None,
+        };
+        repo.insert_session(&session).unwrap();
+
+        handle_add_inner(make_params("echo hello"), &cfg, &repo).unwrap();
+
+        // Session should retain its original hostname/created_at
+        let s = repo.get_session("test-session-abc").unwrap().unwrap();
+        assert_eq!(s.hostname, "pre-existing");
+        assert_eq!(s.created_at, 1_000_000);
+    }
+
+    #[test]
+    fn test_add_inner_normalizes_second_timestamps() {
+        let (_dir, repo) = test_repo();
+        let cfg = default_config();
+
+        let mut params = make_params("echo ts");
+        params.started_at = 1_709_683_200; // seconds
+        params.ended_at = 1_709_683_205; // seconds
+
+        handle_add_inner(params, &cfg, &repo).unwrap();
+
+        let entries = repo
+            .get_entries_filtered(1, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        assert_eq!(entries[0].started_at, 1_709_683_200_000);
+        assert_eq!(entries[0].duration_ms, 5_000);
+    }
+
+    #[test]
+    fn test_add_inner_normalizes_nanosecond_timestamps() {
+        let (_dir, repo) = test_repo();
+        let cfg = default_config();
+
+        let mut params = make_params("echo ns");
+        params.started_at = 1_709_683_200_000_000_000; // nanoseconds
+        params.ended_at = 1_709_683_200_050_000_000; // 50ms later
+
+        handle_add_inner(params, &cfg, &repo).unwrap();
+
+        let entries = repo
+            .get_entries_filtered(1, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        assert_eq!(entries[0].started_at, 1_709_683_200_000);
+        assert_eq!(entries[0].duration_ms, 50);
+    }
+
+    #[test]
+    fn test_add_inner_zero_started_at_uses_ended_at() {
+        let (_dir, repo) = test_repo();
+        let cfg = default_config();
+
+        let mut params = make_params("echo zero");
+        params.started_at = 0;
+        params.ended_at = 1_709_683_200_000;
+
+        handle_add_inner(params, &cfg, &repo).unwrap();
+
+        let entries = repo
+            .get_entries_filtered(1, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        assert_eq!(entries[0].started_at, 1_709_683_200_000);
+    }
+
+    #[test]
+    fn test_add_inner_zero_ended_at_uses_started_at() {
+        let (_dir, repo) = test_repo();
+        let cfg = default_config();
+
+        let mut params = make_params("echo zero-end");
+        params.started_at = 1_709_683_200_000;
+        params.ended_at = 0;
+
+        handle_add_inner(params, &cfg, &repo).unwrap();
+
+        let entries = repo
+            .get_entries_filtered(1, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        assert_eq!(entries[0].started_at, 1_709_683_200_000);
+        assert_eq!(entries[0].ended_at, 1_709_683_200_000);
+        assert_eq!(entries[0].duration_ms, 0);
+    }
+
+    #[test]
+    fn test_add_inner_redacts_secrets_by_default() {
+        let (_dir, repo) = test_repo();
+        let cfg = default_config();
+
+        // Bearer token pattern that should be redacted
+        let mut params = make_params("curl -H 'Authorization: Bearer sk-abc12345678901234567890'");
+        params.session_id = "redact-session".to_string();
+
+        handle_add_inner(params, &cfg, &repo).unwrap();
+
+        let entries = repo
+            .get_entries_filtered(1, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        // The command should have secrets redacted
+        assert!(
+            !entries[0].command.contains("sk-abc1234567890"),
+            "secret should be redacted, got: {}",
+            entries[0].command
+        );
+        assert!(entries[0].command.contains("***REDACTED***"));
+    }
+
+    #[test]
+    fn test_add_inner_skips_redaction_when_disabled() {
+        let (_dir, repo) = test_repo();
+        let cfg = config::Config {
+            redaction: config::RedactionConfig { enabled: false },
+            ..default_config()
+        };
+
+        let mut params = make_params("curl -H 'Authorization: Bearer sk-abc12345678901234567890'");
+        params.session_id = "no-redact-session".to_string();
+
+        handle_add_inner(params, &cfg, &repo).unwrap();
+
+        let entries = repo
+            .get_entries_filtered(1, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        assert!(
+            entries[0].command.contains("sk-abc1234567890"),
+            "secret should NOT be redacted when disabled"
+        );
+    }
+
+    #[test]
+    fn test_add_inner_preserves_executor_info() {
+        let (_dir, repo) = test_repo();
+        let cfg = default_config();
+
+        let mut params = make_params("npm test");
+        params.session_id = "exec-session".to_string();
+        params.executor_type = Some("agent".to_string());
+        params.executor = Some("claude-code".to_string());
+
+        handle_add_inner(params, &cfg, &repo).unwrap();
+
+        let entries = repo
+            .get_entries_filtered(1, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        assert_eq!(entries[0].executor_type.as_deref(), Some("agent"));
+        assert_eq!(entries[0].executor.as_deref(), Some("claude-code"));
+    }
+
+    #[test]
+    fn test_add_inner_preserves_exit_code() {
+        let (_dir, repo) = test_repo();
+        let cfg = default_config();
+
+        let mut params = make_params("false");
+        params.exit_code = Some(1);
+        handle_add_inner(params, &cfg, &repo).unwrap();
+
+        let mut params2 = make_params("true");
+        params2.session_id = "session-2".to_string();
+        params2.exit_code = None;
+        handle_add_inner(params2, &cfg, &repo).unwrap();
+
+        let entries = repo
+            .get_entries_filtered(10, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        // Most recent first
+        let by_cmd: std::collections::HashMap<&str, &Entry> =
+            entries.iter().map(|e| (e.command.as_str(), e)).collect();
+        assert_eq!(by_cmd["false"].exit_code, Some(1));
+        assert_eq!(by_cmd["true"].exit_code, None);
+    }
+
+    #[test]
+    fn test_add_inner_auto_tags_by_cwd() {
+        let (_dir, repo) = test_repo();
+        let mut auto_tags = std::collections::HashMap::new();
+        // auto_tags: key = path_prefix, value = tag_name
+        auto_tags.insert("/home/user/work".to_string(), "work".to_string());
+
+        let cfg = config::Config {
+            auto_tags,
+            ..default_config()
+        };
+
+        // Command in matching directory
+        let mut params = make_params("cargo build");
+        params.session_id = "tag-session".to_string();
+        params.cwd = "/home/user/work/project".to_string();
+
+        handle_add_inner(params, &cfg, &repo).unwrap();
+
+        let entries = repo
+            .get_entries_filtered(1, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        // Tag should be auto-created and assigned
+        assert!(
+            entries[0].tag_id.is_some(),
+            "auto-tag should be assigned for matching cwd"
+        );
+        assert_eq!(entries[0].tag_name.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn test_add_inner_no_auto_tag_for_unmatched_cwd() {
+        let (_dir, repo) = test_repo();
+        let mut auto_tags = std::collections::HashMap::new();
+        auto_tags.insert("/home/user/work".to_string(), "work".to_string());
+
+        let cfg = config::Config {
+            auto_tags,
+            ..default_config()
+        };
+
+        let mut params = make_params("cargo build");
+        params.session_id = "no-tag-session".to_string();
+        params.cwd = "/home/user/personal".to_string();
+
+        handle_add_inner(params, &cfg, &repo).unwrap();
+
+        let entries = repo
+            .get_entries_filtered(1, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        assert!(entries[0].tag_id.is_none(), "no tag for unmatched cwd");
+    }
+
+    #[test]
+    fn test_add_inner_multiple_entries_same_session() {
+        let (_dir, repo) = test_repo();
+        let cfg = default_config();
+
+        for i in 0..5 {
+            let mut params = make_params(&format!("cmd-{i}"));
+            params.started_at = 1_709_683_200_000 + i64::from(i) * 1000;
+            params.ended_at = params.started_at + 100;
+            handle_add_inner(params, &cfg, &repo).unwrap();
+        }
+
+        let entries = repo
+            .get_entries_filtered(10, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        assert_eq!(entries.len(), 5);
+
+        // Session should only be created once
+        let session = repo.get_session("test-session-abc").unwrap();
+        assert!(session.is_some());
+    }
+
+    #[test]
+    fn test_add_inner_multiple_exclusion_patterns() {
+        let (_dir, repo) = test_repo();
+        let cfg = config::Config {
+            exclusions: vec![
+                "^ls".to_string(),
+                "password".to_string(),
+                "^cd ".to_string(),
+            ],
+            ..default_config()
+        };
+
+        handle_add_inner(make_params("ls -la"), &cfg, &repo).unwrap();
+        handle_add_inner(
+            {
+                let mut p = make_params("echo password=secret");
+                p.session_id = "s2".to_string();
+                p
+            },
+            &cfg,
+            &repo,
+        )
+        .unwrap();
+        handle_add_inner(
+            {
+                let mut p = make_params("cd /tmp");
+                p.session_id = "s3".to_string();
+                p
+            },
+            &cfg,
+            &repo,
+        )
+        .unwrap();
+        handle_add_inner(
+            {
+                let mut p = make_params("cargo test");
+                p.session_id = "s4".to_string();
+                p
+            },
+            &cfg,
+            &repo,
+        )
+        .unwrap();
+
+        let entries = repo
+            .get_entries_filtered(10, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].command, "cargo test");
+    }
+
+    #[test]
+    fn test_add_inner_preserves_context() {
+        let (_dir, repo) = test_repo();
+        let cfg = default_config();
+
+        let mut ctx = std::collections::HashMap::new();
+        ctx.insert("shell".to_string(), "zsh".to_string());
+        ctx.insert("prompt_id".to_string(), "abc123".to_string());
+
+        let mut params = make_params("git status");
+        params.context = Some(ctx);
+        params.session_id = "ctx-session".to_string();
+
+        handle_add_inner(params, &cfg, &repo).unwrap();
+
+        let entries = repo
+            .get_entries_filtered(1, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        let ctx = entries[0].context.as_ref().unwrap();
+        assert_eq!(ctx.get("shell").unwrap(), "zsh");
+        assert_eq!(ctx.get("prompt_id").unwrap(), "abc123");
     }
 }
