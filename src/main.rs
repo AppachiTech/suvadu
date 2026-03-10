@@ -368,3 +368,105 @@ fn print_first_run_tip() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── is_user_facing_command ──────────────────────────────────
+
+    #[test]
+    fn internal_commands_are_not_user_facing() {
+        // Commands on the hot path or that produce machine output should NOT
+        // trigger theme init or setup hints.
+        assert!(!is_user_facing_command(&Commands::Add {
+            session_id: "s".into(),
+            command: "ls".into(),
+            cwd: "/".into(),
+            exit_code: Some(0),
+            started_at: 0,
+            ended_at: 0,
+            executor_type: None,
+            executor: None,
+        }));
+        assert!(!is_user_facing_command(&Commands::Get {
+            query: String::new(),
+            offset: 0,
+            prefix: false,
+            cwd: None,
+        }));
+        assert!(!is_user_facing_command(&Commands::Init {
+            target: "zsh".into(),
+        }));
+        assert!(!is_user_facing_command(&Commands::HookClaudeCode));
+        assert!(!is_user_facing_command(&Commands::HookClaudePrompt));
+        assert!(!is_user_facing_command(&Commands::Man));
+        assert!(!is_user_facing_command(&Commands::Completions {
+            shell: clap_complete::Shell::Zsh,
+        }));
+        assert!(!is_user_facing_command(&Commands::Wrap {
+            command: vec!["ls".into()],
+            executor_type: "human".into(),
+            executor: "human".into(),
+        }));
+    }
+
+    #[test]
+    fn user_facing_commands_are_detected() {
+        assert!(is_user_facing_command(&Commands::Enable));
+        assert!(is_user_facing_command(&Commands::Disable));
+        assert!(is_user_facing_command(&Commands::Settings));
+        assert!(is_user_facing_command(&Commands::Status));
+        assert!(is_user_facing_command(&Commands::Version));
+        assert!(is_user_facing_command(&Commands::Update));
+        assert!(is_user_facing_command(&Commands::Uninstall));
+    }
+
+    #[test]
+    fn search_is_user_facing() {
+        let cmd = Commands::Search {
+            query: None,
+            unique: false,
+            after: None,
+            before: None,
+            tag: None,
+            exit_code: None,
+            executor: None,
+            here: false,
+            field: crate::models::SearchField::Command,
+        };
+        assert!(is_user_facing_command(&cmd));
+    }
+
+    #[test]
+    fn stats_is_user_facing() {
+        let cmd = Commands::Stats {
+            days: None,
+            top: 10,
+            text: false,
+            json: false,
+            tag: None,
+        };
+        assert!(is_user_facing_command(&cmd));
+    }
+
+    #[test]
+    fn pause_is_user_facing() {
+        assert!(is_user_facing_command(&Commands::Pause));
+    }
+
+    // ── run_command dispatch smoke tests ────────────────────────
+
+    #[test]
+    fn pause_outputs_export_line() {
+        // Pause doesn't touch the DB or config — safe to test directly.
+        let result = run_command(Commands::Pause);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn version_command_succeeds() {
+        let result = run_command(Commands::Version);
+        assert!(result.is_ok());
+    }
+}

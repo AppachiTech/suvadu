@@ -104,7 +104,16 @@ fn download_and_verify(p: &DownloadParams) -> Result<(), Box<dyn std::error::Err
         p.platform_label, p.archive_url
     );
     let status = std::process::Command::new("curl")
-        .args(["-fsSL", "-m", "300", "-o", p.tarball_path, p.archive_url])
+        .args([
+            "--proto",
+            "=https",
+            "-fsSL",
+            "-m",
+            "300",
+            "-o",
+            p.tarball_path,
+            p.archive_url,
+        ])
         .status()?;
     if !status.success() {
         return Err("Failed to download update. Please check your internet connection.".into());
@@ -152,7 +161,7 @@ fn verify_signature(
         .map_err(|e| format!("Invalid embedded public key (binary may need rebuild): {e}"))?;
 
     let sig_output = std::process::Command::new("curl")
-        .args(["-fsSL", "-m", "30", signature_url])
+        .args(["--proto", "=https", "-fsSL", "-m", "30", signature_url])
         .output();
 
     let sig_bytes = match sig_output {
@@ -189,7 +198,7 @@ fn verify_checksum(
     tarball_str: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let checksum_result = std::process::Command::new("curl")
-        .args(["-fsSL", "-m", "30", checksum_url])
+        .args(["--proto", "=https", "-fsSL", "-m", "30", checksum_url])
         .output();
 
     match checksum_result {
