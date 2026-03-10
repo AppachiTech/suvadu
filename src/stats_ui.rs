@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io;
 
 use chrono::{Datelike, Duration, Local};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::backend::Backend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -20,7 +20,7 @@ use crate::util::{dirs_home, format_count, format_duration_ms, shorten_path};
 
 // ── Period selector ──────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Period {
     Days7,
     Days30,
@@ -59,7 +59,7 @@ impl Period {
 
 // ── Focus management ─────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
     Hourly,
     TopPrograms,
@@ -100,12 +100,20 @@ struct StatsApp {
     program_groups: Vec<(String, i64)>,
     show_executor: bool,
     top_n: usize,
+    tag_id: Option<i64>,
+    tag_name: Option<String>,
 }
 
 impl StatsApp {
-    fn new(repo: &Repository, period: Period, top_n: usize) -> Self {
+    fn new(
+        repo: &Repository,
+        period: Period,
+        top_n: usize,
+        tag_id: Option<i64>,
+        tag_name: Option<String>,
+    ) -> Self {
         let stats = repo
-            .get_stats(period.days(), top_n)
+            .get_stats(period.days(), top_n, tag_id)
             .unwrap_or_else(|_| Stats {
                 total_commands: 0,
                 unique_commands: 0,
@@ -120,7 +128,7 @@ impl StatsApp {
             });
 
         let daily_activity = repo
-            .get_daily_activity(period.heatmap_days())
+            .get_daily_activity(period.heatmap_days(), tag_id)
             .unwrap_or_default();
 
         let program_groups = compute_program_groups(&stats.top_commands);
@@ -136,6 +144,8 @@ impl StatsApp {
             program_groups,
             show_executor: false,
             top_n,
+            tag_id,
+            tag_name,
         };
 
         if !app.stats.top_commands.is_empty() {
@@ -152,10 +162,10 @@ impl StatsApp {
     }
 
     fn reload(&mut self, repo: &Repository) {
-        if let Ok(s) = repo.get_stats(self.period.days(), self.top_n) {
+        if let Ok(s) = repo.get_stats(self.period.days(), self.top_n, self.tag_id) {
             self.stats = s;
         }
-        if let Ok(d) = repo.get_daily_activity(self.period.heatmap_days()) {
+        if let Ok(d) = repo.get_daily_activity(self.period.heatmap_days(), self.tag_id) {
             self.daily_activity = d;
         }
         self.program_groups = compute_program_groups(&self.stats.top_commands);
@@ -211,7 +221,7 @@ impl StatsApp {
         true
     }
 
-    fn move_selection_up(&mut self) {
+    const fn move_selection_up(&mut self) {
         match self.focus {
             Focus::TopCommands => {
                 if let Some(cur) = self.commands_table_state.selected() {
@@ -312,10 +322,20 @@ impl StatsApp {
     fn render_header(&self, f: &mut ratatui::Frame, area: Rect) {
         let t = theme();
 
-        let title = Span::styled(
+        let mut title_spans: Vec<Span> = vec![Span::styled(
             " Suvadu Stats ",
             Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
-        );
+        )];
+
+        if let Some(ref tag) = self.tag_name {
+            title_spans.push(Span::styled(
+                format!(" tag:{tag} "),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(t.warning)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
 
         let periods = [
             Period::Days7,
@@ -342,12 +362,14 @@ impl StatsApp {
             period_spans.push(Span::raw(" "));
         }
 
+        let title_width: usize = title_spans.iter().map(Span::width).sum();
         let period_width: usize = period_spans.iter().map(Span::width).sum();
         let padding = area
             .width
-            .saturating_sub(title.width() as u16 + period_width as u16);
+            .saturating_sub(title_width as u16 + period_width as u16);
 
-        let mut spans = vec![title, Span::raw(" ".repeat(padding as usize))];
+        let mut spans = title_spans;
+        spans.push(Span::raw(" ".repeat(padding as usize)));
         spans.extend(period_spans);
 
         f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -453,7 +475,7 @@ impl StatsApp {
             day_counts.insert(date.clone(), *count);
         }
 
-        let max_count = day_counts.values().copied().max().unwrap_or(0);
+        let max_count = day_counts.values().copied().max().unwrap_or(0).max(1);
 
         // Calculate grid dimensions
         let label_width: u16 = 5;
@@ -553,7 +575,7 @@ impl StatsApp {
 
         let sparkline = Sparkline::default()
             .block(block)
-            .data(&data)
+            .data(data.iter().copied())
             .style(Style::default().fg(t.primary));
 
         f.render_widget(sparkline, area);
@@ -845,7 +867,7 @@ impl StatsApp {
 
     fn render_footer(&self, f: &mut ratatui::Frame, area: Rect) {
         let t = theme();
-        let badge_key = Style::default().bg(Color::Rgb(50, 50, 55)).fg(t.text);
+        let badge_key = Style::default().bg(t.badge_bg).fg(t.text);
         let badge_label = Style::default().fg(t.text_secondary);
 
         let spans = vec![
@@ -883,7 +905,12 @@ pub fn run_stats_ui<B: Backend>(
     repo: &Repository,
     initial_days: Option<usize>,
     top_n: usize,
-) -> io::Result<()> {
+    tag_id: Option<i64>,
+    tag_name: Option<&str>,
+) -> io::Result<()>
+where
+    io::Error: From<B::Error>,
+{
     let period = match initial_days {
         Some(d) if d <= 7 => Period::Days7,
         Some(d) if d <= 30 => Period::Days30,
@@ -891,12 +918,15 @@ pub fn run_stats_ui<B: Backend>(
         _ => Period::AllTime,
     };
 
-    let mut app = StatsApp::new(repo, period, top_n);
+    let mut app = StatsApp::new(repo, period, top_n, tag_id, tag_name.map(String::from));
 
     loop {
         terminal.draw(|f| app.render(f))?;
 
         if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
             if !app.handle_input(key, repo) {
                 return Ok(());
             }
@@ -906,11 +936,11 @@ pub fn run_stats_ui<B: Backend>(
 
 // ── Helpers ──────────────────────────────────────────────────
 
-fn heatmap_colors(t: &crate::theme::Theme) -> [Color; 5] {
+const fn heatmap_colors(t: &crate::theme::Theme) -> [Color; 5] {
     [
         t.bg_elevated,
-        Color::Rgb(10, 50, 32),
-        Color::Rgb(10, 100, 50),
+        t.heatmap_low,
+        t.heatmap_mid,
         t.primary_dim,
         t.primary,
     ]
@@ -933,7 +963,7 @@ fn intensity_level(count: i64, max: i64) -> usize {
     }
 }
 
-fn month_abbrev(month: u32) -> &'static str {
+const fn month_abbrev(month: u32) -> &'static str {
     match month {
         1 => "Ja",
         2 => "Fe",
@@ -952,13 +982,7 @@ fn month_abbrev(month: u32) -> &'static str {
 }
 
 fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else if max_len > 3 {
-        format!("{}...", &s[..max_len - 3])
-    } else {
-        s[..max_len].to_string()
-    }
+    crate::util::truncate_str(s, max_len, "...")
 }
 
 fn compute_program_groups(top_commands: &[(String, i64)]) -> Vec<(String, i64)> {
@@ -970,4 +994,1070 @@ fn compute_program_groups(top_commands: &[(String, i64)]) -> Vec<(String, i64)> 
     let mut sorted: Vec<(String, i64)> = groups.into_iter().collect();
     sorted.sort_by(|a, b| b.1.cmp(&a.1));
     sorted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intensity_level_zero_count() {
+        assert_eq!(intensity_level(0, 100), 0);
+    }
+
+    #[test]
+    fn intensity_level_zero_max() {
+        assert_eq!(intensity_level(50, 0), 0);
+    }
+
+    #[test]
+    fn intensity_level_low() {
+        assert_eq!(intensity_level(20, 100), 1);
+    }
+
+    #[test]
+    fn intensity_level_medium_low() {
+        assert_eq!(intensity_level(50, 100), 2);
+    }
+
+    #[test]
+    fn intensity_level_medium_high() {
+        assert_eq!(intensity_level(75, 100), 3);
+    }
+
+    #[test]
+    fn intensity_level_high() {
+        assert_eq!(intensity_level(90, 100), 4);
+    }
+
+    #[test]
+    fn intensity_level_exact_boundaries() {
+        // 25% boundary
+        assert_eq!(intensity_level(25, 100), 1);
+        // 50% boundary
+        assert_eq!(intensity_level(50, 100), 2);
+        // 75% boundary
+        assert_eq!(intensity_level(75, 100), 3);
+        // 76% -> level 4
+        assert_eq!(intensity_level(76, 100), 4);
+    }
+
+    #[test]
+    fn intensity_level_equal_count_and_max() {
+        assert_eq!(intensity_level(100, 100), 4);
+    }
+
+    #[test]
+    fn month_abbrev_all_months() {
+        assert_eq!(month_abbrev(1), "Ja");
+        assert_eq!(month_abbrev(2), "Fe");
+        assert_eq!(month_abbrev(3), "Mr");
+        assert_eq!(month_abbrev(4), "Ap");
+        assert_eq!(month_abbrev(5), "Ma");
+        assert_eq!(month_abbrev(6), "Jn");
+        assert_eq!(month_abbrev(7), "Jl");
+        assert_eq!(month_abbrev(8), "Au");
+        assert_eq!(month_abbrev(9), "Se");
+        assert_eq!(month_abbrev(10), "Oc");
+        assert_eq!(month_abbrev(11), "No");
+        assert_eq!(month_abbrev(12), "De");
+    }
+
+    #[test]
+    fn month_abbrev_out_of_range() {
+        assert_eq!(month_abbrev(0), "  ");
+        assert_eq!(month_abbrev(13), "  ");
+    }
+
+    #[test]
+    fn compute_program_groups_empty() {
+        let result = compute_program_groups(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn compute_program_groups_single_program() {
+        let commands = vec![("git status".to_string(), 5), ("git push".to_string(), 3)];
+        let groups = compute_program_groups(&commands);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "git");
+        assert_eq!(groups[0].1, 8);
+    }
+
+    #[test]
+    fn compute_program_groups_multiple_programs() {
+        let commands = vec![
+            ("cargo build".to_string(), 10),
+            ("git status".to_string(), 5),
+            ("cargo test".to_string(), 8),
+            ("ls -la".to_string(), 3),
+        ];
+        let groups = compute_program_groups(&commands);
+        assert_eq!(groups[0].0, "cargo");
+        assert_eq!(groups[0].1, 18);
+        assert_eq!(groups[1].0, "git");
+        assert_eq!(groups[1].1, 5);
+        assert_eq!(groups[2].0, "ls");
+        assert_eq!(groups[2].1, 3);
+    }
+
+    #[test]
+    fn compute_program_groups_single_word_command() {
+        let commands = vec![("ls".to_string(), 10)];
+        let groups = compute_program_groups(&commands);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "ls");
+        assert_eq!(groups[0].1, 10);
+    }
+
+    #[test]
+    fn test_period_days() {
+        assert_eq!(Period::Days7.days(), Some(7));
+        assert_eq!(Period::Days30.days(), Some(30));
+        assert_eq!(Period::Days90.days(), Some(90));
+        assert_eq!(Period::AllTime.days(), None);
+    }
+
+    #[test]
+    fn test_period_labels() {
+        assert_eq!(Period::Days7.label(), "7d");
+        assert_eq!(Period::Days30.label(), "30d");
+        assert_eq!(Period::Days90.label(), "90d");
+        assert_eq!(Period::AllTime.label(), "All");
+    }
+
+    #[test]
+    fn test_period_heatmap_days() {
+        assert_eq!(Period::Days7.heatmap_days(), 30);
+        assert_eq!(Period::Days30.heatmap_days(), 90);
+        assert_eq!(Period::Days90.heatmap_days(), 180);
+        assert_eq!(Period::AllTime.heatmap_days(), 365);
+    }
+
+    #[test]
+    fn test_focus_next_cycle() {
+        let f = Focus::Hourly;
+        let f = f.next();
+        assert_eq!(f, Focus::TopPrograms);
+        let f = f.next();
+        assert_eq!(f, Focus::TopCommands);
+        let f = f.next();
+        assert_eq!(f, Focus::TopDirs);
+        let f = f.next();
+        assert_eq!(f, Focus::Hourly); // wraps
+    }
+
+    #[test]
+    fn test_focus_prev_cycle() {
+        let f = Focus::Hourly;
+        let f = f.prev();
+        assert_eq!(f, Focus::TopDirs);
+        let f = f.prev();
+        assert_eq!(f, Focus::TopCommands);
+        let f = f.prev();
+        assert_eq!(f, Focus::TopPrograms);
+        let f = f.prev();
+        assert_eq!(f, Focus::Hourly); // wraps
+    }
+
+    #[test]
+    fn test_stats_app_initial_state() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let app = StatsApp::new(&repo, Period::Days30, 10, None, None);
+
+        assert_eq!(app.period, Period::Days30);
+        assert_eq!(app.focus, Focus::TopCommands);
+        assert!(!app.show_executor);
+        assert_eq!(app.top_n, 10);
+        assert!(app.tag_id.is_none());
+        assert!(app.tag_name.is_none());
+    }
+
+    #[test]
+    fn test_stats_app_focus_via_handle_input() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+
+        assert_eq!(app.focus, Focus::TopCommands);
+
+        // Tab cycles focus forward
+        let cont = app.handle_input(KeyEvent::from(KeyCode::Tab), &repo);
+        assert!(cont);
+        assert_eq!(app.focus, Focus::TopDirs);
+
+        let cont = app.handle_input(KeyEvent::from(KeyCode::Tab), &repo);
+        assert!(cont);
+        assert_eq!(app.focus, Focus::Hourly);
+
+        let cont = app.handle_input(KeyEvent::from(KeyCode::Tab), &repo);
+        assert!(cont);
+        assert_eq!(app.focus, Focus::TopPrograms);
+
+        let cont = app.handle_input(KeyEvent::from(KeyCode::Tab), &repo);
+        assert!(cont);
+        assert_eq!(app.focus, Focus::TopCommands); // wraps
+
+        // BackTab cycles focus backward
+        let cont = app.handle_input(KeyEvent::from(KeyCode::BackTab), &repo);
+        assert!(cont);
+        assert_eq!(app.focus, Focus::TopPrograms);
+    }
+
+    #[test]
+    fn test_stats_app_period_change() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+
+        assert_eq!(app.period, Period::Days7);
+
+        app.handle_input(KeyEvent::from(KeyCode::Char('2')), &repo);
+        assert_eq!(app.period, Period::Days30);
+
+        app.handle_input(KeyEvent::from(KeyCode::Char('3')), &repo);
+        assert_eq!(app.period, Period::Days90);
+
+        app.handle_input(KeyEvent::from(KeyCode::Char('4')), &repo);
+        assert_eq!(app.period, Period::AllTime);
+
+        app.handle_input(KeyEvent::from(KeyCode::Char('1')), &repo);
+        assert_eq!(app.period, Period::Days7);
+    }
+
+    #[test]
+    fn test_stats_app_toggle_executor() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+
+        assert!(!app.show_executor);
+
+        app.handle_input(KeyEvent::from(KeyCode::Char('e')), &repo);
+        assert!(app.show_executor);
+
+        app.handle_input(KeyEvent::from(KeyCode::Char('e')), &repo);
+        assert!(!app.show_executor);
+    }
+
+    #[test]
+    fn test_stats_app_quit() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+
+        let cont = app.handle_input(KeyEvent::from(KeyCode::Char('q')), &repo);
+        assert!(!cont); // false = quit
+
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+        let cont = app.handle_input(KeyEvent::from(KeyCode::Esc), &repo);
+        assert!(!cont);
+    }
+
+    #[test]
+    fn test_stats_app_selection_movement() {
+        use crate::models::{Entry, Session};
+
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let now = chrono::Local::now().timestamp_millis();
+
+        // Insert a session first (entries have a FK on session_id)
+        let session = Session::new("test-host".to_string(), now);
+        repo.insert_session(&session).unwrap();
+        let sid = session.id.clone();
+
+        // Insert some commands so the tables are non-empty
+        repo.insert_entry(&Entry::new(
+            sid.clone(),
+            "git status".to_string(),
+            "/tmp".to_string(),
+            Some(0),
+            now - 300,
+            now - 200,
+        ))
+        .unwrap();
+        repo.insert_entry(&Entry::new(
+            sid.clone(),
+            "cargo build".to_string(),
+            "/tmp".to_string(),
+            Some(0),
+            now - 200,
+            now - 100,
+        ))
+        .unwrap();
+        repo.insert_entry(&Entry::new(
+            sid,
+            "ls -la".to_string(),
+            "/home".to_string(),
+            Some(0),
+            now - 100,
+            now - 50,
+        ))
+        .unwrap();
+
+        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+
+        // Focus is on TopCommands by default; table should have selection at 0
+        assert_eq!(app.focus, Focus::TopCommands);
+        assert_eq!(app.commands_table_state.selected(), Some(0));
+
+        // Move down
+        app.handle_input(KeyEvent::from(KeyCode::Down), &repo);
+        assert_eq!(app.commands_table_state.selected(), Some(1));
+
+        // Move up back to 0
+        app.handle_input(KeyEvent::from(KeyCode::Up), &repo);
+        assert_eq!(app.commands_table_state.selected(), Some(0));
+
+        // Move up at 0 stays at 0 (saturating)
+        app.handle_input(KeyEvent::from(KeyCode::Up), &repo);
+        assert_eq!(app.commands_table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_stats_app_selection_on_different_panels() {
+        use crate::models::{Entry, Session};
+
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let now = chrono::Local::now().timestamp_millis();
+
+        let session = Session::new("test-host".to_string(), now);
+        repo.insert_session(&session).unwrap();
+        let sid = session.id.clone();
+
+        repo.insert_entry(&Entry::new(
+            sid.clone(),
+            "git status".to_string(),
+            "/tmp/a".to_string(),
+            Some(0),
+            now - 300,
+            now - 200,
+        ))
+        .unwrap();
+        repo.insert_entry(&Entry::new(
+            sid,
+            "cargo test".to_string(),
+            "/tmp/b".to_string(),
+            Some(0),
+            now - 200,
+            now - 100,
+        ))
+        .unwrap();
+
+        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+
+        // Switch to TopDirs
+        app.focus = Focus::TopDirs;
+        assert_eq!(app.dirs_table_state.selected(), Some(0));
+
+        app.handle_input(KeyEvent::from(KeyCode::Down), &repo);
+        assert_eq!(app.dirs_table_state.selected(), Some(1));
+
+        // Switch to TopPrograms
+        app.focus = Focus::TopPrograms;
+        assert_eq!(app.programs_table_state.selected(), Some(0));
+
+        app.handle_input(KeyEvent::from(KeyCode::Down), &repo);
+        assert_eq!(app.programs_table_state.selected(), Some(1));
+
+        // Hourly focus: Up/Down have no effect (no selection state for hourly)
+        app.focus = Focus::Hourly;
+        app.handle_input(KeyEvent::from(KeyCode::Down), &repo);
+        app.handle_input(KeyEvent::from(KeyCode::Up), &repo);
+        // No assertion needed - just confirming no panic
+    }
+
+    #[test]
+    fn test_build_daily_counts() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+
+        let counts = app.build_daily_counts();
+        // heatmap_days for Days7 = 30
+        assert_eq!(counts.len(), 30);
+        // With an empty repo, all counts should be 0
+        assert!(counts.iter().all(|&c| c == 0));
+    }
+
+    #[test]
+    fn test_stats_app_with_tag() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let app = StatsApp::new(&repo, Period::Days30, 5, Some(42), Some("work".to_string()));
+
+        assert_eq!(app.tag_id, Some(42));
+        assert_eq!(app.tag_name, Some("work".to_string()));
+        assert_eq!(app.top_n, 5);
+    }
+
+    // ── 1. intensity_level edge cases ───────────────────────────
+
+    #[test]
+    fn intensity_level_count_one_max_one() {
+        // count == max, ratio = 1.0 => level 4
+        assert_eq!(intensity_level(1, 1), 4);
+    }
+
+    #[test]
+    fn intensity_level_large_values() {
+        // 999999 / 1000000 = 0.999999 => level 4
+        assert_eq!(intensity_level(999_999, 1_000_000), 4);
+    }
+
+    #[test]
+    fn intensity_level_boundary_26_percent() {
+        // 26/100 = 0.26 => above 0.25, so level 2
+        assert_eq!(intensity_level(26, 100), 2);
+        // 25/100 = 0.25 => exactly 0.25, so level 1 (ratio <= 0.25)
+        assert_eq!(intensity_level(25, 100), 1);
+    }
+
+    #[test]
+    fn intensity_level_negative_count() {
+        // Negative count should still work: -5 != 0 and max != 0,
+        // ratio = -0.05 which is <= 0.25 => level 1
+        assert_eq!(intensity_level(-5, 100), 1);
+    }
+
+    // ── 2. compute_program_groups edge cases ────────────────────
+
+    #[test]
+    fn compute_program_groups_empty_string_commands() {
+        let commands = vec![("".to_string(), 5)];
+        let groups = compute_program_groups(&commands);
+        // split_whitespace().next() on "" returns None, so unwrap_or(cmd) gives ""
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "");
+        assert_eq!(groups[0].1, 5);
+    }
+
+    #[test]
+    fn compute_program_groups_whitespace_only_commands() {
+        let commands = vec![("   ".to_string(), 3)];
+        let groups = compute_program_groups(&commands);
+        // split_whitespace().next() on "   " returns None, unwrap_or(cmd) gives "   "
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "   ");
+        assert_eq!(groups[0].1, 3);
+    }
+
+    #[test]
+    fn compute_program_groups_descending_order() {
+        let commands = vec![
+            ("alpha run".to_string(), 2),
+            ("beta test".to_string(), 10),
+            ("gamma check".to_string(), 5),
+            ("alpha build".to_string(), 3),
+        ];
+        let groups = compute_program_groups(&commands);
+        // alpha: 2+3=5, beta: 10, gamma: 5
+        // Sorted descending: beta(10), then alpha(5) or gamma(5) (same count, order may vary)
+        assert_eq!(groups[0].0, "beta");
+        assert_eq!(groups[0].1, 10);
+        // The two with count 5 come next
+        assert!(groups[1].1 >= groups[2].1);
+        assert_eq!(groups.len(), 3);
+    }
+
+    // ── 3. build_daily_counts with data ─────────────────────────
+
+    #[test]
+    fn test_build_daily_counts_with_data() {
+        use crate::models::{Entry, Session};
+
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let now = chrono::Local::now().timestamp_millis();
+
+        let session = Session::new("test-host".to_string(), now);
+        repo.insert_session(&session).unwrap();
+        let sid = session.id.clone();
+
+        // Insert entries spread across today and yesterday
+        repo.insert_entry(&Entry::new(
+            sid.clone(),
+            "cmd1".to_string(),
+            "/tmp".to_string(),
+            Some(0),
+            now - 1000,
+            now - 500,
+        ))
+        .unwrap();
+        repo.insert_entry(&Entry::new(
+            sid.clone(),
+            "cmd2".to_string(),
+            "/tmp".to_string(),
+            Some(0),
+            now - 500,
+            now - 100,
+        ))
+        .unwrap();
+
+        let app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+        let counts = app.build_daily_counts();
+
+        // heatmap_days for Days7 = 30
+        assert_eq!(counts.len(), 30);
+        // The last element is today, and we inserted entries today, so it should be > 0
+        assert!(*counts.last().unwrap() > 0);
+    }
+
+    #[test]
+    fn test_build_daily_counts_all_periods() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+
+        let app7 = StatsApp::new(&repo, Period::Days7, 10, None, None);
+        assert_eq!(app7.build_daily_counts().len(), 30);
+
+        let app30 = StatsApp::new(&repo, Period::Days30, 10, None, None);
+        assert_eq!(app30.build_daily_counts().len(), 90);
+
+        let app90 = StatsApp::new(&repo, Period::Days90, 10, None, None);
+        assert_eq!(app90.build_daily_counts().len(), 180);
+
+        let app_all = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+        assert_eq!(app_all.build_daily_counts().len(), 365);
+    }
+
+    // ── 4. move_selection_down boundary clamping ────────────────
+
+    #[test]
+    fn test_move_selection_down_clamps_top_commands() {
+        use crate::models::{Entry, Session};
+
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let now = chrono::Local::now().timestamp_millis();
+
+        let session = Session::new("test-host".to_string(), now);
+        repo.insert_session(&session).unwrap();
+        let sid = session.id.clone();
+
+        // Insert 2 distinct commands
+        repo.insert_entry(&Entry::new(
+            sid.clone(),
+            "cmd_a".to_string(),
+            "/tmp".to_string(),
+            Some(0),
+            now - 200,
+            now - 100,
+        ))
+        .unwrap();
+        repo.insert_entry(&Entry::new(
+            sid,
+            "cmd_b".to_string(),
+            "/tmp".to_string(),
+            Some(0),
+            now - 100,
+            now - 50,
+        ))
+        .unwrap();
+
+        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+        app.focus = Focus::TopCommands;
+
+        // Move down past the last item
+        app.move_selection_down(); // 0 -> 1
+        app.move_selection_down(); // 1 -> clamped to 1
+        app.move_selection_down(); // still 1
+        assert_eq!(app.commands_table_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn test_move_selection_down_clamps_top_dirs() {
+        use crate::models::{Entry, Session};
+
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let now = chrono::Local::now().timestamp_millis();
+
+        let session = Session::new("test-host".to_string(), now);
+        repo.insert_session(&session).unwrap();
+        let sid = session.id.clone();
+
+        // Insert entries with 2 distinct directories
+        repo.insert_entry(&Entry::new(
+            sid.clone(),
+            "ls".to_string(),
+            "/dir_a".to_string(),
+            Some(0),
+            now - 200,
+            now - 100,
+        ))
+        .unwrap();
+        repo.insert_entry(&Entry::new(
+            sid,
+            "ls".to_string(),
+            "/dir_b".to_string(),
+            Some(0),
+            now - 100,
+            now - 50,
+        ))
+        .unwrap();
+
+        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+        app.focus = Focus::TopDirs;
+
+        app.move_selection_down(); // 0 -> 1
+        app.move_selection_down(); // clamped to 1
+        app.move_selection_down(); // still 1
+        assert_eq!(app.dirs_table_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn test_move_selection_down_clamps_top_programs() {
+        use crate::models::{Entry, Session};
+
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let now = chrono::Local::now().timestamp_millis();
+
+        let session = Session::new("test-host".to_string(), now);
+        repo.insert_session(&session).unwrap();
+        let sid = session.id.clone();
+
+        // Insert entries with 2 distinct programs
+        repo.insert_entry(&Entry::new(
+            sid.clone(),
+            "git status".to_string(),
+            "/tmp".to_string(),
+            Some(0),
+            now - 200,
+            now - 100,
+        ))
+        .unwrap();
+        repo.insert_entry(&Entry::new(
+            sid,
+            "cargo build".to_string(),
+            "/tmp".to_string(),
+            Some(0),
+            now - 100,
+            now - 50,
+        ))
+        .unwrap();
+
+        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+        app.focus = Focus::TopPrograms;
+
+        app.move_selection_down(); // 0 -> 1
+        app.move_selection_down(); // clamped to 1
+        app.move_selection_down(); // still 1
+        assert_eq!(app.programs_table_state.selected(), Some(1));
+    }
+
+    // ── 5. move_selection_up at zero for TopDirs and TopPrograms ─
+
+    #[test]
+    fn test_move_selection_up_at_zero_top_dirs() {
+        use crate::models::{Entry, Session};
+
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let now = chrono::Local::now().timestamp_millis();
+
+        let session = Session::new("test-host".to_string(), now);
+        repo.insert_session(&session).unwrap();
+        let sid = session.id.clone();
+
+        repo.insert_entry(&Entry::new(
+            sid,
+            "ls".to_string(),
+            "/some/dir".to_string(),
+            Some(0),
+            now - 100,
+            now - 50,
+        ))
+        .unwrap();
+
+        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+        app.focus = Focus::TopDirs;
+        assert_eq!(app.dirs_table_state.selected(), Some(0));
+
+        // Move up at 0 should stay at 0 (saturating)
+        app.move_selection_up();
+        assert_eq!(app.dirs_table_state.selected(), Some(0));
+
+        app.move_selection_up();
+        assert_eq!(app.dirs_table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_move_selection_up_at_zero_top_programs() {
+        use crate::models::{Entry, Session};
+
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let now = chrono::Local::now().timestamp_millis();
+
+        let session = Session::new("test-host".to_string(), now);
+        repo.insert_session(&session).unwrap();
+        let sid = session.id.clone();
+
+        repo.insert_entry(&Entry::new(
+            sid,
+            "git status".to_string(),
+            "/tmp".to_string(),
+            Some(0),
+            now - 100,
+            now - 50,
+        ))
+        .unwrap();
+
+        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+        app.focus = Focus::TopPrograms;
+        assert_eq!(app.programs_table_state.selected(), Some(0));
+
+        // Move up at 0 should stay at 0 (saturating)
+        app.move_selection_up();
+        assert_eq!(app.programs_table_state.selected(), Some(0));
+
+        app.move_selection_up();
+        assert_eq!(app.programs_table_state.selected(), Some(0));
+    }
+
+    // ── 6. handle_input BackTab from specific focus ─────────────
+
+    #[test]
+    fn test_handle_input_backtab_full_cycle() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+
+        // Start at TopCommands (default)
+        assert_eq!(app.focus, Focus::TopCommands);
+
+        // BackTab: TopCommands -> TopPrograms
+        app.handle_input(KeyEvent::from(KeyCode::BackTab), &repo);
+        assert_eq!(app.focus, Focus::TopPrograms);
+
+        // BackTab: TopPrograms -> Hourly
+        app.handle_input(KeyEvent::from(KeyCode::BackTab), &repo);
+        assert_eq!(app.focus, Focus::Hourly);
+
+        // BackTab: Hourly -> TopDirs
+        app.handle_input(KeyEvent::from(KeyCode::BackTab), &repo);
+        assert_eq!(app.focus, Focus::TopDirs);
+
+        // BackTab: TopDirs -> TopCommands (wraps)
+        app.handle_input(KeyEvent::from(KeyCode::BackTab), &repo);
+        assert_eq!(app.focus, Focus::TopCommands);
+    }
+
+    #[test]
+    fn test_handle_input_backtab_from_top_dirs() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+        app.focus = Focus::TopDirs;
+
+        app.handle_input(KeyEvent::from(KeyCode::BackTab), &repo);
+        assert_eq!(app.focus, Focus::TopCommands);
+    }
+
+    #[test]
+    fn test_handle_input_backtab_from_hourly() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+        app.focus = Focus::Hourly;
+
+        app.handle_input(KeyEvent::from(KeyCode::BackTab), &repo);
+        assert_eq!(app.focus, Focus::TopDirs);
+    }
+
+    // ── 7. handle_input unknown key does nothing ────────────────
+
+    #[test]
+    fn test_handle_input_unknown_key_no_state_change() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = StatsApp::new(&repo, Period::Days30, 10, None, None);
+
+        let focus_before = app.focus;
+        let period_before = app.period;
+        let show_executor_before = app.show_executor;
+        let commands_sel = app.commands_table_state.selected();
+        let dirs_sel = app.dirs_table_state.selected();
+        let programs_sel = app.programs_table_state.selected();
+
+        // Press an unrecognized key (e.g., 'z')
+        let cont = app.handle_input(KeyEvent::from(KeyCode::Char('z')), &repo);
+        assert!(cont); // should not quit
+
+        assert_eq!(app.focus, focus_before);
+        assert_eq!(app.period, period_before);
+        assert_eq!(app.show_executor, show_executor_before);
+        assert_eq!(app.commands_table_state.selected(), commands_sel);
+        assert_eq!(app.dirs_table_state.selected(), dirs_sel);
+        assert_eq!(app.programs_table_state.selected(), programs_sel);
+    }
+
+    #[test]
+    fn test_handle_input_function_key_no_state_change() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = StatsApp::new(&repo, Period::Days30, 10, None, None);
+
+        let focus_before = app.focus;
+        let period_before = app.period;
+
+        let cont = app.handle_input(KeyEvent::from(KeyCode::F(5)), &repo);
+        assert!(cont);
+        assert_eq!(app.focus, focus_before);
+        assert_eq!(app.period, period_before);
+    }
+
+    // ── 8. success_rate calculation and color thresholds ────────
+
+    #[test]
+    fn test_success_rate_calculation_high() {
+        // 95 out of 100 commands successful => 95.0% => >= 90% (success)
+        let total: i64 = 100;
+        let success: i64 = 95;
+        let rate = (success as f64 / total as f64) * 100.0;
+        assert!((rate - 95.0).abs() < f64::EPSILON);
+        assert!(rate >= 90.0);
+    }
+
+    #[test]
+    fn test_success_rate_calculation_warning_zone() {
+        // 75 out of 100 => 75.0% => >= 70% but < 90% (warning)
+        let total: i64 = 100;
+        let success: i64 = 75;
+        let rate = (success as f64 / total as f64) * 100.0;
+        assert!((rate - 75.0).abs() < f64::EPSILON);
+        assert!(rate >= 70.0);
+        assert!(rate < 90.0);
+    }
+
+    #[test]
+    fn test_success_rate_calculation_error_zone() {
+        // 50 out of 100 => 50.0% => < 70% (error)
+        let total: i64 = 100;
+        let success: i64 = 50;
+        let rate = (success as f64 / total as f64) * 100.0;
+        assert!((rate - 50.0).abs() < f64::EPSILON);
+        assert!(rate < 70.0);
+    }
+
+    #[test]
+    fn test_success_rate_zero_total() {
+        // 0 total => rate should be 0.0
+        let total: i64 = 0;
+        let rate: f64 = if total > 0 { 100.0 } else { 0.0 };
+        assert!((rate - 0.0_f64).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_success_rate_boundary_exactly_90() {
+        let total: i64 = 100;
+        let success: i64 = 90;
+        let rate = (success as f64 / total as f64) * 100.0;
+        assert!((rate - 90.0).abs() < f64::EPSILON);
+        // >= 90.0 means success color
+        assert!(rate >= 90.0);
+    }
+
+    #[test]
+    fn test_success_rate_boundary_exactly_70() {
+        let total: i64 = 100;
+        let success: i64 = 70;
+        let rate = (success as f64 / total as f64) * 100.0;
+        assert!((rate - 70.0).abs() < f64::EPSILON);
+        // >= 70.0 but < 90.0 means warning color
+        assert!(rate >= 70.0);
+        assert!(rate < 90.0);
+    }
+
+    #[test]
+    fn test_success_rate_boundary_69() {
+        let total: i64 = 100;
+        let success: i64 = 69;
+        let rate = (success as f64 / total as f64) * 100.0;
+        // < 70.0 means error color
+        assert!(rate < 70.0);
+    }
+
+    // ── 9. Period mapping (matching run_stats_ui logic) ─────────
+
+    #[test]
+    fn test_period_mapping_from_initial_days() {
+        // Replicate the period mapping logic from run_stats_ui
+        fn map_period(initial_days: Option<usize>) -> Period {
+            match initial_days {
+                Some(d) if d <= 7 => Period::Days7,
+                Some(d) if d <= 30 => Period::Days30,
+                Some(d) if d <= 90 => Period::Days90,
+                _ => Period::AllTime,
+            }
+        }
+
+        assert_eq!(map_period(Some(5)), Period::Days7);
+        assert_eq!(map_period(Some(7)), Period::Days7);
+        assert_eq!(map_period(Some(15)), Period::Days30);
+        assert_eq!(map_period(Some(30)), Period::Days30);
+        assert_eq!(map_period(Some(60)), Period::Days90);
+        assert_eq!(map_period(Some(90)), Period::Days90);
+        assert_eq!(map_period(None), Period::AllTime);
+        assert_eq!(map_period(Some(365)), Period::AllTime);
+    }
+
+    #[test]
+    fn test_period_mapping_boundary_values() {
+        fn map_period(initial_days: Option<usize>) -> Period {
+            match initial_days {
+                Some(d) if d <= 7 => Period::Days7,
+                Some(d) if d <= 30 => Period::Days30,
+                Some(d) if d <= 90 => Period::Days90,
+                _ => Period::AllTime,
+            }
+        }
+
+        // Exact boundaries
+        assert_eq!(map_period(Some(1)), Period::Days7);
+        assert_eq!(map_period(Some(7)), Period::Days7);
+        assert_eq!(map_period(Some(8)), Period::Days30);
+        assert_eq!(map_period(Some(30)), Period::Days30);
+        assert_eq!(map_period(Some(31)), Period::Days90);
+        assert_eq!(map_period(Some(90)), Period::Days90);
+        assert_eq!(map_period(Some(91)), Period::AllTime);
+    }
+
+    #[test]
+    fn test_period_mapping_via_stats_app_new() {
+        // Verify that creating StatsApp with different periods works
+        let (_dir, repo) = crate::test_utils::test_repo();
+
+        let app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+        assert_eq!(app.period, Period::Days7);
+
+        let app = StatsApp::new(&repo, Period::Days90, 10, None, None);
+        assert_eq!(app.period, Period::Days90);
+
+        let app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+        assert_eq!(app.period, Period::AllTime);
+    }
+
+    // ── 10. reload resets table selections ──────────────────────
+
+    #[test]
+    fn test_reload_resets_table_selections_with_data() {
+        use crate::models::{Entry, Session};
+
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let now = chrono::Local::now().timestamp_millis();
+
+        let session = Session::new("test-host".to_string(), now);
+        repo.insert_session(&session).unwrap();
+        let sid = session.id.clone();
+
+        repo.insert_entry(&Entry::new(
+            sid.clone(),
+            "git status".to_string(),
+            "/home/user".to_string(),
+            Some(0),
+            now - 300,
+            now - 200,
+        ))
+        .unwrap();
+        repo.insert_entry(&Entry::new(
+            sid,
+            "cargo build".to_string(),
+            "/home/project".to_string(),
+            Some(0),
+            now - 200,
+            now - 100,
+        ))
+        .unwrap();
+
+        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+
+        // Move selections away from 0
+        app.focus = Focus::TopCommands;
+        app.move_selection_down();
+        assert_eq!(app.commands_table_state.selected(), Some(1));
+
+        app.focus = Focus::TopDirs;
+        app.move_selection_down();
+        assert_eq!(app.dirs_table_state.selected(), Some(1));
+
+        app.focus = Focus::TopPrograms;
+        app.move_selection_down();
+        assert_eq!(app.programs_table_state.selected(), Some(1));
+
+        // Reload should reset all selections to Some(0)
+        app.reload(&repo);
+
+        assert_eq!(app.commands_table_state.selected(), Some(0));
+        assert_eq!(app.dirs_table_state.selected(), Some(0));
+        assert_eq!(app.programs_table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_reload_empty_repo_no_selection() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+
+        // With no data, selections should be None
+        app.reload(&repo);
+
+        assert_eq!(app.commands_table_state.selected(), None);
+        assert_eq!(app.dirs_table_state.selected(), None);
+        assert_eq!(app.programs_table_state.selected(), None);
+    }
+
+    #[test]
+    fn test_reload_via_period_change_resets_selections() {
+        use crate::models::{Entry, Session};
+
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let now = chrono::Local::now().timestamp_millis();
+
+        let session = Session::new("test-host".to_string(), now);
+        repo.insert_session(&session).unwrap();
+        let sid = session.id.clone();
+
+        repo.insert_entry(&Entry::new(
+            sid.clone(),
+            "git log".to_string(),
+            "/workspace".to_string(),
+            Some(0),
+            now - 300,
+            now - 200,
+        ))
+        .unwrap();
+        repo.insert_entry(&Entry::new(
+            sid,
+            "make test".to_string(),
+            "/workspace".to_string(),
+            Some(0),
+            now - 200,
+            now - 100,
+        ))
+        .unwrap();
+
+        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+
+        // Move command selection down
+        app.focus = Focus::TopCommands;
+        app.move_selection_down();
+        assert_eq!(app.commands_table_state.selected(), Some(1));
+
+        // Changing period triggers reload, which resets selections
+        app.handle_input(KeyEvent::from(KeyCode::Char('1')), &repo);
+        assert_eq!(app.period, Period::Days7);
+        assert_eq!(app.commands_table_state.selected(), Some(0));
+    }
+
+    // ── heatmap_colors tests ─────────────────────────────────────
+
+    #[test]
+    fn test_heatmap_colors_returns_five_elements() {
+        let colors = heatmap_colors(theme());
+        assert_eq!(colors.len(), 5);
+    }
+
+    #[test]
+    fn test_heatmap_colors_matches_theme() {
+        let t = theme();
+        let colors = heatmap_colors(t);
+        assert_eq!(colors[0], t.bg_elevated);
+        assert_eq!(colors[1], t.heatmap_low);
+        assert_eq!(colors[2], t.heatmap_mid);
+        assert_eq!(colors[3], t.primary_dim);
+        assert_eq!(colors[4], t.primary);
+    }
+
+    #[test]
+    fn test_heatmap_colors_ascending_intensity() {
+        let colors = heatmap_colors(theme());
+        // Verify they are all valid Color values and not all identical,
+        // confirming the array maps from background through increasing intensity.
+        let all_same = colors.windows(2).all(|w| w[0] == w[1]);
+        assert!(!all_same, "heatmap colors should not all be the same");
+    }
 }

@@ -6,12 +6,19 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::util::atomic_write;
+
+/// Maximum bytes to read from stdin for hook input (1 MB).
+const MAX_HOOK_INPUT_BYTES: u64 = 1_048_576;
+
 /// Handle `PostToolUse` hook from Claude Code — reads JSON event from stdin and records the command.
 pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Read;
 
     let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input)?;
+    std::io::stdin()
+        .take(MAX_HOOK_INPUT_BYTES)
+        .read_to_string(&mut input)?;
 
     let event: serde_json::Value = serde_json::from_str(&input)?;
 
@@ -55,6 +62,7 @@ pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
     let session_id = event
         .get("session_id")
         .and_then(serde_json::Value::as_str)
+        .filter(|s| is_valid_session_id(s))
         .map_or_else(
             || format!("claude-{}", uuid::Uuid::new_v4()),
             |s| format!("claude-{s}"),
@@ -69,17 +77,17 @@ pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
         ctx
     });
 
-    crate::handle_add_with_context(
-        &session_id,
-        command.to_string(),
-        cwd.to_string(),
+    crate::commands::entry::handle_add_with_context(crate::commands::entry::AddParams {
+        session_id,
+        command: command.to_string(),
+        cwd: cwd.to_string(),
         exit_code,
-        now,
-        now,
-        Some("agent".to_string()),
-        Some("claude-code".to_string()),
+        started_at: now,
+        ended_at: now,
+        executor_type: Some("agent".to_string()),
+        executor: Some("claude-code".to_string()),
         context,
-    )
+    })
 }
 
 /// Handle `UserPromptSubmit` hook from Claude Code — caches the prompt text
@@ -87,7 +95,9 @@ pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Read;
 
     let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input)?;
+    std::io::stdin()
+        .take(MAX_HOOK_INPUT_BYTES)
+        .read_to_string(&mut input)?;
 
     let event: serde_json::Value = serde_json::from_str(&input)?;
 
@@ -95,7 +105,7 @@ pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
         .get("session_id")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
-    if session_id.is_empty() {
+    if !is_valid_session_id(session_id) {
         return Ok(());
     }
 
@@ -107,28 +117,33 @@ pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Store prompt in cache file
+    // Store prompt in cache file (atomic write to avoid corruption on crash)
     let prompts_dir = get_prompts_dir()?;
     std::fs::create_dir_all(&prompts_dir)?;
     let prompt_file = prompts_dir.join(format!("claude-{session_id}.prompt"));
     // Truncate to 500 chars to keep cache lightweight
-    let truncated = if prompt.len() > 500 {
-        format!("{}...", &prompt[..497])
-    } else {
-        prompt.to_string()
-    };
-    std::fs::write(prompt_file, truncated)?;
+    let truncated = crate::util::truncate_str(prompt, 500, "...");
+    atomic_write(&prompt_file, &truncated)?;
+
+    // Restrict prompt cache file to owner-only (contains user prompts)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&prompt_file, std::fs::Permissions::from_mode(0o600));
+    }
 
     Ok(())
 }
 
-/// Get the directory for cached agent prompts
+/// Returns `true` if `id` contains only safe characters for use in file names.
+fn is_valid_session_id(id: &str) -> bool {
+    crate::util::is_valid_session_id(id)
+}
+
+/// Get the directory for cached agent prompts (uses cached project dirs)
 fn get_prompts_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let home = std::env::var("HOME")?;
-    Ok(PathBuf::from(home)
-        .join(".config")
-        .join("suvadu")
-        .join("prompts"))
+    let dirs = crate::util::project_dirs().ok_or("Could not determine data directory")?;
+    Ok(dirs.data_dir().join("prompts"))
 }
 
 /// Read the cached prompt for a session (if any)
@@ -136,6 +151,23 @@ fn get_cached_prompt(session_id: &str) -> Option<String> {
     let prompts_dir = get_prompts_dir().ok()?;
     let prompt_file = prompts_dir.join(format!("{session_id}.prompt"));
     std::fs::read_to_string(prompt_file).ok()
+}
+
+/// Check if a hook command path belongs to suvadu. Uses path-separator-aware
+/// matching to avoid false positives on paths like `/usr/bin/not-suvadu-tool`.
+fn is_suvadu_hook_command(cmd: &str) -> bool {
+    // Match /suvadu/ as a path component, or the binary names "suv"/"suvadu" at end of path
+    cmd.contains("/suvadu/")
+        || cmd.ends_with("/suv")
+        || cmd.ends_with("/suvadu")
+        || cmd.starts_with("suv ")
+        || cmd.starts_with("suvadu ")
+}
+
+/// Shell-escape a string for embedding inside single quotes.
+/// Replaces `'` with `'\''` (end quote, literal quote, restart quote).
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Install Claude Code hooks and configure `~/.claude/settings.json`.
@@ -151,16 +183,17 @@ pub fn handle_init_claude_code() -> Result<(), Box<dyn std::error::Error>> {
         .join("hooks");
     std::fs::create_dir_all(&hooks_dir)?;
 
-    // Write the PostToolUse hook script
+    // Write the PostToolUse hook script (single-quoted path for shell safety)
     let hook_script_path = hooks_dir.join("claude-code-post-tool.sh");
+    let escaped_bin = shell_escape(&bin_path);
     let script = format!(
         "#!/bin/bash\n\
          # Suvadu — Claude Code PostToolUse Hook\n\
          # Records AI-executed commands in your shell history\n\
          # Generated by: suv init claude-code\n\
-         exec \"{bin_path}\" hook-claude-code 2>/dev/null\n"
+         exec {escaped_bin} hook-claude-code 2>/dev/null\n"
     );
-    std::fs::write(&hook_script_path, &script)?;
+    crate::util::atomic_write_with_mode(&hook_script_path, &script, 0o700)?;
 
     // Write the UserPromptSubmit hook script
     let prompt_hook_path = hooks_dir.join("claude-code-prompt.sh");
@@ -169,22 +202,9 @@ pub fn handle_init_claude_code() -> Result<(), Box<dyn std::error::Error>> {
          # Suvadu — Claude Code UserPromptSubmit Hook\n\
          # Captures the user prompt for agent command grouping\n\
          # Generated by: suv init claude-code\n\
-         exec \"{bin_path}\" hook-claude-prompt 2>/dev/null\n"
+         exec {escaped_bin} hook-claude-prompt 2>/dev/null\n"
     );
-    std::fs::write(&prompt_hook_path, &prompt_script)?;
-
-    // Make executable
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&hook_script_path)?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&hook_script_path, perms)?;
-
-        let mut perms = std::fs::metadata(&prompt_hook_path)?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&prompt_hook_path, perms)?;
-    }
+    crate::util::atomic_write_with_mode(&prompt_hook_path, &prompt_script, 0o700)?;
 
     let hook_path_str = hook_script_path.to_string_lossy().to_string();
     let prompt_hook_path_str = prompt_hook_path.to_string_lossy().to_string();
@@ -195,16 +215,23 @@ pub fn handle_init_claude_code() -> Result<(), Box<dyn std::error::Error>> {
     let auto_configured =
         try_merge_claude_settings(&settings_path, &hook_path_str, &prompt_hook_path_str);
 
-    println!("\x1b[1mSuvadu — Claude Code Integration\x1b[0m");
+    let color = crate::util::color_enabled();
+    let (b, r) = if color {
+        ("\x1b[1m", "\x1b[0m")
+    } else {
+        ("", "")
+    };
+    let green = if color { "\x1b[32m" } else { "" };
+    println!("{b}Suvadu — Claude Code Integration{r}");
     println!();
     println!("Hook scripts installed:");
     println!("  {hook_path_str}");
     println!("  {prompt_hook_path_str}");
     println!();
 
-    if let Ok(true) = auto_configured {
+    if matches!(auto_configured, Ok(true)) {
         println!(
-            "\x1b[32m✓\x1b[0m Settings auto-configured: {}",
+            "{green}✓{r} Settings auto-configured: {}",
             settings_path.display()
         );
         println!();
@@ -248,6 +275,83 @@ pub fn generate_claude_settings_snippet(hook_path: &str, prompt_hook_path: &str)
     .unwrap_or_default()
 }
 
+/// Remove duplicate suvadu hook entries from both `PostToolUse` and `UserPromptSubmit`.
+/// Returns true if any duplicates were removed.
+fn dedup_suvadu_hooks(settings: &mut serde_json::Value) -> bool {
+    let mut changed = false;
+    for key in ["PostToolUse", "UserPromptSubmit"] {
+        let Some(arr) = settings
+            .get_mut("hooks")
+            .and_then(|h| h.get_mut(key))
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        let mut seen_suvadu = false;
+        let before = arr.len();
+        arr.retain(|group| {
+            let is_suvadu = group
+                .get("hooks")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|hooks| {
+                    hooks.iter().any(|h| {
+                        h.get("command")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(is_suvadu_hook_command)
+                    })
+                });
+            if is_suvadu {
+                if seen_suvadu {
+                    return false; // drop duplicate
+                }
+                seen_suvadu = true;
+            }
+            true
+        });
+        if arr.len() != before {
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Check if a suvadu hook already exists for a given hook type (e.g. `PostToolUse`, `UserPromptSubmit`).
+fn has_suvadu_hook(settings: &serde_json::Value, hook_type: &str) -> bool {
+    settings
+        .get("hooks")
+        .and_then(|h| h.get(hook_type))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|arr| {
+            arr.iter().any(|group| {
+                group
+                    .get("hooks")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|hooks| {
+                        hooks.iter().any(|h| {
+                            h.get("command")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(is_suvadu_hook_command)
+                        })
+                    })
+            })
+        })
+}
+
+/// Add a hook entry to the settings object under the given hook type.
+fn add_hook_entry(
+    hooks_obj: &mut serde_json::Map<String, serde_json::Value>,
+    hook_type: &str,
+    hook_json: serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let arr = hooks_obj
+        .entry(hook_type)
+        .or_insert_with(|| serde_json::json!([]));
+    arr.as_array_mut()
+        .ok_or_else(|| format!("{hook_type} is not an array"))?
+        .push(hook_json);
+    Ok(())
+}
+
 /// Try to merge Suvadu hooks into an existing Claude settings file.
 pub fn try_merge_claude_settings(
     settings_path: &Path,
@@ -261,49 +365,19 @@ pub fn try_merge_claude_settings(
     let content = std::fs::read_to_string(settings_path)?;
     let mut settings: serde_json::Value = serde_json::from_str(&content)?;
 
-    // Check if a suvadu hook already exists in PostToolUse
-    let already_has_post_tool = settings
-        .get("hooks")
-        .and_then(|h| h.get("PostToolUse"))
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|arr| {
-            arr.iter().any(|group| {
-                group
-                    .get("hooks")
-                    .and_then(serde_json::Value::as_array)
-                    .is_some_and(|hooks| {
-                        hooks.iter().any(|h| {
-                            h.get("command")
-                                .and_then(serde_json::Value::as_str)
-                                .is_some_and(|cmd| cmd.contains("suvadu"))
-                        })
-                    })
-            })
-        });
+    let already_has_post_tool = has_suvadu_hook(&settings, "PostToolUse");
 
     if already_has_post_tool {
-        // Check if we also have the prompt hook
-        let already_has_prompt = settings
-            .get("hooks")
-            .and_then(|h| h.get("UserPromptSubmit"))
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|arr| {
-                arr.iter().any(|group| {
-                    group
-                        .get("hooks")
-                        .and_then(serde_json::Value::as_array)
-                        .is_some_and(|hooks| {
-                            hooks.iter().any(|h| {
-                                h.get("command")
-                                    .and_then(serde_json::Value::as_str)
-                                    .is_some_and(|cmd| cmd.contains("suvadu"))
-                            })
-                        })
-                })
-            });
+        let already_has_prompt = has_suvadu_hook(&settings, "UserPromptSubmit");
 
         if already_has_prompt {
-            return Ok(true); // Both hooks already configured
+            // Both hooks present — deduplicate any repeated suvadu entries
+            let changed = dedup_suvadu_hooks(&mut settings);
+            if changed {
+                let updated = serde_json::to_string_pretty(&settings)?;
+                atomic_write(settings_path, &updated)?;
+            }
+            return Ok(true);
         }
 
         // Add only the prompt hook
@@ -312,21 +386,19 @@ pub fn try_merge_claude_settings(
             .ok_or("settings.json root is not an object")?;
         let hooks = obj.entry("hooks").or_insert_with(|| serde_json::json!({}));
         let hooks_obj = hooks.as_object_mut().ok_or("hooks is not an object")?;
-        let prompt_submit = hooks_obj
-            .entry("UserPromptSubmit")
-            .or_insert_with(|| serde_json::json!([]));
-        prompt_submit
-            .as_array_mut()
-            .ok_or("UserPromptSubmit is not an array")?
-            .push(serde_json::json!({
+        add_hook_entry(
+            hooks_obj,
+            "UserPromptSubmit",
+            serde_json::json!({
                 "hooks": [{
                     "type": "command",
                     "command": prompt_hook_path
                 }]
-            }));
+            }),
+        )?;
 
         let updated = serde_json::to_string_pretty(&settings)?;
-        std::fs::write(settings_path, updated)?;
+        atomic_write(settings_path, &updated)?;
         return Ok(true);
     }
 
@@ -337,38 +409,32 @@ pub fn try_merge_claude_settings(
     let hooks = obj.entry("hooks").or_insert_with(|| serde_json::json!({}));
     let hooks_obj = hooks.as_object_mut().ok_or("hooks is not an object")?;
 
-    // PostToolUse
-    let post_tool_use = hooks_obj
-        .entry("PostToolUse")
-        .or_insert_with(|| serde_json::json!([]));
-    post_tool_use
-        .as_array_mut()
-        .ok_or("PostToolUse is not an array")?
-        .push(serde_json::json!({
+    add_hook_entry(
+        hooks_obj,
+        "PostToolUse",
+        serde_json::json!({
             "matcher": "Bash",
             "hooks": [{
                 "type": "command",
                 "command": hook_path
             }]
-        }));
+        }),
+    )?;
 
-    // UserPromptSubmit
-    let prompt_submit = hooks_obj
-        .entry("UserPromptSubmit")
-        .or_insert_with(|| serde_json::json!([]));
-    prompt_submit
-        .as_array_mut()
-        .ok_or("UserPromptSubmit is not an array")?
-        .push(serde_json::json!({
+    add_hook_entry(
+        hooks_obj,
+        "UserPromptSubmit",
+        serde_json::json!({
             "hooks": [{
                 "type": "command",
                 "command": prompt_hook_path
             }]
-        }));
+        }),
+    )?;
 
     // Write back with pretty formatting
     let updated = serde_json::to_string_pretty(&settings)?;
-    std::fs::write(settings_path, updated)?;
+    atomic_write(settings_path, &updated)?;
 
     Ok(true)
 }
@@ -387,7 +453,17 @@ pub fn handle_init_ide(
     detection_info: &str,
     verify_executor: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\x1b[1mSuvadu \u{2014} {name} Integration\x1b[0m");
+    let color = crate::util::color_enabled();
+    let (b, r) = if color {
+        ("\x1b[1m", "\x1b[0m")
+    } else {
+        ("", "")
+    };
+    let green = if color { "\x1b[32m" } else { "" };
+    let yellow = if color { "\x1b[33m" } else { "" };
+    let cyan = if color { "\x1b[36m" } else { "" };
+
+    println!("{b}Suvadu \u{2014} {name} Integration{r}");
     println!();
 
     // Check if shell hooks are configured
@@ -408,7 +484,7 @@ pub fn handle_init_ide(
         .is_some_and(|c| c.contains("suv init bash"));
 
     if zsh_ok || bash_ok {
-        println!("\x1b[32m\u{2713}\x1b[0m Shell hooks detected:");
+        println!("{green}\u{2713}{r} Shell hooks detected:");
         if zsh_ok {
             println!("    Zsh:  ~/.zshrc");
         }
@@ -416,14 +492,14 @@ pub fn handle_init_ide(
             println!("    Bash: ~/.bashrc");
         }
         println!();
-        println!("\x1b[32m\u{2713}\x1b[0m {name} commands are automatically tracked when you");
+        println!("{green}\u{2713}{r} {name} commands are automatically tracked when you");
         println!("  run commands in {name}'s integrated terminal.");
         println!();
         for line in detection_info.lines() {
             println!("  {line}");
         }
     } else {
-        println!("\x1b[33m!\x1b[0m Shell hooks not found. Set them up first:");
+        println!("{yellow}!{r} Shell hooks not found. Set them up first:");
         println!();
         println!("  For Zsh:");
         println!("    echo 'eval \"$(suv init zsh)\"' >> ~/.zshrc && source ~/.zshrc");
@@ -435,7 +511,7 @@ pub fn handle_init_ide(
     }
 
     println!();
-    println!("Verify with: \x1b[36msuv search --executor {verify_executor}\x1b[0m");
+    println!("Verify with: {cyan}suv search --executor {verify_executor}{r}");
 
     Ok(())
 }
@@ -491,6 +567,24 @@ mod tests {
             .and_then(|tr| tr.get("exit_code"))
             .and_then(serde_json::Value::as_i64);
         assert!(exit_code.is_none());
+    }
+
+    #[test]
+    fn test_valid_session_ids() {
+        assert!(is_valid_session_id("abc123"));
+        assert!(is_valid_session_id("session-with-dashes"));
+        assert!(is_valid_session_id("session_with_underscores"));
+        assert!(is_valid_session_id("MiXeD-CaSe_123"));
+    }
+
+    #[test]
+    fn test_invalid_session_ids() {
+        assert!(!is_valid_session_id(""));
+        assert!(!is_valid_session_id("../../etc/passwd"));
+        assert!(!is_valid_session_id("session id with spaces"));
+        assert!(!is_valid_session_id("session/slash"));
+        assert!(!is_valid_session_id("session\0null"));
+        assert!(!is_valid_session_id(&"a".repeat(257)));
     }
 
     #[test]
@@ -624,20 +718,88 @@ mod tests {
     }
 
     #[test]
-    fn test_get_prompts_dir() {
-        // get_prompts_dir is private, so test via the module's internal access
-        let result = get_prompts_dir();
-        // Should succeed as long as HOME is set
-        assert!(
-            result.is_ok(),
-            "get_prompts_dir should succeed when HOME is set"
+    fn test_merge_deduplicates_existing_duplicates() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join("settings.json");
+        let hook_path = "/home/user/.config/suvadu/hooks/claude-code-post-tool.sh";
+        let prompt_hook_path = "/home/user/.config/suvadu/hooks/claude-code-prompt.sh";
+
+        // Simulate 4 duplicate UserPromptSubmit entries (as seen in the wild)
+        let settings = serde_json::json!({
+            "hooks": {
+                "PostToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{"type": "command", "command": hook_path}]
+                }],
+                "UserPromptSubmit": [
+                    {"hooks": [{"type": "command", "command": prompt_hook_path}]},
+                    {"hooks": [{"type": "command", "command": prompt_hook_path}]},
+                    {"hooks": [{"type": "command", "command": prompt_hook_path}]},
+                    {"hooks": [{"type": "command", "command": prompt_hook_path}]}
+                ]
+            }
+        });
+        std::fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+
+        // Merge should detect both hooks exist and deduplicate
+        let result =
+            try_merge_claude_settings(&settings_path, hook_path, prompt_hook_path).unwrap();
+        assert!(result);
+
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["hooks"]["PostToolUse"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            parsed["hooks"]["UserPromptSubmit"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
         );
+    }
+
+    #[test]
+    fn test_dedup_preserves_non_suvadu_hooks() {
+        let mut settings = serde_json::json!({
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"hooks": [{"type": "command", "command": "/path/to/suvadu/hook.sh"}]},
+                    {"hooks": [{"type": "command", "command": "/other/tool/hook.sh"}]},
+                    {"hooks": [{"type": "command", "command": "/path/to/suvadu/hook.sh"}]}
+                ]
+            }
+        });
+
+        let changed = dedup_suvadu_hooks(&mut settings);
+        assert!(changed);
+
+        let arr = settings["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(arr.len(), 2); // 1 suvadu + 1 other
+                                  // First entry is suvadu, second is the other tool
+        assert!(arr[0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("suvadu"));
+        assert!(arr[1]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("other"));
+    }
+
+    #[test]
+    fn test_get_prompts_dir() {
+        let result = get_prompts_dir();
+        assert!(result.is_ok(), "get_prompts_dir should succeed");
         let path = result.unwrap();
-        // Should be under .config/suvadu
         let path_str = path.to_string_lossy().to_string();
+        // Should use directories crate path (contains suvadu) and end with prompts
         assert!(
-            path_str.contains(".config/suvadu"),
-            "Prompts dir should be under .config/suvadu, got: {path_str}"
+            path_str.contains("suvadu"),
+            "Prompts dir should be under suvadu data dir, got: {path_str}"
         );
         assert!(
             path_str.ends_with("prompts"),

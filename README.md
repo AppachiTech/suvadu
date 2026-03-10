@@ -86,6 +86,9 @@ Your shell history is one of your most valuable productivity assets — but the 
 - **Date filters** — `Ctrl+F` panel with "today", "yesterday", or `YYYY-MM-DD` ranges
 - **Detail pane** — `Tab` to preview full entry metadata
 - **Deduplication** — toggle unique command view with `Ctrl+U`
+- **Help overlay** — press `F1` or `?` to see all keyboard shortcuts organized by category
+- **Responsive layout** — column layout adapts to narrow, medium, and wide terminals
+- **Field-specific search** — target a single field with `--field cwd`, `--field session`, or `--field executor`
 
 ### Smart Arrow Keys
 - **Frecency ranking** — Up/Down arrow prefers same-directory commands using frequency × recency scoring
@@ -112,14 +115,41 @@ Your shell history is one of your most valuable productivity assets — but the 
 - **Bulk delete** matching entries by pattern or date range
 - **All data stays local** — no telemetry, no external servers
 
+### Security
+- **Secrets redaction** — auto-detects and redacts API keys, tokens, and passwords before storage
+- **Update verification** — Minisign signature verification on self-update binaries
+- **File permissions** — database and config files use owner-only permissions (`0o600`)
+- **ReDoS protection** — user-supplied regex patterns are validated against catastrophic backtracking
+- **SQL safety** — identifier allowlisting prevents SQL injection
+- **CSV injection prevention** — exported values are sanitized against formula injection
+- **Bounded inputs** — search queries (2,000 chars), settings values (500), session IDs (256)
+
+### Themes
+- **Three-tier theme system** — `dark`, `light`, and `terminal` (ANSI 16-color)
+- **Hot-swap** — switch themes live in the settings TUI
+
+### Alias Management
+- **Full lifecycle** — `suv alias add`, `remove`, `list`, and `apply`
+- **Smart suggestions** — `suv alias add-suggested` opens an interactive picker based on history analysis
+
+### Session Timeline
+- **`suv session`** — interactive TUI with session picker, command-level detail, scroll, and filter
+
+### Garbage Collection
+- **`suv gc`** — remove orphaned tags and sessions, then compact the database with VACUUM
+
 ### More
 - **Shell integration** — Zsh (5.1+) and Bash, with `Ctrl+R` search and arrow key cycling
 - **Session replay** — chronological timeline with date, directory, tag, and executor filters
 - **Stats dashboard** — interactive TUI with heatmap, sparkline, hourly distribution, and top commands
 - **Alias suggestions** — analyzes history to suggest shell aliases for frequently-typed commands
-- **Export & import** — JSONL, CSV, and `~/.zsh_history` import
+- **Export & import** — JSONL, CSV, JSON, and `~/.zsh_history` import
+- **JSON output** — `--format json` for export; `--json` flag for machine-readable output
+- **Tag filtering** — `suv stats --tag work` narrows analytics to a specific tag
+- **Transaction safety** — import errors trigger automatic rollback, no partial writes
+- **Frequency-weighted suggestions** — suggest engine weighs command frequency for smarter alias picks
 - **Shell completions** — Zsh, Bash, and Fish (`suv completions <shell>`)
-- **Self-update** — `suv update` with SHA256 checksum verification
+- **Self-update** — `suv update` with Minisign signature verification
 
 ---
 
@@ -233,6 +263,9 @@ suv search --query "git commit"   # Search with initial query
 suv search --unique               # Unique commands only
 suv search --here                 # Commands from current directory
 suv search --executor agent       # Filter by executor type
+suv search --field cwd            # Search by directory
+suv search --field session        # Search by session
+suv search --field executor       # Search by executor
 ```
 
 #### Keyboard Shortcuts
@@ -255,6 +288,7 @@ suv search --executor agent       # Filter by executor type
 | `Ctrl+D` | Delete selected entry (with confirmation) |
 | `Ctrl+G` | Go to specific page |
 | `Left` / `Right` | Previous / next page |
+| `F1` / `?` | Show help overlay |
 
 > **Smart Fallback:** If Suvadu is disabled or paused, `Ctrl+R` automatically reverts to your shell's default history search.
 
@@ -273,6 +307,7 @@ suv replay --session <id>               # Specific session
 suv stats                # Interactive TUI dashboard
 suv stats --days 30      # Last 30 days
 suv stats --text         # Plain text output
+suv stats --tag work     # Stats filtered by tag
 ```
 
 ### Agent Monitoring
@@ -401,6 +436,7 @@ suv delete "" --before 2024-01-01          # Delete entries before a date
 # Export
 suv export > history.jsonl
 suv export --format csv > history.csv
+suv export --format json > history.json
 suv export --after 2025-01-01 --before 2025-06-01 > q1-q2.jsonl
 
 # Import
@@ -437,13 +473,16 @@ exclusions = ["^ls$", "^pwd$", "password"]
 suv settings
 ```
 
-Opens a TUI with tabs for Search, Shell, Exclusions, and Auto Tags.
+Opens a TUI with tabs for Search, Shell, Exclusions, Auto Tags, and Theme.
 
 ### Reference
 
 ```toml
 # Master switch
 enabled = true
+
+# Theme: "dark", "light", or "terminal" (ANSI 16-color)
+theme = "dark"
 
 [search]
 page_limit = 50                      # Rows per page (10-5000)
@@ -561,12 +600,14 @@ Shell hooks use native `$EPOCHREALTIME` (Zsh 5.1+ / Bash 5+) for millisecond-pre
 | `suv search --executor agent` | Filter by executor type |
 | `suv search --unique` | Deduplicated results |
 | `suv search --here` | Commands from current directory |
+| `suv search --field <field>` | Search by specific field (cwd, session, executor) |
 | `suv replay` | Replay current session as timeline |
 | `suv replay --after today --here` | Today's commands in this directory |
 | **Stats & Analytics** | |
 | `suv stats` | Interactive stats dashboard |
 | `suv stats --days 30` | Stats for the last 30 days |
 | `suv stats --text` | Plain text output |
+| `suv stats --tag <name>` | Stats filtered by tag |
 | **Agent Monitoring** | |
 | `suv agent dashboard` | Interactive agent monitoring TUI |
 | `suv agent dashboard --executor claude-code` | Filter to one agent |
@@ -582,6 +623,13 @@ Shell hooks use native `$EPOCHREALTIME` (Zsh 5.1+ / Bash 5+) for millisecond-pre
 | `suv bookmark list` | List all bookmarks |
 | `suv note <id> -c "note"` | Add a note to an entry |
 | `suv suggest-aliases` | Suggest shell aliases (interactive TUI) |
+| `suv alias add <name> <cmd>` | Create a shell alias |
+| `suv alias remove <name>` | Remove an alias |
+| `suv alias list` | List all aliases |
+| `suv alias apply` | Write aliases to sourceable file |
+| `suv alias add-suggested` | Interactive picker from history analysis |
+| `suv gc` | Garbage collect orphaned data and compact DB |
+| `suv session` | Interactive session timeline TUI |
 | **Recording Control** | |
 | `suv status` | Show recording status |
 | `suv enable` / `suv disable` | Toggle recording |
@@ -591,6 +639,7 @@ Shell hooks use native `$EPOCHREALTIME` (Zsh 5.1+ / Bash 5+) for millisecond-pre
 | `suv delete <pattern>` | Delete matching entries |
 | `suv export` | Export history as JSONL |
 | `suv export --format csv` | Export as CSV |
+| `suv export --format json` | Export as JSON |
 | `suv import <file>` | Import from JSONL file |
 | `suv import --from zsh-history` | Import from `~/.zsh_history` |
 | **Integration** | |
@@ -642,7 +691,9 @@ Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for dev
 
 ## Security
 
-For security-related matters including vulnerability reporting, data storage design, and privacy features, see [SECURITY.md](SECURITY.md).
+Suvadu automatically redacts detected API keys, tokens, and passwords before they reach the database. The database and config files are created with owner-only permissions (`0o600`). Self-update verifies binary signatures via Minisign. User-supplied regex is checked for ReDoS, SQL identifiers are allowlisted, and exported CSV values are sanitized against formula injection.
+
+For full details on vulnerability reporting, data storage design, and privacy features, see [SECURITY.md](SECURITY.md).
 
 ## License
 

@@ -18,7 +18,7 @@ pub enum RiskLevel {
 }
 
 impl RiskLevel {
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::None => "safe",
             Self::Low => "low",
@@ -28,7 +28,7 @@ impl RiskLevel {
         }
     }
 
-    pub fn icon(self) -> &'static str {
+    pub const fn icon(self) -> &'static str {
         match self {
             Self::None | Self::Low => "·",
             Self::Medium => "⚡",
@@ -36,7 +36,7 @@ impl RiskLevel {
         }
     }
 
-    pub fn ansi_color(self) -> &'static str {
+    pub const fn ansi_color(self) -> &'static str {
         match self {
             Self::None => "\x1b[0m",
             Self::Low => "\x1b[90m",        // dim
@@ -96,10 +96,33 @@ pub struct FailedCommand {
 }
 
 /// Build the default risk pattern set (compiled once, reused)
-#[allow(clippy::too_many_lines)]
 fn build_patterns() -> Vec<RiskPattern> {
-    let patterns: Vec<(&str, RiskLevel, &'static str, &'static str)> = vec![
-        // --- Critical: destructive / irreversible ---
+    let mut defs = Vec::with_capacity(40);
+    defs.extend(critical_pattern_defs());
+    defs.extend(high_pattern_defs());
+    defs.extend(medium_pattern_defs());
+    defs.extend(low_pattern_defs());
+
+    defs.into_iter()
+        .filter_map(|(pat, level, cat, desc)| match Regex::new(pat) {
+            Ok(regex) => Some(RiskPattern {
+                regex,
+                level,
+                category: cat,
+                description: desc,
+            }),
+            Err(e) => {
+                eprintln!("suvadu: risk pattern failed to compile: {pat}: {e}");
+                None
+            }
+        })
+        .collect()
+}
+
+type PatternDef = (&'static str, RiskLevel, &'static str, &'static str);
+
+fn critical_pattern_defs() -> Vec<PatternDef> {
+    vec![
         (
             r"(^|\s)rm\s+.*(-rf|--recursive|-r\s+-f|-f\s+-r)",
             RiskLevel::Critical,
@@ -107,7 +130,7 @@ fn build_patterns() -> Vec<RiskPattern> {
             "Recursive delete",
         ),
         (
-            r"^git\s+push\s+.*--force",
+            r"^git\s+push\s+.*--force(\s|$)",
             RiskLevel::Critical,
             "destructive",
             "Force push",
@@ -142,7 +165,11 @@ fn build_patterns() -> Vec<RiskPattern> {
             "destructive",
             "Raw disk write",
         ),
-        // --- High: installs code or changes permissions ---
+    ]
+}
+
+fn high_pattern_defs() -> Vec<PatternDef> {
+    vec![
         (
             r"^(npm|yarn|pnpm)\s+(install|add|i)\b",
             RiskLevel::High,
@@ -221,7 +248,11 @@ fn build_patterns() -> Vec<RiskPattern> {
             "script-exec",
             "Execute shell script via sh",
         ),
-        // --- Medium: modifies system state ---
+    ]
+}
+
+fn medium_pattern_defs() -> Vec<PatternDef> {
+    vec![
         (
             r"^sudo\s+",
             RiskLevel::Medium,
@@ -265,32 +296,29 @@ fn build_patterns() -> Vec<RiskPattern> {
             "git",
             "Delete git branch",
         ),
-        // --- Low: network access, config changes ---
+    ]
+}
+
+fn low_pattern_defs() -> Vec<PatternDef> {
+    vec![
         (r"^curl\s+", RiskLevel::Low, "network", "HTTP request"),
         (r"^wget\s+", RiskLevel::Low, "network", "HTTP download"),
         (r"^ssh\s+", RiskLevel::Low, "network", "SSH connection"),
         (r"^scp\s+", RiskLevel::Low, "network", "Remote file copy"),
         (r"^rsync\s+", RiskLevel::Low, "network", "File sync"),
         (r"^git\s+push\s+", RiskLevel::Low, "git", "Push to remote"),
-    ];
-
-    patterns
-        .into_iter()
-        .filter_map(|(pat, level, cat, desc)| {
-            Regex::new(pat).ok().map(|regex| RiskPattern {
-                regex,
-                level,
-                category: cat,
-                description: desc,
-            })
-        })
-        .collect()
+    ]
 }
 
 /// Assess the risk level of a single command
 pub fn assess_risk(command: &str) -> Option<RiskAssessment> {
     let patterns = &*RISK_PATTERNS;
     let cmd = command.trim();
+
+    // Skip commands that don't actually execute the matched operation
+    if is_non_executing(cmd) {
+        return None;
+    }
 
     // Find the highest-risk matching pattern
     let mut best: Option<&RiskPattern> = None;
@@ -310,6 +338,98 @@ pub fn assess_risk(command: &str) -> Option<RiskAssessment> {
         category: p.category,
         description: p.description,
     })
+}
+
+/// Returns true if the command doesn't actually execute the matched operation.
+/// Catches false positives like comments, echo output, and alias definitions.
+fn is_non_executing(cmd: &str) -> bool {
+    // Shell comments
+    if cmd.starts_with('#') {
+        return true;
+    }
+
+    // echo/printf — output only, unless chained to another command
+    if (cmd.starts_with("echo ") || cmd.starts_with("printf ")) && !has_shell_chaining(cmd) {
+        return true;
+    }
+
+    // alias definitions — setting up an alias, not executing the aliased command
+    if cmd.starts_with("alias ") {
+        return true;
+    }
+
+    false
+}
+
+/// Check if the command contains shell operators that chain execution.
+/// Quote-aware: ignores operators inside single or double-quoted strings.
+fn has_shell_chaining(cmd: &str) -> bool {
+    let bytes = cmd.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while i < len {
+        let b = bytes[i];
+
+        // Backslash escaping (not inside single quotes — bash single quotes are fully literal)
+        if b == b'\\' && !in_single && i + 1 < len {
+            i += 2;
+            continue;
+        }
+
+        // Toggle single quote state (ignored inside double quotes)
+        if b == b'\'' && !in_double {
+            in_single = !in_single;
+            i += 1;
+            continue;
+        }
+
+        // Toggle double quote state (ignored inside single quotes)
+        if b == b'"' && !in_single {
+            in_double = !in_double;
+            i += 1;
+            continue;
+        }
+
+        // Only detect operators when outside all quotes
+        if !in_single && !in_double {
+            // Semicolon (no surrounding spaces required)
+            if b == b';' {
+                return true;
+            }
+
+            if b == b' ' {
+                // " | " — pipe (3 chars)
+                if i + 2 < len && bytes[i + 1] == b'|' && bytes[i + 2] == b' ' {
+                    return true;
+                }
+
+                // " && " — logical and (4 chars)
+                if i + 3 < len
+                    && bytes[i + 1] == b'&'
+                    && bytes[i + 2] == b'&'
+                    && bytes[i + 3] == b' '
+                {
+                    return true;
+                }
+
+                // " || " — logical or (4 chars)
+                if i + 3 < len
+                    && bytes[i + 1] == b'|'
+                    && bytes[i + 2] == b'|'
+                    && bytes[i + 3] == b' '
+                {
+                    return true;
+                }
+            }
+        }
+
+        i += 1;
+    }
+
+    false
 }
 
 /// Get the risk level for a command (convenience wrapper)
@@ -353,7 +473,7 @@ pub fn session_risk(entries: &[Entry]) -> SessionRisk {
 }
 
 /// Best-effort extraction of package names from install commands
-fn extract_packages(command: &str) -> Option<PackageInstall> {
+pub fn extract_packages(command: &str) -> Option<PackageInstall> {
     let cmd = command.trim();
 
     // npm/yarn/pnpm install <packages>
@@ -588,6 +708,189 @@ mod tests {
         assert_eq!(risk.safe_count, 2); // cat, npm test
         assert_eq!(risk.failed_commands.len(), 1); // npm test exit 1
         assert_eq!(risk.packages_installed.len(), 1); // express
+    }
+
+    #[test]
+    fn test_all_patterns_compile() {
+        // Verify that all regex patterns compile successfully and none are silently dropped
+        let patterns = &*RISK_PATTERNS;
+        assert!(
+            patterns.len() >= 33,
+            "Expected at least 33 risk patterns, got {}. Some patterns may have failed to compile.",
+            patterns.len()
+        );
+    }
+
+    // ── False positive tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_echo_rm_is_safe() {
+        // echo just prints text — not destructive
+        assert_eq!(risk_level(r#"echo "rm -rf /""#), RiskLevel::None);
+        assert_eq!(risk_level("echo rm -rf /tmp"), RiskLevel::None);
+        assert_eq!(risk_level("printf 'rm -rf /'"), RiskLevel::None);
+    }
+
+    #[test]
+    fn test_echo_with_chaining_is_risky() {
+        // echo piped/chained to something else — could be dangerous
+        assert_ne!(
+            risk_level("echo test && rm -rf /"),
+            RiskLevel::None,
+            "Chained commands should still be assessed"
+        );
+    }
+
+    #[test]
+    fn test_alias_definition_is_safe() {
+        assert_eq!(risk_level("alias rm='rm -i'"), RiskLevel::None);
+        assert_eq!(risk_level("alias gp='git push --force'"), RiskLevel::None);
+    }
+
+    #[test]
+    fn test_comment_is_safe() {
+        assert_eq!(risk_level("# rm -rf /tmp"), RiskLevel::None);
+        assert_eq!(risk_level("# sudo apt install foo"), RiskLevel::None);
+    }
+
+    #[test]
+    fn test_force_with_lease_is_not_critical() {
+        // --force-with-lease is the safe variant of --force
+        assert_ne!(
+            risk_level("git push --force-with-lease"),
+            RiskLevel::Critical,
+            "force-with-lease should not trigger critical force-push"
+        );
+        // But plain --force is still critical
+        assert_eq!(
+            risk_level("git push origin main --force"),
+            RiskLevel::Critical
+        );
+        assert_eq!(
+            risk_level("git push --force origin main"),
+            RiskLevel::Critical
+        );
+    }
+
+    #[test]
+    fn test_is_non_executing() {
+        assert!(is_non_executing("# this is a comment"));
+        assert!(is_non_executing("echo hello world"));
+        assert!(is_non_executing("printf 'test'"));
+        assert!(is_non_executing("alias ll='ls -la'"));
+
+        assert!(!is_non_executing("rm -rf /tmp"));
+        assert!(!is_non_executing("echo test && rm -rf /"));
+        assert!(!is_non_executing("echo test | sh"));
+        assert!(!is_non_executing("git push --force"));
+    }
+
+    // ── has_shell_chaining quote-awareness tests ────────────────────────
+
+    #[test]
+    fn test_chaining_unquoted_pipe() {
+        assert!(has_shell_chaining("echo test | sh"));
+        assert!(has_shell_chaining("cat file | grep foo"));
+    }
+
+    #[test]
+    fn test_chaining_unquoted_and() {
+        assert!(has_shell_chaining("echo test && rm -rf /"));
+        assert!(has_shell_chaining("make && make install"));
+    }
+
+    #[test]
+    fn test_chaining_unquoted_or() {
+        assert!(has_shell_chaining("test -f file || exit 1"));
+    }
+
+    #[test]
+    fn test_chaining_unquoted_semicolon() {
+        assert!(has_shell_chaining("cd /tmp; rm -rf build"));
+        assert!(has_shell_chaining("echo hi;echo bye"));
+    }
+
+    #[test]
+    fn test_chaining_none() {
+        assert!(!has_shell_chaining("echo hello world"));
+        assert!(!has_shell_chaining("ls -la"));
+        assert!(!has_shell_chaining("git status"));
+    }
+
+    #[test]
+    fn test_chaining_double_quoted_pipe_ignored() {
+        assert!(!has_shell_chaining(r#"echo "hello | world""#));
+        assert!(!has_shell_chaining(r#"echo "a | b | c""#));
+    }
+
+    #[test]
+    fn test_chaining_single_quoted_pipe_ignored() {
+        assert!(!has_shell_chaining("echo 'hello | world'"));
+    }
+
+    #[test]
+    fn test_chaining_double_quoted_and_ignored() {
+        assert!(!has_shell_chaining(r#"echo "foo && bar""#));
+    }
+
+    #[test]
+    fn test_chaining_single_quoted_and_ignored() {
+        assert!(!has_shell_chaining("echo 'foo && bar'"));
+    }
+
+    #[test]
+    fn test_chaining_double_quoted_semicolon_ignored() {
+        assert!(!has_shell_chaining(r#"echo "hello;world""#));
+    }
+
+    #[test]
+    fn test_chaining_single_quoted_semicolon_ignored() {
+        assert!(!has_shell_chaining("echo 'hello;world'"));
+    }
+
+    #[test]
+    fn test_chaining_mixed_quoted_and_unquoted() {
+        // Unquoted pipe after a quoted section → should detect
+        assert!(has_shell_chaining(r#"echo "safe text" | sh"#));
+        // Pipe only inside quotes → should NOT detect
+        assert!(!has_shell_chaining(r#"echo "a | b" c"#));
+    }
+
+    #[test]
+    fn test_chaining_escaped_quote_inside_double_quotes() {
+        // Escaped quote doesn't end the double-quoted string
+        assert!(!has_shell_chaining(r#"echo "it\"s a | test""#));
+    }
+
+    #[test]
+    fn test_chaining_single_quote_inside_double_quotes() {
+        // Single quote inside double quotes is literal
+        assert!(!has_shell_chaining(r#"echo "it's a | test""#));
+    }
+
+    #[test]
+    fn test_chaining_double_quote_inside_single_quotes() {
+        // Double quote inside single quotes is literal
+        assert!(!has_shell_chaining(r#"echo '"hello | world"'"#));
+    }
+
+    #[test]
+    fn test_chaining_echo_with_quoted_operators_is_safe() {
+        // These were false positives before the fix
+        assert_eq!(risk_level(r#"echo "rm -rf / | sh""#), RiskLevel::None);
+        assert_eq!(risk_level("echo 'foo && bar'"), RiskLevel::None);
+        assert_eq!(risk_level(r#"echo "test;done""#), RiskLevel::None);
+        assert_eq!(risk_level(r#"printf "a | b""#), RiskLevel::None);
+    }
+
+    #[test]
+    fn test_chaining_echo_with_real_chain_still_detected() {
+        // Real chaining after echo — the chained part contains a dangerous pattern
+        assert_ne!(risk_level("echo ok && rm -rf /"), RiskLevel::None);
+        assert_ne!(risk_level("echo ok; rm -rf /"), RiskLevel::None);
+        // echo piped to sh: not flagged because no pattern matches "echo X | sh"
+        // (only curl/wget | sh are patterned), but chaining IS correctly detected
+        assert!(has_shell_chaining("echo done | sh"));
     }
 
     fn make_entry(command: &str, exit_code: Option<i32>) -> Entry {

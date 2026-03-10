@@ -21,16 +21,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           targets: ${{ matrix.target }}
 
       - name: Install cross
         if: matrix.use_cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        run: cargo install cross --version 0.2.5
+
+      - name: Run Tests
+        if: ${{ !matrix.use_cross }}
+        run: cargo test
 
       - name: Build Binary (Release)
         run: |
@@ -40,7 +44,17 @@ jobs:
             cargo build --release --target ${{ matrix.target }}
           fi
 
+      - name: Install minisign
+        run: |
+          curl -fsSL -o /tmp/minisign.tar.gz https://github.com/jedisct1/minisign/releases/download/0.11/minisign-0.11-linux.tar.gz
+          echo "f0a0954413df8531befed169e447a66da6868d79052ed7e892e50a4291af7ae0  /tmp/minisign.tar.gz" | sha256sum -c -
+          tar xzf /tmp/minisign.tar.gz
+          sudo cp minisign-linux/x86_64/minisign /usr/local/bin/
+          rm -f /tmp/minisign.tar.gz
+
       - name: Prepare Artifacts
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
           # Create directory structure for R2
           mkdir -p artifacts/linux/archive
@@ -54,12 +68,19 @@ jobs:
           # Generate SHA256 checksums
           sha256sum artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz | awk '{print $1}' > artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.sha256
 
+          # Sign with minisign (secret key from GitHub Secrets)
+          echo "$MINISIGN_SECRET_KEY" > /tmp/minisign.key
+          minisign -S -s /tmp/minisign.key -m artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz \
+            -t "suvadu ${{ github.ref_name }} linux${{ matrix.suffix }}" -x artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.minisig
+          rm -f /tmp/minisign.key
+
           # Create versioned tarball
           cp artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz
           cp artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.sha256 artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.sha256
+          cp artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.minisig artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.minisig
 
       - name: Upload to Cloudflare R2
-        uses: ryand56/r2-upload-action@latest
+        uses: ryand56/r2-upload-action@b801a390acbdeb034c5e684ff5e1361c06639e7c # v1.4
         with:
           r2-account-id: ${{ secrets.R2_ACCOUNT_ID }}
           r2-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -77,14 +98,16 @@ jobs:
             -d '{
               "files": [
                 "https://downloads.appachi.tech/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz",
-                "https://downloads.appachi.tech/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.sha256"
+                "https://downloads.appachi.tech/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.sha256",
+                "https://downloads.appachi.tech/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.minisig"
               ]
             }'
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
         with:
-          generate_release_notes: true
+          generate_release_notes: false
           files: |
             artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz
             artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.sha256
+            artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.minisig

@@ -1,4 +1,6 @@
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+
+pub use crate::models::SearchField;
 
 #[derive(Parser)]
 #[command(
@@ -10,6 +12,49 @@ use clap::{CommandFactory, Parser, Subcommand};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
+}
+
+/// Export file format
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ExportFormat {
+    Json,
+    Jsonl,
+    Csv,
+}
+
+impl ExportFormat {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Jsonl => "jsonl",
+            Self::Csv => "csv",
+        }
+    }
+}
+
+/// Import source format
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ImportFormat {
+    Jsonl,
+    ZshHistory,
+}
+
+/// Agent report output format
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ReportFormat {
+    Text,
+    Markdown,
+    Json,
+}
+
+/// Initialization target for shell hooks and IDE integrations
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum InitTarget {
+    Zsh,
+    Bash,
+    ClaudeCode,
+    Cursor,
+    Antigravity,
 }
 
 #[derive(Subcommand)]
@@ -51,7 +96,7 @@ pub enum Commands {
     )]
     Init {
         /// Target: 'zsh', 'bash', 'claude-code', 'cursor', or 'antigravity'
-        target: String,
+        target: InitTarget,
     },
 
     /// Process a Claude Code `PostToolUse` hook event (reads JSON from stdin)
@@ -86,7 +131,7 @@ pub enum Commands {
 
     /// Interactive search through history (Ctrl+R replacement)
     #[command(
-        after_help = "Examples:\n  suv search --query \"git\"\n  suv search --unique\n  suv search --executor bot\n  suv search --after today"
+        after_help = "Examples:\n  suv search --query \"git\"\n  suv search --unique\n  suv search --executor bot\n  suv search --after today\n  suv search --query \"/home\" --field cwd"
     )]
     Search {
         /// Optional initial query
@@ -120,11 +165,15 @@ pub enum Commands {
         /// Filter to commands run in the current directory
         #[arg(long)]
         here: bool,
+
+        /// Search field: command (default), cwd, session, or executor
+        #[arg(long, value_enum, default_value_t = SearchField::Command)]
+        field: SearchField,
     },
 
     /// Show usage analytics and trends
     #[command(
-        after_help = "Examples:\n  suv stats\n  suv stats --days 30\n  suv stats --days 7 -n 5"
+        after_help = "Examples:\n  suv stats\n  suv stats --days 30\n  suv stats --days 7 -n 5\n  suv stats --tag work"
     )]
     Stats {
         /// Number of days to analyze (default: all time)
@@ -136,6 +185,12 @@ pub enum Commands {
         /// Output plain text instead of interactive TUI
         #[arg(long)]
         text: bool,
+        /// Output as JSON for scripting
+        #[arg(long)]
+        json: bool,
+        /// Filter by tag name
+        #[arg(long)]
+        tag: Option<String>,
     },
 
     /// Replay commands chronologically (session timeline or time range)
@@ -188,6 +243,10 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
 
+        /// Skip confirmation prompt
+        #[arg(long, short)]
+        yes: bool,
+
         /// Delete entries older than this date (YYYY-MM-DD)
         #[arg(long)]
         before: Option<String>,
@@ -222,6 +281,34 @@ pub enum Commands {
     )]
     Bookmark(BookmarkCommands),
 
+    /// Manage shell aliases
+    #[command(
+        subcommand,
+        after_help = "Examples:\n  suv alias add gst \"git status\"\n  suv alias list\n  suv alias apply --stdout\n  suv alias remove gst\n  suv alias add-suggested"
+    )]
+    Alias(AliasCommands),
+
+    /// Interactive session timeline view
+    #[command(
+        after_help = "Examples:\n  suv session                    # Pick from recent sessions\n  suv session abc123             # Open session by ID prefix\n  suv session --list             # List sessions without opening\n  suv session --after 2025-01-01 # Sessions after date\n  suv session --tag work         # Sessions with tag"
+    )]
+    Session {
+        /// Session ID or prefix (omit for interactive picker)
+        session_id: Option<String>,
+        /// List sessions and exit (no TUI)
+        #[arg(long)]
+        list: bool,
+        /// Only show sessions after this date
+        #[arg(long)]
+        after: Option<String>,
+        /// Filter by tag name
+        #[arg(long)]
+        tag: Option<String>,
+        /// Max sessions to show (default: 50)
+        #[arg(short = 'n', long, default_value_t = 50)]
+        limit: usize,
+    },
+
     /// Uninstall Suvadu (remove binaries from system)
     Uninstall,
 
@@ -246,37 +333,14 @@ pub enum Commands {
     /// Update to the latest version
     Update,
 
-    /// Suggest shell aliases for frequently-typed long commands
+    /// Export history to a file (JSON, JSONL, or CSV format)
     #[command(
-        name = "suggest-aliases",
-        after_help = "Examples:\n  suv suggest-aliases                    # Interactive TUI\n  suv suggest-aliases --text             # Plain text output\n  suv suggest-aliases --days 30 -c 5     # Last 30 days, min 5 uses"
-    )]
-    SuggestAliases {
-        /// Minimum times a command must appear (default: 10)
-        #[arg(short = 'c', long, default_value_t = 10)]
-        min_count: usize,
-        /// Minimum character length of command (default: 12)
-        #[arg(short = 'l', long, default_value_t = 12)]
-        min_length: usize,
-        /// Only analyze last N days
-        #[arg(short, long)]
-        days: Option<usize>,
-        /// Max suggestions to show (default: 20)
-        #[arg(short = 'n', long, default_value_t = 20)]
-        top: usize,
-        /// Skip TUI, print suggestions to stdout
-        #[arg(long)]
-        text: bool,
-    },
-
-    /// Export history to a file (JSONL or CSV format)
-    #[command(
-        after_help = "Examples:\n  suv export > history.jsonl\n  suv export --format csv > history.csv\n  suv export --after 2025-01-01 > recent.jsonl"
+        after_help = "Examples:\n  suv export --format json > history.json\n  suv export > history.jsonl\n  suv export --format csv > history.csv\n  suv export --after 2025-01-01 > recent.jsonl"
     )]
     Export {
-        /// Output format: jsonl (default) or csv
-        #[arg(long, default_value = "jsonl")]
-        format: String,
+        /// Output format: json, jsonl (default), or csv
+        #[arg(long, value_enum, default_value_t = ExportFormat::Jsonl)]
+        format: ExportFormat,
         /// Only export entries after this date (YYYY-MM-DD)
         #[arg(long)]
         after: Option<String>,
@@ -292,9 +356,9 @@ pub enum Commands {
     Import {
         /// Path to the file to import
         file: String,
-        /// Source format: "jsonl" (default) or "zsh-history"
-        #[arg(long, default_value = "jsonl")]
-        from: String,
+        /// Source format: jsonl (default) or zsh-history
+        #[arg(long, value_enum, default_value_t = ImportFormat::Jsonl)]
+        from: ImportFormat,
         /// Preview import without writing to database
         #[arg(long)]
         dry_run: bool,
@@ -306,6 +370,19 @@ pub enum Commands {
         after_help = "Examples:\n  suv agent report                        # Today's agent report\n  suv agent report --executor claude-code  # Claude Code only\n  suv agent report --format markdown       # Markdown for PR descriptions"
     )]
     Agent(AgentCommands),
+
+    /// Remove orphaned data and compact the database
+    #[command(
+        after_help = "Examples:\n  suv gc              # Remove orphaned sessions/notes\n  suv gc --dry-run    # Preview what would be cleaned\n  suv gc --vacuum     # Also compact the database file"
+    )]
+    Gc {
+        /// Preview what would be deleted without deleting
+        #[arg(long)]
+        dry_run: bool,
+        /// Run VACUUM after cleanup to compact the database file
+        #[arg(long)]
+        vacuum: bool,
+    },
 
     /// Execute a command and record it in Suvadu history
     /// Useful for AI agents and scripts that don't load shell hooks
@@ -387,12 +464,86 @@ pub enum BookmarkCommands {
     },
 
     /// List all bookmarked commands
-    List,
+    List {
+        /// Output as JSON for scripting
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Remove a bookmark
     Remove {
         /// The command text to un-bookmark
         command: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AliasCommands {
+    /// Register a shell alias
+    Add {
+        /// Alias name (alphanumeric, hyphens, underscores)
+        name: String,
+        /// The command the alias expands to
+        command: String,
+    },
+
+    /// Remove a managed alias
+    Remove {
+        /// Alias name to remove
+        name: String,
+    },
+
+    /// List all managed aliases
+    List {
+        /// Output as JSON for scripting
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Write aliases to a sourceable shell file (or stdout)
+    Apply {
+        /// Print alias lines to stdout instead of writing to file
+        #[arg(long)]
+        stdout: bool,
+    },
+
+    /// Interactively pick from suggestions and store to DB
+    #[command(name = "add-suggested")]
+    AddSuggested {
+        /// Minimum times a command must appear (default: 10)
+        #[arg(short = 'c', long, default_value_t = 10)]
+        min_count: usize,
+        /// Minimum character length of command (default: 12)
+        #[arg(short = 'l', long, default_value_t = 12)]
+        min_length: usize,
+        /// Only analyze last N days
+        #[arg(short, long)]
+        days: Option<usize>,
+        /// Max suggestions to show (default: 20)
+        #[arg(short = 'n', long, default_value_t = 20)]
+        top: usize,
+    },
+
+    /// Suggest aliases for frequently-typed long commands
+    #[command(
+        after_help = "Examples:\n  suv alias suggest                    # Interactive TUI\n  suv alias suggest --text             # Plain text output\n  suv alias suggest --days 30 -c 5     # Last 30 days, min 5 uses"
+    )]
+    Suggest {
+        /// Minimum times a command must appear (default: 10)
+        #[arg(short = 'c', long, default_value_t = 10)]
+        min_count: usize,
+        /// Minimum character length of command (default: 12)
+        #[arg(short = 'l', long, default_value_t = 12)]
+        min_length: usize,
+        /// Only analyze last N days
+        #[arg(short, long)]
+        days: Option<usize>,
+        /// Max suggestions to show (default: 20)
+        #[arg(short = 'n', long, default_value_t = 20)]
+        top: usize,
+        /// Skip TUI, print suggestions to stdout
+        #[arg(long)]
+        text: bool,
     },
 }
 
@@ -414,7 +565,7 @@ pub enum AgentCommands {
         executor: Option<String>,
         /// Output format: text, markdown, or json
         #[arg(long, default_value = "text")]
-        format: String,
+        format: ReportFormat,
         /// Filter to commands run in the current directory
         #[arg(long)]
         here: bool,
@@ -452,4 +603,117 @@ pub enum AgentCommands {
         #[arg(long)]
         text: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_cli_parses_enable() {
+        let cli = Cli::try_parse_from(["suv", "enable"]).unwrap();
+        assert!(matches!(cli.command, Commands::Enable));
+    }
+
+    #[test]
+    fn test_cli_parses_search_with_args() {
+        let cli = Cli::try_parse_from(["suv", "search", "-q", "git", "--unique"]).unwrap();
+        match cli.command {
+            Commands::Search { query, unique, .. } => {
+                assert_eq!(query, Some("git".to_string()));
+                assert!(unique);
+            }
+            _ => panic!("Expected Search command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_agent_report() {
+        let cli = Cli::try_parse_from([
+            "suv",
+            "agent",
+            "report",
+            "--format",
+            "json",
+            "--executor",
+            "claude-code",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Agent(AgentCommands::Report {
+                format, executor, ..
+            }) => {
+                assert!(matches!(format, ReportFormat::Json));
+                assert_eq!(executor, Some("claude-code".to_string()));
+            }
+            _ => panic!("Expected Agent Report command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_stats_defaults() {
+        let cli = Cli::try_parse_from(["suv", "stats"]).unwrap();
+        match cli.command {
+            Commands::Stats {
+                days,
+                top,
+                text,
+                json,
+                tag,
+            } => {
+                assert!(days.is_none());
+                assert_eq!(top, 10);
+                assert!(!text);
+                assert!(!json);
+                assert!(tag.is_none());
+            }
+            _ => panic!("Expected Stats command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_stats_with_tag() {
+        let cli = Cli::try_parse_from(["suv", "stats", "--tag", "work"]).unwrap();
+        match cli.command {
+            Commands::Stats { tag, .. } => {
+                assert_eq!(tag, Some("work".to_string()));
+            }
+            _ => panic!("Expected Stats command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_rejects_unknown_command() {
+        let result = Cli::try_parse_from(["suv", "nonexistent"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cli_parses_wrap_with_trailing_args() {
+        let cli = Cli::try_parse_from([
+            "suv",
+            "wrap",
+            "--executor-type",
+            "agent",
+            "--executor",
+            "claude-code",
+            "--",
+            "git",
+            "status",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Wrap {
+                command,
+                executor_type,
+                executor,
+            } => {
+                assert_eq!(command, vec!["git".to_string(), "status".to_string()]);
+                assert_eq!(executor_type, "agent");
+                assert_eq!(executor, "claude-code");
+            }
+            _ => panic!("Expected Wrap command"),
+        }
+    }
 }

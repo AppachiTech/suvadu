@@ -1,9 +1,28 @@
+# Build
 /target
+
+# Backups
 *.rs.bak
 bk/
+
+# Archives
 *.tar.gz
+
+# Temp
 /tmp/
 
+# VHS demo tapes (generated GIFs are tracked instead)
 *.tape
 
+# macOS
 .DS_Store
+
+# Claude Code local settings
+.claude/
+
+# Editor/IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

@@ -1,5 +1,5 @@
 use crate::models::AliasSuggestion;
-use crate::{db, repository, suggest_ui};
+use crate::{repository, suggest_ui};
 
 /// Run the user's shell to get current alias definitions.
 fn get_shell_aliases() -> String {
@@ -76,7 +76,7 @@ fn generate_alias_name(command: &str, taken: &std::collections::HashSet<String>)
         let s2 = format!(
             "{}{}",
             &words[0].chars().next().unwrap_or('x'),
-            &words[1].get(..2.min(words[1].len())).unwrap_or("x")
+            &words[1].chars().take(2).collect::<String>()
         );
         if !taken.contains(&s2) {
             return s2;
@@ -93,35 +93,36 @@ fn generate_alias_name(command: &str, taken: &std::collections::HashSet<String>)
         }
     }
 
-    // Strategy 4: Append digit to strategy 1
-    for i in 2..=99 {
+    // Strategy 4: Append incrementing digit to strategy 1
+    for i in 2.. {
         let s4 = format!("{s1}{i}");
         if !taken.contains(&s4) {
             return s4;
         }
     }
 
-    s1
+    unreachable!("infinite iterator always finds a free suffix")
 }
 
 /// Escape a string for use in a shell alias value (single-quoted).
-fn shell_quote(s: &str) -> String {
+pub fn shell_quote(s: &str) -> String {
     // In single-quoted strings, replace ' with '\''
     s.replace('\'', "'\\''")
 }
 
 /// Build suggestions from history, filtering out already-aliased commands.
-fn build_suggestions(
+/// When `human_only` is true, only commands executed by humans are considered.
+pub fn build_suggestions(
     min_count: usize,
     min_length: usize,
     days: Option<usize>,
     top: usize,
+    human_only: bool,
 ) -> Result<(Vec<AliasSuggestion>, Vec<String>), Box<dyn std::error::Error>> {
-    let db_path = db::get_db_path()?;
-    let conn = db::init_db(&db_path)?;
-    let repo = repository::Repository::new(conn);
+    let repo = repository::Repository::init()?;
 
-    let frequent = repo.get_frequent_commands(days, min_count, min_length, top * 3)?;
+    let frequent =
+        repo.get_frequent_commands_filtered(days, min_count, min_length, top * 3, human_only)?;
 
     let alias_output = get_shell_aliases();
     let (alias_values, mut alias_names) = parse_alias_output(&alias_output);
@@ -167,19 +168,22 @@ pub fn handle_suggest_aliases_text(
     days: Option<usize>,
     top: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (suggestions, skipped) = build_suggestions(min_count, min_length, days, top)?;
+    let (suggestions, skipped) = build_suggestions(min_count, min_length, days, top, false)?;
 
     if suggestions.is_empty() {
-        let period = match days {
-            Some(d) => format!("last {d} days"),
-            None => "all time".to_string(),
-        };
+        let period = days.map_or_else(|| "all time".to_string(), |d| format!("last {d} days"));
         println!("No alias suggestions found.");
         println!("  Criteria: min {min_count} uses, min {min_length} chars, {period}");
         return Ok(());
     }
 
-    println!("\n\x1b[1m── Suggested Aliases ──────────────────────────────\x1b[0m\n");
+    let c = crate::util::color_enabled();
+    let (b, r) = if c { ("\x1b[1m", "\x1b[0m") } else { ("", "") };
+    let cyan = if c { "\x1b[36m" } else { "" };
+    let dim = if c { "\x1b[90m" } else { "" };
+    let faint = if c { "\x1b[2m" } else { "" };
+
+    println!("\n{b}── Suggested Aliases ──────────────────────────────{r}\n");
 
     let max_name_len = suggestions.iter().map(|s| s.name.len()).max().unwrap_or(4);
     for s in &suggestions {
@@ -189,7 +193,7 @@ pub fn handle_suggest_aliases_text(
             String::new()
         };
         println!(
-            "  alias \x1b[36m{:<width$}\x1b[0m='{}'\x1b[90m  # {} uses{dir_info}\x1b[0m",
+            "  alias {cyan}{:<width$}{r}='{}'{dim}  # {} uses{dir_info}{r}",
             s.name,
             shell_quote(&s.command),
             s.count,
@@ -199,12 +203,12 @@ pub fn handle_suggest_aliases_text(
 
     if !skipped.is_empty() {
         println!(
-            "\n\x1b[90m  Skipped (already aliased): {}\x1b[0m",
+            "\n{dim}  Skipped (already aliased): {}{r}",
             skipped.join(", ")
         );
     }
 
-    println!("\n\x1b[2m  Add these to your ~/.zshrc or ~/.bashrc\x1b[0m\n");
+    println!("\n{faint}  Add these to your ~/.zshrc or ~/.bashrc{r}\n");
 
     Ok(())
 }
@@ -215,32 +219,18 @@ pub fn handle_suggest_aliases_tui(
     days: Option<usize>,
     top: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (suggestions, skipped) = build_suggestions(min_count, min_length, days, top)?;
+    let (suggestions, skipped) = build_suggestions(min_count, min_length, days, top, false)?;
 
     if suggestions.is_empty() {
-        let period = match days {
-            Some(d) => format!("last {d} days"),
-            None => "all time".to_string(),
-        };
+        let period = days.map_or_else(|| "all time".to_string(), |d| format!("last {d} days"));
         println!("No alias suggestions found.");
         println!("  Criteria: min {min_count} uses, min {min_length} chars, {period}");
         return Ok(());
     }
 
-    crossterm::terminal::enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
-    let backend = ratatui::backend::CrosstermBackend::new(stdout);
-    let mut terminal = ratatui::Terminal::new(backend)?;
-
-    let res = suggest_ui::run_suggest_ui(&mut terminal, suggestions, skipped);
-
-    crossterm::terminal::disable_raw_mode()?;
-    crossterm::execute!(
-        terminal.backend_mut(),
-        crossterm::terminal::LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
+    let mut guard = crate::util::TerminalGuard::new()?;
+    let res = suggest_ui::run_suggest_ui(guard.terminal(), suggestions, skipped);
+    drop(guard);
 
     match res {
         Ok(Some(selected)) => {
@@ -251,7 +241,11 @@ pub fn handle_suggest_aliases_tui(
                 for s in &selected {
                     println!("alias {}='{}'", s.name, shell_quote(&s.command));
                 }
-                println!("\n\x1b[2m  Add these to your ~/.zshrc or ~/.bashrc\x1b[0m\n");
+                if crate::util::color_enabled() {
+                    println!("\n\x1b[2m  Add these to your ~/.zshrc or ~/.bashrc\x1b[0m\n");
+                } else {
+                    println!("\n  Add these to your ~/.zshrc or ~/.bashrc\n");
+                }
             }
         }
         Ok(None) => {
@@ -263,6 +257,34 @@ pub fn handle_suggest_aliases_tui(
     }
 
     Ok(())
+}
+
+/// Run the suggest TUI and return the user's selected suggestions (or None if quit).
+/// When `human_only` is true, only human-executed commands are considered.
+pub fn run_suggest_and_select(
+    min_count: usize,
+    min_length: usize,
+    days: Option<usize>,
+    top: usize,
+    human_only: bool,
+) -> Result<Option<Vec<AliasSuggestion>>, Box<dyn std::error::Error>> {
+    let (suggestions, skipped) = build_suggestions(min_count, min_length, days, top, human_only)?;
+
+    if suggestions.is_empty() {
+        let period = days.map_or_else(|| "all time".to_string(), |d| format!("last {d} days"));
+        println!("No alias suggestions found.");
+        println!("  Criteria: min {min_count} uses, min {min_length} chars, {period}");
+        return Ok(None);
+    }
+
+    let mut guard = crate::util::TerminalGuard::new()?;
+    let res = suggest_ui::run_suggest_ui(guard.terminal(), suggestions, skipped);
+    drop(guard);
+
+    match res {
+        Ok(result) => Ok(result),
+        Err(e) => Err(e.into()),
+    }
 }
 
 #[cfg(test)]
@@ -328,6 +350,20 @@ mod tests {
         // All 3 strategies taken, falls back to digit suffix
         let name = generate_alias_name("docker compose up", &taken);
         assert_eq!(name, "dcu2");
+    }
+
+    #[test]
+    fn test_generate_alias_name_high_suffix() {
+        let mut taken = std::collections::HashSet::new();
+        taken.insert("dcu".to_string());
+        taken.insert("dco".to_string());
+        taken.insert("docu".to_string());
+        // Take suffixes 2 through 100
+        for i in 2..=100 {
+            taken.insert(format!("dcu{i}"));
+        }
+        let name = generate_alias_name("docker compose up", &taken);
+        assert_eq!(name, "dcu101");
     }
 
     #[test]
