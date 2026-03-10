@@ -20,7 +20,6 @@ pub type ConfigResult<T> = Result<T, ConfigError>;
 
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
@@ -411,5 +410,20 @@ mod tests {
         assert!(!paused_from(Some("0")));
         assert!(!paused_from(Some("false")));
         assert!(!paused_from(Some("")));
+    }
+
+    #[test]
+    fn test_unknown_fields_ignored() {
+        let toml_str = r#"
+enabled = true
+
+[ui]
+show_detail = true
+
+[some_future_section]
+key = "value"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.enabled);
     }
 }
