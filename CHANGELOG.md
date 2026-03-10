@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.1] - 2026-03-10
+
+### Fixed
+- Allow unknown fields in config file for upgrade compatibility from older versions
+
 ## [0.1.0] - 2026-03-10
 
 A major milestone release with 75 commits since v0.0.2: new commands, secrets
