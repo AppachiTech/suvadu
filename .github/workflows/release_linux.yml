@@ -77,7 +77,7 @@ jobs:
           cp artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.minisig artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.minisig
 
       - name: Upload to Cloudflare R2
-        uses: ryand56/r2-upload-action@latest
+        uses: ryand56/r2-upload-action@b801a390acbdeb034c5e684ff5e1361c06639e7c # v1.4
         with:
           r2-account-id: ${{ secrets.R2_ACCOUNT_ID }}
           r2-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
