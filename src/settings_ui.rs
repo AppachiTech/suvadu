@@ -18,9 +18,66 @@ enum InputMode {
     ConfirmQuit,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsTab {
+    Search,
+    Shell,
+    Exclusions,
+    AutoTags,
+}
+
+impl SettingsTab {
+    const ALL: &[Self] = &[Self::Search, Self::Shell, Self::Exclusions, Self::AutoTags];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Search => 0,
+            Self::Shell => 1,
+            Self::Exclusions => 2,
+            Self::AutoTags => 3,
+        }
+    }
+
+    fn item_count(self, config: &Config) -> usize {
+        match self {
+            Self::Search => 5,
+            Self::Shell => 3,
+            Self::Exclusions => config.exclusions.len(),
+            Self::AutoTags => config.auto_tags.len(),
+        }
+    }
+
+    const fn next(self) -> Self {
+        match self {
+            Self::Search => Self::Shell,
+            Self::Shell => Self::Exclusions,
+            Self::Exclusions => Self::AutoTags,
+            Self::AutoTags => Self::Search,
+        }
+    }
+
+    const fn prev(self) -> Self {
+        match self {
+            Self::Search => Self::AutoTags,
+            Self::Shell => Self::Search,
+            Self::Exclusions => Self::Shell,
+            Self::AutoTags => Self::Exclusions,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Search => "Search",
+            Self::Shell => "Shell",
+            Self::Exclusions => "Exclusions",
+            Self::AutoTags => "Auto Tags",
+        }
+    }
+}
+
 struct AppState {
     config: Config,
-    current_tab: usize,
+    current_tab: SettingsTab,
     selected_item: usize,
     input_mode: InputMode,
     input_buffer: String,
@@ -28,8 +85,6 @@ struct AppState {
     auto_tag_path_input: String,
     auto_tag_name_input: String,
     auto_tag_focus: usize, // 0 = path, 1 = name
-    // (Tab Index -> Number of items)
-    tab_items: Vec<usize>,
     exclusion_list_state: ListState,
     auto_tag_list_state: ListState,
     save_status: Option<String>,
@@ -40,15 +95,13 @@ impl AppState {
     fn new(config: Config) -> Self {
         Self {
             config,
-            current_tab: 0,
+            current_tab: SettingsTab::Search,
             selected_item: 0,
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
             auto_tag_path_input: String::new(),
             auto_tag_name_input: String::new(),
             auto_tag_focus: 0,
-            // Tab 0: Search (5 items), Tab 1: Shell (2 + theme), Tab 2: Exclusions (Dynamic), Tab 3: Auto Tags (Dynamic)
-            tab_items: vec![5, 3, 0, 0],
             exclusion_list_state: ListState::default(),
             auto_tag_list_state: ListState::default(),
             save_status: None,
@@ -57,17 +110,13 @@ impl AppState {
     }
 
     const fn next_tab(&mut self) {
-        self.current_tab = (self.current_tab + 1) % self.tab_items.len();
+        self.current_tab = self.current_tab.next();
         self.selected_item = 0;
         self.reset_list_states();
     }
 
     const fn prev_tab(&mut self) {
-        if self.current_tab > 0 {
-            self.current_tab -= 1;
-        } else {
-            self.current_tab = self.tab_items.len() - 1;
-        }
+        self.current_tab = self.current_tab.prev();
         self.selected_item = 0;
         self.reset_list_states();
     }
@@ -79,32 +128,24 @@ impl AppState {
     }
 
     fn next_item(&mut self) {
-        let max = if self.current_tab == 2 {
-            self.config.exclusions.len()
-        } else if self.current_tab == 3 {
-            self.config.auto_tags.len()
-        } else {
-            self.tab_items[self.current_tab]
-        };
+        let max = self.current_tab.item_count(&self.config);
 
         if max > 0 {
             self.selected_item = (self.selected_item + 1) % max;
-            if self.current_tab == 2 {
-                self.exclusion_list_state.select(Some(self.selected_item));
-            } else if self.current_tab == 3 {
-                self.auto_tag_list_state.select(Some(self.selected_item));
+            match self.current_tab {
+                SettingsTab::Exclusions => {
+                    self.exclusion_list_state.select(Some(self.selected_item));
+                }
+                SettingsTab::AutoTags => {
+                    self.auto_tag_list_state.select(Some(self.selected_item));
+                }
+                _ => {}
             }
         }
     }
 
     fn prev_item(&mut self) {
-        let max = if self.current_tab == 2 {
-            self.config.exclusions.len()
-        } else if self.current_tab == 3 {
-            self.config.auto_tags.len()
-        } else {
-            self.tab_items[self.current_tab]
-        };
+        let max = self.current_tab.item_count(&self.config);
 
         if max > 0 {
             if self.selected_item > 0 {
@@ -112,44 +153,48 @@ impl AppState {
             } else {
                 self.selected_item = max - 1;
             }
-            if self.current_tab == 2 {
-                self.exclusion_list_state.select(Some(self.selected_item));
-            } else if self.current_tab == 3 {
-                self.auto_tag_list_state.select(Some(self.selected_item));
+            match self.current_tab {
+                SettingsTab::Exclusions => {
+                    self.exclusion_list_state.select(Some(self.selected_item));
+                }
+                SettingsTab::AutoTags => {
+                    self.auto_tag_list_state.select(Some(self.selected_item));
+                }
+                _ => {}
             }
         }
     }
 
     fn toggle_bool(&mut self) {
         match (self.current_tab, self.selected_item) {
-            (0, 1) => {
+            (SettingsTab::Search, 1) => {
                 self.config.search.show_unique_by_default =
                     !self.config.search.show_unique_by_default;
                 self.dirty = true;
             }
-            (0, 2) => {
+            (SettingsTab::Search, 2) => {
                 self.config.search.filter_by_current_session_tag =
                     !self.config.search.filter_by_current_session_tag;
                 self.dirty = true;
             }
-            (0, 3) => {
+            (SettingsTab::Search, 3) => {
                 self.config.search.context_boost = !self.config.search.context_boost;
                 self.dirty = true;
             }
-            (0, 4) => {
+            (SettingsTab::Search, 4) => {
                 self.config.search.show_detail_pane = !self.config.search.show_detail_pane;
                 self.dirty = true;
             }
-            (1, 0) => {
+            (SettingsTab::Shell, 0) => {
                 self.config.shell.enable_arrow_navigation =
                     !self.config.shell.enable_arrow_navigation;
                 self.dirty = true;
             }
-            (1, 1) => {
+            (SettingsTab::Shell, 1) => {
                 self.config.agent.show_risk_in_search = !self.config.agent.show_risk_in_search;
                 self.dirty = true;
             }
-            (1, 2) => {
+            (SettingsTab::Shell, 2) => {
                 self.config.theme = self.config.theme.next();
                 self.dirty = true;
                 // Apply immediately so the UI reflects the new theme
@@ -207,17 +252,17 @@ impl AppState {
             KeyCode::BackTab => self.prev_tab(),
             KeyCode::Down | KeyCode::Char('j') => self.next_item(),
             KeyCode::Up | KeyCode::Char('k') => self.prev_item(),
-            KeyCode::Char('a') if self.current_tab == 2 => {
+            KeyCode::Char('a') if self.current_tab == SettingsTab::Exclusions => {
                 self.input_mode = InputMode::Editing;
                 self.input_buffer.clear();
             }
-            KeyCode::Char('a') if self.current_tab == 3 => {
+            KeyCode::Char('a') if self.current_tab == SettingsTab::AutoTags => {
                 self.input_mode = InputMode::Editing;
                 self.auto_tag_path_input.clear();
                 self.auto_tag_name_input.clear();
                 self.auto_tag_focus = 0;
             }
-            KeyCode::Char('d') if self.current_tab == 2 => {
+            KeyCode::Char('d') if self.current_tab == SettingsTab::Exclusions => {
                 if !self.config.exclusions.is_empty() {
                     self.config.exclusions.remove(self.selected_item);
                     self.dirty = true;
@@ -236,7 +281,7 @@ impl AppState {
                         });
                 }
             }
-            KeyCode::Char('d') if self.current_tab == 3 => {
+            KeyCode::Char('d') if self.current_tab == SettingsTab::AutoTags => {
                 if !self.config.auto_tags.is_empty() {
                     self.dirty = true;
                     let mut auto_tags: Vec<_> = self.config.auto_tags.keys().cloned().collect();
@@ -263,7 +308,7 @@ impl AppState {
             KeyCode::Enter | KeyCode::Char(' ') => {
                 // Enter/Space toggles bools or enters edit mode for numbers/text
                 match (self.current_tab, self.selected_item) {
-                    (0, 0) => {
+                    (SettingsTab::Search, 0) => {
                         // Page Limit
                         self.input_mode = InputMode::Editing;
                         self.input_buffer = self.config.search.page_limit.to_string();
@@ -279,7 +324,7 @@ impl AppState {
     fn handle_editing_input(&mut self, key: event::KeyEvent) {
         match key.code {
             KeyCode::Enter => {
-                if (self.current_tab, self.selected_item) == (0, 0) {
+                if (self.current_tab, self.selected_item) == (SettingsTab::Search, 0) {
                     if let Ok(n) = self.input_buffer.parse::<usize>() {
                         self.config.search.page_limit = n.clamp(10, 5000);
                         self.dirty = true;
@@ -291,7 +336,9 @@ impl AppState {
                         self.save_status = Some("Invalid number".to_string());
                     }
                     self.input_mode = InputMode::Normal;
-                } else if self.current_tab == 2 && !self.input_buffer.is_empty() {
+                } else if self.current_tab == SettingsTab::Exclusions
+                    && !self.input_buffer.is_empty()
+                {
                     self.config.exclusions.push(self.input_buffer.clone());
                     self.dirty = true;
                     self.save_status = Some(format!("Added exclusion: {}", self.input_buffer));
@@ -299,7 +346,7 @@ impl AppState {
                     self.selected_item = self.config.exclusions.len() - 1;
                     self.exclusion_list_state.select(Some(self.selected_item));
                     self.input_mode = InputMode::Normal;
-                } else if self.current_tab == 3 {
+                } else if self.current_tab == SettingsTab::AutoTags {
                     // Auto-tag dual-field form
                     if self.auto_tag_focus == 0 {
                         // Move from Path to Tag
@@ -339,13 +386,13 @@ impl AppState {
             KeyCode::Esc => {
                 self.input_mode = InputMode::Normal;
             }
-            KeyCode::Tab if self.current_tab == 3 => {
+            KeyCode::Tab if self.current_tab == SettingsTab::AutoTags => {
                 // Toggle focus between path and tag
                 self.auto_tag_focus = 1 - self.auto_tag_focus;
             }
             KeyCode::Char(c) => {
                 const MAX_SETTINGS_INPUT: usize = 500;
-                if self.current_tab == 3 {
+                if self.current_tab == SettingsTab::AutoTags {
                     if self.auto_tag_focus == 0 {
                         if self.auto_tag_path_input.len() < MAX_SETTINGS_INPUT {
                             self.auto_tag_path_input.push(c);
@@ -358,7 +405,7 @@ impl AppState {
                 }
             }
             KeyCode::Backspace => {
-                if self.current_tab == 3 {
+                if self.current_tab == SettingsTab::AutoTags {
                     if self.auto_tag_focus == 0 {
                         self.auto_tag_path_input.pop();
                     } else {
@@ -469,7 +516,12 @@ fn ui(f: &mut ratatui::Frame, app: &mut AppState) {
         ],
     };
 
-    if app.input_mode == InputMode::Normal && (app.current_tab == 2 || app.current_tab == 3) {
+    if app.input_mode == InputMode::Normal
+        && matches!(
+            app.current_tab,
+            SettingsTab::Exclusions | SettingsTab::AutoTags
+        )
+    {
         help_badges.push(Span::styled(" a ", badge_key));
         help_badges.push(Span::styled(" Add  ", badge_label));
         help_badges.push(Span::styled(" d ", badge_key));
@@ -497,7 +549,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut AppState) {
 
     // Render input popup if editing
     if app.input_mode == InputMode::Editing {
-        if app.current_tab == 3 {
+        if app.current_tab == SettingsTab::AutoTags {
             render_auto_tag_popup(f, app);
         } else {
             render_input_popup(f, &app.input_buffer);
@@ -539,17 +591,10 @@ fn setting_item<'a>(label: &str, value: &str, selected: bool, _editable: bool) -
 
 fn render_sidebar(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     let t = theme();
-    let categories = [
-        ("Search", "magnifying glass"),
-        ("Shell", "terminal"),
-        ("Exclusions", "filter"),
-        ("Auto Tags", "tag"),
-    ];
-    let items: Vec<ListItem> = categories
+    let items: Vec<ListItem> = SettingsTab::ALL
         .iter()
-        .enumerate()
-        .map(|(i, (cat, _))| {
-            let (prefix, style) = if i == app.current_tab {
+        .map(|tab| {
+            let (prefix, style) = if *tab == app.current_tab {
                 (
                     " > ",
                     Style::default()
@@ -560,7 +605,7 @@ fn render_sidebar(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             } else {
                 ("   ", Style::default().fg(t.text_secondary))
             };
-            ListItem::new(format!("{prefix}{cat}")).style(style)
+            ListItem::new(format!("{prefix}{}", tab.label())).style(style)
         })
         .collect();
 
@@ -583,16 +628,15 @@ fn render_content_panel(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) 
 
     // Render main content based on current tab
     match app.current_tab {
-        0 => render_search_tab(f, app, content_chunks[0]),
-        1 => render_shell_tab(f, app, content_chunks[0]),
-        2 => render_exclusions_tab(f, app, content_chunks[0]),
-        3 => render_auto_tags_tab(f, app, content_chunks[0]),
-        _ => {}
+        SettingsTab::Search => render_search_tab(f, app, content_chunks[0]),
+        SettingsTab::Shell => render_shell_tab(f, app, content_chunks[0]),
+        SettingsTab::Exclusions => render_exclusions_tab(f, app, content_chunks[0]),
+        SettingsTab::AutoTags => render_auto_tags_tab(f, app, content_chunks[0]),
     }
 
     // Render description pane
     let t = theme();
-    let description = get_setting_description(app.current_tab, app.selected_item);
+    let description = get_setting_description(app.current_tab.index(), app.selected_item);
     let desc_paragraph = Paragraph::new(description)
         .wrap(Wrap { trim: true })
         .style(Style::default().fg(t.text_secondary))
@@ -929,18 +973,18 @@ mod tests {
         let mut app = AppState::new(config);
 
         // Initial state
-        assert_eq!(app.current_tab, 0);
+        assert_eq!(app.current_tab, SettingsTab::Search);
         assert_eq!(app.selected_item, 0);
 
         // Tab navigation
         app.next_tab();
-        assert_eq!(app.current_tab, 1);
+        assert_eq!(app.current_tab, SettingsTab::Shell);
         app.next_tab();
-        assert_eq!(app.current_tab, 2);
+        assert_eq!(app.current_tab, SettingsTab::Exclusions);
         app.next_tab();
-        assert_eq!(app.current_tab, 3);
+        assert_eq!(app.current_tab, SettingsTab::AutoTags);
         app.next_tab();
-        assert_eq!(app.current_tab, 0); // Cycle back
+        assert_eq!(app.current_tab, SettingsTab::Search); // Cycle back
 
         // Item navigation (Tab 0 has 5 items)
         app.next_item();
@@ -963,8 +1007,8 @@ mod tests {
 
         let mut app = AppState::new(config);
 
-        // Toggle Search Unique (Tab 0, Item 1)
-        app.current_tab = 0;
+        // Toggle Search Unique (Tab Search, Item 1)
+        app.current_tab = SettingsTab::Search;
         app.selected_item = 1;
         app.toggle_bool();
         assert!(app.config.search.show_unique_by_default);
@@ -972,8 +1016,8 @@ mod tests {
         app.toggle_bool();
         assert!(!app.config.search.show_unique_by_default);
 
-        // Toggle Arrow Navigation (Tab 1, Item 0)
-        app.current_tab = 1;
+        // Toggle Arrow Navigation (Tab Shell, Item 0)
+        app.current_tab = SettingsTab::Shell;
         app.selected_item = 0;
         app.toggle_bool();
         assert!(!app.config.shell.enable_arrow_navigation);
@@ -986,8 +1030,8 @@ mod tests {
         let config = Config::default();
         let mut app = AppState::new(config);
 
-        // Theme is Tab 1, Item 2
-        app.current_tab = 1;
+        // Theme is Tab Shell, Item 2
+        app.current_tab = SettingsTab::Shell;
         app.selected_item = 2;
 
         assert_eq!(app.config.theme, ThemeName::Dark);
@@ -1008,14 +1052,13 @@ mod tests {
         let config = Config::default();
         let app = AppState::new(config);
 
-        assert_eq!(app.current_tab, 0);
+        assert_eq!(app.current_tab, SettingsTab::Search);
         assert_eq!(app.selected_item, 0);
         assert_eq!(app.input_mode, InputMode::Normal);
         assert!(app.input_buffer.is_empty());
         assert!(app.auto_tag_path_input.is_empty());
         assert!(app.auto_tag_name_input.is_empty());
         assert_eq!(app.auto_tag_focus, 0);
-        assert_eq!(app.tab_items, vec![5, 3, 0, 0]);
         assert!(app.save_status.is_none());
         assert!(!app.dirty);
     }
@@ -1025,19 +1068,19 @@ mod tests {
         let config = Config::default();
         let mut app = AppState::new(config);
 
-        // From tab 0, prev_tab wraps to last tab
+        // From Search, prev_tab wraps to last tab
         app.prev_tab();
-        assert_eq!(app.current_tab, 3);
+        assert_eq!(app.current_tab, SettingsTab::AutoTags);
         assert_eq!(app.selected_item, 0);
 
         app.prev_tab();
-        assert_eq!(app.current_tab, 2);
+        assert_eq!(app.current_tab, SettingsTab::Exclusions);
 
         app.prev_tab();
-        assert_eq!(app.current_tab, 1);
+        assert_eq!(app.current_tab, SettingsTab::Shell);
 
         app.prev_tab();
-        assert_eq!(app.current_tab, 0);
+        assert_eq!(app.current_tab, SettingsTab::Search);
     }
 
     #[test]
@@ -1053,7 +1096,7 @@ mod tests {
 
         // Switching tab resets selected_item to 0
         app.next_tab();
-        assert_eq!(app.current_tab, 1);
+        assert_eq!(app.current_tab, SettingsTab::Shell);
         assert_eq!(app.selected_item, 0);
     }
 
@@ -1077,8 +1120,8 @@ mod tests {
         let config = Config::default();
         let mut app = AppState::new(config);
 
-        // Tab 0, Item 2: filter_by_current_session_tag (default false)
-        app.current_tab = 0;
+        // Tab Search, Item 2: filter_by_current_session_tag (default false)
+        app.current_tab = SettingsTab::Search;
         app.selected_item = 2;
         assert!(!app.config.search.filter_by_current_session_tag);
         app.toggle_bool();
@@ -1103,8 +1146,8 @@ mod tests {
         let config = Config::default();
         let mut app = AppState::new(config);
 
-        // Tab 1, Item 1: show_risk_in_search (default true)
-        app.current_tab = 1;
+        // Tab Shell, Item 1: show_risk_in_search (default true)
+        app.current_tab = SettingsTab::Shell;
         app.selected_item = 1;
         assert!(app.config.agent.show_risk_in_search);
         app.toggle_bool();
@@ -1117,8 +1160,8 @@ mod tests {
         let config = Config::default();
         let mut app = AppState::new(config);
 
-        // Tab 0, Item 0 is Page Limit; Enter enters edit mode
-        app.current_tab = 0;
+        // Tab Search, Item 0 is Page Limit; Enter enters edit mode
+        app.current_tab = SettingsTab::Search;
         app.selected_item = 0;
 
         let cont = app.handle_input(KeyEvent::from(KeyCode::Enter));
@@ -1145,7 +1188,7 @@ mod tests {
         let mut app = AppState::new(config);
 
         // Enter edit mode for page limit
-        app.current_tab = 0;
+        app.current_tab = SettingsTab::Search;
         app.selected_item = 0;
         app.handle_input(KeyEvent::from(KeyCode::Enter));
 
@@ -1169,7 +1212,7 @@ mod tests {
         let mut app = AppState::new(config);
 
         // Enter edit mode
-        app.current_tab = 0;
+        app.current_tab = SettingsTab::Search;
         app.selected_item = 0;
         app.handle_input(KeyEvent::from(KeyCode::Enter));
         assert_eq!(app.input_mode, InputMode::Editing);
@@ -1192,7 +1235,7 @@ mod tests {
         let mut app = AppState::new(config);
 
         // Switch to exclusions tab
-        app.current_tab = 2;
+        app.current_tab = SettingsTab::Exclusions;
         app.selected_item = 0;
         assert!(app.config.exclusions.is_empty());
 
@@ -1222,7 +1265,7 @@ mod tests {
         config.exclusions = vec!["^ls$".to_string(), "password".to_string()];
 
         let mut app = AppState::new(config);
-        app.current_tab = 2;
+        app.current_tab = SettingsTab::Exclusions;
         app.selected_item = 0;
 
         // Delete first exclusion
@@ -1282,11 +1325,11 @@ mod tests {
 
         // Tab key cycles tabs
         app.handle_input(KeyEvent::from(KeyCode::Tab));
-        assert_eq!(app.current_tab, 1);
+        assert_eq!(app.current_tab, SettingsTab::Shell);
 
         // BackTab goes back
         app.handle_input(KeyEvent::from(KeyCode::BackTab));
-        assert_eq!(app.current_tab, 0);
+        assert_eq!(app.current_tab, SettingsTab::Search);
 
         // Down/j moves selection
         app.handle_input(KeyEvent::from(KeyCode::Down));
@@ -1316,7 +1359,7 @@ mod tests {
         ];
 
         let mut app = AppState::new(config);
-        app.current_tab = 2;
+        app.current_tab = SettingsTab::Exclusions;
         app.selected_item = 0;
 
         // Navigate through exclusion items
@@ -1344,7 +1387,7 @@ mod tests {
         let mut app = AppState::new(config);
 
         // Enter edit mode for exclusion
-        app.current_tab = 2;
+        app.current_tab = SettingsTab::Exclusions;
         app.handle_input(KeyEvent::from(KeyCode::Char('a')));
         assert_eq!(app.input_mode, InputMode::Editing);
 
@@ -1367,8 +1410,8 @@ mod tests {
         let config = Config::default();
         let mut app = AppState::new(config);
 
-        // Switch to auto-tags tab (tab 3)
-        app.current_tab = 3;
+        // Switch to auto-tags tab
+        app.current_tab = SettingsTab::AutoTags;
         app.selected_item = 0;
 
         // Press 'a' to start adding an auto-tag
@@ -1417,7 +1460,7 @@ mod tests {
             .insert("/work/repo".to_string(), "work".to_string());
 
         let mut app = AppState::new(config);
-        app.current_tab = 3;
+        app.current_tab = SettingsTab::AutoTags;
         app.selected_item = 0;
 
         assert_eq!(app.config.auto_tags.len(), 2);
@@ -1441,7 +1484,7 @@ mod tests {
         let config = Config::default();
         let mut app = AppState::new(config);
 
-        app.current_tab = 3;
+        app.current_tab = SettingsTab::AutoTags;
         app.handle_input(KeyEvent::from(KeyCode::Char('a')));
         assert_eq!(app.input_mode, InputMode::Editing);
         assert_eq!(app.auto_tag_focus, 0);
@@ -1461,7 +1504,7 @@ mod tests {
         let config = Config::default();
         let mut app = AppState::new(config);
 
-        app.current_tab = 3;
+        app.current_tab = SettingsTab::AutoTags;
         app.handle_input(KeyEvent::from(KeyCode::Char('a')));
         assert_eq!(app.input_mode, InputMode::Editing);
 
@@ -1511,7 +1554,7 @@ mod tests {
         config.exclusions = vec!["only_one".to_string()];
 
         let mut app = AppState::new(config);
-        app.current_tab = 2;
+        app.current_tab = SettingsTab::Exclusions;
         app.selected_item = 0;
         app.exclusion_list_state.select(Some(0));
 
@@ -1529,7 +1572,7 @@ mod tests {
         config.exclusions = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
 
         let mut app = AppState::new(config);
-        app.current_tab = 2;
+        app.current_tab = SettingsTab::Exclusions;
         app.selected_item = 2; // Select last item ("gamma")
         app.exclusion_list_state.select(Some(2));
 
@@ -1587,7 +1630,7 @@ mod tests {
         let mut app = AppState::new(config);
 
         // Enter editing mode for exclusion
-        app.current_tab = 2;
+        app.current_tab = SettingsTab::Exclusions;
         app.handle_input(KeyEvent::from(KeyCode::Char('a')));
         assert_eq!(app.input_mode, InputMode::Editing);
 
@@ -1604,7 +1647,7 @@ mod tests {
         let config = Config::default();
         let mut app = AppState::new(config);
 
-        app.current_tab = 3;
+        app.current_tab = SettingsTab::AutoTags;
         app.handle_input(KeyEvent::from(KeyCode::Char('a')));
         assert_eq!(app.auto_tag_focus, 0);
 
@@ -1627,7 +1670,7 @@ mod tests {
         let config = Config::default();
         let mut app = AppState::new(config);
 
-        app.current_tab = 3;
+        app.current_tab = SettingsTab::AutoTags;
         app.handle_input(KeyEvent::from(KeyCode::Char('a')));
         // Switch to tag field
         app.auto_tag_focus = 1;
@@ -1651,8 +1694,8 @@ mod tests {
         let config = Config::default();
         let mut app = AppState::new(config);
 
-        // Tab 2 (exclusions) with no exclusions
-        app.current_tab = 2;
+        // Exclusions tab with no exclusions
+        app.current_tab = SettingsTab::Exclusions;
         app.selected_item = 0;
 
         // next_item and prev_item should not change selected_item
@@ -1694,8 +1737,8 @@ mod tests {
         let config = Config::default();
         let mut app = AppState::new(config);
 
-        // Tab 0, Item 1: show_unique_by_default (default false)
-        app.current_tab = 0;
+        // Tab Search, Item 1: show_unique_by_default (default false)
+        app.current_tab = SettingsTab::Search;
         app.selected_item = 1;
         assert!(!app.config.search.show_unique_by_default);
 
@@ -1707,7 +1750,7 @@ mod tests {
         app.handle_input(KeyEvent::from(KeyCode::Enter));
         assert!(!app.config.search.show_unique_by_default);
 
-        // Tab 0, Item 3: context_boost (default true)
+        // Tab Search, Item 3: context_boost (default true)
         app.selected_item = 3;
         assert!(app.config.search.context_boost);
         app.handle_input(KeyEvent::from(KeyCode::Char(' ')));
@@ -1719,7 +1762,7 @@ mod tests {
     fn test_multiple_exclusion_adds() {
         let config = Config::default();
         let mut app = AppState::new(config);
-        app.current_tab = 2;
+        app.current_tab = SettingsTab::Exclusions;
 
         // Add "pattern1"
         app.handle_input(KeyEvent::from(KeyCode::Char('a')));
@@ -1747,7 +1790,7 @@ mod tests {
     fn test_exclusion_add_esc_cancels() {
         let config = Config::default();
         let mut app = AppState::new(config);
-        app.current_tab = 2;
+        app.current_tab = SettingsTab::Exclusions;
 
         // Enter edit mode for adding exclusion
         app.handle_input(KeyEvent::from(KeyCode::Char('a')));
@@ -1772,7 +1815,7 @@ mod tests {
         let config = Config::default();
         let mut app = AppState::new(config);
 
-        app.current_tab = 3;
+        app.current_tab = SettingsTab::AutoTags;
         app.handle_input(KeyEvent::from(KeyCode::Char('a')));
         assert_eq!(app.input_mode, InputMode::Editing);
 
@@ -1799,7 +1842,7 @@ mod tests {
         config.exclusions = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
 
         let mut app = AppState::new(config);
-        app.current_tab = 2;
+        app.current_tab = SettingsTab::Exclusions;
         app.selected_item = 1; // Select "beta" (middle)
         app.exclusion_list_state.select(Some(1));
 
@@ -1821,7 +1864,7 @@ mod tests {
             .insert("/path/b".to_string(), "tag_b".to_string());
 
         let mut app = AppState::new(config);
-        app.current_tab = 3;
+        app.current_tab = SettingsTab::AutoTags;
         app.selected_item = 0;
 
         // Navigate through auto-tag items
