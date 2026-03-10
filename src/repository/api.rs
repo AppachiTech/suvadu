@@ -9,8 +9,8 @@ use super::Repository;
 /// a concrete `Repository`, which is useful for testing (mock repositories)
 /// and for decoupling business logic from the storage backend.
 ///
-/// Currently used in tests; will be adopted by command handlers incrementally.
-#[allow(dead_code)]
+/// Trait-based dispatch for `Repository`; used in tests and integration tests.
+#[cfg_attr(not(test), allow(dead_code))]
 pub trait RepositoryApi {
     // ── mod.rs (core) ───────────────────────────────────────────────────
     fn insert_session(&self, session: &Session) -> DbResult<()>;

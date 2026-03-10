@@ -5,6 +5,10 @@ use crate::models::SearchField;
 use crate::repository::Repository;
 use crate::search;
 
+/// Exit code signalling the shell widget that suvadu is inactive and should
+/// fall back to native search (e.g. Ctrl-R).
+const EXIT_CODE_SHELL_FALLBACK: i32 = 10;
+
 pub struct SearchParams<'a> {
     pub query: Option<&'a String>,
     pub unique: bool,
@@ -22,7 +26,7 @@ pub fn handle_search(p: &SearchParams) -> Result<(), Box<dyn std::error::Error>>
     // If not, we want to fallback to the shell's default search.
     // We use exit code 10 to signal this to the shell widget.
     if !config::should_record()? {
-        process::exit(10);
+        process::exit(EXIT_CODE_SHELL_FALLBACK);
     }
 
     // Initialize database
@@ -116,10 +120,6 @@ mod tests {
     use crate::models::{Entry, Session};
     use crate::test_utils::test_repo;
 
-    /// The exit code used to signal the shell widget that suvadu is
-    /// inactive and the shell should fall back to its native search.
-    const EXIT_CODE_SHELL_FALLBACK: i32 = 10;
-
     fn seed_session(repo: &Repository, session_id: &str) {
         let session = Session {
             id: session_id.to_string(),
@@ -144,10 +144,8 @@ mod tests {
 
     #[test]
     fn test_shell_fallback_exit_code_is_documented() {
-        // This test exists to document the magic exit code.
-        // If the value needs to change, update both the constant
-        // and the process::exit(10) call in handle_search().
-        assert_eq!(EXIT_CODE_SHELL_FALLBACK, 10);
+        // This test exists to document the exit code constant.
+        assert_eq!(super::EXIT_CODE_SHELL_FALLBACK, 10);
     }
 
     #[test]

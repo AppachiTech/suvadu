@@ -71,55 +71,66 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
     let tarball_str = tarball_path.to_string_lossy().to_string();
     let update_dir_str = update_dir.path().to_string_lossy().to_string();
 
-    download_and_verify(
+    let params = DownloadParams {
         platform_label,
-        &archive_url,
-        &checksum_url,
-        &signature_url,
-        &tarball_str,
-        &update_dir_str,
-        &binary_path,
-        update_dir.path(),
-    )?;
+        archive_url: &archive_url,
+        checksum_url: &checksum_url,
+        signature_url: &signature_url,
+        tarball_path: &tarball_str,
+        extract_dir: &update_dir_str,
+        binary_path: &binary_path,
+        update_dir: update_dir.path(),
+    };
+    download_and_verify(&params)?;
 
     install_binary(&binary_path)?;
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn download_and_verify(
-    platform_label: &str,
-    archive_url: &str,
-    checksum_url: &str,
-    signature_url: &str,
-    tarball_str: &str,
-    update_dir_str: &str,
-    binary_path: &std::path::Path,
-    update_dir: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Downloading {platform_label} build from: {archive_url}");
+struct DownloadParams<'a> {
+    platform_label: &'a str,
+    archive_url: &'a str,
+    checksum_url: &'a str,
+    signature_url: &'a str,
+    tarball_path: &'a str,
+    extract_dir: &'a str,
+    binary_path: &'a std::path::Path,
+    update_dir: &'a std::path::Path,
+}
+
+fn download_and_verify(p: &DownloadParams) -> Result<(), Box<dyn std::error::Error>> {
+    println!(
+        "Downloading {} build from: {}",
+        p.platform_label, p.archive_url
+    );
     let status = std::process::Command::new("curl")
-        .args(["-fsSL", "-m", "300", "-o", tarball_str, archive_url])
+        .args(["-fsSL", "-m", "300", "-o", p.tarball_path, p.archive_url])
         .status()?;
     if !status.success() {
         return Err("Failed to download update. Please check your internet connection.".into());
     }
 
-    verify_signature(signature_url, tarball_str)?;
-    verify_checksum(checksum_url, tarball_str)?;
+    verify_signature(p.signature_url, p.tarball_path)?;
+    verify_checksum(p.checksum_url, p.tarball_path)?;
 
     let status = std::process::Command::new("tar")
-        .args(["--no-same-owner", "-xzf", tarball_str, "-C", update_dir_str])
+        .args([
+            "--no-same-owner",
+            "-xzf",
+            p.tarball_path,
+            "-C",
+            p.extract_dir,
+        ])
         .status()?;
     if !status.success() {
         return Err("Failed to extract update archive.".into());
     }
 
-    if !binary_path.exists() {
+    if !p.binary_path.exists() {
         return Err("Expected binary not found after extraction.".into());
     }
-    let canonical_binary = binary_path.canonicalize()?;
-    let canonical_dir = update_dir.canonicalize()?;
+    let canonical_binary = p.binary_path.canonicalize()?;
+    let canonical_dir = p.update_dir.canonicalize()?;
     if !canonical_binary.starts_with(&canonical_dir) {
         return Err("Extracted binary is outside temp directory. Aborting for security.".into());
     }

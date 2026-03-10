@@ -10,14 +10,7 @@ static SECRET_PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(build_patte
 
 struct SecretPattern {
     regex: Regex,
-    #[allow(dead_code)]
-    category: &'static str,
-    #[allow(dead_code)]
-    description: &'static str,
 }
-
-/// (regex, category, description)
-type PatternDef = (&'static str, &'static str, &'static str);
 
 /// Redact secrets from a command string.
 /// Returns the command with all detected secret values replaced by `***REDACTED***`.
@@ -57,12 +50,8 @@ fn build_patterns() -> Vec<SecretPattern> {
 
     defs.into_iter()
         .flatten()
-        .filter_map(|(pat, cat, desc)| match Regex::new(pat) {
-            Ok(regex) => Some(SecretPattern {
-                regex,
-                category: cat,
-                description: desc,
-            }),
+        .filter_map(|pat| match Regex::new(pat) {
+            Ok(regex) => Some(SecretPattern { regex }),
             Err(e) => {
                 eprintln!("suvadu: secret pattern failed to compile: {pat}: {e}");
                 None
@@ -73,115 +62,79 @@ fn build_patterns() -> Vec<SecretPattern> {
 
 /// Environment variable assignments with sensitive names
 /// Captures: group(1) = `VAR_NAME=`, group(2) = the secret value
-fn env_var_patterns() -> Vec<PatternDef> {
+fn env_var_patterns() -> Vec<&'static str> {
     vec![
         // export SECRET_KEY=value or SECRET_KEY=value (inline)
-        (
-            r"(?i)((?:export\s+)?(?:\w*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|API_SECRET|ACCESS_KEY|PRIVATE_KEY|AUTH|CREDENTIAL)\w*)=)(\S+)",
-            "env-var",
-            "Sensitive environment variable assignment",
-        ),
+        r"(?i)((?:export\s+)?(?:\w*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|API_SECRET|ACCESS_KEY|PRIVATE_KEY|AUTH|CREDENTIAL)\w*)=)(\S+)",
     ]
 }
 
 /// CLI flags that take passwords
-fn cli_password_patterns() -> Vec<PatternDef> {
+fn cli_password_patterns() -> Vec<&'static str> {
     vec![
         // mysql -pPassword or mysql -p'password' or mysql -p"password"
-        (
-            r"(\s-p)([^\s-][^\s]*)",
-            "cli-password",
-            "MySQL-style inline password (-p)",
-        ),
+        r"(\s-p)([^\s-][^\s]*)",
         // --password=value or --password value
-        (
-            r"(--password[=\s])(\S+)",
-            "cli-password",
-            "CLI --password flag",
-        ),
+        r"(--password[=\s])(\S+)",
         // --token=value or --token value
-        (r"(--token[=\s])(\S+)", "cli-password", "CLI --token flag"),
+        r"(--token[=\s])(\S+)",
         // --secret=value or --secret value
-        (r"(--secret[=\s])(\S+)", "cli-password", "CLI --secret flag"),
+        r"(--secret[=\s])(\S+)",
         // --api-key=value or --apikey=value
-        (
-            r"(?i)(--api[-_]?key[=\s])(\S+)",
-            "cli-password",
-            "CLI --api-key flag",
-        ),
+        r"(?i)(--api[-_]?key[=\s])(\S+)",
     ]
 }
 
 /// Literal API key / token patterns (well-known prefixes)
-fn api_key_patterns() -> Vec<PatternDef> {
+fn api_key_patterns() -> Vec<&'static str> {
     vec![
         // AWS Access Key ID (always starts with AKIA)
-        (r"()(AKIA[0-9A-Z]{16})", "api-key", "AWS Access Key ID"),
+        r"()(AKIA[0-9A-Z]{16})",
         // GitHub tokens: ghp_, gho_, ghs_, ghr_, github_pat_
-        (
-            r"()(?:ghp_|gho_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]{20,}",
-            "api-key",
-            "GitHub token",
-        ),
-        // OpenAI API key: sk-...
-        (r"()(sk-[A-Za-z0-9]{20,})", "api-key", "OpenAI API key"),
+        r"()(?:ghp_|gho_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]{20,}",
+        // OpenAI API key: sk-... (but not sk-ant- which is Anthropic)
+        r"()(sk-(?!ant-)[A-Za-z0-9]{20,})",
+        // Anthropic API key: sk-ant-api...
+        r"()(sk-ant-api[A-Za-z0-9_-]{20,})",
         // Slack tokens: xoxb-, xoxp-, xoxo-, xoxa-
-        (r"()(xox[bpoa]-[A-Za-z0-9-]+)", "api-key", "Slack token"),
+        r"()(xox[bpoa]-[A-Za-z0-9-]+)",
         // Stripe keys: sk_live_, sk_test_, pk_live_, pk_test_
-        (
-            r"()([sr]k_(?:live|test)_[A-Za-z0-9]{20,})",
-            "api-key",
-            "Stripe API key",
-        ),
+        r"()([sr]k_(?:live|test)_[A-Za-z0-9]{20,})",
+        // NPM tokens: npm_...
+        r"()(npm_[A-Za-z0-9]{20,})",
+        // PyPI tokens: pypi-...
+        r"()(pypi-[A-Za-z0-9_-]{20,})",
+        // GCP service account key (JSON key_id or private_key_id patterns)
+        r#"(?i)("private_key":\s*")(-----BEGIN[^"]+)"#,
+        // Azure AD client secret (common 34-40 char format)
+        r"(?i)((?:AZURE_CLIENT_SECRET|AZURE_SECRET)\s*=\s*)(\S+)",
+        // PEM private key headers (inline)
+        r"()(-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----)",
         // Generic long hex secrets (32+ hex chars, common for API keys)
         // Only match when preceded by a key-like assignment
-        (
-            r"(?i)((?:SECRET|TOKEN|KEY|PASSWORD|AUTH|CREDENTIAL)\w*[=:]\s*)([0-9a-f]{32,})",
-            "api-key",
-            "Hex secret value",
-        ),
+        r"(?i)((?:SECRET|TOKEN|KEY|PASSWORD|AUTH|CREDENTIAL)\w*[=:]\s*)([0-9a-f]{32,})",
     ]
 }
 
 /// Authorization headers in curl/wget/httpie commands
-fn auth_header_patterns() -> Vec<PatternDef> {
+fn auth_header_patterns() -> Vec<&'static str> {
     vec![
         // curl -H "Authorization: Bearer xxx"
-        (
-            r#"(?i)(-H\s*['"]?Authorization:\s*Bearer\s+)([^'"}\s]+)"#,
-            "auth-header",
-            "Bearer token in Authorization header",
-        ),
+        r#"(?i)(-H\s*['"]?Authorization:\s*Bearer\s+)([^'"}\s]+)"#,
         // curl -H "Authorization: Basic xxx"
-        (
-            r#"(?i)(-H\s*['"]?Authorization:\s*Basic\s+)([^'"}\s]+)"#,
-            "auth-header",
-            "Basic auth in Authorization header",
-        ),
+        r#"(?i)(-H\s*['"]?Authorization:\s*Basic\s+)([^'"}\s]+)"#,
         // curl -H "Authorization: token xxx" (GitHub style)
-        (
-            r#"(?i)(-H\s*['"]?Authorization:\s*token\s+)([^'"}\s]+)"#,
-            "auth-header",
-            "Token in Authorization header",
-        ),
+        r#"(?i)(-H\s*['"]?Authorization:\s*token\s+)([^'"}\s]+)"#,
         // curl -u user:password
-        (
-            r"(-u\s+\S+:)(\S+)",
-            "auth-header",
-            "Basic auth credentials (-u user:pass)",
-        ),
+        r"(-u\s+\S+:)(\S+)",
     ]
 }
 
 /// Database connection strings with embedded passwords
-fn connection_string_patterns() -> Vec<PatternDef> {
+fn connection_string_patterns() -> Vec<&'static str> {
     vec![
         // postgresql://user:password@host  or  mysql://user:password@host
-        (
-            r"((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://[^:]+:)([^@]+)(@)",
-            "connection-string",
-            "Database connection string with password",
-        ),
+        r"((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://[^:]+:)([^@]+)(@)",
     ]
 }
 
@@ -326,5 +279,42 @@ mod tests {
         let cmd = "mongosh mongodb+srv://user:p@ssw0rd@cluster.example.com/db";
         let redacted = redact_secrets(cmd);
         assert!(!redacted.contains("p@ssw0rd"));
+    }
+
+    #[test]
+    fn test_anthropic_api_key() {
+        let cmd = "export ANTHROPIC_API_KEY=sk-ant-api03-abc123def456ghi789jkl012mno345";
+        let redacted = redact_secrets(cmd);
+        assert!(!redacted.contains("sk-ant-api03"));
+    }
+
+    #[test]
+    fn test_npm_token() {
+        let cmd =
+            "npm config set //registry.npmjs.org/:_authToken npm_aBcDeFgHiJkLmNoPqRsTuVwXyZ012345";
+        let redacted = redact_secrets(cmd);
+        assert!(!redacted.contains("npm_aBcDeFg"));
+    }
+
+    #[test]
+    fn test_pypi_token() {
+        let cmd = "twine upload --password pypi-AgEIcHlwaS5vcmcABcDeFgHiJkLm_NoPq";
+        let redacted = redact_secrets(cmd);
+        assert!(!redacted.contains("pypi-AgEIcHlwaS5vcmcABcDeFgHiJkLm_NoPq"));
+    }
+
+    #[test]
+    fn test_pem_private_key() {
+        let cmd = "echo '-----BEGIN RSA PRIVATE KEY-----' > key.pem";
+        let redacted = redact_secrets(cmd);
+        assert!(redacted.contains("***REDACTED***"));
+        assert!(!redacted.contains("BEGIN RSA PRIVATE KEY"));
+    }
+
+    #[test]
+    fn test_azure_client_secret() {
+        let cmd = "export AZURE_CLIENT_SECRET=abc123def456ghi789jkl012mno345pqr678";
+        let redacted = redact_secrets(cmd);
+        assert!(!redacted.contains("abc123def456"));
     }
 }

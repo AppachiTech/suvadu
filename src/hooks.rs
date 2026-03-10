@@ -107,7 +107,16 @@ __suvadu_detect_executor() {
     elif [[ -n "$AIDER" ]] || [[ -n "$AIDER_SESSION" ]]; then
         executor_type="agent"
         executor="aider"
+    elif [[ -n "$CONTINUE_SESSION" ]]; then
+        executor_type="agent"
+        executor="continue-dev"
+    elif [[ -n "$COPILOT_WORKSPACE" ]]; then
+        executor_type="agent"
+        executor="copilot"
     # IDE Detection
+    elif [[ -n "$WINDSURF" ]] || [[ -n "$CODEIUM" ]]; then
+        executor_type="ide"
+        executor="windsurf"
     elif [[ "$TERM_PROGRAM" == "vscode" ]] || [[ -n "$VSCODE_INJECTION" ]]; then
         executor_type="ide"
         executor="vscode"
@@ -117,6 +126,12 @@ __suvadu_detect_executor() {
     elif [[ -n "$ANTIGRAVITY_AGENT" ]]; then
         executor_type="ide"
         executor="antigravity"
+    elif [[ -n "$INTELLIJ_ENVIRONMENT_READER" ]]; then
+        executor_type="ide"
+        executor="intellij"
+    elif [[ -n "$PYCHARM_HOSTED" ]]; then
+        executor_type="ide"
+        executor="pycharm"
     # Human Detection
     elif [[ -t 0 ]]; then
         executor_type="human"

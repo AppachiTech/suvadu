@@ -477,22 +477,25 @@ fn process_old_files(dir: &std::path::Path, max_age_secs: u64, delete: bool) -> 
     let now = std::time::SystemTime::now();
     let mut count = 0u64;
     for entry in entries.flatten() {
-        if let Ok(meta) = entry.metadata() {
-            if meta.is_file() {
-                if let Ok(modified) = meta.modified() {
-                    if let Ok(age) = now.duration_since(modified) {
-                        if age.as_secs() > max_age_secs {
-                            if delete {
-                                if std::fs::remove_file(entry.path()).is_ok() {
-                                    count += 1;
-                                }
-                            } else {
-                                count += 1;
-                            }
-                        }
-                    }
-                }
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age.as_secs() <= max_age_secs {
+            continue;
+        }
+        if delete {
+            if std::fs::remove_file(entry.path()).is_ok() {
+                count += 1;
             }
+        } else {
+            count += 1;
         }
     }
     count
