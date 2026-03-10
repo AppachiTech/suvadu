@@ -51,6 +51,7 @@ pub enum DialogState {
         entry_id: i64,
         input: String,
     },
+    Help,
 }
 
 /// Display/mode options that control how search results are presented.

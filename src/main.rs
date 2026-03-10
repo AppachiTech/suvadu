@@ -74,7 +74,7 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         cmd @ Commands::Add { .. } => run_add(cmd),
-        Commands::Init { target } => run_init(&target),
+        Commands::Init { target } => run_init(target),
         Commands::HookClaudeCode => integrations::handle_hook_claude_code(),
         Commands::HookClaudePrompt => integrations::handle_hook_claude_prompt(),
         cmd @ Commands::Search { .. } => run_search(cmd),
@@ -265,37 +265,31 @@ fn run_toggle(enable: bool) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn run_init(target: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn run_init(target: cli::InitTarget) -> Result<(), Box<dyn std::error::Error>> {
     match target {
-        "zsh" => {
+        cli::InitTarget::Zsh => {
             let cfg = config::load_config().unwrap_or_default();
             println!("{}", hooks::get_zsh_hook(&cfg)?);
             print_first_run_tip();
             Ok(())
         }
-        "bash" => {
+        cli::InitTarget::Bash => {
             let cfg = config::load_config().unwrap_or_default();
             println!("{}", hooks::get_bash_hook(&cfg)?);
             print_first_run_tip();
             Ok(())
         }
-        "claude-code" => integrations::handle_init_claude_code(),
-        "cursor" => integrations::handle_init_ide(
+        cli::InitTarget::ClaudeCode => integrations::handle_init_claude_code(),
+        cli::InitTarget::Cursor => integrations::handle_init_ide(
             "Cursor",
             "Suvadu detects Cursor via $CURSOR_INJECTION and\n$CURSOR_TRACE_ID environment variables.",
             "cursor",
         ),
-        "antigravity" => integrations::handle_init_ide(
+        cli::InitTarget::Antigravity => integrations::handle_init_ide(
             "Antigravity",
             "Suvadu detects Antigravity via the $ANTIGRAVITY_AGENT\nenvironment variable.",
             "antigravity",
         ),
-        _ => {
-            eprintln!(
-                "Unsupported target: {target}. Use 'zsh', 'bash', 'claude-code', 'cursor', or 'antigravity'."
-            );
-            process::exit(1);
-        }
     }
 }
 
@@ -396,7 +390,7 @@ mod tests {
             cwd: None,
         }));
         assert!(!is_user_facing_command(&Commands::Init {
-            target: "zsh".into(),
+            target: cli::InitTarget::Zsh,
         }));
         assert!(!is_user_facing_command(&Commands::HookClaudeCode));
         assert!(!is_user_facing_command(&Commands::HookClaudePrompt));

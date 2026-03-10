@@ -10,13 +10,7 @@ pub fn handle_agent(cmd: cli::AgentCommands) -> Result<(), Box<dyn std::error::E
             executor,
             format,
             here,
-        } => handle_agent_report(
-            &after,
-            before.as_deref(),
-            executor.as_deref(),
-            &format,
-            here,
-        ),
+        } => handle_agent_report(&after, before.as_deref(), executor.as_deref(), format, here),
         cli::AgentCommands::Dashboard {
             after,
             executor,
@@ -40,7 +34,7 @@ fn handle_agent_report(
     after: &str,
     before: Option<&str>,
     executor: Option<&str>,
-    format: &str,
+    format: cli::ReportFormat,
     here: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = repository::Repository::init()?;
@@ -91,9 +85,11 @@ fn handle_agent_report(
     let home = dirs_home();
 
     match format {
-        "json" => print_agent_report_json(&entries, &risk_summary)?,
-        "markdown" | "md" => print_agent_report_markdown(&entries, &risk_summary, &home),
-        _ => print_agent_report_text(&entries, &risk_summary, &home),
+        cli::ReportFormat::Json => print_agent_report_json(&entries, &risk_summary)?,
+        cli::ReportFormat::Markdown => {
+            print_agent_report_markdown(&entries, &risk_summary, &home);
+        }
+        cli::ReportFormat::Text => print_agent_report_text(&entries, &risk_summary, &home),
     }
 
     Ok(())
@@ -838,10 +834,10 @@ mod tests {
     #[test]
     fn agent_filter_excludes_human_and_unknown() {
         let entries = vec![
-            make_entry("echo a", Some("claude"), Some("claude")),
+            make_entry("echo a", Some("agent"), Some("claude")),
             make_entry("echo b", Some("human"), None),
             make_entry("echo c", Some("unknown"), None),
-            make_entry("echo d", Some("copilot"), Some("copilot")),
+            make_entry("echo d", Some("ide"), Some("copilot")),
             make_entry("echo e", None, None), // executor_type is None → is_agent false
         ];
 
@@ -876,13 +872,13 @@ mod tests {
     // ── print_agent_report_text ─────────────────────────────────
 
     fn make_test_entries() -> Vec<Entry> {
-        let mut failed = make_entry("rm -rf /important", Some("claude"), Some("claude"));
+        let mut failed = make_entry("rm -rf /important", Some("agent"), Some("claude"));
         failed.exit_code = Some(1);
         vec![
-            make_entry("ls -la", Some("claude"), Some("claude")),
-            make_entry("cargo build", Some("copilot"), Some("copilot")),
+            make_entry("ls -la", Some("agent"), Some("claude")),
+            make_entry("cargo build", Some("agent"), Some("copilot")),
             failed,
-            make_entry("npm install express", Some("claude"), Some("claude")),
+            make_entry("npm install express", Some("agent"), Some("claude")),
         ]
     }
 

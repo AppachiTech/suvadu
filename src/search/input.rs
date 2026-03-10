@@ -14,6 +14,10 @@ impl SearchApp {
             DialogState::TagAssociation => return self.handle_tag_dialog_input(key),
             DialogState::Note { .. } => return self.handle_note_dialog_input(key),
             DialogState::Filter => return self.handle_filter_input(key),
+            DialogState::Help => {
+                self.dialog = DialogState::None;
+                return SearchAction::Continue;
+            }
             DialogState::None => {}
         }
         self.handle_normal_input(key)
@@ -45,6 +49,10 @@ impl SearchApp {
             }
             KeyCode::Tab => {
                 self.view.detail_pane_open = !self.view.detail_pane_open;
+            }
+            KeyCode::F(1) | KeyCode::Char('?') => {
+                self.dialog = DialogState::Help;
+                return SearchAction::Continue;
             }
             KeyCode::Char(c) if self.query.len() + c.len_utf8() <= MAX_INPUT_LEN => {
                 self.query.push(c);

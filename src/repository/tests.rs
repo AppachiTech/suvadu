@@ -2403,3 +2403,149 @@ fn test_get_frequent_commands_with_day_filter() {
         "old-command (60 days ago) should be excluded with 7-day filter"
     );
 }
+
+// ── Stats Edge-Case Tests ───────────────────────────────
+
+#[test]
+fn test_stats_empty_database() {
+    let (_dir, repo) = setup_test_db();
+
+    let stats = repo.get_stats(None, 10, None).unwrap();
+    assert_eq!(stats.total_commands, 0);
+    assert_eq!(stats.unique_commands, 0);
+    assert_eq!(stats.success_count, 0);
+    assert_eq!(stats.failure_count, 0);
+    assert_eq!(stats.avg_duration_ms, 0);
+    assert!(stats.top_commands.is_empty());
+    assert!(stats.top_directories.is_empty());
+}
+
+#[test]
+fn test_stats_single_entry() {
+    let (_dir, repo) = setup_test_db();
+
+    let session = Session::new("test-host".to_string(), 1000);
+    repo.insert_session(&session).unwrap();
+
+    let now = chrono::Utc::now().timestamp_millis();
+    let entry = Entry::new(
+        session.id.clone(),
+        "echo hello".to_string(),
+        "/home/user".to_string(),
+        Some(0),
+        now - 1000,
+        now - 500,
+    );
+    repo.insert_entry(&entry).unwrap();
+
+    let stats = repo.get_stats(None, 10, None).unwrap();
+    assert_eq!(stats.total_commands, 1);
+    assert_eq!(stats.unique_commands, 1);
+    assert_eq!(stats.success_count, 1);
+    assert_eq!(stats.failure_count, 0);
+    assert!(stats.avg_duration_ms > 0);
+
+    // The command should appear in top_commands
+    assert_eq!(stats.top_commands.len(), 1);
+    assert_eq!(stats.top_commands[0].0, "echo hello");
+    assert_eq!(stats.top_commands[0].1, 1);
+
+    // The cwd should appear in top_directories
+    assert_eq!(stats.top_directories.len(), 1);
+    assert_eq!(stats.top_directories[0].0, "/home/user");
+    assert_eq!(stats.top_directories[0].1, 1);
+}
+
+#[test]
+fn test_hourly_heatmap_empty_database() {
+    let (_dir, repo) = setup_test_db();
+
+    // Hourly distribution is returned as part of get_stats
+    let stats = repo.get_stats(None, 10, None).unwrap();
+    // On an empty database, hourly_distribution should be empty (no rows to group)
+    assert!(
+        stats.hourly_distribution.is_empty(),
+        "Empty database should produce no hourly distribution data"
+    );
+}
+
+#[test]
+fn test_daily_activity_empty_database() {
+    let (_dir, repo) = setup_test_db();
+
+    let activity = repo.get_daily_activity(30, None).unwrap();
+    assert!(
+        activity.is_empty(),
+        "Empty database should return empty daily activity"
+    );
+}
+
+#[test]
+fn test_top_sessions_empty_database() {
+    let (_dir, repo) = setup_test_db();
+
+    // list_sessions with a limit acts as the "top sessions" query
+    let sessions = repo.list_sessions(None, None, 10).unwrap();
+    assert!(
+        sessions.is_empty(),
+        "Empty database should return no sessions"
+    );
+}
+
+#[test]
+fn test_stats_with_period_filter() {
+    let (_dir, repo) = setup_test_db();
+
+    let session = Session::new("test-host".to_string(), 1000);
+    repo.insert_session(&session).unwrap();
+
+    let now = chrono::Utc::now().timestamp_millis();
+    let day_ms = 86_400_000i64;
+
+    // Insert a recent entry (1 hour ago)
+    let recent = Entry::new(
+        session.id.clone(),
+        "recent-cmd".to_string(),
+        "/recent".to_string(),
+        Some(0),
+        now - 3_600_000,
+        now - 3_599_000,
+    );
+    repo.insert_entry(&recent).unwrap();
+
+    // Insert an old entry (20 days ago)
+    let old = Entry::new(
+        session.id.clone(),
+        "old-cmd".to_string(),
+        "/old".to_string(),
+        Some(1),
+        now - 20 * day_ms,
+        now - 20 * day_ms + 1000,
+    );
+    repo.insert_entry(&old).unwrap();
+
+    // All time — both entries
+    let all_stats = repo.get_stats(None, 10, None).unwrap();
+    assert_eq!(all_stats.total_commands, 2);
+    assert_eq!(all_stats.success_count, 1);
+    assert_eq!(all_stats.failure_count, 1);
+
+    // Last 7 days — only the recent entry
+    let week_stats = repo.get_stats(Some(7), 10, None).unwrap();
+    assert_eq!(
+        week_stats.total_commands, 1,
+        "Only recent entry within 7 days"
+    );
+    assert_eq!(week_stats.unique_commands, 1);
+    assert_eq!(week_stats.success_count, 1);
+    assert_eq!(week_stats.failure_count, 0);
+    assert_eq!(week_stats.period_days, Some(7));
+
+    // Verify the recent command is in top_commands
+    assert_eq!(week_stats.top_commands.len(), 1);
+    assert_eq!(week_stats.top_commands[0].0, "recent-cmd");
+
+    // Verify the recent directory is in top_directories
+    assert_eq!(week_stats.top_directories.len(), 1);
+    assert_eq!(week_stats.top_directories[0].0, "/recent");
+}

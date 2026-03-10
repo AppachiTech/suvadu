@@ -50,12 +50,14 @@ impl Entry {
         }
     }
 
+    /// Parse the `executor_type` string into a typed `ExecutorKind`.
+    pub fn executor_kind(&self) -> ExecutorKind {
+        ExecutorKind::from_str_opt(self.executor_type.as_deref())
+    }
+
     /// Returns `true` if this entry was executed by a human (or unknown/missing executor).
     pub fn is_human(&self) -> bool {
-        matches!(
-            self.executor_type.as_deref(),
-            None | Some("human" | "unknown")
-        )
+        self.executor_kind().is_human()
     }
 
     /// Returns `true` if this entry was executed by an agent (not human/unknown).
@@ -116,6 +118,42 @@ pub struct Bookmark {
     pub command: String,
     pub label: Option<String>,
     pub created_at: i64,
+}
+
+/// Known executor types for type-safe matching.
+///
+/// The `executor_type` field on `Entry` is stored as `Option<String>` for
+/// database and serde compatibility. Use `Entry::executor_kind()` to get
+/// a typed `ExecutorKind` for exhaustive matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutorKind {
+    Human,
+    Agent,
+    Bot,
+    Ide,
+    Ci,
+    Programmatic,
+    Unknown,
+}
+
+impl ExecutorKind {
+    /// Parse an executor type string into a typed variant.
+    pub fn from_str_opt(s: Option<&str>) -> Self {
+        match s {
+            Some("human") => Self::Human,
+            Some("agent") => Self::Agent,
+            Some("bot") => Self::Bot,
+            Some("ide") => Self::Ide,
+            Some("ci") => Self::Ci,
+            Some("programmatic") => Self::Programmatic,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Returns `true` for human or unknown/missing executor types.
+    pub const fn is_human(self) -> bool {
+        matches!(self, Self::Human | Self::Unknown)
+    }
 }
 
 /// Which entry field to search on.
@@ -276,6 +314,53 @@ mod tests {
     }
 
     #[test]
+    fn test_executor_kind_from_str_opt() {
+        assert_eq!(ExecutorKind::from_str_opt(None), ExecutorKind::Unknown);
+        assert_eq!(
+            ExecutorKind::from_str_opt(Some("human")),
+            ExecutorKind::Human
+        );
+        assert_eq!(
+            ExecutorKind::from_str_opt(Some("agent")),
+            ExecutorKind::Agent
+        );
+        assert_eq!(ExecutorKind::from_str_opt(Some("bot")), ExecutorKind::Bot);
+        assert_eq!(ExecutorKind::from_str_opt(Some("ide")), ExecutorKind::Ide);
+        assert_eq!(ExecutorKind::from_str_opt(Some("ci")), ExecutorKind::Ci);
+        assert_eq!(
+            ExecutorKind::from_str_opt(Some("programmatic")),
+            ExecutorKind::Programmatic
+        );
+        assert_eq!(
+            ExecutorKind::from_str_opt(Some("unrecognized")),
+            ExecutorKind::Unknown
+        );
+    }
+
+    #[test]
+    fn test_executor_kind_is_human() {
+        assert!(ExecutorKind::Human.is_human());
+        assert!(ExecutorKind::Unknown.is_human());
+        assert!(!ExecutorKind::Agent.is_human());
+        assert!(!ExecutorKind::Bot.is_human());
+        assert!(!ExecutorKind::Ide.is_human());
+        assert!(!ExecutorKind::Ci.is_human());
+        assert!(!ExecutorKind::Programmatic.is_human());
+    }
+
+    #[test]
+    fn test_entry_executor_kind() {
+        let mut entry = Entry::test("ls");
+        assert_eq!(entry.executor_kind(), ExecutorKind::Unknown);
+
+        entry.executor_type = Some("agent".to_string());
+        assert_eq!(entry.executor_kind(), ExecutorKind::Agent);
+
+        entry.executor_type = Some("human".to_string());
+        assert_eq!(entry.executor_kind(), ExecutorKind::Human);
+    }
+
+    #[test]
     fn test_entry_is_agent() {
         let mut entry = Entry::new(
             "s1".to_string(),
@@ -298,7 +383,13 @@ mod tests {
         entry.executor_type = Some("agent".to_string());
         assert!(entry.is_agent());
 
-        entry.executor_type = Some("claude-code".to_string());
+        entry.executor_type = Some("ide".to_string());
+        assert!(entry.is_agent());
+
+        entry.executor_type = Some("ci".to_string());
+        assert!(entry.is_agent());
+
+        entry.executor_type = Some("programmatic".to_string());
         assert!(entry.is_agent());
     }
 }

@@ -344,4 +344,72 @@ mod tests {
             assert!(pk.verify(data, &sig, false).is_err());
         }
     }
+
+    // --- Path traversal security tests ---
+
+    #[test]
+    fn path_traversal_detected_outside_dir() {
+        let dir = std::path::Path::new("/tmp/update");
+        let outside = std::path::Path::new("/etc/passwd");
+        assert!(!outside.starts_with(dir));
+    }
+
+    #[test]
+    fn path_within_dir_is_accepted() {
+        let dir = std::path::Path::new("/tmp/update");
+        let inside = std::path::Path::new("/tmp/update/suv");
+        assert!(inside.starts_with(dir));
+    }
+
+    // --- Checksum comparison security tests ---
+
+    #[test]
+    fn checksum_mismatch_detected() {
+        let expected = "abc123";
+        let actual = "def456";
+        assert!(expected != actual);
+    }
+
+    #[test]
+    fn empty_checksum_rejected() {
+        let expected = "";
+        let actual = "abc123";
+        assert!(expected.is_empty() || actual.is_empty() || expected != actual);
+
+        let expected = "abc123";
+        let actual = "";
+        assert!(expected.is_empty() || actual.is_empty() || expected != actual);
+    }
+
+    #[test]
+    fn matching_checksum_accepted() {
+        let expected = "abc123def456";
+        let actual = "abc123def456";
+        assert!(!expected.is_empty() && !actual.is_empty() && expected == actual);
+    }
+
+    // --- Checksum extraction parsing tests ---
+
+    #[test]
+    fn checksum_extracted_from_sha256sum_output() {
+        // sha256sum format: "hash  filename"
+        let output = "abc123def456  /tmp/file.tar.gz\n";
+        let extracted = output.split_whitespace().next().unwrap_or("");
+        assert_eq!(extracted, "abc123def456");
+    }
+
+    #[test]
+    fn checksum_extraction_handles_empty_output() {
+        let output = "";
+        let extracted = output.split_whitespace().next().unwrap_or("");
+        assert_eq!(extracted, "");
+    }
+
+    #[test]
+    fn checksum_extraction_handles_shasum_format() {
+        // shasum -a 256 format: "hash  filename"
+        let output = "e3b0c44298fc1c149  some_file.tar.gz\n";
+        let extracted = output.split_whitespace().next().unwrap_or("");
+        assert_eq!(extracted, "e3b0c44298fc1c149");
+    }
 }

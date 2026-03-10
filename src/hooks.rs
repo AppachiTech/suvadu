@@ -7,9 +7,8 @@ fn shell_quote_single(value: &str) -> String {
     format!("'{escaped}'")
 }
 
-/// Executor-detection function for **zsh** shell scripts.
-const fn zsh_executor_detection_script() -> &'static str {
-    r#"# Detect executor type and name
+/// Executor-detection shell function body, shared between zsh and bash hooks.
+const EXECUTOR_DETECTION_SCRIPT: &str = r#"# Detect executor type and name
 __suvadu_detect_executor() {
     local executor_type="unknown"
     local executor="unknown"
@@ -73,78 +72,7 @@ __suvadu_detect_executor() {
 
     echo "$executor_type:$executor"
 }
-"#
-}
-
-/// Executor-detection function for **bash** shell scripts.
-///
-/// The bash variant has a slightly different set of detections compared to zsh.
-const fn bash_executor_detection_script() -> &'static str {
-    r#"# Detect executor type and name
-__suvadu_detect_executor() {
-    local executor_type="unknown"
-    local executor="unknown"
-
-    # CI/CD Detection
-    if [[ -n "$CI" ]]; then
-        executor_type="ci"
-        if [[ -n "$GITHUB_ACTIONS" ]]; then
-            executor="github-actions"
-        elif [[ -n "$GITLAB_CI" ]]; then
-            executor="gitlab"
-        elif [[ -n "$CIRCLECI" ]]; then
-            executor="circleci"
-        else
-            executor="ci-unknown"
-        fi
-    # AI Agent Detection
-    elif [[ -n "$CLAUDE_CODE" ]] || [[ "$TERM_PROGRAM" == "claude" ]]; then
-        executor_type="agent"
-        executor="claude-code"
-    elif [[ -n "$CODEX_CLI" ]]; then
-        executor_type="agent"
-        executor="openai-codex"
-    elif [[ -n "$AIDER" ]] || [[ -n "$AIDER_SESSION" ]]; then
-        executor_type="agent"
-        executor="aider"
-    elif [[ -n "$CONTINUE_SESSION" ]]; then
-        executor_type="agent"
-        executor="continue-dev"
-    elif [[ -n "$COPILOT_WORKSPACE" ]]; then
-        executor_type="agent"
-        executor="copilot"
-    # IDE Detection
-    elif [[ -n "$WINDSURF" ]] || [[ -n "$CODEIUM" ]]; then
-        executor_type="ide"
-        executor="windsurf"
-    elif [[ "$TERM_PROGRAM" == "vscode" ]] || [[ -n "$VSCODE_INJECTION" ]]; then
-        executor_type="ide"
-        executor="vscode"
-    elif [[ -n "$CURSOR_INJECTION" ]] || [[ -n "$CURSOR_TRACE_ID" ]]; then
-        executor_type="ide"
-        executor="cursor"
-    elif [[ -n "$ANTIGRAVITY_AGENT" ]]; then
-        executor_type="ide"
-        executor="antigravity"
-    elif [[ -n "$INTELLIJ_ENVIRONMENT_READER" ]]; then
-        executor_type="ide"
-        executor="intellij"
-    elif [[ -n "$PYCHARM_HOSTED" ]]; then
-        executor_type="ide"
-        executor="pycharm"
-    # Human Detection
-    elif [[ -t 0 ]]; then
-        executor_type="human"
-        executor="terminal"
-    else
-        executor_type="programmatic"
-        executor="subprocess"
-    fi
-
-    echo "$executor_type:$executor"
-}
-"#
-}
+"#;
 
 /// Zsh-specific preamble, preexec/precmd hooks, and hook registration.
 ///
@@ -497,7 +425,7 @@ pub fn get_zsh_hook(config: &config::Config) -> Result<String, Box<dyn std::erro
     let bin_path = current_exe.to_string_lossy();
 
     let mut script = zsh_preexec_script(&bin_path);
-    script.push_str(zsh_executor_detection_script());
+    script.push_str(EXECUTOR_DETECTION_SCRIPT);
     script.push_str(zsh_hook_functions());
     script.push_str(zsh_widgets_script());
 
@@ -524,7 +452,7 @@ pub fn get_bash_hook(config: &config::Config) -> Result<String, Box<dyn std::err
     let bin_path = current_exe.to_string_lossy();
 
     let mut script = bash_preexec_script(&bin_path);
-    script.push_str(bash_executor_detection_script());
+    script.push_str(EXECUTOR_DETECTION_SCRIPT);
     script.push_str(bash_hook_functions());
     script.push_str(bash_search_widget());
 

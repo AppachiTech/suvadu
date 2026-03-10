@@ -39,6 +39,24 @@ pub enum ImportFormat {
     ZshHistory,
 }
 
+/// Agent report output format
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ReportFormat {
+    Text,
+    Markdown,
+    Json,
+}
+
+/// Initialization target for shell hooks and IDE integrations
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum InitTarget {
+    Zsh,
+    Bash,
+    ClaudeCode,
+    Cursor,
+    Antigravity,
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Enable history recording globally (persistent)
@@ -78,7 +96,7 @@ pub enum Commands {
     )]
     Init {
         /// Target: 'zsh', 'bash', 'claude-code', 'cursor', or 'antigravity'
-        target: String,
+        target: InitTarget,
     },
 
     /// Process a Claude Code `PostToolUse` hook event (reads JSON from stdin)
@@ -547,7 +565,7 @@ pub enum AgentCommands {
         executor: Option<String>,
         /// Output format: text, markdown, or json
         #[arg(long, default_value = "text")]
-        format: String,
+        format: ReportFormat,
         /// Filter to commands run in the current directory
         #[arg(long)]
         here: bool,
@@ -626,7 +644,7 @@ mod tests {
             Commands::Agent(AgentCommands::Report {
                 format, executor, ..
             }) => {
-                assert_eq!(format, "json");
+                assert!(matches!(format, ReportFormat::Json));
                 assert_eq!(executor, Some("claude-code".to_string()));
             }
             _ => panic!("Expected Agent Report command"),

@@ -106,6 +106,7 @@ impl SearchApp {
                 DialogState::Delete { .. } => self.render_delete_dialog(f, f.area()),
                 DialogState::TagAssociation => self.render_tag_dialog(f, f.area()),
                 DialogState::Note { .. } => self.render_note_dialog(f, f.area()),
+                DialogState::Help => self.render_help_dialog(f, f.area()),
                 DialogState::None => {}
             }
         })?;
@@ -223,6 +224,8 @@ impl SearchApp {
                 },
                 badge_label_style,
             ),
+            Span::styled(" ? ", badge_key_style),
+            Span::styled(" Help  ", badge_label_style),
         ]
     }
 
@@ -1022,9 +1025,90 @@ impl SearchApp {
         f.render_widget(hint, inner_layout[1]);
     }
 
+    pub(super) fn render_help_dialog(&self, f: &mut ratatui::Frame, area: Rect) {
+        // Use self to stay consistent with other dialog render methods.
+        let _ = &self.dialog;
+
+        let t = theme();
+        let popup_area = centered_rect(70, 80, area);
+        f.render_widget(Clear, popup_area);
+
+        let block = Block::default()
+            .title(" Keyboard Shortcuts ")
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(t.primary))
+            .style(Style::default().bg(t.bg_elevated));
+
+        let lines = build_help_lines(t);
+        let content = Paragraph::new(lines).block(block);
+        f.render_widget(content, popup_area);
+    }
+
     fn highlight_command(command: &str, width: usize) -> ratatui::text::Text<'static> {
         crate::util::highlight_command(command, width)
     }
+}
+
+fn help_section(title: &'static str, t: &crate::theme::Theme) -> Line<'static> {
+    Line::from(Span::styled(
+        title,
+        Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn help_row(key: &'static str, desc: &'static str, t: &crate::theme::Theme) -> Line<'static> {
+    let key_style = Style::default().fg(t.text).add_modifier(Modifier::BOLD);
+    let desc_style = Style::default().fg(t.text_secondary);
+    Line::from(vec![
+        Span::styled(key, key_style),
+        Span::styled(desc, desc_style),
+    ])
+}
+
+fn build_help_lines(t: &crate::theme::Theme) -> Vec<Line<'static>> {
+    vec![
+        Line::from(""),
+        help_section("\u{2500}\u{2500} Navigation \u{2500}\u{2500}", t),
+        help_row(
+            "  \u{2191}/\u{2193}/j/k        ",
+            "Move selection up/down",
+            t,
+        ),
+        help_row("  PgUp/PgDn       ", "Previous/next page", t),
+        help_row("  ^G              ", "Go to page...", t),
+        help_row("  Home/End        ", "First/last entry", t),
+        Line::from(""),
+        help_section("\u{2500}\u{2500} Actions \u{2500}\u{2500}", t),
+        help_row("  Enter           ", "Select command", t),
+        help_row("  ^Y              ", "Copy command to clipboard", t),
+        help_row("  ^D              ", "Delete entry", t),
+        help_row("  ^B              ", "Toggle bookmark", t),
+        help_row("  ^N              ", "Add/edit note", t),
+        Line::from(""),
+        help_section("\u{2500}\u{2500} Filters \u{2500}\u{2500}", t),
+        help_row(
+            "  ^F              ",
+            "Filter dialog (date, tag, exit code)",
+            t,
+        ),
+        help_row("  ^T              ", "Tag current session", t),
+        help_row("  ^L              ", "Toggle directory filter", t),
+        Line::from(""),
+        help_section("\u{2500}\u{2500} Display \u{2500}\u{2500}", t),
+        help_row("  ^U              ", "Toggle unique/all mode", t),
+        help_row("  Tab             ", "Toggle detail pane", t),
+        help_row("  ^S              ", "Toggle context boost", t),
+        Line::from(""),
+        help_section("\u{2500}\u{2500} Other \u{2500}\u{2500}", t),
+        help_row("  ?/F1            ", "This help", t),
+        help_row("  Esc/q           ", "Exit", t),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Press any key to close",
+            Style::default().fg(t.text_muted),
+        )),
+    ]
 }
 
 #[cfg(test)]

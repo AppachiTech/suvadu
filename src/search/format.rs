@@ -133,13 +133,14 @@ pub(super) fn entry_row_styles(
 // ── Entry formatting ───────────────────────────────────────────
 
 pub(super) fn format_executor(entry: &crate::models::Entry) -> String {
-    let icon = match entry.executor_type.as_deref() {
-        Some("human") => "👤",
-        Some("bot" | "agent") => "🤖",
-        Some("ide") => "💻",
-        Some("ci") => "⚙️",
-        Some("programmatic") => "⚡",
-        _ => "❓",
+    use crate::models::ExecutorKind;
+    let icon = match entry.executor_kind() {
+        ExecutorKind::Human => "👤",
+        ExecutorKind::Agent | ExecutorKind::Bot => "🤖",
+        ExecutorKind::Ide => "💻",
+        ExecutorKind::Ci => "⚙️",
+        ExecutorKind::Programmatic => "⚡",
+        ExecutorKind::Unknown => "❓",
     };
     entry
         .executor

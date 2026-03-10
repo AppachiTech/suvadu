@@ -267,6 +267,38 @@ impl Repository {
         Ok(count)
     }
 
+    /// Build the SQL and params for a pattern-based query (shared by delete and count).
+    fn build_pattern_sql(
+        prefix: &str,
+        pattern: &str,
+        is_regex: bool,
+        before_timestamp: Option<i64>,
+    ) -> DbResult<(String, Vec<Box<dyn rusqlite::ToSql>>)> {
+        if is_regex {
+            regex::Regex::new(pattern)
+                .map_err(|e| crate::db::DbError::Validation(e.to_string()))?;
+
+            let mut sql = format!("{prefix} WHERE command REGEXP ?1");
+            let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(pattern.to_string())];
+
+            if let Some(ts) = before_timestamp {
+                sql.push_str(" AND started_at < ?2");
+                params.push(Box::new(ts));
+            }
+            Ok((sql, params))
+        } else {
+            let escaped = super::escape_like(pattern);
+            let mut sql = format!("{prefix} WHERE command LIKE ?1 ESCAPE '\\'");
+            let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(format!("%{escaped}%"))];
+
+            if let Some(ts) = before_timestamp {
+                sql.push_str(" AND started_at < ?2");
+                params.push(Box::new(ts));
+            }
+            Ok((sql, params))
+        }
+    }
+
     /// Delete entries matching a pattern (and optionally older than a timestamp)
     pub fn delete_entries(
         &self,
@@ -274,41 +306,12 @@ impl Repository {
         is_regex: bool,
         before_timestamp: Option<i64>,
     ) -> DbResult<usize> {
-        if is_regex {
-            // Validate regex before sending to SQLite
-            regex::Regex::new(pattern)
-                .map_err(|e| crate::db::DbError::Validation(e.to_string()))?;
-
-            // Use SQLite REGEXP function — no need to load rows into memory
-            let mut sql = String::from("DELETE FROM entries WHERE command REGEXP ?1");
-            let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-            param_values.push(Box::new(pattern.to_string()));
-
-            if let Some(ts) = before_timestamp {
-                sql.push_str(" AND started_at < ?2");
-                param_values.push(Box::new(ts));
-            }
-
-            let count = self
-                .conn
-                .execute(&sql, rusqlite::params_from_iter(param_values.iter()))?;
-            Ok(count)
-        } else {
-            let escaped = super::escape_like(pattern);
-            let mut sql = String::from("DELETE FROM entries WHERE command LIKE ?1 ESCAPE '\\'");
-            let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-            params.push(Box::new(format!("%{escaped}%")));
-
-            if let Some(ts) = before_timestamp {
-                sql.push_str(" AND started_at < ?2");
-                params.push(Box::new(ts));
-            }
-
-            let count = self
-                .conn
-                .execute(&sql, rusqlite::params_from_iter(params.iter()))?;
-            Ok(count)
-        }
+        let (sql, params) =
+            Self::build_pattern_sql("DELETE FROM entries", pattern, is_regex, before_timestamp)?;
+        let count = self
+            .conn
+            .execute(&sql, rusqlite::params_from_iter(params.iter()))?;
+        Ok(count)
     }
 
     /// Count preview of deletion (Dry Run)
@@ -318,52 +321,18 @@ impl Repository {
         is_regex: bool,
         before_timestamp: Option<i64>,
     ) -> DbResult<usize> {
-        if is_regex {
-            // Validate regex before sending to SQLite
-            regex::Regex::new(pattern)
-                .map_err(|e| crate::db::DbError::Validation(e.to_string()))?;
-
-            // Use SQLite REGEXP function — no need to load rows into memory
-            let mut sql = String::from("SELECT COUNT(*) FROM entries WHERE command REGEXP ?1");
-            let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-            param_values.push(Box::new(pattern.to_string()));
-
-            if let Some(ts) = before_timestamp {
-                sql.push_str(" AND started_at < ?2");
-                param_values.push(Box::new(ts));
-            }
-
-            let count: i64 = self.conn.query_row(
-                &sql,
-                rusqlite::params_from_iter(param_values.iter()),
-                |row| row.get(0),
-            )?;
-            Ok(
-                usize::try_from(count)
-                    .map_err(|e| crate::db::DbError::Validation(e.to_string()))?,
-            )
-        } else {
-            let escaped = super::escape_like(pattern);
-            let mut sql =
-                String::from("SELECT COUNT(*) FROM entries WHERE command LIKE ?1 ESCAPE '\\'");
-            let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-            params.push(Box::new(format!("%{escaped}%")));
-
-            if let Some(ts) = before_timestamp {
-                sql.push_str(" AND started_at < ?2");
-                params.push(Box::new(ts));
-            }
-
-            let count: i64 =
-                self.conn
-                    .query_row(&sql, rusqlite::params_from_iter(params.iter()), |row| {
-                        row.get(0)
-                    })?;
-            Ok(
-                usize::try_from(count)
-                    .map_err(|e| crate::db::DbError::Validation(e.to_string()))?,
-            )
-        }
+        let (sql, params) = Self::build_pattern_sql(
+            "SELECT COUNT(*) FROM entries",
+            pattern,
+            is_regex,
+            before_timestamp,
+        )?;
+        let count: i64 =
+            self.conn
+                .query_row(&sql, rusqlite::params_from_iter(params.iter()), |row| {
+                    row.get(0)
+                })?;
+        usize::try_from(count).map_err(|e| crate::db::DbError::Validation(e.to_string()))
     }
 
     /// Export all entries with optional date filtering (no pagination)
