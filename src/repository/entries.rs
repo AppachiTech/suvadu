@@ -1,3 +1,9 @@
+// SQL safety: all queries in this module use `FilterBuilder` to compose WHERE
+// clauses. `FilterBuilder::build_where()` returns a string containing only
+// hardcoded column names and `?` placeholders — never interpolated user values.
+// Actual user input is stored in `FilterBuilder::params` and bound via rusqlite's
+// parameterized query API (`params_refs()`). This is safe against SQL injection.
+
 use crate::db::DbResult;
 use crate::models::{Entry, SessionSummary};
 use rusqlite::params;

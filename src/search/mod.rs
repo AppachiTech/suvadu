@@ -1,4 +1,5 @@
 mod data;
+mod format;
 mod input;
 mod render;
 

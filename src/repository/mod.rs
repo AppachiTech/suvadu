@@ -226,6 +226,9 @@ impl FilterBuilder {
         self
     }
 
+    /// Build a WHERE clause string with only hardcoded column names and `?`
+    /// placeholders. User values are in `self.params`, bound separately via
+    /// `params_refs()`. The returned string is safe to interpolate into SQL.
     pub fn build_where(&self) -> String {
         if self.clauses.is_empty() {
             " WHERE 1=1".into()
