@@ -186,9 +186,6 @@ pub fn migrate_config_macos() {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn migrate_config_macos() {}
-
 /// Get the path to the suvadu config file
 pub fn get_config_path() -> ConfigResult<PathBuf> {
     let dirs = crate::util::project_dirs()
