@@ -53,9 +53,9 @@ jobs:
           # Generate SHA256 checksums
           shasum -a 256 artifacts/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz | awk '{print $1}' > artifacts/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz.sha256
 
-          # Sign with minisign (secret key from GitHub Secrets)
+          # Sign with minisign (secret key from GitHub Secrets, empty password piped)
           echo "$MINISIGN_SECRET_KEY" > /tmp/minisign.key
-          minisign -S -s /tmp/minisign.key -m artifacts/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz \
+          echo '' | minisign -S -s /tmp/minisign.key -m artifacts/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz \
             -t "suvadu ${{ github.ref_name }} macOS${{ matrix.suffix }}" -x artifacts/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz.minisig
           rm -f /tmp/minisign.key
 
