@@ -28,6 +28,7 @@ Suvadu (Tamil: "Trace" / "Footprint") replaces your shell's built-in history wit
 ## Table of Contents
 
 - [Why Suvadu?](#why-suvadu)
+  - [How does Suvadu compare to other tools?](#how-does-suvadu-compare-to-other-tools)
 - [Features](#features)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
@@ -68,6 +69,24 @@ Your shell history is one of your most valuable productivity assets — but the 
 | **AI Agents** | Invisible | Auto-detected, risk-assessed, auditable |
 | **Cross-shell** | Per-shell files | Unified database |
 | **UI** | Reverse-i-search | Interactive TUI with filters, preview, bookmarks |
+
+### How does Suvadu compare to other tools?
+
+| Feature | Suvadu | Atuin | McFly | Hstr | fzf history |
+|---------|--------|-------|-------|------|-------------|
+| **Storage** | Local SQLite | Cloud or local SQLite | Local SQLite | In-memory | Flat file |
+| **Cloud sync** | No — privacy-first, local-only | Yes (optional local) | No | No | No |
+| **TUI** | Full-screen with detail pane | Full-screen | Inline overlay | Full-screen | Inline |
+| **Fuzzy search** | Yes (nucleo) | Yes (skim) | Neural scoring | Substring/regex | Yes (fzf) |
+| **Activity heatmap** | Yes (5-tier) | Dashboard (cloud) | No | No | No |
+| **AI agent tracking** | Auto-detect + risk assess | No | No | No | No |
+| **Secrets redaction** | Auto before storage | No | No | No | No |
+| **Session timeline** | Interactive TUI | No | No | No | No |
+| **Themes** | 5 built-in, hot-swap | No | No | No | No |
+| **Signed updates** | Minisign verification | Yes | No | No | No |
+| **Account required** | No | Yes (for sync) | No | No | No |
+
+Suvadu is designed for developers who want a powerful local-only shell history with no cloud dependency, no account, and no data leaving their machine.
 
 ---
 
