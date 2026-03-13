@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.2] - 2026-03-13
+
+### Fixed
+- **Linux self-update** — `suv update` failed with "Text file busy" (ETXTBSY) on Linux because `cp` cannot overwrite a running binary. Fixed by removing the old binary before copying; the kernel keeps the old inode alive for the running process.
+
+### Added
+- **`scripts/install.sh`** — Universal installer script that handles both fresh installs and updates. Auto-detects OS (Linux/macOS) and architecture (x86_64/ARM64), verifies SHA256 checksums, uses `rm`-before-`cp` to avoid the Linux "Text file busy" issue, checks `version.txt` to skip updates when already on latest, and only shows shell integration instructions on fresh installs.
+- **Cargo install detection** — `suv update` now detects Cargo-installed binaries (`~/.cargo/bin/`) and redirects users to `cargo install suvadu`, matching the existing Homebrew detection behavior.
+- **`version.txt`** — CI now publishes a `version.txt` file to `downloads.appachi.tech` on each release, enabling the install script to compare versions and skip unnecessary downloads.
+
+### Changed
+- **Homebrew update command** — `suv update` for Homebrew users now suggests the full `brew update && brew tap AppachiTech/suvadu && brew upgrade suvadu` command to ensure the tap is present and the formula index is fresh.
+- **CI** — Skip redundant `cargo test` in the macOS x86_64 cross-compile job (already tested in the ARM64 job).
+
 ## [0.1.1] - 2026-03-10
 
 ### Fixed

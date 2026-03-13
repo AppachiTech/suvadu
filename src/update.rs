@@ -22,6 +22,14 @@ pub fn is_homebrew_install() -> bool {
     false
 }
 
+pub fn is_cargo_install() -> bool {
+    if let Ok(exe) = std::env::current_exe() {
+        let path = exe.to_string_lossy();
+        return path.contains("/.cargo/bin/");
+    }
+    false
+}
+
 pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
     println!("Current version: v{}", env!("CARGO_PKG_VERSION"));
 
@@ -30,12 +38,26 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
         println!("Suvadu was installed via Homebrew. To update, run:");
         println!();
         if crate::util::color_enabled() {
-            println!("  \x1b[36mbrew upgrade suvadu\x1b[0m");
+            println!("  \x1b[36mbrew update && brew tap AppachiTech/suvadu && brew upgrade suvadu\x1b[0m");
         } else {
-            println!("  brew upgrade suvadu");
+            println!("  brew update && brew tap AppachiTech/suvadu && brew upgrade suvadu");
         }
         println!();
         println!("Using 'suv update' with Homebrew installs can cause version conflicts.");
+        return Ok(());
+    }
+
+    if is_cargo_install() {
+        println!();
+        println!("Suvadu was installed via Cargo. To update, run:");
+        println!();
+        if crate::util::color_enabled() {
+            println!("  \x1b[36mcargo install suvadu\x1b[0m");
+        } else {
+            println!("  cargo install suvadu");
+        }
+        println!();
+        println!("Using 'suv update' with Cargo installs can cause version conflicts.");
         return Ok(());
     }
 
@@ -264,6 +286,14 @@ fn install_binary(binary_path: &std::path::Path) -> Result<(), Box<dyn std::erro
 
     println!("Installing update (requires sudo)...");
 
+    // On Linux, `cp` over a running binary fails with "Text file busy".
+    // Removing first works because the kernel keeps the old inode alive
+    // until the running process exits, while freeing the directory entry
+    // for the new file.
+    let _ = std::process::Command::new("sudo")
+        .args(["rm", "-f", &*install_str])
+        .status();
+
     let status_bin = std::process::Command::new("sudo")
         .args(["cp", &binary_str, &*install_str])
         .status()?;
@@ -291,6 +321,15 @@ mod tests {
         assert!(
             !result,
             "Test binary should not be detected as a Homebrew install"
+        );
+    }
+
+    #[test]
+    fn test_is_not_cargo_install() {
+        let result = is_cargo_install();
+        assert!(
+            !result,
+            "Test binary should not be detected as a Cargo install"
         );
     }
 

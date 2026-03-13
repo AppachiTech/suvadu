@@ -206,6 +206,17 @@ echo 'eval "$(suv init zsh)"' >> ~/.zshrc && source ~/.zshrc
 echo 'eval "$(suv init bash)"' >> ~/.bashrc && source ~/.bashrc
 ```
 
+### Cargo (any platform with Rust)
+
+```bash
+cargo install suvadu
+
+# Add to your shell (choose one):
+echo 'eval "$(suv init zsh)"' >> ~/.zshrc && source ~/.zshrc
+# or
+echo 'eval "$(suv init bash)"' >> ~/.bashrc && source ~/.bashrc
+```
+
 ### Build from Source
 
 ```bash
@@ -219,10 +230,16 @@ sudo cp target/release/suv /usr/local/bin/
 
 ```bash
 # Homebrew
-brew upgrade suvadu
+brew update && brew tap AppachiTech/suvadu && brew upgrade suvadu
 
-# Manual installations
+# Cargo
+cargo install suvadu
+
+# Manual installations (curl/tar)
 suv update
+
+# Or use the install script (also works for first-time installs)
+curl -fsSL https://downloads.appachi.tech/install.sh | bash
 ```
 
 ### Uninstalling

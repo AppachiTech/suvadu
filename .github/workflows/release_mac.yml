@@ -29,6 +29,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Run Tests
+        if: matrix.suffix == ''
         run: cargo test
 
       - name: Build Binary (Release)
@@ -59,6 +60,9 @@ jobs:
             -t "suvadu ${{ github.ref_name }} macOS${{ matrix.suffix }}" -x artifacts/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz.minisig
           rm -f /tmp/minisign.key
 
+          # Write version.txt for install script version checks
+          echo "${GITHUB_REF_NAME#v}" > artifacts/version.txt
+
           # Create versioned tarball (e.g. suv-macos-v0.1.0.tar.gz)
           cp artifacts/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz artifacts/macos/archive/suv-macos${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz
           cp artifacts/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz.sha256 artifacts/macos/archive/suv-macos${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.sha256
@@ -84,7 +88,8 @@ jobs:
               "files": [
                 "https://downloads.appachi.tech/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz",
                 "https://downloads.appachi.tech/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz.sha256",
-                "https://downloads.appachi.tech/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz.minisig"
+                "https://downloads.appachi.tech/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz.minisig",
+                "https://downloads.appachi.tech/version.txt"
               ]
             }'
 

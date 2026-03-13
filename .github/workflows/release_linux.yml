@@ -74,6 +74,9 @@ jobs:
             -t "suvadu ${{ github.ref_name }} linux${{ matrix.suffix }}" -x artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.minisig
           rm -f /tmp/minisign.key
 
+          # Write version.txt for install script version checks
+          echo "${GITHUB_REF_NAME#v}" > artifacts/version.txt
+
           # Create versioned tarball
           cp artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz
           cp artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.sha256 artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.sha256
@@ -99,7 +102,8 @@ jobs:
               "files": [
                 "https://downloads.appachi.tech/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz",
                 "https://downloads.appachi.tech/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.sha256",
-                "https://downloads.appachi.tech/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.minisig"
+                "https://downloads.appachi.tech/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.minisig",
+                "https://downloads.appachi.tech/version.txt"
               ]
             }'
 
