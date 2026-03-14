@@ -1,12 +1,12 @@
 <p align="center">
-  <h1 align="center">Suvadu</h1>
-  <p align="center"><strong>Total recall for your terminal.</strong></p>
-  <p align="center">
-    <a href="https://github.com/AppachiTech/suvadu/actions/workflows/ci.yml"><img src="https://github.com/AppachiTech/suvadu/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-    <a href="https://crates.io/crates/suvadu"><img src="https://img.shields.io/crates/v/suvadu.svg" alt="crates.io"></a>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
-    <a href="https://github.com/AppachiTech/suvadu/releases"><img src="https://img.shields.io/github/v/release/AppachiTech/suvadu?label=latest" alt="Latest Release"></a>
-  </p>
+  <img src="assets/suvadu-logo.svg" alt="Suvadu" width="180">
+</p>
+<p align="center"><strong>Total recall for your terminal.</strong></p>
+<p align="center">
+  <a href="https://github.com/AppachiTech/suvadu/actions/workflows/ci.yml"><img src="https://github.com/AppachiTech/suvadu/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://crates.io/crates/suvadu"><img src="https://img.shields.io/crates/v/suvadu.svg" alt="crates.io"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://github.com/AppachiTech/suvadu/releases"><img src="https://img.shields.io/github/v/release/AppachiTech/suvadu?label=latest" alt="Latest Release"></a>
 </p>
 
 Suvadu (Tamil: "Trace" / "Footprint") replaces your shell's built-in history with a SQLite-backed store, giving you structured storage, millisecond-precision timestamps, and a modern interactive search UI — across every terminal, IDE, and AI agent you use.

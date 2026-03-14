@@ -1,0 +1,49 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <filter id="appIconGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <linearGradient id="iconBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#000000"/>
+      <stop offset="100%" stop-color="#001A00"/>
+    </linearGradient>
+    <linearGradient id="iconGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#39FF14"/>
+      <stop offset="50%" stop-color="#00FF41"/>
+      <stop offset="100%" stop-color="#008F11"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="256" height="256" rx="60" fill="url(#iconBg)"/>
+
+  <g filter="url(#appIconGlow)">
+    <!-- Hexagonal frame -->
+    <path d="M 128 40 L 200 85 L 200 175 L 128 220 L 56 175 L 56 85 Z"
+      fill="none" stroke="url(#iconGradient)" stroke-width="6"/>
+
+    <!-- Inner hex -->
+    <path d="M 128 70 L 175 97.5 L 175 152.5 L 128 180 L 81 152.5 L 81 97.5 Z"
+      fill="rgba(0, 255, 65, 0.1)" stroke="#00FF41" stroke-width="3"/>
+
+    <!-- Terminal prompt symbol: > -->
+    <path d="M 95 115 L 120 128 L 95 141"
+      stroke="#39FF14" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- Terminal cursor line: _ -->
+    <line x1="130" y1="141" x2="161" y2="141"
+      stroke="#39FF14" stroke-width="5" stroke-linecap="round"/>
+
+    <!-- Decorative dots at hex vertices -->
+    <circle cx="128" cy="60" r="3" fill="#39FF14"/>
+    <circle cx="185" cy="95" r="3" fill="#39FF14"/>
+    <circle cx="185" cy="161" r="3" fill="#39FF14"/>
+    <circle cx="128" cy="196" r="3" fill="#39FF14"/>
+    <circle cx="71" cy="161" r="3" fill="#39FF14"/>
+    <circle cx="71" cy="95" r="3" fill="#39FF14"/>
+  </g>
+</svg>
