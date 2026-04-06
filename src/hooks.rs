@@ -408,7 +408,7 @@ __suvadu_time_ms() {
     if [[ -n "$EPOCHREALTIME" ]]; then
         local secs="${EPOCHREALTIME%%.*}"
         local frac="${EPOCHREALTIME##*.}"
-        echo "$(( secs * 1000 + ${frac:0:3} ))"
+        echo "$(( secs * 1000 + 10#${frac:0:3} ))"
     else
         # Fallback: date +%s gives seconds, multiply by 1000
         echo "$(( $(date +%s) * 1000 ))"
