@@ -519,6 +519,22 @@ impl Repository {
         Ok(())
     }
 
+    /// Insert a session row only if `id` is not already present.
+    /// Used by `suv import` to satisfy the entries → sessions FK when the export
+    /// did not include the source machine's session metadata.
+    pub fn insert_session_if_missing(
+        &self,
+        id: &str,
+        hostname: &str,
+        created_at: i64,
+    ) -> DbResult<bool> {
+        let changed = self.conn.execute(
+            "INSERT OR IGNORE INTO sessions (id, hostname, created_at, tag_id) VALUES (?1, ?2, ?3, NULL)",
+            params![id, hostname, created_at],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// Get a session by ID
     pub fn get_session(&self, id: &str) -> DbResult<Option<Session>> {
         let mut stmt = self

@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 
 use crate::models::{Entry, Session};
@@ -28,7 +29,8 @@ pub fn handle_export(
 
     match format {
         "json" => {
-            // Stream JSON array: print `[`, then comma-separated entries, then `]`
+            // Stream JSON array: print `[`, then comma-separated entries, then `]`.
+            // Empty results still emit `[]` so the output is always valid JSON.
             let mut count = 0usize;
             let stdout = std::io::stdout();
             let mut out = stdout.lock();
@@ -43,6 +45,7 @@ pub fn handle_export(
                 Ok(())
             })?;
             if count == 0 {
+                writeln!(out, "[]")?;
                 eprintln!("No entries to export.");
             } else {
                 writeln!(out, "\n]")?;
@@ -95,8 +98,48 @@ pub fn handle_export(
     Ok(())
 }
 
+/// Result of a JSONL import. Returned by `import_jsonl_into_repo` so callers
+/// (and tests) can inspect what happened without parsing stdout.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ImportStats {
+    pub imported: u64,
+    pub parse_errors: u64,
+    pub placeholder_sessions: u64,
+    /// Tags that didn't exist on the destination and were created during import.
+    pub created_tags: u64,
+    /// Entries whose source `tag_id` could not be remapped (no matching name on
+    /// destination and tag creation failed, or the export carried a `tag_id`
+    /// without a `tag_name`). The entry is still imported but with `tag_id = NULL`.
+    pub dropped_tag_associations: u64,
+}
+
+/// Inspect the first non-empty line of `file` and reject formats that clearly
+/// aren't JSONL (e.g. CSV exports the user accidentally piped to `suv import`).
+/// Returns `Ok(())` on a JSONL-shaped file or an empty file.
+fn check_jsonl_shape(file: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let f = std::fs::File::open(file)?;
+    let reader = std::io::BufReader::new(f);
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !trimmed.starts_with('{') {
+            return Err(format!(
+                "{file} does not look like JSONL — its first non-empty line is not a JSON object.\n\
+                 `suv import` accepts JSONL only (use `--from zsh-history` for zsh history files).\n\
+                 If you exported as CSV, re-export with: suv export > history.jsonl"
+            )
+            .into());
+        }
+        return Ok(());
+    }
+    Ok(())
+}
+
 pub fn handle_import(file: &str, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
-    const BATCH_SIZE: u64 = 10_000;
+    check_jsonl_shape(file)?;
 
     let f = std::fs::File::open(file)?;
     let reader = std::io::BufReader::new(f);
@@ -128,13 +171,60 @@ pub fn handle_import(file: &str, dry_run: bool) -> Result<(), Box<dyn std::error
     }
 
     let repo = Repository::init()?;
+    let stats = import_jsonl_into_repo(&repo, reader)?;
 
-    // Stream entries in batches to avoid loading entire file into memory.
-    // Each batch is committed independently; a parse error skips the line,
-    // an insert error rolls back only the current batch and aborts.
-    let mut imported = 0u64;
-    let mut parse_errors = 0u64;
+    println!(
+        "Imported {} entries ({} skipped).",
+        stats.imported, stats.parse_errors
+    );
+    if stats.placeholder_sessions > 0 {
+        println!(
+            "  Created {} placeholder session(s) for entries from other machines.",
+            stats.placeholder_sessions
+        );
+    }
+    if stats.created_tags > 0 {
+        println!(
+            "  Created {} tag(s) carried over from the source machine.",
+            stats.created_tags
+        );
+    }
+    if stats.dropped_tag_associations > 0 {
+        println!(
+            "  {} entry(ies) imported with tag_id cleared (no name in export, or tag limit reached).",
+            stats.dropped_tag_associations
+        );
+    }
+    Ok(())
+}
+
+/// Stream JSONL entries from `reader` into `repo`.
+///
+/// Two integrity fixups are applied per entry to keep the import alive when
+/// the destination DB doesn't share state with the source:
+///
+/// * If the entry's `session_id` doesn't exist locally, an `imported`-host
+///   placeholder session is created (satisfies `entries.session_id` FK).
+/// * If the entry's `tag_id` doesn't exist locally, it's remapped by
+///   `tag_name` — looked up on the destination, created if missing, or
+///   cleared to NULL if neither path works (satisfies `entries.tag_id` FK).
+///
+/// Wraps the work in a transaction with periodic re-commits to bound WAL growth.
+/// A parse error skips the line; an insert error rolls back the current batch
+/// and propagates.
+pub fn import_jsonl_into_repo<R: BufRead>(
+    repo: &Repository,
+    reader: R,
+) -> Result<ImportStats, Box<dyn std::error::Error>> {
+    const BATCH_SIZE: u64 = 10_000;
+    const PLACEHOLDER_HOSTNAME: &str = "imported";
+
+    let mut stats = ImportStats::default();
     let mut batch_count = 0u64;
+    let mut ensured_sessions: HashSet<String> = HashSet::new();
+    // Lower-cased tag name → resolved local tag_id (or None if creation failed
+    // and we had to drop the association).
+    let mut tag_remap: HashMap<String, Option<i64>> = HashMap::new();
 
     let tx = repo.transaction()?;
 
@@ -144,29 +234,44 @@ pub fn handle_import(file: &str, dry_run: bool) -> Result<(), Box<dyn std::error
         if trimmed.is_empty() {
             continue;
         }
-        let entry: Entry = match serde_json::from_str(trimmed) {
+        let mut entry: Entry = match serde_json::from_str(trimmed) {
             Ok(e) => e,
             Err(err) => {
                 eprintln!("Line {}: parse error: {err}", line_num + 1);
-                parse_errors += 1;
+                stats.parse_errors += 1;
                 continue;
             }
         };
 
+        if !ensured_sessions.contains(&entry.session_id) {
+            let created = repo.insert_session_if_missing(
+                &entry.session_id,
+                PLACEHOLDER_HOSTNAME,
+                entry.started_at,
+            )?;
+            if created {
+                stats.placeholder_sessions += 1;
+            }
+            ensured_sessions.insert(entry.session_id.clone());
+        }
+
+        if entry.tag_id.is_some() {
+            let resolved = remap_tag_id(repo, &entry, &mut tag_remap, &mut stats)?;
+            entry.tag_id = resolved;
+        }
+
         match repo.insert_entry(&entry) {
             Ok(_) => {
-                imported += 1;
+                stats.imported += 1;
                 batch_count += 1;
             }
             Err(e) => {
                 eprintln!("Insert failed at line {}: {e}", line_num + 1);
                 eprintln!("Rolling back — no entries from this batch were written.");
-                // tx drops here, auto-rolling back
                 return Err(e.into());
             }
         }
 
-        // Commit in batches to bound memory and WAL growth
         if batch_count >= BATCH_SIZE {
             tx.recommit()?;
             batch_count = 0;
@@ -174,8 +279,48 @@ pub fn handle_import(file: &str, dry_run: bool) -> Result<(), Box<dyn std::error
     }
 
     tx.commit()?;
-    println!("Imported {imported} entries ({parse_errors} skipped).");
-    Ok(())
+    Ok(stats)
+}
+
+/// Resolve the destination-local `tag_id` for an entry whose source `tag_id`
+/// may not exist on this machine. Strategy: look up by `tag_name`, create the
+/// tag if missing, fall back to `None` if there's no name to remap by or tag
+/// creation fails (e.g. the 20-tag cap). Caches results per name to avoid
+/// re-querying for every entry.
+fn remap_tag_id(
+    repo: &Repository,
+    entry: &Entry,
+    cache: &mut HashMap<String, Option<i64>>,
+    stats: &mut ImportStats,
+) -> Result<Option<i64>, Box<dyn std::error::Error>> {
+    let Some(name) = entry.tag_name.as_deref() else {
+        // tag_id without a name — defensively drop the association rather
+        // than risk hitting an unrelated tag id on the destination.
+        stats.dropped_tag_associations += 1;
+        return Ok(None);
+    };
+
+    let key = name.to_lowercase();
+    if let Some(cached) = cache.get(&key) {
+        if cached.is_none() {
+            stats.dropped_tag_associations += 1;
+        }
+        return Ok(*cached);
+    }
+
+    let resolved = if let Some(id) = repo.get_tag_id_by_name(name)? {
+        Some(id)
+    } else if let Ok(id) = repo.create_tag(name, None) {
+        stats.created_tags += 1;
+        Some(id)
+    } else {
+        // Tag cap reached, validation failed, etc. — drop the
+        // association so the entry still imports.
+        stats.dropped_tag_associations += 1;
+        None
+    };
+    cache.insert(key, resolved);
+    Ok(resolved)
 }
 
 /// Parse a single extended-history line: `: timestamp:duration;command`
@@ -715,5 +860,543 @@ mod tests {
             row.contains(",1000,"),
             "Duration should appear as unquoted 1000: {row}"
         );
+    }
+
+    // ── handle_import / import_jsonl_into_repo tests ────────────────────
+    // These cover the GH#19 regression: exporting from one machine and
+    // importing into a fresh DB on another machine used to fail with a
+    // FOREIGN KEY constraint error because the export only carried entries,
+    // not the parent sessions row that the entries.session_id FK requires.
+
+    fn make_jsonl(entries: &[Entry]) -> String {
+        entries
+            .iter()
+            .map(|e| serde_json::to_string(e).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn test_import_jsonl_creates_placeholder_session_for_unknown_session_id() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+
+        // Entry references a session_id that does NOT exist in the destination DB.
+        let entry = Entry::new(
+            "session-from-other-machine".to_string(),
+            "git status".to_string(),
+            "/home/dev/project".to_string(),
+            Some(0),
+            1_700_000_000_000,
+            1_700_000_001_000,
+        );
+        let jsonl = make_jsonl(&[entry]);
+
+        let stats = import_jsonl_into_repo(&repo, jsonl.as_bytes()).expect("import should succeed");
+
+        assert_eq!(stats.imported, 1);
+        assert_eq!(stats.parse_errors, 0);
+        assert_eq!(stats.placeholder_sessions, 1);
+
+        let session = repo
+            .get_session("session-from-other-machine")
+            .unwrap()
+            .expect("placeholder session should have been created");
+        assert_eq!(session.hostname, "imported");
+    }
+
+    #[test]
+    fn test_import_jsonl_reuses_existing_session_without_duplicate() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+
+        // Pre-create the session that the imported entries reference.
+        let session = Session {
+            id: "preexisting-session".to_string(),
+            hostname: "real-host".to_string(),
+            created_at: 1_500_000_000_000,
+            tag_id: None,
+        };
+        repo.insert_session(&session).unwrap();
+
+        let entry = Entry::new(
+            session.id.clone(),
+            "ls".to_string(),
+            "/tmp".to_string(),
+            Some(0),
+            1_700_000_000_000,
+            1_700_000_000_500,
+        );
+        let stats = import_jsonl_into_repo(&repo, make_jsonl(&[entry]).as_bytes()).unwrap();
+
+        assert_eq!(stats.imported, 1);
+        assert_eq!(
+            stats.placeholder_sessions, 0,
+            "no placeholder should be created when the session already exists"
+        );
+
+        // Original session row must be untouched (real-host, not 'imported').
+        let stored = repo.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(stored.hostname, "real-host");
+        assert_eq!(stored.created_at, 1_500_000_000_000);
+    }
+
+    #[test]
+    fn test_import_jsonl_dedups_session_creation_across_entries() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+
+        // Three entries from the SAME unknown session — should produce exactly
+        // one placeholder, not three.
+        let entries: Vec<Entry> = (0..3)
+            .map(|i| {
+                Entry::new(
+                    "shared-session".to_string(),
+                    format!("cmd-{i}"),
+                    "/tmp".to_string(),
+                    Some(0),
+                    1_700_000_000_000 + i,
+                    1_700_000_000_000 + i + 1,
+                )
+            })
+            .collect();
+
+        let stats = import_jsonl_into_repo(&repo, make_jsonl(&entries).as_bytes()).unwrap();
+
+        assert_eq!(stats.imported, 3);
+        assert_eq!(stats.placeholder_sessions, 1);
+    }
+
+    #[test]
+    fn test_import_jsonl_export_roundtrip_into_fresh_db() {
+        // The end-to-end scenario from GH#19: export entries from repo A,
+        // import the resulting JSONL into a fresh repo B. Should succeed with
+        // no FK errors and produce the same set of commands.
+        let (_dir_a, repo_a) = crate::test_utils::test_repo();
+        let session = Session {
+            id: "mac1-session".to_string(),
+            hostname: "mac1".to_string(),
+            created_at: 1_600_000_000_000,
+            tag_id: None,
+        };
+        repo_a.insert_session(&session).unwrap();
+        let rows: [(&str, i64, i64); 3] = [
+            ("git status", 1_700_000_000_000, 1_700_000_000_500),
+            ("ls -la", 1_700_000_000_001, 1_700_000_000_501),
+            ("cargo test", 1_700_000_000_002, 1_700_000_000_502),
+        ];
+        for (cmd, started, ended) in rows {
+            let entry = Entry::new(
+                session.id.clone(),
+                cmd.to_string(),
+                "/work".to_string(),
+                Some(0),
+                started,
+                ended,
+            );
+            repo_a.insert_entry(&entry).unwrap();
+        }
+
+        let mut jsonl = String::new();
+        repo_a
+            .stream_export_entries(None, None, |entry| {
+                jsonl.push_str(&serde_json::to_string(&entry)?);
+                jsonl.push('\n');
+                Ok(())
+            })
+            .unwrap();
+
+        let (_dir_b, repo_b) = crate::test_utils::test_repo();
+        let stats = import_jsonl_into_repo(&repo_b, jsonl.as_bytes())
+            .expect("import into fresh DB must not hit FK constraint");
+
+        assert_eq!(stats.imported, 3);
+        assert_eq!(stats.parse_errors, 0);
+        assert_eq!(stats.placeholder_sessions, 1);
+
+        let mut imported_cmds: Vec<String> = Vec::new();
+        repo_b
+            .stream_export_entries(None, None, |e| {
+                imported_cmds.push(e.command);
+                Ok(())
+            })
+            .unwrap();
+        imported_cmds.sort();
+        assert_eq!(imported_cmds, vec!["cargo test", "git status", "ls -la"]);
+    }
+
+    #[test]
+    fn test_check_jsonl_shape_rejects_csv_file() {
+        use std::io::Write as _;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("history.csv");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            "command,cwd,exit_code,started_at,ended_at,duration_ms,session_id,executor_type,executor"
+        )
+        .unwrap();
+        writeln!(f, "\"ls\",\"/tmp\",0,1,2,1,\"s\",\"human\",\"\"").unwrap();
+
+        let err = check_jsonl_shape(path.to_str().unwrap())
+            .expect_err("CSV file should be rejected up front");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("does not look like JSONL"),
+            "error should mention JSONL: {msg}"
+        );
+        assert!(
+            msg.contains("CSV"),
+            "error should hint at the CSV mistake: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_check_jsonl_shape_accepts_jsonl_file() {
+        use std::io::Write as _;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, r#"{{"session_id":"s","command":"ls","cwd":"/tmp","exit_code":0,"started_at":1,"ended_at":2,"duration_ms":1}}"#).unwrap();
+
+        check_jsonl_shape(path.to_str().unwrap()).expect("JSONL should be accepted");
+    }
+
+    #[test]
+    fn test_check_jsonl_shape_accepts_empty_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("empty.jsonl");
+        std::fs::File::create(&path).unwrap();
+        check_jsonl_shape(path.to_str().unwrap()).expect("empty file should not error");
+    }
+
+    #[test]
+    fn test_check_jsonl_shape_skips_blank_leading_lines() {
+        use std::io::Write as _;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, "   ").unwrap();
+        writeln!(f, r#"{{"session_id":"s","command":"ls","cwd":"/tmp","exit_code":0,"started_at":1,"ended_at":2,"duration_ms":1}}"#).unwrap();
+
+        check_jsonl_shape(path.to_str().unwrap())
+            .expect("leading blank lines should be skipped before format check");
+    }
+
+    // ── tag_id FK remap on JSONL import ────────────────────────────────
+    // Same class of bug as the session FK fix: entries.tag_id REFERENCES tags(id),
+    // so importing an entry whose tag_id doesn't exist on the destination must
+    // not blow up the whole import. Strategy: re-map by tag_name.
+
+    /// Make an entry that will (after JSONL roundtrip) carry `tag_id` + `tag_name`.
+    fn entry_with_tag(session_id: &str, command: &str, tag_id: i64, tag_name: &str) -> Entry {
+        let mut e = Entry::new(
+            session_id.to_string(),
+            command.to_string(),
+            "/tmp".to_string(),
+            Some(0),
+            1_700_000_000_000,
+            1_700_000_000_500,
+        );
+        e.tag_id = Some(tag_id);
+        e.tag_name = Some(tag_name.to_string());
+        e
+    }
+
+    #[test]
+    fn test_import_jsonl_remaps_tag_id_via_existing_tag_by_name() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+
+        // Destination already has a tag named "demo" but with a different id
+        // than the source machine assigned.
+        let local_tag_id = repo.create_tag("demo", Some("local")).unwrap();
+        assert_ne!(local_tag_id, 999, "local tag_id must differ from source");
+
+        // Source machine had tag id=999 named "demo".
+        let entry = entry_with_tag("src-session", "git status", 999, "demo");
+        let stats =
+            import_jsonl_into_repo(&repo, make_jsonl(&[entry]).as_bytes()).expect("import ok");
+
+        assert_eq!(stats.imported, 1);
+        assert_eq!(
+            stats.created_tags, 0,
+            "tag already existed on destination — none created"
+        );
+        assert_eq!(stats.dropped_tag_associations, 0);
+
+        // Verify the entry was associated with the LOCAL tag id, not 999.
+        let mut got_tag_ids: Vec<Option<i64>> = Vec::new();
+        repo.stream_export_entries(None, None, |e| {
+            got_tag_ids.push(e.tag_id);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(got_tag_ids, vec![Some(local_tag_id)]);
+    }
+
+    #[test]
+    fn test_import_jsonl_creates_missing_tag_during_import() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        // Destination has zero tags. Import an entry tagged "imported-tag".
+        let entry = entry_with_tag("src-session", "ls", 7, "imported-tag");
+
+        let stats =
+            import_jsonl_into_repo(&repo, make_jsonl(&[entry]).as_bytes()).expect("import ok");
+
+        assert_eq!(stats.imported, 1);
+        assert_eq!(stats.created_tags, 1, "tag should have been created");
+        assert_eq!(stats.dropped_tag_associations, 0);
+
+        // The new tag should exist locally — name is lower-cased per create_tag.
+        let new_id = repo
+            .get_tag_id_by_name("imported-tag")
+            .unwrap()
+            .expect("tag should exist after import");
+
+        let mut tag_ids: Vec<Option<i64>> = Vec::new();
+        repo.stream_export_entries(None, None, |e| {
+            tag_ids.push(e.tag_id);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(tag_ids, vec![Some(new_id)]);
+    }
+
+    #[test]
+    fn test_import_jsonl_clears_tag_id_when_no_tag_name() {
+        // Defensive: an export with tag_id but no tag_name shouldn't be allowed
+        // to point at a random tag id on the destination. Drop the association.
+        let (_dir, repo) = crate::test_utils::test_repo();
+
+        let mut entry = Entry::new(
+            "src-session".to_string(),
+            "ls".to_string(),
+            "/tmp".to_string(),
+            Some(0),
+            1_700_000_000_000,
+            1_700_000_000_500,
+        );
+        entry.tag_id = Some(42);
+        entry.tag_name = None;
+
+        let stats =
+            import_jsonl_into_repo(&repo, make_jsonl(&[entry]).as_bytes()).expect("import ok");
+
+        assert_eq!(stats.imported, 1);
+        assert_eq!(stats.created_tags, 0);
+        assert_eq!(stats.dropped_tag_associations, 1);
+
+        let mut tag_ids: Vec<Option<i64>> = Vec::new();
+        repo.stream_export_entries(None, None, |e| {
+            tag_ids.push(e.tag_id);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(tag_ids, vec![None], "tag_id should be cleared on import");
+    }
+
+    #[test]
+    fn test_import_jsonl_handles_tag_cap_gracefully() {
+        // Simulate: destination already has the 20-tag cap maxed out. Importing
+        // an entry that references a NEW tag must drop the association rather
+        // than fail the whole import.
+        let (_dir, repo) = crate::test_utils::test_repo();
+        for i in 0..20 {
+            repo.create_tag(&format!("local-tag-{i}"), None).unwrap();
+        }
+
+        let entry = entry_with_tag("src-session", "ls", 999, "brand-new-tag");
+        let stats =
+            import_jsonl_into_repo(&repo, make_jsonl(&[entry]).as_bytes()).expect("import ok");
+
+        assert_eq!(stats.imported, 1);
+        assert_eq!(
+            stats.created_tags, 0,
+            "tag creation should fail under the cap"
+        );
+        assert_eq!(stats.dropped_tag_associations, 1);
+
+        // Entry imported with NULL tag_id; tag count stays at 20.
+        let tags = repo.get_tags().unwrap();
+        assert_eq!(tags.len(), 20);
+    }
+
+    #[test]
+    fn test_import_jsonl_tag_remap_is_cached_across_entries() {
+        // Three entries reference the same source tag — should call create_tag
+        // exactly once (verified indirectly by created_tags = 1).
+        let (_dir, repo) = crate::test_utils::test_repo();
+
+        let entries: Vec<Entry> = (0..3)
+            .map(|i| {
+                let mut e = entry_with_tag("src-session", "cmd", 999, "shared-tag");
+                e.command = format!("cmd-{i}");
+                e.started_at += i;
+                e.ended_at += i;
+                e
+            })
+            .collect();
+
+        let stats = import_jsonl_into_repo(&repo, make_jsonl(&entries).as_bytes()).unwrap();
+        assert_eq!(stats.imported, 3);
+        assert_eq!(
+            stats.created_tags, 1,
+            "tag should be created once and cached"
+        );
+    }
+
+    #[test]
+    fn test_import_jsonl_full_roundtrip_preserves_tag_associations() {
+        // End-to-end: source DB has a tag and entries tagged with it.
+        // Export to JSONL, import into a fresh DB, verify entries are still
+        // tagged with the same name (id will differ).
+        let (_dir_a, repo_a) = crate::test_utils::test_repo();
+        let session = Session {
+            id: "mac1-session".to_string(),
+            hostname: "mac1".to_string(),
+            created_at: 1_600_000_000_000,
+            tag_id: None,
+        };
+        repo_a.insert_session(&session).unwrap();
+        let src_tag = repo_a.create_tag("project-x", Some("source")).unwrap();
+        let mut entry = Entry::new(
+            session.id,
+            "make build".to_string(),
+            "/work".to_string(),
+            Some(0),
+            1_700_000_000_000,
+            1_700_000_000_500,
+        );
+        entry.tag_id = Some(src_tag);
+        repo_a.insert_entry(&entry).unwrap();
+
+        let mut jsonl = String::new();
+        repo_a
+            .stream_export_entries(None, None, |e| {
+                jsonl.push_str(&serde_json::to_string(&e)?);
+                jsonl.push('\n');
+                Ok(())
+            })
+            .unwrap();
+
+        let (_dir_b, repo_b) = crate::test_utils::test_repo();
+        let stats = import_jsonl_into_repo(&repo_b, jsonl.as_bytes())
+            .expect("roundtrip with tagged entries should not hit FK constraint");
+
+        assert_eq!(stats.imported, 1);
+        assert_eq!(stats.created_tags, 1);
+        assert_eq!(stats.placeholder_sessions, 1);
+
+        // Entry on the destination should be associated with the local
+        // "project-x" tag, even if its numeric id differs from the source.
+        let dst_tag_id = repo_b.get_tag_id_by_name("project-x").unwrap().unwrap();
+        let mut dst_tag_ids: Vec<Option<i64>> = Vec::new();
+        repo_b
+            .stream_export_entries(None, None, |e| {
+                dst_tag_ids.push(e.tag_id);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(dst_tag_ids, vec![Some(dst_tag_id)]);
+    }
+
+    // ── JSON export shape ──────────────────────────────────────────────
+
+    #[test]
+    fn test_json_export_emits_valid_array_when_empty() {
+        // Mirror handle_export's "json" branch with zero entries.
+        // Empty result must still produce valid JSON ("[]"), not an empty file.
+        let mut buf: Vec<u8> = Vec::new();
+        let count = 0usize;
+
+        if count == 0 {
+            writeln!(buf, "[]").unwrap();
+        } else {
+            writeln!(buf, "\n]").unwrap();
+        }
+
+        let s = String::from_utf8(buf).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(s.trim()).expect("empty export must be valid JSON");
+        assert!(parsed.is_array());
+        assert_eq!(parsed.as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_json_export_format_is_valid_json_for_entries() {
+        // Replicate handle_export's "json" branch for two entries and verify the
+        // resulting bytes parse as a JSON array of two objects.
+        let entries = [
+            Entry::new(
+                "s1".to_string(),
+                "ls".to_string(),
+                "/tmp".to_string(),
+                Some(0),
+                1,
+                2,
+            ),
+            Entry::new(
+                "s1".to_string(),
+                "echo hi".to_string(),
+                "/tmp".to_string(),
+                Some(0),
+                3,
+                4,
+            ),
+        ];
+
+        let mut buf: Vec<u8> = Vec::new();
+        for (count, entry) in entries.iter().enumerate() {
+            if count == 0 {
+                writeln!(buf, "[").unwrap();
+            } else {
+                writeln!(buf, ",").unwrap();
+            }
+            write!(buf, "  {}", serde_json::to_string(&entry).unwrap()).unwrap();
+        }
+        writeln!(buf, "\n]").unwrap();
+
+        let s = String::from_utf8(buf).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&s).expect("two-entry export must be valid JSON");
+        let arr = parsed.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["command"], "ls");
+        assert_eq!(arr[1]["command"], "echo hi");
+    }
+
+    // ── CSV export edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn test_csv_row_with_embedded_newline_is_rfc4180_compliant() {
+        // RFC 4180 §2.6: fields containing line breaks must be quoted.
+        // csv_safe doesn't strip newlines (intentionally) — the surrounding
+        // `"..."` in handle_export's format string carries the field across
+        // line boundaries. Verify the output a CSV reader would see.
+        let mut entry = Entry::new(
+            "s".to_string(),
+            "cat <<EOF\nhello\nEOF".to_string(),
+            "/tmp".to_string(),
+            Some(0),
+            1,
+            2,
+        );
+        entry.executor_type = None;
+        entry.executor = None;
+
+        let cmd = csv_safe(&entry.command);
+        let row = format!("\"{cmd}\",\"{}\"", csv_safe(&entry.cwd));
+        // The cell contains literal newlines, but they're inside double quotes,
+        // so a compliant CSV reader treats them as part of the field.
+        assert!(row.contains("\"cat <<EOF\nhello\nEOF\""));
+        // Quote count is even (open + close pairs only — no broken quoting).
+        let quotes = row.chars().filter(|c| *c == '"').count();
+        assert_eq!(quotes % 2, 0);
+    }
+
+    #[test]
+    fn test_csv_safe_strips_leading_cr_via_apostrophe() {
+        // CR at start would otherwise be a formula-injection vector in some
+        // spreadsheet apps; csv_safe prefixes with a single quote.
+        let out = csv_safe("\rmalicious");
+        assert!(out.starts_with('\''));
     }
 }

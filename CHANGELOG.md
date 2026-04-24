@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.3] - 2026-04-25
+
+### Fixed
+- **Cross-machine `suv export` → `suv import` no longer fails with `FOREIGN KEY constraint failed`** — previously, a JSONL export only carried entries, so importing into a fresh database on another machine died on the very first row because the entry's `session_id` (and any `tag_id`) referenced rows that did not exist locally. The importer now auto-creates a placeholder session for any unknown `session_id`, and re-maps each entry's `tag_id` by looking up the carried-over `tag_name` on the destination — creating the tag locally when missing, falling back to a NULL tag association if the 20-tag cap is reached. Addresses #19.
+- **`suv import` now rejects non-JSONL files up front with a clear message** — passing a CSV (or JSON-array) export to `suv import` previously emitted a confusing per-line "expected struct Entry" parse error for every line. The importer now peeks the first non-empty line and aborts with a single actionable message pointing the user at `suv export > history.jsonl`. Addresses #19.
+- **`suv export --format json` with zero matching entries now emits `[]` instead of an empty file** — previously an empty result produced a zero-byte file that downstream JSON parsers rejected as invalid.
+
 ## [0.3.2] - 2026-04-16
 
 ### Added
