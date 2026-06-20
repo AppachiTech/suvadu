@@ -47,6 +47,15 @@ pub enum ReportFormat {
     Json,
 }
 
+/// Minimum risk level that makes `suv agent report --fail-on` exit non-zero.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum FailLevel {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
 /// Initialization target for shell hooks and IDE integrations
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum InitTarget {
@@ -659,6 +668,10 @@ pub enum AgentCommands {
         /// Filter to commands run in the current directory
         #[arg(long)]
         here: bool,
+        /// Exit non-zero if any command at or above this risk level is found
+        /// (for local pre-push hooks / CI). E.g. --fail-on high
+        #[arg(long, value_enum)]
+        fail_on: Option<FailLevel>,
     },
 
     /// Interactive agent activity dashboard

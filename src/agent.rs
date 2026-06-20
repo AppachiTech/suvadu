@@ -10,7 +10,15 @@ pub fn handle_agent(cmd: cli::AgentCommands) -> Result<(), Box<dyn std::error::E
             executor,
             format,
             here,
-        } => handle_agent_report(&after, before.as_deref(), executor.as_deref(), format, here),
+            fail_on,
+        } => handle_agent_report(
+            &after,
+            before.as_deref(),
+            executor.as_deref(),
+            format,
+            here,
+            fail_on,
+        ),
         cli::AgentCommands::Dashboard {
             after,
             executor,
@@ -41,6 +49,7 @@ fn handle_agent_report(
     executor: Option<&str>,
     format: cli::ReportFormat,
     here: bool,
+    fail_on: Option<cli::FailLevel>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = repository::Repository::init()?;
 
@@ -97,7 +106,39 @@ fn handle_agent_report(
         cli::ReportFormat::Text => print_agent_report_text(&entries, &risk_summary, &home),
     }
 
+    // Opt-in gating for local pre-push hooks / CI: exit non-zero (code 2) when
+    // any command meets or exceeds the requested risk level.
+    if let Some(level) = fail_on {
+        let flagged = count_at_or_above(&risk_summary, level);
+        if flagged > 0 {
+            eprintln!(
+                "suvadu: {flagged} agent command(s) at or above '{}' risk.",
+                fail_level_label(level)
+            );
+            std::process::exit(2);
+        }
+    }
+
     Ok(())
+}
+
+/// Number of commands at or above `level` in the summary.
+const fn count_at_or_above(s: &risk::SessionRisk, level: cli::FailLevel) -> usize {
+    match level {
+        cli::FailLevel::Critical => s.critical_count,
+        cli::FailLevel::High => s.critical_count + s.high_count,
+        cli::FailLevel::Medium => s.critical_count + s.high_count + s.medium_count,
+        cli::FailLevel::Low => s.critical_count + s.high_count + s.medium_count + s.low_count,
+    }
+}
+
+const fn fail_level_label(level: cli::FailLevel) -> &'static str {
+    match level {
+        cli::FailLevel::Low => "low",
+        cli::FailLevel::Medium => "medium",
+        cli::FailLevel::High => "high",
+        cli::FailLevel::Critical => "critical",
+    }
 }
 
 fn print_agent_report_text(entries: &[Entry], risk_summary: &risk::SessionRisk, home: &str) {
@@ -751,6 +792,23 @@ fn build_agent_report_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_count_at_or_above_thresholds() {
+        let s = risk::SessionRisk {
+            critical_count: 1,
+            high_count: 2,
+            medium_count: 3,
+            low_count: 4,
+            safe_count: 5,
+            packages_installed: Vec::new(),
+            failed_commands: Vec::new(),
+        };
+        assert_eq!(count_at_or_above(&s, cli::FailLevel::Critical), 1);
+        assert_eq!(count_at_or_above(&s, cli::FailLevel::High), 3);
+        assert_eq!(count_at_or_above(&s, cli::FailLevel::Medium), 6);
+        assert_eq!(count_at_or_above(&s, cli::FailLevel::Low), 10);
+    }
 
     /// Helper: build an `Entry` with the given executor_type and executor,
     /// using sensible defaults for everything else.
