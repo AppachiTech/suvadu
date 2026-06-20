@@ -78,8 +78,11 @@ fn env_var_patterns() -> Vec<&'static str> {
 /// CLI flags that take passwords
 fn cli_password_patterns() -> Vec<&'static str> {
     vec![
-        // mysql -pPassword or mysql -p'password' or mysql -p"password"
-        r"(\s-p)([^\s-][^\s]*)",
+        // `-p<password>` ONLY for DB clients that use it that way (mysql family).
+        // Scoped to the client command so we don't redact `docker run -p8080:80`,
+        // `ssh -p2222`, or `redis-cli -p 6379` (where -p is a PORT, not a password).
+        // group(1) = "<client> ... -p", group(2) = the password value.
+        r"(?i)(\b(?:mysql|mysqldump|mariadb)\b[^\n]*?\s-p)([^\s-]\S*)",
         // --password=value or --password value
         r"(--password[=\s])(\S+)",
         // --token=value or --token value
@@ -120,6 +123,12 @@ fn api_key_patterns() -> Vec<&'static str> {
         // Generic long hex secrets (32+ hex chars, common for API keys)
         // Only match when preceded by a key-like assignment
         r"(?i)((?:SECRET|TOKEN|KEY|PASSWORD|AUTH|CREDENTIAL)\w*[=:]\s*)([0-9a-f]{32,})",
+        // Base64 / base64url secrets after a secret-ish key name, for the `:`
+        // (JSON/YAML) and `=` forms that the hex rule misses, e.g.
+        // {"apiToken":"YWxhZGRpbjpvcGVuc2VzYW1l"} or --config token:AbC123...
+        // The keyword must be the TAIL of the identifier (immediately before the
+        // separator) so KEY_PATH=/usr/local/... is NOT redacted as a secret.
+        r#"(?i)((?:secret|token|key|password|passwd|auth|credential)["']?\s*[=:]\s*["']?)([A-Za-z0-9+/_-]{24,}={0,2})"#,
     ]
 }
 
@@ -132,16 +141,23 @@ fn auth_header_patterns() -> Vec<&'static str> {
         r#"(?i)(-H\s*['"]?Authorization:\s*Basic\s+)([^'"}\s]+)"#,
         // curl -H "Authorization: token xxx" (GitHub style)
         r#"(?i)(-H\s*['"]?Authorization:\s*token\s+)([^'"}\s]+)"#,
-        // curl -u user:password
-        r"(-u\s+\S+:)(\S+)",
+        // curl -u user:password — scoped to HTTP clients so we don't redact
+        // `docker run -u 1000:1000` (UID:GID) or other -u flags. The client
+        // command and user are kept; only the password after the colon is hidden.
+        // group(1) = "<client> ... -u user:", group(2) = password.
+        r"(?i)(\b(?:curl|wget|http|https|xh)\b[^\n]*?-u\s+[^\s:]+:)(\S+)",
     ]
 }
 
 /// Database connection strings with embedded passwords
 fn connection_string_patterns() -> Vec<&'static str> {
     vec![
-        // postgresql://user:password@host  or  mysql://user:password@host
-        r"((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://[^:]+:)([^@]+)(@)",
+        // scheme://[user]:password@host — redact only the password.
+        // group(1) = "scheme://<user>:"  (user may be empty: redis://:pass@host)
+        // group(2) = password (greedy within the token, so an '@' inside the
+        //            password like postgres://u:p@ss@host doesn't leak the tail)
+        // group(3) = "@host"  (the final @ + host, kept intact)
+        r"((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|rediss|amqp|amqps)://[^/@\s]*:)(\S+)(@[^@\s/]+)",
     ]
 }
 
@@ -534,5 +550,124 @@ mod tests {
         let cmd = "ANTHROPIC_API_KEY=sk-ant-api03-test123 claude";
         let redacted = redact_secrets(cmd);
         assert!(redacted.contains("ANTHROPIC_API_KEY=***REDACTED***"));
+    }
+
+    // ── Redaction hardening: -p/-u false positives must NOT be redacted ──
+
+    #[test]
+    fn test_no_false_positive_docker_port() {
+        // -p here is a port mapping, not a password.
+        for cmd in [
+            "docker run -p 8080:80 nginx",
+            "docker run -p8080:80 nginx",
+            "docker run -p 127.0.0.1:5432:5432 postgres",
+        ] {
+            assert_eq!(redact_secrets(cmd), cmd, "should not redact docker -p: {cmd}");
+        }
+    }
+
+    #[test]
+    fn test_no_false_positive_ssh_port() {
+        for cmd in ["ssh -p 2222 user@host", "ssh -p2222 user@host", "scp -P 2222 f host:"] {
+            assert_eq!(redact_secrets(cmd), cmd, "should not redact ssh port: {cmd}");
+        }
+    }
+
+    #[test]
+    fn test_no_false_positive_redis_cli_port() {
+        // redis-cli -p is a PORT, not a password.
+        let cmd = "redis-cli -p 6379 ping";
+        assert_eq!(redact_secrets(cmd), cmd);
+    }
+
+    #[test]
+    fn test_no_false_positive_docker_user_uid_gid() {
+        // -u 1000:1000 is UID:GID, not user:password.
+        let cmd = "docker run -u 1000:1000 alpine id";
+        assert_eq!(redact_secrets(cmd), cmd);
+    }
+
+    #[test]
+    fn test_mysql_password_still_redacted() {
+        let cmd = "mysql -u root -pMyP@ssw0rd mydb";
+        let redacted = redact_secrets(cmd);
+        assert!(redacted.contains("-p***REDACTED***"));
+        assert!(!redacted.contains("MyP@ssw0rd"));
+    }
+
+    // ── Redaction hardening: connection-string leaks ──
+
+    #[test]
+    fn test_connection_string_at_sign_in_password_no_leak() {
+        // Password contains '@'; the whole password must be redacted, host kept.
+        let cmd = "psql postgresql://admin:p@ss@db.example.com:5432/mydb";
+        let redacted = redact_secrets(cmd);
+        assert!(!redacted.contains("p@ss"), "leaked @-password: {redacted}");
+        assert!(redacted.contains("@db.example.com:5432/mydb"), "host mangled: {redacted}");
+        assert!(redacted.contains("postgresql://admin:***REDACTED***@"));
+    }
+
+    #[test]
+    fn test_connection_string_password_only_uri() {
+        // No username (redis://:password@host) must still be redacted.
+        let cmd = "redis-cli -u redis://:authpass123@cache.example.com:6379";
+        let redacted = redact_secrets(cmd);
+        assert!(!redacted.contains("authpass123"), "leaked password-only URI: {redacted}");
+    }
+
+    #[test]
+    fn test_no_false_positive_redis_uri_without_auth() {
+        // No '@' → no credentials → must not be touched.
+        let cmd = "redis-cli -u redis://cache.example.com:6379/0";
+        assert_eq!(redact_secrets(cmd), cmd);
+    }
+
+    // ── Redaction hardening: base64 secret after a key name ──
+
+    #[test]
+    fn test_base64_token_in_json_redacted() {
+        let cmd = r#"curl -d '{"apiToken":"YWxhZGRpbjpvcGVuc2VzYW1lMTIzNDU2"}' api.com"#;
+        let redacted = redact_secrets(cmd);
+        assert!(!redacted.contains("YWxhZGRpbjpvcGVuc2VzYW1lMTIzNDU2"), "leaked base64: {redacted}");
+    }
+
+    #[test]
+    fn test_no_false_positive_key_path() {
+        // KEY_PATH ends in PATH, not a secret keyword → its path value is kept.
+        let cmd = "KEY_PATH=/home/user/projects/myapp/config/settings npm start";
+        assert_eq!(redact_secrets(cmd), cmd);
+    }
+
+    /// Consolidated corpus: each (input, must_be_absent) pair locks in a known
+    /// false-positive (input unchanged) or known leak (secret redacted). Keeps
+    /// the multi-regex redaction rules from regressing.
+    #[test]
+    fn test_redaction_corpus() {
+        // (command, substring_that_must_NOT_survive)
+        let must_redact = [
+            ("mysql -u root -psup3rs3cret db", "sup3rs3cret"),
+            ("curl -u admin:s3cretpw https://api.com", "s3cretpw"),
+            ("psql postgresql://u:p@ss@host/db", "p@ss"),
+            ("redis-cli -u redis://:onlypass@host", "onlypass"),
+            (r#"http POST api.com token:abcdefGHIJKLmnop12345678="#, "abcdefGHIJKLmnop12345678"),
+        ];
+        for (cmd, secret) in must_redact {
+            let out = redact_secrets(cmd);
+            assert!(!out.contains(secret), "FAILED to redact `{secret}` in: {cmd} -> {out}");
+        }
+
+        // commands that must be returned untouched (no false positives)
+        let must_keep = [
+            "docker run -p 8080:80 nginx",
+            "docker run -u 1000:1000 alpine",
+            "ssh -p 2222 host",
+            "redis-cli -p 6379 ping",
+            "redis-cli -u redis://cache:6379/0",
+            "KEY_PATH=/usr/local/share/app/keys/dir cmd",
+            "git status",
+        ];
+        for cmd in must_keep {
+            assert_eq!(redact_secrets(cmd), cmd, "false positive on: {cmd}");
+        }
     }
 }
