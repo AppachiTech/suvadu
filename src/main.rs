@@ -58,8 +58,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Internal commands (Add, Get, hooks, etc.) don't render TUI,
     // so skip the config read + theme init on the hot path.
     if is_user_facing_command(&cli.command) {
-        let theme_name = config::load_config().map(|c| c.theme).unwrap_or_default();
-        theme::init_theme(theme_name);
+        let cfg = config::load_config().unwrap_or_default();
+        theme::init_theme(cfg.theme);
+        // Apply user risk-ignore suppressions to all risk assessment.
+        risk::set_ignore_patterns(&cfg.agent.risk_ignore_patterns);
     }
 
     run_command(cli.command)

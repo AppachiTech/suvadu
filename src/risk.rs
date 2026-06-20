@@ -1,4 +1,4 @@
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
 use regex::Regex;
 
@@ -6,6 +6,43 @@ use crate::models::Entry;
 
 /// Global pattern cache — compiled once, reused forever
 static RISK_PATTERNS: LazyLock<Vec<RiskPattern>> = LazyLock::new(build_patterns);
+
+/// User-configured ignore patterns (`agent.risk_ignore_patterns`). Commands
+/// matching any of these are treated as safe so users can suppress false
+/// positives. Empty until `set_ignore_patterns` is called at startup, so tests
+/// (which never call it) and the hot path are unaffected.
+static RISK_IGNORE_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+
+/// Install user-configured risk-ignore regexes. Call once at startup. Invalid
+/// patterns are skipped with a warning. A second call is a no-op (`OnceLock`).
+pub fn set_ignore_patterns(patterns: &[String]) {
+    if patterns.is_empty() {
+        return;
+    }
+    let compiled: Vec<Regex> = patterns
+        .iter()
+        .filter_map(|p| match Regex::new(p) {
+            Ok(re) => Some(re),
+            Err(e) => {
+                eprintln!("suvadu: invalid risk_ignore_pattern '{p}': {e}");
+                None
+            }
+        })
+        .collect();
+    let _ = RISK_IGNORE_PATTERNS.set(compiled);
+}
+
+/// Whether a command matches any of the given ignore patterns (pure helper).
+fn matches_any(cmd: &str, pats: &[Regex]) -> bool {
+    pats.iter().any(|re| re.is_match(cmd))
+}
+
+/// Whether a command matches a user-configured ignore pattern.
+fn is_ignored(cmd: &str) -> bool {
+    RISK_IGNORE_PATTERNS
+        .get()
+        .is_some_and(|pats| matches_any(cmd, pats))
+}
 
 /// Risk severity levels for command classification
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -320,6 +357,11 @@ pub fn assess_risk(command: &str) -> Option<RiskAssessment> {
         return None;
     }
 
+    // Honor user-configured false-positive suppressions.
+    if is_ignored(cmd) {
+        return None;
+    }
+
     // Find the highest-risk matching pattern
     let mut best: Option<&RiskPattern> = None;
 
@@ -581,6 +623,27 @@ fn parse_package_args(args: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_ignore_patterns_suppress_match() {
+        // The pure matcher backs is_ignored(); a matching ignore pattern makes
+        // assess_risk return None for that command. (Tested without touching the
+        // process-global OnceLock so parallel risk tests stay hermetic.)
+        let pats = vec![Regex::new(r"^rm -rf /tmp/build$").unwrap()];
+        assert!(matches_any("rm -rf /tmp/build", &pats));
+        assert!(!matches_any("rm -rf /etc", &pats));
+        // Without ignores configured (the test default), risk is still assessed.
+        assert_eq!(risk_level("rm -rf /tmp/build"), RiskLevel::Critical);
+    }
+
+    #[test]
+    fn test_set_ignore_patterns_skips_invalid_regex() {
+        // Invalid regexes are dropped, not panicked on.
+        set_ignore_patterns(&["[unclosed".to_string()]);
+        // No assertion on global state (OnceLock is process-wide); just ensure
+        // the call does not panic and risk assessment keeps working.
+        assert_eq!(risk_level("git status"), RiskLevel::None);
+    }
 
     #[test]
     fn test_critical_patterns() {

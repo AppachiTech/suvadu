@@ -11,6 +11,8 @@ use super::tools;
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let repo = Repository::init_read_only()?;
     let config = crate::config::load_config().unwrap_or_default();
+    // Apply user risk-ignore suppressions so the assess_risk tool honors them.
+    crate::risk::set_ignore_patterns(&config.agent.risk_ignore_patterns);
     let mcp = &config.mcp;
     let stdin = io::stdin();
     let stdout = io::stdout();
