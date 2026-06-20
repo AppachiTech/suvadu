@@ -52,7 +52,13 @@ pub fn error_response(id: &Value, code: i64, message: &str) -> Value {
 pub fn tool_result(id: &Value, text: &str) -> Value {
     let truncated;
     let output = if text.len() > MAX_OUTPUT_CHARS {
-        truncated = format!("{}... (output truncated)", &text[..MAX_OUTPUT_CHARS]);
+        // Snap the byte cap down to a UTF-8 char boundary so multibyte content
+        // (emoji / CJK / accents) landing on the boundary can't panic the slice.
+        let mut end = MAX_OUTPUT_CHARS;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        truncated = format!("{}... (output truncated)", &text[..end]);
         &truncated
     } else {
         text
@@ -133,6 +139,19 @@ mod tests {
             output.ends_with("... (output truncated)"),
             "truncated output should end with suffix"
         );
+    }
+
+    #[test]
+    fn test_tool_result_truncates_multibyte_without_panic() {
+        // A multibyte char (😀 = 4 bytes) straddling the byte cap must not panic
+        // the slice; truncation snaps down to a char boundary.
+        let long_text = "😀".repeat(MAX_OUTPUT_CHARS); // far exceeds the byte cap
+        let resp = tool_result(&json!(1), &long_text);
+        let output = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(output.ends_with("... (output truncated)"));
+        // The body before the suffix must be valid UTF-8 made of whole emoji.
+        let body = output.trim_end_matches("... (output truncated)");
+        assert!(body.chars().all(|c| c == '😀'));
     }
 
     #[test]

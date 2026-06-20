@@ -1350,11 +1350,7 @@ fn handle_find_agent_session(repo: &Repository, args: &Value) -> Result<String, 
             let _ = writeln!(out, "   Directories: {}", s.directories.join(", "));
         }
         if !s.first_prompt.is_empty() {
-            let prompt_display = if s.first_prompt.len() > 80 {
-                format!("{}...", &s.first_prompt[..77])
-            } else {
-                s.first_prompt.clone()
-            };
+            let prompt_display = util::truncate_str(&s.first_prompt, 80, "...");
             let _ = writeln!(out, "   First prompt: \"{prompt_display}\"");
         }
         let _ = writeln!(out, "   Risk: {}", s.risk_summary);
