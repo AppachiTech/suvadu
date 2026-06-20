@@ -39,6 +39,23 @@ pub fn get_db_path() -> DbResult<PathBuf> {
     Ok(data_dir.join("history.db"))
 }
 
+/// Directory where database backups are written (`<data_dir>/backups`),
+/// created with owner-only permissions if missing.
+pub fn get_backup_dir() -> DbResult<PathBuf> {
+    let dirs = crate::util::project_dirs()
+        .ok_or_else(|| DbError::Path("Could not determine data directory".to_string()))?;
+    let dir = dirs.data_dir().join("backups");
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(dir)
+}
+
 /// Read the current schema version (0 if no version table exists yet).
 fn get_schema_version(conn: &Connection) -> DbResult<i64> {
     conn.execute(

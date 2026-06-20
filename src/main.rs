@@ -133,7 +133,16 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
             dry_run,
             yes,
             before,
-        } => commands::entry::handle_delete(&pattern, regex, dry_run, yes, before.as_deref()),
+            no_backup,
+        } => commands::entry::handle_delete(
+            &pattern,
+            regex,
+            dry_run,
+            yes,
+            before.as_deref(),
+            no_backup,
+        ),
+        Commands::Backup { out } => commands::entry::handle_backup(out.as_deref()),
         Commands::Gc { dry_run, vacuum } => commands::entry::handle_gc(dry_run, vacuum),
         Commands::Uninstall => commands::settings::handle_uninstall(),
         Commands::Version => {

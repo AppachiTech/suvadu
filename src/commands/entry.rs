@@ -223,17 +223,28 @@ fn handle_add_inner(
     Ok(()) // Silent success
 }
 
+#[allow(clippy::fn_params_excessive_bools)]
 pub fn handle_delete(
     pattern: &str,
     is_regex: bool,
     dry_run: bool,
     skip_confirm: bool,
     before: Option<&str>,
+    no_backup: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = Repository::init()?;
-    handle_delete_with_repo(&repo, pattern, is_regex, dry_run, skip_confirm, before)
+    handle_delete_with_repo(
+        &repo,
+        pattern,
+        is_regex,
+        dry_run,
+        skip_confirm,
+        before,
+        no_backup,
+    )
 }
 
+#[allow(clippy::fn_params_excessive_bools)]
 fn handle_delete_with_repo(
     repo: &Repository,
     pattern: &str,
@@ -241,6 +252,7 @@ fn handle_delete_with_repo(
     dry_run: bool,
     skip_confirm: bool,
     before: Option<&str>,
+    no_backup: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if pattern.trim().is_empty() {
         return Err(
@@ -286,9 +298,78 @@ fn handle_delete_with_repo(
         }
     }
 
+    // Snapshot the database before an irreversible delete so the operation is
+    // recoverable. Skipped with --no-backup. A backup failure aborts the delete
+    // rather than proceeding without a safety net.
+    if !no_backup {
+        match timestamped_backup_path("predelete") {
+            Ok(path) => match repo.backup_to(&path) {
+                Ok(()) => println!("Backed up to {} before deleting.", path.display()),
+                Err(e) => {
+                    return Err(format!(
+                        "Backup failed ({e}); aborting delete. Re-run with --no-backup to skip the backup."
+                    )
+                    .into());
+                }
+            },
+            Err(e) => {
+                return Err(format!(
+                    "Could not prepare backup ({e}); aborting delete. Re-run with --no-backup to skip."
+                )
+                .into());
+            }
+        }
+    }
+
     let deleted = repo.delete_entries(pattern, is_regex, before_timestamp)?;
     println!("✓ Deleted {deleted} entries.");
 
+    Ok(())
+}
+
+/// Build a timestamped backup path in the backups dir, e.g.
+/// `<data>/backups/history-20260620-181500.db`.
+fn timestamped_backup_path(prefix: &str) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let dir = crate::db::get_backup_dir()?;
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    Ok(dir.join(format!("{prefix}-{stamp}.db")))
+}
+
+/// Human-readable byte size (e.g. "1.2 MB").
+#[allow(clippy::cast_precision_loss)]
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut size = n as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} B")
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
+/// `suv backup [--out PATH]` — write a consistent copy of the database.
+pub fn handle_backup(out: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let repo = Repository::init()?;
+    let dest = match out {
+        Some(p) => std::path::PathBuf::from(p),
+        None => timestamped_backup_path("history")?,
+    };
+    if dest.exists() {
+        return Err(format!("Backup target already exists: {}", dest.display()).into());
+    }
+    if let Some(parent) = dest.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    repo.backup_to(&dest)?;
+    let size = std::fs::metadata(&dest).map_or(0, |m| m.len());
+    println!("✓ Backed up to {} ({})", dest.display(), human_bytes(size));
     Ok(())
 }
 
@@ -719,7 +800,7 @@ mod tests {
         seed_entries(&repo, &["git status", "git commit", "cargo build"]);
 
         // dry_run should not delete anything
-        handle_delete_with_repo(&repo, "git", false, true, true, None).unwrap();
+        handle_delete_with_repo(&repo, "git", false, true, true, None, true).unwrap();
 
         // Verify all entries still exist
         let entries = repo
@@ -734,7 +815,7 @@ mod tests {
         seed_entries(&repo, &["git status", "cargo build"]);
 
         let result =
-            handle_delete_with_repo(&repo, "nonexistent_pattern", false, false, true, None);
+            handle_delete_with_repo(&repo, "nonexistent_pattern", false, false, true, None, true);
         assert!(result.is_ok());
 
         let entries = repo
@@ -749,7 +830,7 @@ mod tests {
         seed_entries(&repo, &["git status", "git commit", "cargo build"]);
 
         // Delete entries matching "^git" regex, skip confirmation
-        handle_delete_with_repo(&repo, "^git", true, false, true, None).unwrap();
+        handle_delete_with_repo(&repo, "^git", true, false, true, None, true).unwrap();
 
         let entries = repo
             .get_entries_filtered(100, 0, &crate::repository::QueryFilter::default())
@@ -761,7 +842,7 @@ mod tests {
     #[test]
     fn test_handle_delete_empty_pattern_error() {
         let (_dir, repo) = test_repo();
-        let result = handle_delete_with_repo(&repo, "", false, false, true, None);
+        let result = handle_delete_with_repo(&repo, "", false, false, true, None, true);
         assert!(result.is_err());
     }
 

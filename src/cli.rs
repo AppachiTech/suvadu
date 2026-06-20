@@ -313,6 +313,20 @@ pub enum Commands {
         /// Delete entries older than this date (YYYY-MM-DD)
         #[arg(long)]
         before: Option<String>,
+
+        /// Skip the automatic database backup taken before deleting
+        #[arg(long)]
+        no_backup: bool,
+    },
+
+    /// Back up the database to a file (consistent snapshot)
+    #[command(
+        after_help = "Examples:\n  suv backup                 # Timestamped file in the backups dir\n  suv backup --out ~/suv.db  # Specific path"
+    )]
+    Backup {
+        /// Destination path (default: a timestamped file in the backups dir)
+        #[arg(long)]
+        out: Option<String>,
     },
 
     /// Manage tags

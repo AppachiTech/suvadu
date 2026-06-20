@@ -8,6 +8,35 @@ fn setup_test_db() -> (tempfile::TempDir, Repository) {
 }
 
 #[test]
+fn test_backup_to_creates_consistent_copy() {
+    let (temp, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 1000);
+    repo.insert_session(&session).unwrap();
+    for i in 0..3 {
+        repo.insert_entry(&crate::models::Entry::new(
+            session.id.clone(),
+            format!("cmd {i}"),
+            "/tmp".into(),
+            Some(0),
+            1000 + i,
+            1000 + i,
+        ))
+        .unwrap();
+    }
+
+    let dest = temp.path().join("backup.db");
+    repo.backup_to(&dest).unwrap();
+    assert!(dest.exists(), "backup file should be created");
+
+    // The copy must be a valid DB with the same entries.
+    let copy = Repository::new(crate::db::init_db(&dest).unwrap());
+    let entries = copy
+        .get_recent_entries(100, 0, None, false, None, true)
+        .unwrap();
+    assert_eq!(entries.len(), 3);
+}
+
+#[test]
 fn test_insert_and_get_session() {
     let (_temp, repo) = setup_test_db();
 

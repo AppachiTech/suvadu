@@ -604,6 +604,22 @@ impl Repository {
         TransactionGuard::new(self)
     }
 
+    /// Write a compact, consistent copy of the database to `dest` using
+    /// `VACUUM INTO`. `dest` must not already exist. On Unix the copy is
+    /// restricted to owner-only since it contains shell history.
+    pub fn backup_to(&self, dest: &std::path::Path) -> DbResult<()> {
+        // VACUUM INTO needs a string literal (no bind params); escape quotes.
+        let escaped = dest.to_string_lossy().replace('\'', "''");
+        self.conn
+            .execute_batch(&format!("VACUUM INTO '{escaped}'"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    }
+
     /// Check if a (command, `started_at`) pair already exists in the database.
     /// Used during import dedup — avoids loading the entire history into memory.
     pub fn entry_exists(&self, command: &str, started_at: i64) -> DbResult<bool> {
