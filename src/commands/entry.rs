@@ -289,6 +289,13 @@ fn handle_delete_with_repo(
     }
 
     if !skip_confirm {
+        if !util::stdin_is_terminal() {
+            return Err(
+                "Refusing to delete without confirmation: stdin is not a terminal. \
+                 Re-run with --yes to confirm non-interactively."
+                    .into(),
+            );
+        }
         eprint!("Delete {count} entries matching '{pattern}'? [y/N] ");
         let mut answer = String::new();
         std::io::stdin().read_line(&mut answer)?;
@@ -844,6 +851,24 @@ mod tests {
         let (_dir, repo) = test_repo();
         let result = handle_delete_with_repo(&repo, "", false, false, true, None, true);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_handle_delete_refuses_non_tty_without_yes() {
+        // Under `cargo test` stdin is not a terminal, so a confirm-required
+        // delete (skip_confirm=false) must refuse rather than read piped input.
+        let (_dir, repo) = test_repo();
+        seed_entries(&repo, &["git status", "git commit"]);
+
+        let result =
+            handle_delete_with_repo(&repo, "git", false, false, false, None, true);
+        assert!(result.is_err(), "non-interactive delete without --yes must error");
+
+        // Nothing was deleted.
+        let entries = repo
+            .get_entries_filtered(100, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        assert_eq!(entries.len(), 2);
     }
 
     // ── handle_bookmark tests ───────────────────────────────────

@@ -13,6 +13,14 @@ pub fn color_enabled() -> bool {
     })
 }
 
+/// Returns `true` if stdin is connected to a terminal (interactive). Used to
+/// refuse destructive y/N prompts when input is piped/redirected, where a
+/// stray "y" could confirm something the caller never intended.
+pub fn stdin_is_terminal() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
+}
+
 /// RAII guard that sets up and tears down the terminal for TUI rendering.
 /// On creation it enters raw mode and the alternate screen.
 /// On drop (including panic unwind) it restores the terminal.

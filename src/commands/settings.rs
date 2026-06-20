@@ -151,6 +151,11 @@ pub fn handle_uninstall() -> Result<(), Box<dyn std::error::Error>> {
         println!("  • Cargo (~/.cargo/bin/suv)");
     }
     println!();
+    if !crate::util::stdin_is_terminal() {
+        return Err(
+            "Refusing to uninstall without confirmation: stdin is not a terminal.".into(),
+        );
+    }
     print!("Uninstall all? [y/N] ");
     std::io::Write::flush(&mut std::io::stdout())?;
 
