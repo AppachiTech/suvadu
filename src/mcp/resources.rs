@@ -69,7 +69,7 @@ pub fn read_resource(
         ));
     }
     let content = match uri {
-        "suvadu://history/recent" => read_recent_history(repo)?,
+        "suvadu://history/recent" => read_recent_history(repo, mcp)?,
         "suvadu://failures/recent" => read_recent_failures(repo)?,
         "suvadu://stats/today" => read_today_stats(repo)?,
         "suvadu://risk/summary" => read_risk_summary(repo)?,
@@ -105,9 +105,13 @@ fn format_time(ms: i64) -> String {
         )
 }
 
-fn read_recent_history(repo: &Repository) -> Result<String, String> {
+fn read_recent_history(
+    repo: &Repository,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
+    let limit = usize::try_from(mcp.default_limit).unwrap_or(20);
     let entries = repo
-        .get_recent_entries(20, 0, None, false, None, true)
+        .get_recent_entries(limit, 0, None, false, None, true)
         .map_err(|e| format!("query failed: {e}"))?;
 
     if entries.is_empty() {

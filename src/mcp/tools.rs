@@ -53,21 +53,21 @@ pub fn call_tool(
         return Err(format!("Tool '{name}' is disabled via MCP configuration"));
     }
     match name {
-        "search_commands" => handle_search_commands(repo, args),
-        "recent_commands" => handle_recent_commands(repo, args),
+        "search_commands" => handle_search_commands(repo, args, mcp),
+        "recent_commands" => handle_recent_commands(repo, args, mcp),
         "command_status" => handle_command_status(repo, args),
         "get_prompts" => handle_get_prompts(repo, args),
         "session_history" => handle_session_history(repo, args),
-        "get_stats" => handle_get_stats(repo, args),
+        "get_stats" => handle_get_stats(repo, args, mcp),
         "list_sessions" => handle_list_sessions(repo, args),
         "what_changed" => handle_what_changed(repo, args),
-        "what_failed" => handle_what_failed(repo, args),
+        "what_failed" => handle_what_failed(repo, args, mcp),
         "suggest_next" => handle_suggest_next(repo, args),
         "assess_risk" => handle_assess_risk(args),
         "find_agent_session" => handle_find_agent_session(repo, args),
         "replay_agent_session" => handle_replay_agent_session(repo, args),
-        "learn_from_failures" => handle_learn_from_failures(repo, args),
-        "project_context" => handle_project_context(repo, args),
+        "learn_from_failures" => handle_learn_from_failures(repo, args, mcp),
+        "project_context" => handle_project_context(repo, args, mcp),
         _ => Err(format!("Unknown tool: {name}")),
     }
 }
@@ -352,9 +352,14 @@ fn format_time(ms: i64) -> String {
 
 use chrono::TimeZone;
 
-fn handle_search_commands(repo: &Repository, args: &Value) -> Result<String, String> {
+fn handle_search_commands(
+    repo: &Repository,
+    args: &Value,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
     let query = get_str(args, "query").unwrap_or("");
-    let limit = usize::try_from(get_int(args, "limit", 20)).unwrap_or(20);
+    let default_limit = usize::try_from(mcp.default_limit).unwrap_or(20);
+    let limit = usize::try_from(get_int(args, "limit", i64::from(mcp.default_limit))).unwrap_or(default_limit);
     let after = get_str(args, "after").and_then(|s| util::parse_date_input(s, false));
     let before = get_str(args, "before").and_then(|s| util::parse_date_input(s, true));
     let executor = get_str(args, "executor");
@@ -397,8 +402,13 @@ fn handle_search_commands(repo: &Repository, args: &Value) -> Result<String, Str
     Ok(out)
 }
 
-fn handle_recent_commands(repo: &Repository, args: &Value) -> Result<String, String> {
-    let limit = usize::try_from(get_int(args, "limit", 20)).unwrap_or(20);
+fn handle_recent_commands(
+    repo: &Repository,
+    args: &Value,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
+    let default_limit = usize::try_from(mcp.default_limit).unwrap_or(20);
+    let limit = usize::try_from(get_int(args, "limit", i64::from(mcp.default_limit))).unwrap_or(default_limit);
     let directory = get_str(args, "directory");
     let executor = get_str(args, "executor");
     let after = get_str(args, "after").and_then(|s| util::parse_date_input(s, false));
@@ -590,8 +600,12 @@ fn handle_session_history(repo: &Repository, args: &Value) -> Result<String, Str
     Ok(out)
 }
 
-fn handle_get_stats(repo: &Repository, args: &Value) -> Result<String, String> {
-    let days = get_int(args, "days", 7);
+fn handle_get_stats(
+    repo: &Repository,
+    args: &Value,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
+    let days = get_int(args, "days", i64::from(mcp.default_days));
     let directory = get_str(args, "directory");
 
     let now = chrono::Utc::now().timestamp_millis();
@@ -857,9 +871,14 @@ fn handle_what_changed(repo: &Repository, args: &Value) -> Result<String, String
     Ok(out)
 }
 
-fn handle_what_failed(repo: &Repository, args: &Value) -> Result<String, String> {
+fn handle_what_failed(
+    repo: &Repository,
+    args: &Value,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
     let hours = get_int(args, "hours", 24);
-    let limit = usize::try_from(get_int(args, "limit", 20)).unwrap_or(20);
+    let default_limit = usize::try_from(mcp.default_limit).unwrap_or(20);
+    let limit = usize::try_from(get_int(args, "limit", i64::from(mcp.default_limit))).unwrap_or(default_limit);
     let directory = get_str(args, "directory");
 
     let now = chrono::Utc::now().timestamp_millis();
@@ -1521,8 +1540,12 @@ struct CmdFailStats {
     last_fail_at: i64,
 }
 
-fn handle_learn_from_failures(repo: &Repository, args: &Value) -> Result<String, String> {
-    let days = get_int(args, "days", 7);
+fn handle_learn_from_failures(
+    repo: &Repository,
+    args: &Value,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
+    let days = get_int(args, "days", i64::from(mcp.default_days));
     let directory = get_str(args, "directory");
 
     let now = chrono::Utc::now().timestamp_millis();
@@ -1658,8 +1681,12 @@ fn format_build_test_lint(entries: &[crate::models::Entry], out: &mut String) {
     out.push('\n');
 }
 
-fn handle_project_context(repo: &Repository, args: &Value) -> Result<String, String> {
-    let days = get_int(args, "days", 7);
+fn handle_project_context(
+    repo: &Repository,
+    args: &Value,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
+    let days = get_int(args, "days", i64::from(mcp.default_days));
     let directory = get_str(args, "directory");
 
     let now = chrono::Utc::now().timestamp_millis();
