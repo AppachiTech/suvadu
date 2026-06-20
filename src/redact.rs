@@ -562,14 +562,26 @@ mod tests {
             "docker run -p8080:80 nginx",
             "docker run -p 127.0.0.1:5432:5432 postgres",
         ] {
-            assert_eq!(redact_secrets(cmd), cmd, "should not redact docker -p: {cmd}");
+            assert_eq!(
+                redact_secrets(cmd),
+                cmd,
+                "should not redact docker -p: {cmd}"
+            );
         }
     }
 
     #[test]
     fn test_no_false_positive_ssh_port() {
-        for cmd in ["ssh -p 2222 user@host", "ssh -p2222 user@host", "scp -P 2222 f host:"] {
-            assert_eq!(redact_secrets(cmd), cmd, "should not redact ssh port: {cmd}");
+        for cmd in [
+            "ssh -p 2222 user@host",
+            "ssh -p2222 user@host",
+            "scp -P 2222 f host:",
+        ] {
+            assert_eq!(
+                redact_secrets(cmd),
+                cmd,
+                "should not redact ssh port: {cmd}"
+            );
         }
     }
 
@@ -603,7 +615,10 @@ mod tests {
         let cmd = "psql postgresql://admin:p@ss@db.example.com:5432/mydb";
         let redacted = redact_secrets(cmd);
         assert!(!redacted.contains("p@ss"), "leaked @-password: {redacted}");
-        assert!(redacted.contains("@db.example.com:5432/mydb"), "host mangled: {redacted}");
+        assert!(
+            redacted.contains("@db.example.com:5432/mydb"),
+            "host mangled: {redacted}"
+        );
         assert!(redacted.contains("postgresql://admin:***REDACTED***@"));
     }
 
@@ -612,7 +627,10 @@ mod tests {
         // No username (redis://:password@host) must still be redacted.
         let cmd = "redis-cli -u redis://:authpass123@cache.example.com:6379";
         let redacted = redact_secrets(cmd);
-        assert!(!redacted.contains("authpass123"), "leaked password-only URI: {redacted}");
+        assert!(
+            !redacted.contains("authpass123"),
+            "leaked password-only URI: {redacted}"
+        );
     }
 
     #[test]
@@ -628,7 +646,10 @@ mod tests {
     fn test_base64_token_in_json_redacted() {
         let cmd = r#"curl -d '{"apiToken":"YWxhZGRpbjpvcGVuc2VzYW1lMTIzNDU2"}' api.com"#;
         let redacted = redact_secrets(cmd);
-        assert!(!redacted.contains("YWxhZGRpbjpvcGVuc2VzYW1lMTIzNDU2"), "leaked base64: {redacted}");
+        assert!(
+            !redacted.contains("YWxhZGRpbjpvcGVuc2VzYW1lMTIzNDU2"),
+            "leaked base64: {redacted}"
+        );
     }
 
     #[test]
@@ -649,11 +670,17 @@ mod tests {
             ("curl -u admin:s3cretpw https://api.com", "s3cretpw"),
             ("psql postgresql://u:p@ss@host/db", "p@ss"),
             ("redis-cli -u redis://:onlypass@host", "onlypass"),
-            (r#"http POST api.com token:abcdefGHIJKLmnop12345678="#, "abcdefGHIJKLmnop12345678"),
+            (
+                r#"http POST api.com token:abcdefGHIJKLmnop12345678="#,
+                "abcdefGHIJKLmnop12345678",
+            ),
         ];
         for (cmd, secret) in must_redact {
             let out = redact_secrets(cmd);
-            assert!(!out.contains(secret), "FAILED to redact `{secret}` in: {cmd} -> {out}");
+            assert!(
+                !out.contains(secret),
+                "FAILED to redact `{secret}` in: {cmd} -> {out}"
+            );
         }
 
         // commands that must be returned untouched (no false positives)

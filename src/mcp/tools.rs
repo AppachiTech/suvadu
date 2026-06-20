@@ -359,7 +359,8 @@ fn handle_search_commands(
 ) -> Result<String, String> {
     let query = get_str(args, "query").unwrap_or("");
     let default_limit = usize::try_from(mcp.default_limit).unwrap_or(20);
-    let limit = usize::try_from(get_int(args, "limit", i64::from(mcp.default_limit))).unwrap_or(default_limit);
+    let limit = usize::try_from(get_int(args, "limit", i64::from(mcp.default_limit)))
+        .unwrap_or(default_limit);
     let after = get_str(args, "after").and_then(|s| util::parse_date_input(s, false));
     let before = get_str(args, "before").and_then(|s| util::parse_date_input(s, true));
     let executor = get_str(args, "executor");
@@ -408,7 +409,8 @@ fn handle_recent_commands(
     mcp: &crate::config::McpConfig,
 ) -> Result<String, String> {
     let default_limit = usize::try_from(mcp.default_limit).unwrap_or(20);
-    let limit = usize::try_from(get_int(args, "limit", i64::from(mcp.default_limit))).unwrap_or(default_limit);
+    let limit = usize::try_from(get_int(args, "limit", i64::from(mcp.default_limit)))
+        .unwrap_or(default_limit);
     let directory = get_str(args, "directory");
     let executor = get_str(args, "executor");
     let after = get_str(args, "after").and_then(|s| util::parse_date_input(s, false));
@@ -878,7 +880,8 @@ fn handle_what_failed(
 ) -> Result<String, String> {
     let hours = get_int(args, "hours", 24);
     let default_limit = usize::try_from(mcp.default_limit).unwrap_or(20);
-    let limit = usize::try_from(get_int(args, "limit", i64::from(mcp.default_limit))).unwrap_or(default_limit);
+    let limit = usize::try_from(get_int(args, "limit", i64::from(mcp.default_limit)))
+        .unwrap_or(default_limit);
     let directory = get_str(args, "directory");
 
     let now = chrono::Utc::now().timestamp_millis();

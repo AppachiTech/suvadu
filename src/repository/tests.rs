@@ -652,7 +652,9 @@ fn test_recent_entries_shows_failed_commands() {
     .unwrap();
 
     // get_recent_entries should return BOTH invocations (no dedup)
-    let results = repo.get_recent_entries(10, 0, None, false, None, true).unwrap();
+    let results = repo
+        .get_recent_entries(10, 0, None, false, None, true)
+        .unwrap();
     assert_eq!(results.len(), 2);
     // Most recent first
     assert_eq!(results[0].started_at, 2000);
@@ -699,7 +701,10 @@ fn test_recent_entries_recency_beats_cwd_boost() {
         .get_recent_entries(10, 0, None, false, Some("/project"), true)
         .unwrap();
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0].command, "ls", "most recent command must be offset 0");
+    assert_eq!(
+        results[0].command, "ls",
+        "most recent command must be offset 0"
+    );
     assert_eq!(results[1].command, "make test");
 }
 
@@ -747,27 +752,55 @@ fn test_recent_entries_hides_agent_commands_by_default() {
     let session = Session::new("host".to_string(), 100);
     repo.insert_session(&session).unwrap();
 
-    let mut human = Entry::new(session.id.clone(), "git push".into(), "/p".into(), Some(0), 1000, 1010);
+    let mut human = Entry::new(
+        session.id.clone(),
+        "git push".into(),
+        "/p".into(),
+        Some(0),
+        1000,
+        1010,
+    );
     human.executor_type = Some("human".into());
     repo.insert_entry(&human).unwrap();
 
-    let mut ide = Entry::new(session.id.clone(), "npm test".into(), "/p".into(), Some(0), 2000, 2010);
+    let mut ide = Entry::new(
+        session.id.clone(),
+        "npm test".into(),
+        "/p".into(),
+        Some(0),
+        2000,
+        2010,
+    );
     ide.executor_type = Some("ide".into());
     repo.insert_entry(&ide).unwrap();
 
-    let mut agent = Entry::new(session.id.clone(), "grep -rn foo".into(), "/p".into(), Some(0), 3000, 3010);
+    let mut agent = Entry::new(
+        session.id.clone(),
+        "grep -rn foo".into(),
+        "/p".into(),
+        Some(0),
+        3000,
+        3010,
+    );
     agent.executor_type = Some("agent".into());
     repo.insert_entry(&agent).unwrap();
 
     // Default (include_agents=false): agent command is hidden, human + ide show.
-    let hidden = repo.get_recent_entries(10, 0, None, false, None, false).unwrap();
+    let hidden = repo
+        .get_recent_entries(10, 0, None, false, None, false)
+        .unwrap();
     let cmds: Vec<&str> = hidden.iter().map(|e| e.command.as_str()).collect();
-    assert!(!cmds.contains(&"grep -rn foo"), "agent command must be hidden by default");
+    assert!(
+        !cmds.contains(&"grep -rn foo"),
+        "agent command must be hidden by default"
+    );
     assert!(cmds.contains(&"git push"), "human command must show");
     assert!(cmds.contains(&"npm test"), "ide command must show");
 
     // include_agents=true: everything shows, most recent (agent) first.
-    let shown = repo.get_recent_entries(10, 0, None, false, None, true).unwrap();
+    let shown = repo
+        .get_recent_entries(10, 0, None, false, None, true)
+        .unwrap();
     assert_eq!(shown.len(), 3);
     assert_eq!(shown[0].command, "grep -rn foo");
 }

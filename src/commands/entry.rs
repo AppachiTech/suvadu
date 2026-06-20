@@ -860,9 +860,11 @@ mod tests {
         let (_dir, repo) = test_repo();
         seed_entries(&repo, &["git status", "git commit"]);
 
-        let result =
-            handle_delete_with_repo(&repo, "git", false, false, false, None, true);
-        assert!(result.is_err(), "non-interactive delete without --yes must error");
+        let result = handle_delete_with_repo(&repo, "git", false, false, false, None, true);
+        assert!(
+            result.is_err(),
+            "non-interactive delete without --yes must error"
+        );
 
         // Nothing was deleted.
         let entries = repo

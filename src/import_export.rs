@@ -985,8 +985,22 @@ mod tests {
         let session = Session::new("host".to_string(), 1_500_000_000_000);
         repo.insert_session(&session).unwrap();
         let entries = vec![
-            Entry::new(session.id.clone(), "git status".into(), "/p".into(), Some(0), 1_700_000_000_000, 1_700_000_000_100),
-            Entry::new(session.id.clone(), "cargo build".into(), "/p".into(), Some(0), 1_700_000_001_000, 1_700_000_001_100),
+            Entry::new(
+                session.id.clone(),
+                "git status".into(),
+                "/p".into(),
+                Some(0),
+                1_700_000_000_000,
+                1_700_000_000_100,
+            ),
+            Entry::new(
+                session.id.clone(),
+                "cargo build".into(),
+                "/p".into(),
+                Some(0),
+                1_700_000_001_000,
+                1_700_000_001_100,
+            ),
         ];
         let jsonl = make_jsonl(&entries);
 
