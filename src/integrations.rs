@@ -124,8 +124,10 @@ pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
     let prompts_dir = get_prompts_dir()?;
     std::fs::create_dir_all(&prompts_dir)?;
     let prompt_file = prompts_dir.join(format!("claude-{session_id}.prompt"));
-    // Truncate to 500 chars to keep cache lightweight
-    let truncated = crate::util::truncate_str(prompt, 500, "...");
+    // Cap length to keep the cache lightweight (configurable).
+    let max_chars =
+        crate::config::load_config_cached().map_or(4000, |c| c.agent.prompt_capture_max_chars);
+    let truncated = crate::util::truncate_str(prompt, max_chars, "...");
     atomic_write(&prompt_file, &truncated)?;
 
     // Restrict prompt cache file to owner-only (contains user prompts)
@@ -318,7 +320,9 @@ pub fn handle_hook_cursor_prompt() -> Result<(), Box<dyn std::error::Error>> {
         let prompts_dir = get_prompts_dir()?;
         std::fs::create_dir_all(&prompts_dir)?;
         let prompt_file = prompts_dir.join(format!("{session_id}.prompt"));
-        let truncated = crate::util::truncate_str(prompt, 500, "...");
+        let max_chars =
+            crate::config::load_config_cached().map_or(4000, |c| c.agent.prompt_capture_max_chars);
+        let truncated = crate::util::truncate_str(prompt, max_chars, "...");
         atomic_write(&prompt_file, &truncated)?;
 
         #[cfg(unix)]

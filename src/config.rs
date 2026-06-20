@@ -148,6 +148,14 @@ pub struct AgentConfig {
     /// Additional risk patterns to ignore (suppress false positives)
     #[serde(default)]
     pub risk_ignore_patterns: Vec<String>,
+    /// Max characters of an agent prompt to capture. Prompts are stored locally
+    /// in the cache dir; the cap keeps the cache lightweight. Default 4000.
+    #[serde(default = "default_prompt_capture_max_chars")]
+    pub prompt_capture_max_chars: usize,
+}
+
+const fn default_prompt_capture_max_chars() -> usize {
+    4000
 }
 
 impl Default for AgentConfig {
@@ -155,6 +163,7 @@ impl Default for AgentConfig {
         Self {
             show_risk_in_search: true,
             risk_ignore_patterns: Vec::new(),
+            prompt_capture_max_chars: default_prompt_capture_max_chars(),
         }
     }
 }
@@ -381,6 +390,12 @@ fn validate_config(config: &Config) -> ConfigResult<()> {
     if config.search.cwd_boost_percent > 100 {
         return Err(ConfigError::Path(
             "search.cwd_boost_percent must be between 0 and 100".into(),
+        ));
+    }
+    if config.agent.prompt_capture_max_chars == 0 || config.agent.prompt_capture_max_chars > 100_000
+    {
+        return Err(ConfigError::Path(
+            "agent.prompt_capture_max_chars must be between 1 and 100000".into(),
         ));
     }
     for pattern in &config.exclusions {
