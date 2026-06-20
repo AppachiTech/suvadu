@@ -185,7 +185,7 @@ fn handle_add_inner(
 
     // Redact secrets before storage (unless disabled in config)
     let command = if config.redaction.enabled {
-        crate::redact::redact_secrets(&command)
+        crate::redact::redact_secrets_with_extra(&command, &config.redaction.extra_patterns)
     } else {
         command
     };
@@ -1350,7 +1350,10 @@ mod tests {
     fn test_add_inner_skips_redaction_when_disabled() {
         let (_dir, repo) = test_repo();
         let cfg = config::Config {
-            redaction: config::RedactionConfig { enabled: false },
+            redaction: config::RedactionConfig {
+                enabled: false,
+                ..Default::default()
+            },
             ..default_config()
         };
 

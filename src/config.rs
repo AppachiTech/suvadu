@@ -173,11 +173,19 @@ pub struct RedactionConfig {
     /// Enable automatic secret redaction before storage (default: true)
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Extra user-defined regex patterns. Any match is replaced with the
+    /// redaction placeholder before storage — for internal/corporate secret
+    /// formats the built-in rules don't cover.
+    #[serde(default)]
+    pub extra_patterns: Vec<String>,
 }
 
 impl Default for RedactionConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            extra_patterns: Vec::new(),
+        }
     }
 }
 
@@ -403,6 +411,18 @@ fn validate_config(config: &Config) -> ConfigResult<()> {
             return Err(ConfigError::Path(
                 "exclusion patterns must not be empty".into(),
             ));
+        }
+    }
+    for pattern in &config.redaction.extra_patterns {
+        if pattern.is_empty() {
+            return Err(ConfigError::Path(
+                "redaction.extra_patterns must not be empty".into(),
+            ));
+        }
+        if regex::Regex::new(pattern).is_err() {
+            return Err(ConfigError::Path(format!(
+                "invalid redaction.extra_patterns regex: {pattern}"
+            )));
         }
     }
     if config.mcp.default_days == 0 || config.mcp.default_days > 365 {

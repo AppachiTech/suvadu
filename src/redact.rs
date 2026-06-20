@@ -1,4 +1,4 @@
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use regex::Regex;
 
@@ -7,6 +7,13 @@ const REDACTED: &str = "***REDACTED***";
 
 /// Compiled secret patterns — built once, reused forever
 static SECRET_PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(build_patterns);
+
+/// (source strings, compiled regexes) for the extra-pattern cache.
+type ExtraCache = (Vec<String>, Arc<Vec<Regex>>);
+
+/// Cache of compiled user `extra_patterns`, recompiled only when the source
+/// strings change (the hot recording path passes them on every command).
+static EXTRA_CACHE: Mutex<Option<ExtraCache>> = Mutex::new(None);
 
 struct SecretPattern {
     regex: Regex,
@@ -30,6 +37,39 @@ pub fn redact_secrets(command: &str) -> String {
     }
 
     result
+}
+
+/// Like [`redact_secrets`], then apply user-configured `extra_patterns`. Each
+/// extra pattern's whole match is replaced with the placeholder. Invalid
+/// patterns are skipped (they're validated at config load). Compilation is
+/// cached so the hot recording path doesn't recompile per command.
+pub fn redact_secrets_with_extra(command: &str, extra_patterns: &[String]) -> String {
+    let mut result = redact_secrets(command);
+    if extra_patterns.is_empty() {
+        return result;
+    }
+    let compiled = compiled_extra(extra_patterns);
+    for re in compiled.iter() {
+        result = re.replace_all(&result, REDACTED).to_string();
+    }
+    result
+}
+
+/// Return cached compiled extra patterns, recompiling only when they change.
+fn compiled_extra(patterns: &[String]) -> Arc<Vec<Regex>> {
+    if let Ok(guard) = EXTRA_CACHE.lock() {
+        if let Some((src, compiled)) = guard.as_ref() {
+            if src == patterns {
+                return Arc::clone(compiled);
+            }
+        }
+    }
+    let compiled: Arc<Vec<Regex>> =
+        Arc::new(patterns.iter().filter_map(|p| Regex::new(p).ok()).collect());
+    if let Ok(mut guard) = EXTRA_CACHE.lock() {
+        *guard = Some((patterns.to_vec(), Arc::clone(&compiled)));
+    }
+    compiled
 }
 
 /// Check if a command contains any secrets (without redacting).
@@ -657,6 +697,26 @@ mod tests {
         // KEY_PATH ends in PATH, not a secret keyword → its path value is kept.
         let cmd = "KEY_PATH=/home/user/projects/myapp/config/settings npm start";
         assert_eq!(redact_secrets(cmd), cmd);
+    }
+
+    #[test]
+    fn test_extra_patterns_redact() {
+        // A corporate token format the built-ins don't know about.
+        let extra = vec![r"CORP-[A-Z0-9]{8}".to_string()];
+        let out = redact_secrets_with_extra("deploy --key CORP-AB12CD34 prod", &extra);
+        assert!(
+            !out.contains("CORP-AB12CD34"),
+            "extra pattern should redact: {out}"
+        );
+        assert!(out.contains("***REDACTED***"));
+        // Built-in rules still apply through the same call.
+        let out2 = redact_secrets_with_extra("export API_KEY=abc123 deploy", &extra);
+        assert!(out2.contains("API_KEY=***REDACTED***"));
+    }
+
+    #[test]
+    fn test_extra_patterns_empty_is_noop() {
+        assert_eq!(redact_secrets_with_extra("git status", &[]), "git status");
     }
 
     /// Consolidated corpus: each (input, must_be_absent) pair locks in a known
