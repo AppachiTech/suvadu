@@ -312,6 +312,7 @@ fn check_database() -> CheckResult {
             field: SearchField::Command,
             exclude_agents: false,
             cwd_prefix: false,
+            failed_only: false,
         })
         .unwrap_or(0);
 

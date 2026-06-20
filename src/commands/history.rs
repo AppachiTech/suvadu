@@ -45,6 +45,7 @@ pub fn handle_history(
             field: SearchField::Command,
             exclude_agents: false,
             cwd_prefix: false,
+            failed_only: false,
         },
     )?;
 

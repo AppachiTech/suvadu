@@ -192,6 +192,10 @@ pub enum Commands {
         #[arg(long)]
         include_agents: bool,
 
+        /// Show only failed commands (non-zero exit code)
+        #[arg(long)]
+        failed: bool,
+
         /// Search field: command (default), cwd, session, or executor
         #[arg(long, value_enum, default_value_t = SearchField::Command)]
         field: SearchField,

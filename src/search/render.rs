@@ -171,6 +171,7 @@ impl SearchApp {
         f.render_widget(help_paragraph, area);
     }
 
+    #[allow(clippy::too_many_lines)]
     fn build_help_badges(&self) -> Vec<Span<'static>> {
         let t = theme();
         let badge_key_style = Style::default().bg(t.badge_bg).fg(t.text);
@@ -259,6 +260,15 @@ impl SearchApp {
                     " Hide AI  "
                 } else {
                     " Show AI  "
+                },
+                badge_label_style,
+            ),
+            Span::styled(" ^E ", badge_key_style),
+            Span::styled(
+                if self.filters.failed_only {
+                    " All  "
+                } else {
+                    " Failed  "
                 },
                 badge_label_style,
             ),
@@ -1214,6 +1224,7 @@ fn build_help_lines(t: &crate::theme::Theme) -> Vec<Line<'static>> {
         help_row("  ^T              ", "Tag current session", t),
         help_row("  ^L              ", "Toggle directory filter", t),
         help_row("  ^A              ", "Toggle AI-agent commands", t),
+        help_row("  ^E              ", "Toggle failed-only (errors)", t),
         Line::from(""),
         help_section("\u{2500}\u{2500} Display \u{2500}\u{2500}", t),
         help_row("  ^U              ", "Toggle unique/all mode", t),
@@ -1418,6 +1429,7 @@ mod tests {
             filter_exit_code: None,
             filter_executor_type: None,
             show_agents: false,
+            failed_only: false,
             start_date_input: None,
             end_date_input: None,
             tag_filter_input: None,
@@ -1503,6 +1515,7 @@ mod tests {
             filter_exit_code: None,
             filter_executor_type: None,
             show_agents: false,
+            failed_only: false,
             start_date_input: None,
             end_date_input: None,
             tag_filter_input: None,
@@ -1547,6 +1560,7 @@ mod tests {
             filter_exit_code: None,
             filter_executor_type: None,
             show_agents: false,
+            failed_only: false,
             start_date_input: None,
             end_date_input: None,
             tag_filter_input: None,
@@ -1601,6 +1615,7 @@ mod tests {
             filter_exit_code: exit_code,
             filter_executor_type: executor_type,
             show_agents: false,
+            failed_only: false,
             start_date_input: None,
             end_date_input: None,
             tag_filter_input: None,
@@ -1722,6 +1737,7 @@ mod tests {
             filter_exit_code: None,
             filter_executor_type: None,
             show_agents: false,
+            failed_only: false,
             start_date_input: None,
             end_date_input: None,
             tag_filter_input: None,
@@ -1769,6 +1785,7 @@ mod tests {
             filter_exit_code: None,
             filter_executor_type: None,
             show_agents: false,
+            failed_only: false,
             start_date_input: None,
             end_date_input: None,
             tag_filter_input: None,
@@ -1816,6 +1833,7 @@ mod tests {
             filter_exit_code: None,
             filter_executor_type: None,
             show_agents: false,
+            failed_only: false,
             start_date_input: None,
             end_date_input: None,
             tag_filter_input: None,
@@ -2089,6 +2107,7 @@ mod tests {
             filter_exit_code: None,
             filter_executor_type: None,
             show_agents: false,
+            failed_only: false,
             start_date_input: None,
             end_date_input: None,
             tag_filter_input: None,
@@ -2151,6 +2170,7 @@ mod tests {
             filter_exit_code: None,
             filter_executor_type: None,
             show_agents: false,
+            failed_only: false,
             start_date_input: None,
             end_date_input: None,
             tag_filter_input: None,
@@ -2300,6 +2320,7 @@ mod tests {
             filter_exit_code: None,
             filter_executor_type: None,
             show_agents: false,
+            failed_only: false,
             start_date_input: None,
             end_date_input: None,
             tag_filter_input: None,

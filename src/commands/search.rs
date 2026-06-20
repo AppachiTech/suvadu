@@ -9,6 +9,7 @@ use crate::search;
 /// fall back to native search (e.g. Ctrl-R).
 const EXIT_CODE_SHELL_FALLBACK: i32 = 10;
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct SearchParams<'a> {
     pub query: Option<&'a String>,
     pub unique: bool,
@@ -20,6 +21,7 @@ pub struct SearchParams<'a> {
     pub here: bool,
     pub field: SearchField,
     pub include_agents: bool,
+    pub failed_only: bool,
 }
 
 pub fn handle_search(p: &SearchParams) -> Result<(), Box<dyn std::error::Error>> {
@@ -71,6 +73,7 @@ pub fn handle_search(p: &SearchParams) -> Result<(), Box<dyn std::error::Error>>
             cwd: cwd_filter.as_deref(),
             field: p.field,
             include_agents: show_agents,
+            failed_only: p.failed_only,
         },
     )?;
 

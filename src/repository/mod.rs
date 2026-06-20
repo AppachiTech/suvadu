@@ -59,6 +59,7 @@ pub fn entry_from_row(row: &rusqlite::Row, tag_id_col: usize) -> rusqlite::Resul
 /// Filter parameters for entry queries. Replaces 10-12 positional parameters
 /// with a single self-documenting struct.
 #[derive(Default, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct QueryFilter<'a> {
     pub after: Option<i64>,
     pub before: Option<i64>,
@@ -78,6 +79,10 @@ pub struct QueryFilter<'a> {
     /// exactly. Used by project-scoped tools so "this directory" means the whole
     /// project tree. Defaults to `false` (exact match).
     pub cwd_prefix: bool,
+    /// When `true`, return only commands that failed (non-zero, non-null exit
+    /// code). Combined with an explicit `exit_code` it is redundant; on its own
+    /// it answers "what did I run that failed?". Defaults to `false`.
+    pub failed_only: bool,
 }
 
 impl QueryFilter<'_> {
@@ -92,6 +97,7 @@ impl QueryFilter<'_> {
             .with_cwd_mode(self.cwd, self.cwd_prefix)
             // An explicit executor filter takes precedence over the agent hide.
             .with_exclude_agents(self.exclude_agents && self.executor.is_none())
+            .with_failed_only(self.failed_only)
     }
 }
 
@@ -262,6 +268,15 @@ impl FilterBuilder {
         self
     }
 
+    /// Restrict to commands that failed (non-zero, non-null exit code).
+    pub fn with_failed_only(mut self, failed_only: bool) -> Self {
+        if failed_only {
+            self.clauses
+                .push("(e.exit_code IS NOT NULL AND e.exit_code != 0)".into());
+        }
+        self
+    }
+
     pub fn with_executor(mut self, executor: Option<&str>) -> Self {
         if let Some(exec) = executor {
             self.clauses.push(
@@ -402,6 +417,22 @@ mod filter_builder_tests {
         let fb = FilterBuilder::new().with_session(Some("sess-123"));
         assert_eq!(fb.build_where(), " WHERE e.session_id = ?");
         assert_eq!(fb.params_refs().len(), 1);
+    }
+
+    #[test]
+    fn with_failed_only() {
+        let fb = FilterBuilder::new().with_failed_only(true);
+        assert_eq!(
+            fb.build_where(),
+            " WHERE (e.exit_code IS NOT NULL AND e.exit_code != 0)"
+        );
+        assert!(fb.params_refs().is_empty());
+    }
+
+    #[test]
+    fn with_failed_only_false_is_noop() {
+        let fb = FilterBuilder::new().with_failed_only(false);
+        assert_eq!(fb.build_where(), " WHERE 1=1");
     }
 
     #[test]

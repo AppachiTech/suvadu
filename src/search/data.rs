@@ -32,6 +32,9 @@ impl SearchApp {
         if self.filters.executor_type.is_some() {
             count += 1;
         }
+        if self.filters.failed_only {
+            count += 1;
+        }
         count
     }
 
@@ -49,6 +52,7 @@ impl SearchApp {
             field: self.view.search_field,
             exclude_agents: !self.filters.show_agents,
             cwd_prefix: false,
+            failed_only: self.filters.failed_only,
         }
     }
 

@@ -339,6 +339,19 @@ impl SearchApp {
                 self.pagination.page = 1;
                 return Some(SearchAction::Reload);
             }
+            KeyCode::Char('e') => {
+                self.filters.failed_only = !self.filters.failed_only;
+                self.status_message = Some((
+                    if self.filters.failed_only {
+                        "Failed commands only".into()
+                    } else {
+                        "All exit codes".into()
+                    },
+                    std::time::Instant::now(),
+                ));
+                self.pagination.page = 1;
+                return Some(SearchAction::Reload);
+            }
             _ => return None,
         }
         Some(SearchAction::Continue)

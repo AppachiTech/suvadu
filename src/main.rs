@@ -259,6 +259,7 @@ fn run_search(cmd: Commands) -> Result<(), Box<dyn std::error::Error>> {
         executor,
         here,
         include_agents,
+        failed,
         field,
     } = cmd
     else {
@@ -275,6 +276,7 @@ fn run_search(cmd: Commands) -> Result<(), Box<dyn std::error::Error>> {
         here,
         field,
         include_agents,
+        failed_only: failed,
     })
 }
 
@@ -484,6 +486,7 @@ mod tests {
             executor: None,
             here: false,
             include_agents: false,
+            failed: false,
             field: crate::models::SearchField::Command,
         };
         assert!(is_user_facing_command(&cmd));

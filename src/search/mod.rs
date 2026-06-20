@@ -88,6 +88,8 @@ pub struct FilterState {
     /// When `true`, AI-agent / bot / CI / script commands are shown. Defaults
     /// from `config.search.recall_show_agents`; toggled live with Ctrl+A.
     pub show_agents: bool,
+    /// When `true`, show only failed commands (non-zero exit). Toggled with Ctrl+E.
+    pub failed_only: bool,
 
     // Dialog text inputs (persist across filter-dialog open/close)
     pub start_date_input: String,
@@ -111,6 +113,7 @@ pub struct PaginationState {
 }
 
 /// Configuration bundle for constructing a `SearchApp`, reducing constructor parameter count.
+#[allow(clippy::struct_excessive_bools)]
 pub struct SearchConfig {
     pub entries: Vec<Entry>,
     pub initial_query: Option<String>,
@@ -126,6 +129,7 @@ pub struct SearchConfig {
     pub filter_exit_code: Option<i32>,
     pub filter_executor_type: Option<String>,
     pub show_agents: bool,
+    pub failed_only: bool,
     pub start_date_input: Option<String>,
     pub end_date_input: Option<String>,
     pub tag_filter_input: Option<String>,
@@ -205,6 +209,7 @@ impl SearchApp {
                 executor_type: cfg.filter_executor_type,
                 cwd: cfg.filter_cwd,
                 show_agents: cfg.show_agents,
+                failed_only: cfg.failed_only,
                 start_date_input: start_default,
                 end_date_input: end_default,
                 tag_filter_input: cfg.tag_filter_input.unwrap_or_default(),
@@ -424,6 +429,7 @@ fn load_search_entries(
 
 /// Parameters for `run_search` — bundles the CLI flags into one struct
 /// to avoid excessive positional arguments.
+#[allow(clippy::struct_excessive_bools)]
 pub struct SearchArgs<'a> {
     pub initial_query: Option<&'a str>,
     pub unique_mode: bool,
@@ -438,6 +444,8 @@ pub struct SearchArgs<'a> {
     /// When `true`, include AI-agent / bot / CI / script commands in results.
     /// Defaults to hidden; toggled at runtime with Ctrl+A.
     pub include_agents: bool,
+    /// When `true`, start filtered to failed commands only (toggle: Ctrl+E).
+    pub failed_only: bool,
 }
 
 pub fn run_search(
@@ -475,6 +483,7 @@ pub fn run_search(
         field: args.field,
         exclude_agents: !args.include_agents,
         cwd_prefix: false,
+        failed_only: args.failed_only,
     };
 
     let (entries, total_count, unique_counts) =
@@ -508,6 +517,7 @@ pub fn run_search(
         filter_exit_code: args.exit_code,
         filter_executor_type: args.executor.map(String::from),
         show_agents: args.include_agents,
+        failed_only: args.failed_only,
         start_date_input: args.after.map(String::from),
         end_date_input: args.before.map(String::from),
         tag_filter_input: args.tag.map(String::from),
