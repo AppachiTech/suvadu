@@ -34,7 +34,10 @@ pub fn handle_alias(cmd: AliasCommands) -> Result<(), Box<dyn std::error::Error>
 
 fn handle_add(name: &str, command: &str) -> Result<(), Box<dyn std::error::Error>> {
     let repo = Repository::init()?;
-    add_alias_to(&repo, name, command)
+    add_alias_to(&repo, name, command)?;
+    // Regenerate the managed alias file so the new alias is live in the next
+    // shell without a separate `suv alias apply` step.
+    apply_aliases_from(&repo, false)
 }
 
 fn add_alias_to(
@@ -205,7 +208,8 @@ fn handle_add_suggested(
                 "✓ Added {added} alias{}",
                 if added == 1 { "" } else { "es" }
             );
-            println!("  Run 'suv alias apply' to generate the shell file.");
+            // Regenerate the managed alias file automatically.
+            apply_aliases_from(&repo, false)?;
         }
         _ => {
             println!("No aliases added.");
