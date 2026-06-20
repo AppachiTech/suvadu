@@ -84,7 +84,7 @@ impl SettingsTab {
 
     fn item_count(self, config: &Config) -> usize {
         match self {
-            Self::Search => 9,
+            Self::Search => 10,
             Self::Shell => 3,
             Self::Exclusions => config.exclusions.len(),
             Self::AutoTags => config.auto_tags.len(),
@@ -257,6 +257,10 @@ impl AppState {
             }
             (SettingsTab::Search, 5) => {
                 self.config.search.vim_mode = !self.config.search.vim_mode;
+                self.dirty = true;
+            }
+            (SettingsTab::Search, 9) => {
+                self.config.search.recall_show_agents = !self.config.search.recall_show_agents;
                 self.dirty = true;
             }
             (SettingsTab::Shell, 0) => {
@@ -984,6 +988,7 @@ const fn get_setting_description(tab: usize, item: usize) -> &'static str {
         (0, 6) => "Commands longer than this (in characters) get a scoring penalty (10-500)",
         (0, 7) => "Boost percentage for human-typed commands over agent commands. 0 = disabled (0-100)",
         (0, 8) => "Boost percentage for same-directory commands when Smart Mode is on. 0 = disabled (0-100)",
+        (0, 9) => "Show AI-agent / bot / CI / script commands in Up-arrow and Ctrl+R recall. Off by default so recall shows what you typed (toggle live with Ctrl+A / Alt+A)",
         (1, 0) => "Bind Up/Down arrow keys to cycle through command history",
         (1, 1) => "Show risk assessment badges in the search detail pane for agent commands",
         (1, 2) => "Color theme: dark (RGB for dark terminals), light (RGB for light terminals), terminal (ANSI 16 — adapts to your scheme). Changes apply immediately.",
@@ -1048,6 +1053,11 @@ fn render_search_tab(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             &format!("{}%", app.config.search.cwd_boost_percent),
             app.selected_item == 8,
             false,
+        ),
+        setting_toggle(
+            "Show AI Agent Commands in Recall",
+            app.config.search.recall_show_agents,
+            app.selected_item == 9,
         ),
     ];
 
@@ -1692,6 +1702,8 @@ mod tests {
         app.next_item();
         assert_eq!(app.selected_item, 8);
         app.next_item();
+        assert_eq!(app.selected_item, 9);
+        app.next_item();
         assert_eq!(app.selected_item, 0); // Cycle back
     }
 
@@ -1806,12 +1818,12 @@ mod tests {
         let config = Config::default();
         let mut app = AppState::new(config);
 
-        // Tab 0 has 9 items; going prev from 0 wraps to 8
+        // Tab 0 has 10 items; going prev from 0 wraps to 9
         assert_eq!(app.selected_item, 0);
         app.prev_item();
-        assert_eq!(app.selected_item, 8);
+        assert_eq!(app.selected_item, 9);
 
-        // And going next from 8 wraps to 0
+        // And going next from 9 wraps to 0
         app.next_item();
         assert_eq!(app.selected_item, 0);
     }

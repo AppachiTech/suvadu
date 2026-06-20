@@ -107,7 +107,7 @@ fn format_time(ms: i64) -> String {
 
 fn read_recent_history(repo: &Repository) -> Result<String, String> {
     let entries = repo
-        .get_recent_entries(20, 0, None, false, None)
+        .get_recent_entries(20, 0, None, false, None, true)
         .map_err(|e| format!("query failed: {e}"))?;
 
     if entries.is_empty() {
@@ -150,6 +150,7 @@ fn read_recent_failures(repo: &Repository) -> Result<String, String> {
         executor: None,
         cwd: None,
         field: SearchField::Command,
+        exclude_agents: false,
     };
 
     let entries = repo
@@ -205,6 +206,7 @@ fn read_today_stats(repo: &Repository) -> Result<String, String> {
         executor: None,
         cwd: None,
         field: SearchField::Command,
+        exclude_agents: false,
     };
 
     let total = repo
@@ -283,6 +285,7 @@ fn read_risk_summary(repo: &Repository) -> Result<String, String> {
         executor: None,
         cwd: None,
         field: SearchField::Command,
+        exclude_agents: false,
     };
 
     let entries = repo
@@ -359,6 +362,7 @@ fn read_agent_activity(repo: &Repository) -> Result<String, String> {
             executor: Some(agent),
             cwd: None,
             field: SearchField::Command,
+            exclude_agents: false,
         };
 
         let total = repo.count_filtered(&qf).unwrap_or(0);
@@ -406,6 +410,7 @@ fn read_agent_sessions(repo: &Repository) -> Result<String, String> {
         executor: None,
         cwd: None,
         field: SearchField::Command,
+        exclude_agents: false,
     };
 
     let entries = repo

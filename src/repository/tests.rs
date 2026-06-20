@@ -623,7 +623,7 @@ fn test_recent_entries_shows_failed_commands() {
     .unwrap();
 
     // get_recent_entries should return BOTH invocations (no dedup)
-    let results = repo.get_recent_entries(10, 0, None, false, None).unwrap();
+    let results = repo.get_recent_entries(10, 0, None, false, None, true).unwrap();
     assert_eq!(results.len(), 2);
     // Most recent first
     assert_eq!(results[0].started_at, 2000);
@@ -633,7 +633,11 @@ fn test_recent_entries_shows_failed_commands() {
 }
 
 #[test]
-fn test_recent_entries_with_cwd_boost() {
+fn test_recent_entries_recency_beats_cwd_boost() {
+    // Regression test for the "command typed in the wrong directory disappears
+    // after cd" bug: recency must be the primary sort key, so the most-recent
+    // command is always reachable at offset 0 regardless of `boost_cwd`. The
+    // cwd boost may only break ties between equally-recent commands.
     let (_temp, repo) = setup_test_db();
     let session = Session::new("host".to_string(), 100);
     repo.insert_session(&session).unwrap();
@@ -649,7 +653,7 @@ fn test_recent_entries_with_cwd_boost() {
     ))
     .unwrap();
 
-    // Newer command in /other
+    // Newer command in /other (e.g. typed, then user cd'd to /project)
     repo.insert_entry(&Entry::new(
         session.id.clone(),
         "ls".into(),
@@ -660,13 +664,83 @@ fn test_recent_entries_with_cwd_boost() {
     ))
     .unwrap();
 
-    // With boost_cwd=/project, /project commands should come first
+    // Even with boost_cwd=/project, the newer /other command must come first —
+    // it must NOT be buried beneath every same-directory command.
     let results = repo
-        .get_recent_entries(10, 0, None, false, Some("/project"))
+        .get_recent_entries(10, 0, None, false, Some("/project"), true)
         .unwrap();
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0].command, "make test");
-    assert_eq!(results[1].command, "ls");
+    assert_eq!(results[0].command, "ls", "most recent command must be offset 0");
+    assert_eq!(results[1].command, "make test");
+}
+
+#[test]
+fn test_recent_entries_cwd_boost_breaks_ties() {
+    // When two commands share the same timestamp, the cwd boost decides order.
+    let (_temp, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "other dir cmd".into(),
+        "/other".into(),
+        Some(0),
+        5000,
+        5010,
+    ))
+    .unwrap();
+    repo.insert_entry(&Entry::new(
+        session.id.clone(),
+        "project dir cmd".into(),
+        "/project".into(),
+        Some(0),
+        5000,
+        5010,
+    ))
+    .unwrap();
+
+    let results = repo
+        .get_recent_entries(10, 0, None, false, Some("/project"), true)
+        .unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results[0].command, "project dir cmd",
+        "same timestamp: current-directory command wins the tie"
+    );
+}
+
+#[test]
+fn test_recent_entries_hides_agent_commands_by_default() {
+    // Up-arrow / Ctrl+R recall hides agent/bot/ci/programmatic commands unless
+    // include_agents is set; human/ide/unknown/NULL always show.
+    let (_temp, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 100);
+    repo.insert_session(&session).unwrap();
+
+    let mut human = Entry::new(session.id.clone(), "git push".into(), "/p".into(), Some(0), 1000, 1010);
+    human.executor_type = Some("human".into());
+    repo.insert_entry(&human).unwrap();
+
+    let mut ide = Entry::new(session.id.clone(), "npm test".into(), "/p".into(), Some(0), 2000, 2010);
+    ide.executor_type = Some("ide".into());
+    repo.insert_entry(&ide).unwrap();
+
+    let mut agent = Entry::new(session.id.clone(), "grep -rn foo".into(), "/p".into(), Some(0), 3000, 3010);
+    agent.executor_type = Some("agent".into());
+    repo.insert_entry(&agent).unwrap();
+
+    // Default (include_agents=false): agent command is hidden, human + ide show.
+    let hidden = repo.get_recent_entries(10, 0, None, false, None, false).unwrap();
+    let cmds: Vec<&str> = hidden.iter().map(|e| e.command.as_str()).collect();
+    assert!(!cmds.contains(&"grep -rn foo"), "agent command must be hidden by default");
+    assert!(cmds.contains(&"git push"), "human command must show");
+    assert!(cmds.contains(&"npm test"), "ide command must show");
+
+    // include_agents=true: everything shows, most recent (agent) first.
+    let shown = repo.get_recent_entries(10, 0, None, false, None, true).unwrap();
+    assert_eq!(shown.len(), 3);
+    assert_eq!(shown[0].command, "grep -rn foo");
 }
 
 #[test]
@@ -697,7 +771,7 @@ fn test_recent_entries_prefix_match() {
 
     // Prefix match for "git" should only return "git status"
     let results = repo
-        .get_recent_entries(10, 0, Some("git"), true, None)
+        .get_recent_entries(10, 0, Some("git"), true, None, true)
         .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].command, "git status");

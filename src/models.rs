@@ -60,6 +60,13 @@ impl Entry {
         self.executor_kind().is_human()
     }
 
+    /// Returns `true` if this entry was typed interactively — a terminal or an
+    /// IDE-integrated terminal — or is unknown/legacy. See
+    /// [`ExecutorKind::is_interactive`].
+    pub fn is_interactive(&self) -> bool {
+        self.executor_kind().is_interactive()
+    }
+
     /// Returns `true` if this entry was executed by an agent (not human/unknown).
     pub fn is_agent(&self) -> bool {
         !self.is_human()
@@ -153,6 +160,23 @@ impl ExecutorKind {
     /// Returns `true` for human or unknown/missing executor types.
     pub const fn is_human(self) -> bool {
         matches!(self, Self::Human | Self::Unknown)
+    }
+
+    /// `executor_type` string values that represent automated, non-interactive
+    /// command sources — AI agents, bots, CI runners, and background scripts.
+    /// These are hidden from interactive history recall (Up-arrow / Ctrl+R) by
+    /// default, since they are rarely the commands a person wants to re-run.
+    pub const NON_INTERACTIVE_DB_VALUES: [&'static str; 4] = ["agent", "bot", "ci", "programmatic"];
+
+    /// Returns `true` for commands a person drives interactively — a real
+    /// terminal or an IDE-integrated terminal (VS Code, Cursor, …) — plus
+    /// unknown/legacy entries. Returns `false` for agent/bot/ci/programmatic.
+    ///
+    /// This is intentionally broader than [`Self::is_human`] (which excludes
+    /// `Ide`): IDE-terminal commands are typed by the user and belong in
+    /// everyday recall, whereas `is_human` is used for agent-vs-human analytics.
+    pub const fn is_interactive(self) -> bool {
+        matches!(self, Self::Human | Self::Ide | Self::Unknown)
     }
 }
 

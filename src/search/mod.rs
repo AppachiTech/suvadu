@@ -85,6 +85,9 @@ pub struct FilterState {
     pub exit_code: Option<i32>,
     pub executor_type: Option<String>,
     pub cwd: Option<String>,
+    /// When `true`, AI-agent / bot / CI / script commands are shown. Defaults
+    /// from `config.search.recall_show_agents`; toggled live with Ctrl+A.
+    pub show_agents: bool,
 
     // Dialog text inputs (persist across filter-dialog open/close)
     pub start_date_input: String,
@@ -122,6 +125,7 @@ pub struct SearchConfig {
     pub filter_tag_id: Option<i64>,
     pub filter_exit_code: Option<i32>,
     pub filter_executor_type: Option<String>,
+    pub show_agents: bool,
     pub start_date_input: Option<String>,
     pub end_date_input: Option<String>,
     pub tag_filter_input: Option<String>,
@@ -200,6 +204,7 @@ impl SearchApp {
                 exit_code: cfg.filter_exit_code,
                 executor_type: cfg.filter_executor_type,
                 cwd: cfg.filter_cwd,
+                show_agents: cfg.show_agents,
                 start_date_input: start_default,
                 end_date_input: end_default,
                 tag_filter_input: cfg.tag_filter_input.unwrap_or_default(),
@@ -430,6 +435,9 @@ pub struct SearchArgs<'a> {
     pub prefix_match: bool,
     pub cwd: Option<&'a str>,
     pub field: SearchField,
+    /// When `true`, include AI-agent / bot / CI / script commands in results.
+    /// Defaults to hidden; toggled at runtime with Ctrl+A.
+    pub include_agents: bool,
 }
 
 pub fn run_search(
@@ -465,6 +473,7 @@ pub fn run_search(
         executor: args.executor,
         cwd: args.cwd,
         field: args.field,
+        exclude_agents: !args.include_agents,
     };
 
     let (entries, total_count, unique_counts) =
@@ -497,6 +506,7 @@ pub fn run_search(
         filter_tag_id: tag_id,
         filter_exit_code: args.exit_code,
         filter_executor_type: args.executor.map(String::from),
+        show_agents: args.include_agents,
         start_date_input: args.after.map(String::from),
         end_date_input: args.before.map(String::from),
         tag_filter_input: args.tag.map(String::from),

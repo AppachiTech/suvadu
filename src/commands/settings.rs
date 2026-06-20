@@ -65,6 +65,7 @@ pub fn handle_status() -> Result<(), Box<dyn std::error::Error>> {
                     executor: None,
                     cwd: None,
                     field: crate::models::SearchField::Command,
+                    exclude_agents: false,
                 })
                 .unwrap_or(0);
             println!("  Commands: {total} recorded");

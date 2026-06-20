@@ -88,7 +88,8 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
             offset,
             prefix,
             cwd,
-        } => commands::search::handle_get(&query, offset, prefix, cwd.as_deref()),
+            include_agents,
+        } => commands::search::handle_get(&query, offset, prefix, cwd.as_deref(), include_agents),
         Commands::Settings => commands::settings::handle_settings(),
         Commands::Status => commands::settings::handle_status(),
         Commands::Doctor => {
@@ -244,6 +245,7 @@ fn run_search(cmd: Commands) -> Result<(), Box<dyn std::error::Error>> {
         exit_code,
         executor,
         here,
+        include_agents,
         field,
     } = cmd
     else {
@@ -259,6 +261,7 @@ fn run_search(cmd: Commands) -> Result<(), Box<dyn std::error::Error>> {
         executor: executor.as_deref(),
         here,
         field,
+        include_agents,
     })
 }
 
@@ -422,6 +425,7 @@ mod tests {
             offset: 0,
             prefix: false,
             cwd: None,
+            include_agents: false,
         }));
         assert!(!is_user_facing_command(&Commands::Init {
             target: cli::InitTarget::Zsh,
@@ -465,6 +469,7 @@ mod tests {
             exit_code: None,
             executor: None,
             here: false,
+            include_agents: false,
             field: crate::models::SearchField::Command,
         };
         assert!(is_user_facing_command(&cmd));

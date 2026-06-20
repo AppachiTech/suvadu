@@ -374,6 +374,7 @@ fn handle_search_commands(repo: &Repository, args: &Value) -> Result<String, Str
         executor,
         cwd: directory,
         field: SearchField::Command,
+        exclude_agents: false,
     };
 
     let entries = repo
@@ -414,11 +415,12 @@ fn handle_recent_commands(repo: &Repository, args: &Value) -> Result<String, Str
             executor,
             cwd: directory,
             field: SearchField::Command,
+            exclude_agents: false,
         };
         repo.get_entries_filtered(limit, 0, &qf)
             .map_err(|e| format!("query failed: {e}"))?
     } else {
-        repo.get_recent_entries(limit, 0, None, false, directory)
+        repo.get_recent_entries(limit, 0, None, false, directory, true)
             .map_err(|e| format!("query failed: {e}"))?
     };
 
@@ -446,7 +448,7 @@ fn handle_command_status(repo: &Repository, args: &Value) -> Result<String, Stri
     }
 
     let entries = repo
-        .get_recent_entries(limit, 0, Some(command), true, directory)
+        .get_recent_entries(limit, 0, Some(command), true, directory, true)
         .map_err(|e| format!("query failed: {e}"))?;
 
     if entries.is_empty() {
@@ -605,6 +607,7 @@ fn handle_get_stats(repo: &Repository, args: &Value) -> Result<String, String> {
         executor: None,
         cwd: directory,
         field: SearchField::Command,
+        exclude_agents: false,
     };
 
     let total = repo
@@ -788,6 +791,7 @@ fn handle_what_changed(repo: &Repository, args: &Value) -> Result<String, String
         executor,
         cwd: directory,
         field: SearchField::Command,
+        exclude_agents: false,
     };
 
     let entries = repo
@@ -872,6 +876,7 @@ fn handle_what_failed(repo: &Repository, args: &Value) -> Result<String, String>
         executor: None,
         cwd: directory,
         field: SearchField::Command,
+        exclude_agents: false,
     };
 
     let entries = repo
@@ -985,6 +990,7 @@ fn handle_suggest_next(repo: &Repository, args: &Value) -> Result<String, String
         executor: None,
         cwd: directory,
         field: SearchField::Command,
+        exclude_agents: false,
     };
 
     let entries = repo
@@ -1300,6 +1306,7 @@ fn handle_find_agent_session(repo: &Repository, args: &Value) -> Result<String, 
         executor,
         cwd: directory,
         field: crate::models::SearchField::Command,
+        exclude_agents: false,
     };
 
     let entries = repo

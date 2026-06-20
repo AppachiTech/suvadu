@@ -48,6 +48,7 @@ pub trait RepositoryApi {
         query: Option<&str>,
         prefix_match: bool,
         boost_cwd: Option<&str>,
+        include_agents: bool,
     ) -> DbResult<Vec<Entry>>;
     fn count_unique_filtered(&self, filter: &super::QueryFilter) -> DbResult<i64>;
     fn delete_entries(
@@ -197,8 +198,17 @@ impl RepositoryApi for Repository {
         query: Option<&str>,
         prefix_match: bool,
         boost_cwd: Option<&str>,
+        include_agents: bool,
     ) -> DbResult<Vec<Entry>> {
-        Self::get_recent_entries(self, limit, offset, query, prefix_match, boost_cwd)
+        Self::get_recent_entries(
+            self,
+            limit,
+            offset,
+            query,
+            prefix_match,
+            boost_cwd,
+            include_agents,
+        )
     }
 
     fn count_unique_filtered(&self, filter: &super::QueryFilter) -> DbResult<i64> {

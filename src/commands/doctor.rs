@@ -310,6 +310,7 @@ fn check_database() -> CheckResult {
             executor: None,
             cwd: None,
             field: SearchField::Command,
+            exclude_agents: false,
         })
         .unwrap_or(0);
 

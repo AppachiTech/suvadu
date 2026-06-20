@@ -19,6 +19,7 @@ pub struct SearchParams<'a> {
     pub executor: Option<&'a str>,
     pub here: bool,
     pub field: SearchField,
+    pub include_agents: bool,
 }
 
 pub fn handle_search(p: &SearchParams) -> Result<(), Box<dyn std::error::Error>> {
@@ -50,6 +51,11 @@ pub fn handle_search(p: &SearchParams) -> Result<(), Box<dyn std::error::Error>>
         None
     };
 
+    // Hide agent/bot/ci/script commands from Ctrl+R recall unless the user
+    // opted in (config default or the --include-agents flag). Togglable in the
+    // TUI with Ctrl+A.
+    let show_agents = p.include_agents || app_config.search.recall_show_agents;
+
     // Run TUI
     let selected = search::run_search(
         &repo,
@@ -64,6 +70,7 @@ pub fn handle_search(p: &SearchParams) -> Result<(), Box<dyn std::error::Error>>
             prefix_match: false,
             cwd: cwd_filter.as_deref(),
             field: p.field,
+            include_agents: show_agents,
         },
     )?;
 
@@ -80,6 +87,7 @@ pub fn handle_get(
     offset: usize,
     prefix: bool,
     cwd: Option<&str>,
+    include_agents: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = Repository::init()?;
 
@@ -93,7 +101,11 @@ pub fn handle_get(
         None
     };
 
-    if let Some(cmd) = get_from_repo(&repo, query, offset, prefix, boost_cwd)? {
+    // Hide agent/bot/ci/script commands from Up-arrow recall unless the user
+    // opted in (config default or the per-shell --include-agents flag).
+    let show_agents = include_agents || config.search.recall_show_agents;
+
+    if let Some(cmd) = get_from_repo(&repo, query, offset, prefix, boost_cwd, show_agents)? {
         print!("{cmd}");
     }
 
@@ -108,9 +120,10 @@ fn get_from_repo(
     offset: usize,
     prefix: bool,
     boost_cwd: Option<&str>,
+    include_agents: bool,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
     let query_opt = if query.is_empty() { None } else { Some(query) };
-    let results = repo.get_recent_entries(1, offset, query_opt, prefix, boost_cwd)?;
+    let results = repo.get_recent_entries(1, offset, query_opt, prefix, boost_cwd, include_agents)?;
     Ok(results.into_iter().next().map(|e| e.command))
 }
 
@@ -169,15 +182,15 @@ mod tests {
         seed_entry(&repo, "s1", "echo newest", 3_000);
 
         // With no query, offset 0 returns the most recent entry
-        let result = get_from_repo(&repo, "", 0, false, None).unwrap();
+        let result = get_from_repo(&repo, "", 0, false, None, true).unwrap();
         assert_eq!(result.as_deref(), Some("echo newest"));
 
         // Offset 1 returns the second most recent
-        let result = get_from_repo(&repo, "", 1, false, None).unwrap();
+        let result = get_from_repo(&repo, "", 1, false, None, true).unwrap();
         assert_eq!(result.as_deref(), Some("echo new"));
 
         // Offset 2 returns the oldest
-        let result = get_from_repo(&repo, "", 2, false, None).unwrap();
+        let result = get_from_repo(&repo, "", 2, false, None, true).unwrap();
         assert_eq!(result.as_deref(), Some("echo old"));
     }
 
@@ -190,18 +203,18 @@ mod tests {
         seed_entry(&repo, "s1", "git log", 3_000);
 
         // Query "git" should match git commands, most recent first
-        let result = get_from_repo(&repo, "git", 0, false, None).unwrap();
+        let result = get_from_repo(&repo, "git", 0, false, None, true).unwrap();
         assert_eq!(result.as_deref(), Some("git log"));
 
-        let result = get_from_repo(&repo, "git", 1, false, None).unwrap();
+        let result = get_from_repo(&repo, "git", 1, false, None, true).unwrap();
         assert_eq!(result.as_deref(), Some("git status"));
 
         // Query "docker" should match only the docker command
-        let result = get_from_repo(&repo, "docker", 0, false, None).unwrap();
+        let result = get_from_repo(&repo, "docker", 0, false, None, true).unwrap();
         assert_eq!(result.as_deref(), Some("docker ps"));
 
         // No second docker match
-        let result = get_from_repo(&repo, "docker", 1, false, None).unwrap();
+        let result = get_from_repo(&repo, "docker", 1, false, None, true).unwrap();
         assert!(result.is_none());
     }
 
@@ -210,11 +223,11 @@ mod tests {
         let (_dir, repo) = test_repo();
 
         // No entries at all
-        let result = get_from_repo(&repo, "", 0, false, None).unwrap();
+        let result = get_from_repo(&repo, "", 0, false, None, true).unwrap();
         assert!(result.is_none());
 
         // With a query on empty DB
-        let result = get_from_repo(&repo, "git", 0, false, None).unwrap();
+        let result = get_from_repo(&repo, "git", 0, false, None, true).unwrap();
         assert!(result.is_none());
     }
 
@@ -227,18 +240,18 @@ mod tests {
         seed_entry(&repo, "s1", "docker ps", 3_000);
 
         // Prefix "git" should match both git commands
-        let result = get_from_repo(&repo, "git", 0, true, None).unwrap();
+        let result = get_from_repo(&repo, "git", 0, true, None, true).unwrap();
         assert_eq!(result.as_deref(), Some("git log --oneline"));
 
-        let result = get_from_repo(&repo, "git", 1, true, None).unwrap();
+        let result = get_from_repo(&repo, "git", 1, true, None, true).unwrap();
         assert_eq!(result.as_deref(), Some("git status"));
 
         // Prefix "docker" should match just docker ps
-        let result = get_from_repo(&repo, "docker", 0, true, None).unwrap();
+        let result = get_from_repo(&repo, "docker", 0, true, None, true).unwrap();
         assert_eq!(result.as_deref(), Some("docker ps"));
 
         // Prefix "xyz" matches nothing
-        let result = get_from_repo(&repo, "xyz", 0, true, None).unwrap();
+        let result = get_from_repo(&repo, "xyz", 0, true, None, true).unwrap();
         assert!(result.is_none());
     }
 }

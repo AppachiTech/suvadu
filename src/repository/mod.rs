@@ -69,6 +69,11 @@ pub struct QueryFilter<'a> {
     pub executor: Option<&'a str>,
     pub cwd: Option<&'a str>,
     pub field: crate::models::SearchField,
+    /// When `true`, hide automated (agent/bot/ci/programmatic) commands so only
+    /// interactively-typed history is returned. Ignored when an explicit
+    /// `executor` filter is set (that filter wins). Defaults to `false`
+    /// (show everything) to preserve behaviour for non-recall callers.
+    pub exclude_agents: bool,
 }
 
 impl QueryFilter<'_> {
@@ -81,6 +86,8 @@ impl QueryFilter<'_> {
             .with_query_field(self.query, self.prefix_match, self.field)
             .with_executor(self.executor)
             .with_cwd(self.cwd)
+            // An explicit executor filter takes precedence over the agent hide.
+            .with_exclude_agents(self.exclude_agents && self.executor.is_none())
     }
 }
 
@@ -208,6 +215,24 @@ impl FilterBuilder {
         if let Some(tid) = tag_id {
             self.clauses.push("s.tag_id = ?".into());
             self.params.push(Box::new(tid));
+        }
+        self
+    }
+
+    /// Hide automated (agent/bot/ci/programmatic) commands when `exclude` is
+    /// true. NULL/human/ide/unknown rows always pass. The excluded values are
+    /// hardcoded constants ([`crate::models::ExecutorKind::NON_INTERACTIVE_DB_VALUES`]),
+    /// so they are safe to inline into SQL and add no bound parameters.
+    pub fn with_exclude_agents(mut self, exclude: bool) -> Self {
+        if exclude {
+            let list = crate::models::ExecutorKind::NON_INTERACTIVE_DB_VALUES
+                .iter()
+                .map(|v| format!("'{v}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.clauses.push(format!(
+                "(e.executor_type IS NULL OR e.executor_type NOT IN ({list}))"
+            ));
         }
         self
     }

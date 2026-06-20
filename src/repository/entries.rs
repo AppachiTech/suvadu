@@ -222,18 +222,25 @@ impl Repository {
         query: Option<&str>,
         prefix_match: bool,
         boost_cwd: Option<&str>,
+        include_agents: bool,
     ) -> DbResult<Vec<Entry>> {
-        let mut fb = FilterBuilder::new().with_query(query, prefix_match);
+        let mut fb = FilterBuilder::new()
+            .with_query(query, prefix_match)
+            .with_exclude_agents(!include_agents);
 
+        // Recency is the PRIMARY sort key so the just-typed command is always at
+        // offset 0 regardless of which directory it ran in (a `cd` away must not
+        // bury it). `boost_cwd` only breaks ties between equally-recent commands,
+        // gently preferring the current directory without hiding anything.
         let cwd_order = if boost_cwd.is_some() {
-            "CASE WHEN e.cwd = ? THEN 0 ELSE 1 END, "
+            ", CASE WHEN e.cwd = ? THEN 0 ELSE 1 END"
         } else {
             ""
         };
 
         let sql = format!(
             "SELECT {ENTRY_COLUMNS}
-             {ENTRY_JOINS}{} ORDER BY {cwd_order}e.started_at DESC LIMIT ? OFFSET ?",
+             {ENTRY_JOINS}{} ORDER BY e.started_at DESC{cwd_order} LIMIT ? OFFSET ?",
             fb.build_where()
         );
 

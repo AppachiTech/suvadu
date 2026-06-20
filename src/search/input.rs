@@ -326,6 +326,19 @@ impl SearchApp {
                 self.pagination.page = 1;
                 return Some(SearchAction::Reload);
             }
+            KeyCode::Char('a') => {
+                self.filters.show_agents = !self.filters.show_agents;
+                self.status_message = Some((
+                    if self.filters.show_agents {
+                        "Agent commands shown".into()
+                    } else {
+                        "Agent commands hidden".into()
+                    },
+                    std::time::Instant::now(),
+                ));
+                self.pagination.page = 1;
+                return Some(SearchAction::Reload);
+            }
             _ => return None,
         }
         Some(SearchAction::Continue)

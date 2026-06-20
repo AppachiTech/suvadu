@@ -47,6 +47,7 @@ impl SearchApp {
             executor: self.filters.executor_type.as_deref(),
             cwd: self.filters.cwd.as_deref(),
             field: self.view.search_field,
+            exclude_agents: !self.filters.show_agents,
         }
     }
 
@@ -122,8 +123,9 @@ impl SearchApp {
             if score_cmp != std::cmp::Ordering::Equal {
                 return score_cmp;
             }
-            // Tiebreaker: human entries first
-            b.0.is_human().cmp(&a.0.is_human())
+            // Tiebreaker: interactively-typed entries (terminal/IDE) first,
+            // above agent/bot/ci/script commands.
+            b.0.is_interactive().cmp(&a.0.is_interactive())
         });
         scored.into_iter().map(|(e, _)| e).collect()
     }

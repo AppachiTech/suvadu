@@ -35,6 +35,7 @@ fn test_search_config(entries: Vec<Entry>, total_items: usize) -> SearchConfig {
         filter_tag_id: None,
         filter_exit_code: None,
         filter_executor_type: None,
+        show_agents: false,
         start_date_input: None,
         end_date_input: None,
         tag_filter_input: None,

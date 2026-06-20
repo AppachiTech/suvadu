@@ -304,8 +304,11 @@ _suvadu_up_arrow_widget() {
         fi
     fi
 
-    local result
-    result="$($_SUVADU_BIN get --query "$_SUVADU_QUERY" --offset $_SUVADU_OFFSET --prefix --cwd "$PWD" 2>/dev/null)"
+    local result _suvadu_agents_flag=""
+    # Up-arrow shows only commands you typed by default; Alt+A reveals AI-agent
+    # commands by setting _SUVADU_SHOW_AGENTS for this shell.
+    [[ -n "$_SUVADU_SHOW_AGENTS" ]] && _suvadu_agents_flag="--include-agents"
+    result="$($_SUVADU_BIN get --query "$_SUVADU_QUERY" --offset $_SUVADU_OFFSET --prefix --cwd "$PWD" $_suvadu_agents_flag 2>/dev/null)"
 
     if [[ -n "$result" ]]; then
         LBUFFER="$result"
@@ -329,8 +332,9 @@ _suvadu_down_arrow_widget() {
 
     if [[ $_SUVADU_OFFSET -gt 0 ]]; then
         ((_SUVADU_OFFSET--))
-        local result
-        result="$($_SUVADU_BIN get --query "$_SUVADU_QUERY" --offset $_SUVADU_OFFSET --prefix --cwd "$PWD" 2>/dev/null)"
+        local result _suvadu_agents_flag=""
+        [[ -n "$_SUVADU_SHOW_AGENTS" ]] && _suvadu_agents_flag="--include-agents"
+        result="$($_SUVADU_BIN get --query "$_SUVADU_QUERY" --offset $_SUVADU_OFFSET --prefix --cwd "$PWD" $_suvadu_agents_flag 2>/dev/null)"
         if [[ -n "$result" ]]; then
             LBUFFER="$result"
             RBUFFER=""
@@ -347,9 +351,22 @@ _suvadu_down_arrow_widget() {
     zle -R
 }
 
+# Toggle AI-agent commands in Up/Down arrow recall (per shell session)
+_suvadu_toggle_agents_widget() {
+    emulate -L zsh
+    if [[ -n "$_SUVADU_SHOW_AGENTS" ]]; then
+        unset _SUVADU_SHOW_AGENTS
+        zle -M "suvadu: AI-agent commands hidden from history recall"
+    else
+        export _SUVADU_SHOW_AGENTS=1
+        zle -M "suvadu: AI-agent commands shown in history recall"
+    fi
+}
+
 # Register Up/Down
 zle -N suvadu-up-arrow _suvadu_up_arrow_widget
 zle -N suvadu-down-arrow _suvadu_down_arrow_widget
+zle -N suvadu-toggle-agents _suvadu_toggle_agents_widget
 
 "#
 }
@@ -550,6 +567,8 @@ bindkey '^[[A' suvadu-up-arrow
 bindkey '^[OA' suvadu-up-arrow
 bindkey '^[[B' suvadu-down-arrow
 bindkey '^[OB' suvadu-down-arrow
+# Alt+A toggles AI-agent commands in Up/Down recall for this shell
+bindkey '^[a' suvadu-toggle-agents
 ",
         );
     }
@@ -636,8 +655,8 @@ mod tests {
             "search widget missing emulate -L zsh"
         );
         assert!(
-            hook.matches("emulate -L zsh").count() == 3,
-            "expected emulate -L zsh in all 3 widgets"
+            hook.matches("emulate -L zsh").count() == 4,
+            "expected emulate -L zsh in all 4 widgets (search, up, down, toggle-agents)"
         );
         // Widgets must use LBUFFER/RBUFFER (not BUFFER/CURSOR) for buffer placement
         assert!(hook.contains("LBUFFER=\"$selected\""));

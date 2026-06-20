@@ -142,6 +142,10 @@ pub enum Commands {
         /// Current working directory (for context-aware ranking)
         #[arg(long)]
         cwd: Option<String>,
+
+        /// Include AI-agent / bot / CI / script commands (hidden by default)
+        #[arg(long)]
+        include_agents: bool,
     },
 
     /// Configure Suvadu (interactive UI)
@@ -183,6 +187,10 @@ pub enum Commands {
         /// Filter to commands run in the current directory
         #[arg(long)]
         here: bool,
+
+        /// Include AI-agent / bot / CI / script commands (hidden by default)
+        #[arg(long)]
+        include_agents: bool,
 
         /// Search field: command (default), cwd, session, or executor
         #[arg(long, value_enum, default_value_t = SearchField::Command)]

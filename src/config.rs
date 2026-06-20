@@ -75,6 +75,12 @@ pub struct SearchConfig {
     pub filter_by_current_session_tag: bool,
     #[serde(default = "default_true")]
     pub context_boost: bool,
+    /// When `false` (the default), AI-agent / bot / CI / script commands are
+    /// hidden from interactive recall (Up-arrow and Ctrl+R) so day-to-day
+    /// history shows the commands you actually typed. Toggle at runtime with
+    /// Ctrl+A in the search TUI (or Alt+A for the shell Up-arrow).
+    #[serde(default = "default_false")]
+    pub recall_show_agents: bool,
     #[serde(default = "default_true")]
     pub show_detail_pane: bool,
     #[serde(default = "default_false")]
@@ -94,6 +100,7 @@ impl Default for SearchConfig {
             show_unique_by_default: false,
             filter_by_current_session_tag: false,
             context_boost: true,
+            recall_show_agents: false,
             show_detail_pane: true,
             vim_mode: false,
             length_threshold: 80,
