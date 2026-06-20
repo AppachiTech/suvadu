@@ -12,7 +12,7 @@ struct StatsFilter {
 }
 
 impl StatsFilter {
-    fn new(days: Option<usize>, tag_id: Option<i64>) -> Self {
+    fn new(days: Option<usize>, tag_id: Option<i64>, human_only: bool) -> Self {
         let time_filter = days.map(|d| {
             let now = chrono::Utc::now().timestamp_millis();
             now - i64::try_from(d)
@@ -32,6 +32,12 @@ impl StatsFilter {
         }
         if tag_id.is_some() {
             conditions.push("(s.tag_id = ? OR e.tag_id = ?)");
+        }
+        // Human-only uses a static clause (no bound parameter), so it doesn't
+        // affect bind() indices.
+        if human_only {
+            conditions
+                .push("(e.executor_type IS NULL OR e.executor_type = 'human' OR e.executor_type = 'unknown')");
         }
         let where_clause = if conditions.is_empty() {
             String::new()
@@ -114,7 +120,20 @@ impl Repository {
         top_n: usize,
         tag_id: Option<i64>,
     ) -> DbResult<Stats> {
-        let f = StatsFilter::new(days, tag_id);
+        self.get_stats_filtered(days, top_n, tag_id, false)
+    }
+
+    /// Like [`Self::get_stats`] but optionally restricted to human-typed
+    /// commands (excludes agent/bot/ci/programmatic), so a person's own
+    /// analytics aren't swamped by agent traffic.
+    pub fn get_stats_filtered(
+        &self,
+        days: Option<usize>,
+        top_n: usize,
+        tag_id: Option<i64>,
+        human_only: bool,
+    ) -> DbResult<Stats> {
+        let f = StatsFilter::new(days, tag_id, human_only);
 
         // Combined aggregate: single table scan instead of 5 separate queries
         let agg_sql = format!(

@@ -1098,6 +1098,12 @@ fn test_stats_with_entries() {
     assert_eq!(stats.executor_breakdown[0].1, 3);
     assert_eq!(stats.executor_breakdown[1].0, "agent");
     assert_eq!(stats.executor_breakdown[1].1, 2);
+
+    // human_only excludes the 2 agent commands → 3 total, all human.
+    let human = repo.get_stats_filtered(None, 10, None, true).unwrap();
+    assert_eq!(human.total_commands, 3);
+    assert_eq!(human.top_commands[0].0, "git status");
+    assert_eq!(human.top_commands[0].1, 3);
 }
 
 #[test]

@@ -10,13 +10,14 @@ pub fn handle_stats_tui(
     days: Option<usize>,
     top: usize,
     tag: Option<&str>,
+    human: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = repository::Repository::init()?;
 
     let tag_id = resolve_tag(&repo, tag)?;
 
     let mut guard = crate::util::TerminalGuard::new()?;
-    let res = stats_ui::run_stats_ui(guard.terminal(), &repo, days, top, tag_id, tag);
+    let res = stats_ui::run_stats_ui(guard.terminal(), &repo, days, top, tag_id, tag, human);
     drop(guard);
 
     res?;
@@ -44,9 +45,10 @@ pub fn handle_stats_json(
     days: Option<usize>,
     top: usize,
     tag: Option<&str>,
+    human: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = repository::Repository::init()?;
-    handle_stats_json_with_repo(&repo, days, top, tag)
+    handle_stats_json_with_repo(&repo, days, top, tag, human)
 }
 
 fn handle_stats_json_with_repo(
@@ -54,9 +56,10 @@ fn handle_stats_json_with_repo(
     days: Option<usize>,
     top: usize,
     tag: Option<&str>,
+    human: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tag_id = resolve_tag(repo, tag)?;
-    let stats = repo.get_stats(days, top, tag_id)?;
+    let stats = repo.get_stats_filtered(days, top, tag_id, human)?;
     println!("{}", serde_json::to_string_pretty(&stats)?);
     Ok(())
 }
@@ -66,9 +69,10 @@ pub fn handle_stats_text(
     days: Option<usize>,
     top: usize,
     tag: Option<&str>,
+    human: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = repository::Repository::init()?;
-    handle_stats_text_with_repo(&repo, days, top, tag)
+    handle_stats_text_with_repo(&repo, days, top, tag, human)
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -77,9 +81,10 @@ fn handle_stats_text_with_repo(
     days: Option<usize>,
     top: usize,
     tag: Option<&str>,
+    human: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tag_id = resolve_tag(repo, tag)?;
-    let stats = repo.get_stats(days, top, tag_id)?;
+    let stats = repo.get_stats_filtered(days, top, tag_id, human)?;
 
     // Header
     let period = stats
@@ -421,27 +426,27 @@ mod tests {
     fn test_stats_text_empty_db() {
         let (_dir, repo) = test_repo();
         // Should not error on empty DB
-        handle_stats_text_with_repo(&repo, None, 10, None).unwrap();
+        handle_stats_text_with_repo(&repo, None, 10, None, false).unwrap();
     }
 
     #[test]
     fn test_stats_text_with_data() {
         let (_dir, repo) = test_repo();
         seed_stats_data(&repo);
-        handle_stats_text_with_repo(&repo, None, 10, None).unwrap();
+        handle_stats_text_with_repo(&repo, None, 10, None, false).unwrap();
     }
 
     #[test]
     fn test_stats_json_output() {
         let (_dir, repo) = test_repo();
         seed_stats_data(&repo);
-        handle_stats_json_with_repo(&repo, None, 10, None).unwrap();
+        handle_stats_json_with_repo(&repo, None, 10, None, false).unwrap();
     }
 
     #[test]
     fn test_stats_json_empty_db() {
         let (_dir, repo) = test_repo();
-        handle_stats_json_with_repo(&repo, None, 10, None).unwrap();
+        handle_stats_json_with_repo(&repo, None, 10, None, false).unwrap();
     }
 
     #[test]
@@ -469,6 +474,6 @@ mod tests {
             );
             repo.insert_entry(&entry).unwrap();
         }
-        handle_stats_text_with_repo(&repo, None, 10, Some("work")).unwrap();
+        handle_stats_text_with_repo(&repo, None, 10, Some("work"), false).unwrap();
     }
 }

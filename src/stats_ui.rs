@@ -99,6 +99,7 @@ struct StatsApp {
     programs_table_state: TableState,
     program_groups: Vec<(String, i64)>,
     show_executor: bool,
+    human_only: bool,
     top_n: usize,
     tag_id: Option<i64>,
     tag_name: Option<String>,
@@ -111,9 +112,10 @@ impl StatsApp {
         top_n: usize,
         tag_id: Option<i64>,
         tag_name: Option<String>,
+        human_only: bool,
     ) -> Self {
         let stats = repo
-            .get_stats(period.days(), top_n, tag_id)
+            .get_stats_filtered(period.days(), top_n, tag_id, human_only)
             .unwrap_or_else(|_| Stats {
                 total_commands: 0,
                 unique_commands: 0,
@@ -149,6 +151,7 @@ impl StatsApp {
             programs_table_state: TableState::default(),
             program_groups,
             show_executor: false,
+            human_only,
             top_n,
             tag_id,
             tag_name,
@@ -168,7 +171,9 @@ impl StatsApp {
     }
 
     fn reload(&mut self, repo: &Repository) {
-        if let Ok(s) = repo.get_stats(self.period.days(), self.top_n, self.tag_id) {
+        if let Ok(s) =
+            repo.get_stats_filtered(self.period.days(), self.top_n, self.tag_id, self.human_only)
+        {
             self.stats = s;
         }
         if let Ok(d) = repo.get_daily_activity(self.period.heatmap_days(), self.tag_id) {
@@ -217,6 +222,10 @@ impl StatsApp {
                 self.reload(repo);
             }
             KeyCode::Char('e') => self.show_executor = !self.show_executor,
+            KeyCode::Char('h') => {
+                self.human_only = !self.human_only;
+                self.reload(repo);
+            }
             KeyCode::Tab => {
                 self.focus = if key.modifiers.contains(KeyModifiers::SHIFT) {
                     self.focus.prev()
@@ -918,6 +927,7 @@ pub fn run_stats_ui<B: Backend>(
     top_n: usize,
     tag_id: Option<i64>,
     tag_name: Option<&str>,
+    human_only: bool,
 ) -> io::Result<()>
 where
     io::Error: From<B::Error>,
@@ -929,7 +939,14 @@ where
         _ => Period::AllTime,
     };
 
-    let mut app = StatsApp::new(repo, period, top_n, tag_id, tag_name.map(String::from));
+    let mut app = StatsApp::new(
+        repo,
+        period,
+        top_n,
+        tag_id,
+        tag_name.map(String::from),
+        human_only,
+    );
 
     loop {
         terminal.draw(|f| app.render(f))?;
@@ -1266,7 +1283,7 @@ mod tests {
     #[test]
     fn test_stats_app_initial_state() {
         let (_dir, repo) = crate::test_utils::test_repo();
-        let app = StatsApp::new(&repo, Period::Days30, 10, None, None);
+        let app = StatsApp::new(&repo, Period::Days30, 10, None, None, false);
 
         assert_eq!(app.period, Period::Days30);
         assert_eq!(app.focus, Focus::TopCommands);
@@ -1279,7 +1296,7 @@ mod tests {
     #[test]
     fn test_stats_app_focus_via_handle_input() {
         let (_dir, repo) = crate::test_utils::test_repo();
-        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None, false);
 
         assert_eq!(app.focus, Focus::TopCommands);
 
@@ -1309,7 +1326,7 @@ mod tests {
     #[test]
     fn test_stats_app_period_change() {
         let (_dir, repo) = crate::test_utils::test_repo();
-        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None, false);
 
         assert_eq!(app.period, Period::Days7);
 
@@ -1329,7 +1346,7 @@ mod tests {
     #[test]
     fn test_stats_app_toggle_executor() {
         let (_dir, repo) = crate::test_utils::test_repo();
-        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None, false);
 
         assert!(!app.show_executor);
 
@@ -1343,12 +1360,12 @@ mod tests {
     #[test]
     fn test_stats_app_quit() {
         let (_dir, repo) = crate::test_utils::test_repo();
-        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None, false);
 
         let cont = app.handle_input(KeyEvent::from(KeyCode::Char('q')), &repo);
         assert!(!cont); // false = quit
 
-        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None, false);
         let cont = app.handle_input(KeyEvent::from(KeyCode::Esc), &repo);
         assert!(!cont);
     }
@@ -1394,7 +1411,7 @@ mod tests {
         ))
         .unwrap();
 
-        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None, false);
 
         // Focus is on TopCommands by default; table should have selection at 0
         assert_eq!(app.focus, Focus::TopCommands);
@@ -1443,7 +1460,7 @@ mod tests {
         ))
         .unwrap();
 
-        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None, false);
 
         // Switch to TopDirs
         app.focus = Focus::TopDirs;
@@ -1469,7 +1486,7 @@ mod tests {
     #[test]
     fn test_build_daily_counts() {
         let (_dir, repo) = crate::test_utils::test_repo();
-        let app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+        let app = StatsApp::new(&repo, Period::Days7, 10, None, None, false);
 
         let counts = app.build_daily_counts();
         // heatmap_days for Days7 = 30
@@ -1481,7 +1498,14 @@ mod tests {
     #[test]
     fn test_stats_app_with_tag() {
         let (_dir, repo) = crate::test_utils::test_repo();
-        let app = StatsApp::new(&repo, Period::Days30, 5, Some(42), Some("work".to_string()));
+        let app = StatsApp::new(
+            &repo,
+            Period::Days30,
+            5,
+            Some(42),
+            Some("work".to_string()),
+            false,
+        );
 
         assert_eq!(app.tag_id, Some(42));
         assert_eq!(app.tag_name, Some("work".to_string()));
@@ -1662,7 +1686,7 @@ mod tests {
         ))
         .unwrap();
 
-        let app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+        let app = StatsApp::new(&repo, Period::Days7, 10, None, None, false);
         let counts = app.build_daily_counts();
 
         // heatmap_days for Days7 = 30
@@ -1675,16 +1699,16 @@ mod tests {
     fn test_build_daily_counts_all_periods() {
         let (_dir, repo) = crate::test_utils::test_repo();
 
-        let app7 = StatsApp::new(&repo, Period::Days7, 10, None, None);
+        let app7 = StatsApp::new(&repo, Period::Days7, 10, None, None, false);
         assert_eq!(app7.build_daily_counts().len(), 30);
 
-        let app30 = StatsApp::new(&repo, Period::Days30, 10, None, None);
+        let app30 = StatsApp::new(&repo, Period::Days30, 10, None, None, false);
         assert_eq!(app30.build_daily_counts().len(), 90);
 
-        let app90 = StatsApp::new(&repo, Period::Days90, 10, None, None);
+        let app90 = StatsApp::new(&repo, Period::Days90, 10, None, None, false);
         assert_eq!(app90.build_daily_counts().len(), 180);
 
-        let app_all = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+        let app_all = StatsApp::new(&repo, Period::AllTime, 10, None, None, false);
         assert_eq!(app_all.build_daily_counts().len(), 365);
     }
 
@@ -1721,7 +1745,7 @@ mod tests {
         ))
         .unwrap();
 
-        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None, false);
         app.focus = Focus::TopCommands;
 
         // Move down past the last item
@@ -1762,7 +1786,7 @@ mod tests {
         ))
         .unwrap();
 
-        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None, false);
         app.focus = Focus::TopDirs;
 
         app.move_selection_down(); // 0 -> 1
@@ -1802,7 +1826,7 @@ mod tests {
         ))
         .unwrap();
 
-        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None, false);
         app.focus = Focus::TopPrograms;
 
         app.move_selection_down(); // 0 -> 1
@@ -1834,7 +1858,7 @@ mod tests {
         ))
         .unwrap();
 
-        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None, false);
         app.focus = Focus::TopDirs;
         assert_eq!(app.dirs_table_state.selected(), Some(0));
 
@@ -1867,7 +1891,7 @@ mod tests {
         ))
         .unwrap();
 
-        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None, false);
         app.focus = Focus::TopPrograms;
         assert_eq!(app.programs_table_state.selected(), Some(0));
 
@@ -1884,7 +1908,7 @@ mod tests {
     #[test]
     fn test_handle_input_backtab_full_cycle() {
         let (_dir, repo) = crate::test_utils::test_repo();
-        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None, false);
 
         // Start at TopCommands (default)
         assert_eq!(app.focus, Focus::TopCommands);
@@ -1909,7 +1933,7 @@ mod tests {
     #[test]
     fn test_handle_input_backtab_from_top_dirs() {
         let (_dir, repo) = crate::test_utils::test_repo();
-        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None, false);
         app.focus = Focus::TopDirs;
 
         app.handle_input(KeyEvent::from(KeyCode::BackTab), &repo);
@@ -1919,7 +1943,7 @@ mod tests {
     #[test]
     fn test_handle_input_backtab_from_hourly() {
         let (_dir, repo) = crate::test_utils::test_repo();
-        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None, false);
         app.focus = Focus::Hourly;
 
         app.handle_input(KeyEvent::from(KeyCode::BackTab), &repo);
@@ -1931,7 +1955,7 @@ mod tests {
     #[test]
     fn test_handle_input_unknown_key_no_state_change() {
         let (_dir, repo) = crate::test_utils::test_repo();
-        let mut app = StatsApp::new(&repo, Period::Days30, 10, None, None);
+        let mut app = StatsApp::new(&repo, Period::Days30, 10, None, None, false);
 
         let focus_before = app.focus;
         let period_before = app.period;
@@ -1955,7 +1979,7 @@ mod tests {
     #[test]
     fn test_handle_input_function_key_no_state_change() {
         let (_dir, repo) = crate::test_utils::test_repo();
-        let mut app = StatsApp::new(&repo, Period::Days30, 10, None, None);
+        let mut app = StatsApp::new(&repo, Period::Days30, 10, None, None, false);
 
         let focus_before = app.focus;
         let period_before = app.period;
@@ -2087,13 +2111,13 @@ mod tests {
         // Verify that creating StatsApp with different periods works
         let (_dir, repo) = crate::test_utils::test_repo();
 
-        let app = StatsApp::new(&repo, Period::Days7, 10, None, None);
+        let app = StatsApp::new(&repo, Period::Days7, 10, None, None, false);
         assert_eq!(app.period, Period::Days7);
 
-        let app = StatsApp::new(&repo, Period::Days90, 10, None, None);
+        let app = StatsApp::new(&repo, Period::Days90, 10, None, None, false);
         assert_eq!(app.period, Period::Days90);
 
-        let app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+        let app = StatsApp::new(&repo, Period::AllTime, 10, None, None, false);
         assert_eq!(app.period, Period::AllTime);
     }
 
@@ -2129,7 +2153,7 @@ mod tests {
         ))
         .unwrap();
 
-        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None, false);
 
         // Move selections away from 0
         app.focus = Focus::TopCommands;
@@ -2155,7 +2179,7 @@ mod tests {
     #[test]
     fn test_reload_empty_repo_no_selection() {
         let (_dir, repo) = crate::test_utils::test_repo();
-        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None, false);
 
         // With no data, selections should be None
         app.reload(&repo);
@@ -2195,7 +2219,7 @@ mod tests {
         ))
         .unwrap();
 
-        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None);
+        let mut app = StatsApp::new(&repo, Period::AllTime, 10, None, None, false);
 
         // Move command selection down
         app.focus = Focus::TopCommands;

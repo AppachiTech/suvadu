@@ -217,6 +217,9 @@ pub enum Commands {
         /// Filter by tag name
         #[arg(long)]
         tag: Option<String>,
+        /// Only count human-typed commands (exclude AI agents, CI, scripts)
+        #[arg(long)]
+        human: bool,
     },
 
     /// Replay commands chronologically (session timeline or time range)
@@ -758,12 +761,14 @@ mod tests {
                 text,
                 json,
                 tag,
+                human,
             } => {
                 assert!(days.is_none());
                 assert_eq!(top, 10);
                 assert!(!text);
                 assert!(!json);
                 assert!(tag.is_none());
+                assert!(!human);
             }
             _ => panic!("Expected Stats command"),
         }

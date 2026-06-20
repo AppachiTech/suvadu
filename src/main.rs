@@ -191,13 +191,14 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
             text,
             json,
             tag,
+            human,
         } => {
             if json {
-                commands::stats::handle_stats_json(days, top, tag.as_deref())
+                commands::stats::handle_stats_json(days, top, tag.as_deref(), human)
             } else if text {
-                commands::stats::handle_stats_text(days, top, tag.as_deref())
+                commands::stats::handle_stats_text(days, top, tag.as_deref(), human)
             } else {
-                commands::stats::handle_stats_tui(days, top, tag.as_deref())
+                commands::stats::handle_stats_tui(days, top, tag.as_deref(), human)
             }
         }
         cmd @ Commands::Replay { .. } => run_replay(cmd),
@@ -496,6 +497,7 @@ mod tests {
             text: false,
             json: false,
             tag: None,
+            human: false,
         };
         assert!(is_user_facing_command(&cmd));
     }
