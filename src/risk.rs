@@ -285,6 +285,27 @@ fn high_pattern_defs() -> Vec<PatternDef> {
             "script-exec",
             "Execute shell script via sh",
         ),
+        // Irreversible operations an agent might run that previously slipped
+        // through as "safe".
+        (
+            r"^git\s+clean\s+(-[a-zA-Z]*f|--force)",
+            RiskLevel::High,
+            "git",
+            "Delete untracked files (git clean)",
+        ),
+        (
+            // chmod 777 / other world-writable modes, including with flags like -R.
+            r"^chmod\s+(-[a-zA-Z]+\s+)*[0-7]*[0-7][0-7][2367](\s|$)",
+            RiskLevel::High,
+            "permission",
+            "World-writable permissions (chmod)",
+        ),
+        (
+            r"^chown\s+-R\b",
+            RiskLevel::High,
+            "permission",
+            "Recursive ownership change (chown -R)",
+        ),
     ]
 }
 
@@ -680,6 +701,22 @@ mod tests {
             RiskLevel::High
         );
         assert_eq!(risk_level("./deploy.sh"), RiskLevel::High);
+    }
+
+    #[test]
+    fn test_high_irreversible_patterns() {
+        // git clean with a force flag
+        assert_eq!(risk_level("git clean -fd"), RiskLevel::High);
+        assert_eq!(risk_level("git clean -f"), RiskLevel::High);
+        assert_eq!(risk_level("git clean --force"), RiskLevel::High);
+        // ...but not a dry run
+        assert_eq!(risk_level("git clean -n"), RiskLevel::None);
+        // world-writable chmod, including recursive
+        assert_eq!(risk_level("chmod 777 file"), RiskLevel::High);
+        assert_eq!(risk_level("chmod -R 777 dir"), RiskLevel::High);
+        assert_eq!(risk_level("chmod 666 file"), RiskLevel::High);
+        // recursive chown
+        assert_eq!(risk_level("chown -R user:group /srv"), RiskLevel::High);
     }
 
     #[test]
