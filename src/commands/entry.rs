@@ -426,6 +426,17 @@ fn handle_bookmark_with_repo(
                 return Err(format!("No bookmark found for: {command}").into());
             }
         }
+        crate::cli::BookmarkCommands::Pick => {
+            let bookmarks = repo.list_bookmarks()?;
+            if bookmarks.is_empty() {
+                eprintln!("No bookmarks yet. Use `suv bookmark add <command>` to save one.");
+                return Ok(());
+            }
+            if let Some(cmd) = crate::commands::picker::pick_bookmark(&bookmarks)? {
+                // stdout carries the chosen command for the shell wrapper to inject.
+                println!("{cmd}");
+            }
+        }
     }
     Ok(())
 }

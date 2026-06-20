@@ -562,6 +562,9 @@ pub enum BookmarkCommands {
         /// The command text to un-bookmark
         command: String,
     },
+
+    /// Pick a bookmark interactively and recall it into the prompt
+    Pick,
 }
 
 #[derive(Subcommand, Debug)]

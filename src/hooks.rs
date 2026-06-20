@@ -152,11 +152,11 @@ _SUVADU_START_TIME=0
 _SUVADU_OFFSET=-1
 _SUVADU_BIN={escaped}
 
-# Shell function wrapper: intercepts `suv search` so the selected command is
-# placed into the editing buffer (via print -z) instead of being printed as
-# dead text.  All other subcommands pass straight through to the binary.
+# Shell function wrapper: intercepts `suv search` and `suv bookmark pick` so the
+# selected command is placed into the editing buffer (via print -z) instead of
+# being printed as dead text.  All other subcommands pass straight through.
 suv() {{
-    if [[ "${{1:-}}" == "search" ]]; then
+    if [[ "${{1:-}}" == "search" || ("${{1:-}}" == "bookmark" && "${{2:-}}" == "pick") ]]; then
         local selected
         selected="$("$_SUVADU_BIN" "$@")"
         if [[ -n "$selected" ]]; then
@@ -396,11 +396,11 @@ _SUVADU_START_TIME=0
 _SUVADU_CMD=""
 _SUVADU_BIN={escaped}
 
-# Shell function wrapper: intercepts `suv search` so the selected command is
-# placed into readline history (press Up to recall) instead of being printed
-# as dead text.  All other subcommands pass straight through to the binary.
+# Shell function wrapper: intercepts `suv search` and `suv bookmark pick` so the
+# selected command is placed into readline history (press Up to recall) instead
+# of being printed as dead text.  All other subcommands pass straight through.
 suv() {{
-    if [[ "${{1:-}}" == "search" ]]; then
+    if [[ "${{1:-}}" == "search" || ("${{1:-}}" == "bookmark" && "${{2:-}}" == "pick") ]]; then
         local selected
         selected="$("$_SUVADU_BIN" "$@")"
         if [[ -n "$selected" ]]; then
