@@ -552,7 +552,7 @@ fn handle_get_prompts(repo: &Repository, args: &Value) -> Result<String, String>
             "{}. [{}] \"{}\" — {} cmds, {} ok",
             i + 1,
             session_short,
-            prompt,
+            util::truncate_str(prompt, 200, "..."),
             cmds.len(),
             successes,
         );
@@ -1454,7 +1454,11 @@ fn handle_replay_agent_session(repo: &Repository, args: &Value) -> Result<String
             .cloned()
             .unwrap_or_default();
         if !prompt.is_empty() && prompt != last_prompt {
-            let _ = writeln!(out, "  [PROMPT] \"{prompt}\"");
+            let _ = writeln!(
+                out,
+                "  [PROMPT] \"{}\"",
+                util::truncate_str(&prompt, 200, "...")
+            );
             let _ = writeln!(out, "           {}\n", format_time(entry.started_at));
             last_prompt = prompt;
         }
