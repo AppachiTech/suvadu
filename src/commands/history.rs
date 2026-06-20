@@ -44,6 +44,7 @@ pub fn handle_history(
             cwd: cwd_filter.as_deref(),
             field: SearchField::Command,
             exclude_agents: false,
+            cwd_prefix: false,
         },
     )?;
 

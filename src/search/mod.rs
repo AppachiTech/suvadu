@@ -474,6 +474,7 @@ pub fn run_search(
         cwd: args.cwd,
         field: args.field,
         exclude_agents: !args.include_agents,
+        cwd_prefix: false,
     };
 
     let (entries, total_count, unique_counts) =

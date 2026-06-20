@@ -381,6 +381,7 @@ fn handle_search_commands(
         cwd: directory,
         field: SearchField::Command,
         exclude_agents: false,
+        cwd_prefix: false,
     };
 
     let entries = repo
@@ -428,6 +429,7 @@ fn handle_recent_commands(
             cwd: directory,
             field: SearchField::Command,
             exclude_agents: false,
+            cwd_prefix: false,
         };
         repo.get_entries_filtered(limit, 0, &qf)
             .map_err(|e| format!("query failed: {e}"))?
@@ -624,6 +626,8 @@ fn handle_get_stats(
         cwd: directory,
         field: SearchField::Command,
         exclude_agents: false,
+        // get_stats is project-scoped: include the directory's subtree.
+        cwd_prefix: true,
     };
 
     let total = repo
@@ -808,6 +812,8 @@ fn handle_what_changed(repo: &Repository, args: &Value) -> Result<String, String
         cwd: directory,
         field: SearchField::Command,
         exclude_agents: false,
+        // what_changed is project-scoped: include the directory's subtree.
+        cwd_prefix: true,
     };
 
     let entries = repo
@@ -899,6 +905,7 @@ fn handle_what_failed(
         cwd: directory,
         field: SearchField::Command,
         exclude_agents: false,
+        cwd_prefix: false,
     };
 
     let entries = repo
@@ -1013,6 +1020,7 @@ fn handle_suggest_next(repo: &Repository, args: &Value) -> Result<String, String
         cwd: directory,
         field: SearchField::Command,
         exclude_agents: false,
+        cwd_prefix: false,
     };
 
     let entries = repo
@@ -1329,6 +1337,8 @@ fn handle_find_agent_session(repo: &Repository, args: &Value) -> Result<String, 
         cwd: directory,
         field: crate::models::SearchField::Command,
         exclude_agents: false,
+        // find_agent_session is project-scoped: include the directory's subtree.
+        cwd_prefix: true,
     };
 
     let entries = repo
@@ -1561,6 +1571,8 @@ fn handle_learn_from_failures(
     let qf = QueryFilter {
         after: Some(after),
         cwd: directory,
+        // Project-scoped: include the directory's subtree.
+        cwd_prefix: true,
         ..QueryFilter::default()
     };
 
@@ -1703,6 +1715,8 @@ fn handle_project_context(
     let qf = QueryFilter {
         after: Some(after),
         cwd: directory,
+        // Project-scoped: include the directory's subtree.
+        cwd_prefix: true,
         ..QueryFilter::default()
     };
 

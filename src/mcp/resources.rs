@@ -155,6 +155,7 @@ fn read_recent_failures(repo: &Repository) -> Result<String, String> {
         cwd: None,
         field: SearchField::Command,
         exclude_agents: false,
+        cwd_prefix: false,
     };
 
     let entries = repo
@@ -211,6 +212,7 @@ fn read_today_stats(repo: &Repository) -> Result<String, String> {
         cwd: None,
         field: SearchField::Command,
         exclude_agents: false,
+        cwd_prefix: false,
     };
 
     let total = repo
@@ -290,6 +292,7 @@ fn read_risk_summary(repo: &Repository) -> Result<String, String> {
         cwd: None,
         field: SearchField::Command,
         exclude_agents: false,
+        cwd_prefix: false,
     };
 
     let entries = repo
@@ -367,6 +370,7 @@ fn read_agent_activity(repo: &Repository) -> Result<String, String> {
             cwd: None,
             field: SearchField::Command,
             exclude_agents: false,
+            cwd_prefix: false,
         };
 
         let total = repo.count_filtered(&qf).unwrap_or(0);
@@ -415,6 +419,7 @@ fn read_agent_sessions(repo: &Repository) -> Result<String, String> {
         cwd: None,
         field: SearchField::Command,
         exclude_agents: false,
+        cwd_prefix: false,
     };
 
     let entries = repo

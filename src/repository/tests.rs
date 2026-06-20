@@ -8,6 +8,53 @@ fn setup_test_db() -> (tempfile::TempDir, Repository) {
 }
 
 #[test]
+fn test_cwd_prefix_matches_subtree() {
+    let (_temp, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 1000);
+    repo.insert_session(&session).unwrap();
+    let dirs = ["/proj", "/proj/src", "/proj/tests", "/other"];
+    for (i, d) in dirs.iter().enumerate() {
+        repo.insert_entry(&crate::models::Entry::new(
+            session.id.clone(),
+            format!("cmd {i}"),
+            (*d).to_string(),
+            Some(0),
+            1000 + i as i64,
+            1000 + i as i64,
+        ))
+        .unwrap();
+    }
+
+    // Exact match: only /proj itself.
+    let exact = repo
+        .get_entries_filtered(
+            100,
+            0,
+            &super::QueryFilter {
+                cwd: Some("/proj"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(exact.len(), 1);
+
+    // Subtree: /proj, /proj/src, /proj/tests — but not /other.
+    let subtree = repo
+        .get_entries_filtered(
+            100,
+            0,
+            &super::QueryFilter {
+                cwd: Some("/proj"),
+                cwd_prefix: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(subtree.len(), 3);
+    assert!(subtree.iter().all(|e| e.cwd.starts_with("/proj")));
+}
+
+#[test]
 fn test_backup_to_creates_consistent_copy() {
     let (temp, repo) = setup_test_db();
     let session = Session::new("host".to_string(), 1000);

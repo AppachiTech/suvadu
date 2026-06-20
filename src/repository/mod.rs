@@ -74,6 +74,10 @@ pub struct QueryFilter<'a> {
     /// `executor` filter is set (that filter wins). Defaults to `false`
     /// (show everything) to preserve behaviour for non-recall callers.
     pub exclude_agents: bool,
+    /// When `true`, `cwd` matches the directory **and its subtree** rather than
+    /// exactly. Used by project-scoped tools so "this directory" means the whole
+    /// project tree. Defaults to `false` (exact match).
+    pub cwd_prefix: bool,
 }
 
 impl QueryFilter<'_> {
@@ -85,7 +89,7 @@ impl QueryFilter<'_> {
             .with_exit_code(self.exit_code)
             .with_query_field(self.query, self.prefix_match, self.field)
             .with_executor(self.executor)
-            .with_cwd(self.cwd)
+            .with_cwd_mode(self.cwd, self.cwd_prefix)
             // An explicit executor filter takes precedence over the agent hide.
             .with_exclude_agents(self.exclude_agents && self.executor.is_none())
     }
@@ -189,6 +193,27 @@ impl FilterBuilder {
             self.clauses.push("e.cwd = ?".into());
             self.params.push(Box::new(dir.to_string()));
         }
+        self
+    }
+
+    /// Filter by directory, optionally including its subtree. With `prefix`,
+    /// matches the directory itself plus any path under `dir/` — the anchored
+    /// `LIKE 'dir/%'` keeps it index-usable. Without `prefix`, exact match.
+    pub fn with_cwd_mode(self, cwd: Option<&str>, prefix: bool) -> Self {
+        match (cwd, prefix) {
+            (Some(dir), true) => self.with_cwd_subtree(dir),
+            (cwd, _) => self.with_cwd(cwd),
+        }
+    }
+
+    /// Match `dir` and everything beneath it (`dir` or `dir/...`).
+    pub fn with_cwd_subtree(mut self, dir: &str) -> Self {
+        let trimmed = dir.trim_end_matches('/');
+        self.clauses
+            .push("(e.cwd = ? OR e.cwd LIKE ? ESCAPE '\\')".into());
+        self.params.push(Box::new(trimmed.to_string()));
+        self.params
+            .push(Box::new(format!("{}/%", escape_like(trimmed))));
         self
     }
 
@@ -377,6 +402,29 @@ mod filter_builder_tests {
         let fb = FilterBuilder::new().with_session(Some("sess-123"));
         assert_eq!(fb.build_where(), " WHERE e.session_id = ?");
         assert_eq!(fb.params_refs().len(), 1);
+    }
+
+    #[test]
+    fn with_cwd_subtree_matches_dir_and_children() {
+        let fb = FilterBuilder::new().with_cwd_subtree("/home/u/proj");
+        assert_eq!(
+            fb.build_where(),
+            " WHERE (e.cwd = ? OR e.cwd LIKE ? ESCAPE '\\')"
+        );
+        assert_eq!(fb.params_refs().len(), 2);
+    }
+
+    #[test]
+    fn with_cwd_mode_exact_vs_prefix() {
+        // prefix=false → exact
+        let exact = FilterBuilder::new().with_cwd_mode(Some("/p"), false);
+        assert_eq!(exact.build_where(), " WHERE e.cwd = ?");
+        // prefix=true → subtree
+        let sub = FilterBuilder::new().with_cwd_mode(Some("/p"), true);
+        assert!(sub.build_where().contains("LIKE ? ESCAPE"));
+        // None → no clause regardless of prefix
+        let none = FilterBuilder::new().with_cwd_mode(None, true);
+        assert_eq!(none.build_where(), " WHERE 1=1");
     }
 
     #[test]

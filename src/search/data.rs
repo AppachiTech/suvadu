@@ -48,6 +48,7 @@ impl SearchApp {
             cwd: self.filters.cwd.as_deref(),
             field: self.view.search_field,
             exclude_agents: !self.filters.show_agents,
+            cwd_prefix: false,
         }
     }
 
