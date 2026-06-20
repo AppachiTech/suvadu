@@ -174,7 +174,8 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
             file,
             from,
             dry_run,
-        } => run_import(&file, from, dry_run),
+            allow_duplicates,
+        } => run_import(&file, from, dry_run, allow_duplicates),
         Commands::Stats {
             days,
             top,
@@ -332,9 +333,10 @@ fn run_import(
     file: &str,
     from: cli::ImportFormat,
     dry_run: bool,
+    allow_duplicates: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match from {
-        cli::ImportFormat::Jsonl => import_export::handle_import(file, dry_run),
+        cli::ImportFormat::Jsonl => import_export::handle_import(file, dry_run, allow_duplicates),
         cli::ImportFormat::ZshHistory => import_export::handle_import_zsh_history(file, dry_run),
     }
 }

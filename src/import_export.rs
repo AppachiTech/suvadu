@@ -111,6 +111,9 @@ pub struct ImportStats {
     /// destination and tag creation failed, or the export carried a `tag_id`
     /// without a `tag_name`). The entry is still imported but with `tag_id = NULL`.
     pub dropped_tag_associations: u64,
+    /// Entries skipped because an identical (`command`, `started_at`) row
+    /// already existed — keeps re-syncing the same export idempotent.
+    pub dropped_duplicates: u64,
 }
 
 /// Inspect the first non-empty line of `file` and reject formats that clearly
@@ -138,7 +141,11 @@ fn check_jsonl_shape(file: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-pub fn handle_import(file: &str, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub fn handle_import(
+    file: &str,
+    dry_run: bool,
+    allow_duplicates: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     check_jsonl_shape(file)?;
 
     let f = std::fs::File::open(file)?;
@@ -171,12 +178,22 @@ pub fn handle_import(file: &str, dry_run: bool) -> Result<(), Box<dyn std::error
     }
 
     let repo = Repository::init()?;
-    let stats = import_jsonl_into_repo(&repo, reader)?;
+    let stats = if allow_duplicates {
+        import_jsonl_into_repo_opts(&repo, reader, true)?
+    } else {
+        import_jsonl_into_repo(&repo, reader)?
+    };
 
     println!(
         "Imported {} entries ({} skipped).",
         stats.imported, stats.parse_errors
     );
+    if stats.dropped_duplicates > 0 {
+        println!(
+            "  Skipped {} duplicate entry(ies) already present (use --allow-duplicates to keep them).",
+            stats.dropped_duplicates
+        );
+    }
     if stats.placeholder_sessions > 0 {
         println!(
             "  Created {} placeholder session(s) for entries from other machines.",
@@ -212,9 +229,23 @@ pub fn handle_import(file: &str, dry_run: bool) -> Result<(), Box<dyn std::error
 /// Wraps the work in a transaction with periodic re-commits to bound WAL growth.
 /// A parse error skips the line; an insert error rolls back the current batch
 /// and propagates.
+///
+/// Duplicate entries (same `command` + `started_at` as an existing row) are
+/// skipped so re-importing the same export — or merging the same history onto
+/// several machines — is idempotent. Use [`import_jsonl_into_repo_opts`] with
+/// `allow_duplicates = true` to keep every line.
 pub fn import_jsonl_into_repo<R: BufRead>(
     repo: &Repository,
     reader: R,
+) -> Result<ImportStats, Box<dyn std::error::Error>> {
+    import_jsonl_into_repo_opts(repo, reader, false)
+}
+
+/// Like [`import_jsonl_into_repo`] but with explicit duplicate handling.
+pub fn import_jsonl_into_repo_opts<R: BufRead>(
+    repo: &Repository,
+    reader: R,
+    allow_duplicates: bool,
 ) -> Result<ImportStats, Box<dyn std::error::Error>> {
     const BATCH_SIZE: u64 = 10_000;
     const PLACEHOLDER_HOSTNAME: &str = "imported";
@@ -242,6 +273,14 @@ pub fn import_jsonl_into_repo<R: BufRead>(
                 continue;
             }
         };
+
+        // Skip entries already present so re-syncing the same export is
+        // idempotent. Visible within the open transaction, so intra-file
+        // duplicates are caught too.
+        if !allow_duplicates && repo.entry_exists(&entry.command, entry.started_at)? {
+            stats.dropped_duplicates += 1;
+            continue;
+        }
 
         if !ensured_sessions.contains(&entry.session_id) {
             let created = repo.insert_session_if_missing(
@@ -937,6 +976,33 @@ mod tests {
         let stored = repo.get_session(&session.id).unwrap().unwrap();
         assert_eq!(stored.hostname, "real-host");
         assert_eq!(stored.created_at, 1_500_000_000_000);
+    }
+
+    #[test]
+    fn test_import_jsonl_is_idempotent_by_default() {
+        // Re-importing the same export must not double the history.
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let session = Session::new("host".to_string(), 1_500_000_000_000);
+        repo.insert_session(&session).unwrap();
+        let entries = vec![
+            Entry::new(session.id.clone(), "git status".into(), "/p".into(), Some(0), 1_700_000_000_000, 1_700_000_000_100),
+            Entry::new(session.id.clone(), "cargo build".into(), "/p".into(), Some(0), 1_700_000_001_000, 1_700_000_001_100),
+        ];
+        let jsonl = make_jsonl(&entries);
+
+        let first = import_jsonl_into_repo(&repo, jsonl.as_bytes()).unwrap();
+        assert_eq!(first.imported, 2);
+        assert_eq!(first.dropped_duplicates, 0);
+
+        // Second import of the same data imports nothing new.
+        let second = import_jsonl_into_repo(&repo, jsonl.as_bytes()).unwrap();
+        assert_eq!(second.imported, 0);
+        assert_eq!(second.dropped_duplicates, 2);
+
+        // allow_duplicates=true keeps every line.
+        let third = import_jsonl_into_repo_opts(&repo, jsonl.as_bytes(), true).unwrap();
+        assert_eq!(third.imported, 2);
+        assert_eq!(third.dropped_duplicates, 0);
     }
 
     #[test]

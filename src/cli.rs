@@ -425,6 +425,9 @@ pub enum Commands {
         /// Preview import without writing to database
         #[arg(long)]
         dry_run: bool,
+        /// Keep entries that already exist instead of skipping duplicates (jsonl only)
+        #[arg(long)]
+        allow_duplicates: bool,
     },
 
     /// Monitor and audit AI agent command activity
