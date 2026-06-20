@@ -168,7 +168,9 @@ pub fn handle_suggest_aliases_text(
     days: Option<usize>,
     top: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (suggestions, skipped) = build_suggestions(min_count, min_length, days, top, false)?;
+    // Only suggest aliases for commands a human actually typed — aliasing an
+    // agent's one-off commands is noise. Matches the add-suggested apply path.
+    let (suggestions, skipped) = build_suggestions(min_count, min_length, days, top, true)?;
 
     if suggestions.is_empty() {
         let period = days.map_or_else(|| "all time".to_string(), |d| format!("last {d} days"));
@@ -219,7 +221,9 @@ pub fn handle_suggest_aliases_tui(
     days: Option<usize>,
     top: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (suggestions, skipped) = build_suggestions(min_count, min_length, days, top, false)?;
+    // Only suggest aliases for commands a human actually typed — aliasing an
+    // agent's one-off commands is noise. Matches the add-suggested apply path.
+    let (suggestions, skipped) = build_suggestions(min_count, min_length, days, top, true)?;
 
     if suggestions.is_empty() {
         let period = days.map_or_else(|| "all time".to_string(), |d| format!("last {d} days"));
