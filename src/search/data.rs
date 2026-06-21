@@ -167,12 +167,14 @@ impl SearchApp {
                 // a tier.
                 let tier = match_tier(&field_value.to_lowercase(), &query_lc, &atoms);
 
-                // For a multi-word query, require every word to actually appear
-                // (tier >= 1). Otherwise a loose subsequence (tier 0) surfaces
-                // unrelated commands — e.g. "git add" matching "git rev-parse",
-                // or "git mango" matching random JSON. Single-token queries keep
-                // fuzzy/abbreviation matching (e.g. "gco" → "git checkout").
-                if atoms.len() >= 2 && tier == 0 {
+                // Require every typed token to actually appear as a literal
+                // substring (tier >= 1). Pure subsequence matches (tier 0)
+                // surface unrelated commands — e.g. "git add" matching
+                // "git rev-parse", or random gibberish matching long commands
+                // whose characters happen to contain it as a subsequence.
+                // Results always contain what you typed; nucleo still ranks
+                // within the literal matches.
+                if tier == 0 {
                     continue;
                 }
 

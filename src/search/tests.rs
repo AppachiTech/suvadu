@@ -182,17 +182,28 @@ fn test_multi_word_query_absent_word_returns_nothing() {
 }
 
 #[test]
-fn test_single_token_abbreviation_still_fuzzy() {
-    // Single-token queries keep subsequence/abbreviation matching.
+fn test_single_token_requires_literal_substring() {
+    // A single token must appear literally — no loose subsequence. So a
+    // literal fragment matches, but gibberish (and abbreviations like "gco")
+    // do not.
     let entries = vec![
         create_test_entry("git checkout main"),
         create_test_entry("cargo build"),
     ];
-    let scored = SearchApp::fuzzy_score(entries, "gco", None, SearchField::Command, 80, 33, 50);
-    let cmds: Vec<&str> = scored.iter().map(|e| e.command.as_str()).collect();
+    let by = |q: &str| {
+        SearchApp::fuzzy_score(entries.clone(), q, None, SearchField::Command, 80, 33, 50)
+    };
+    // literal fragment matches
+    let cmds: Vec<String> = by("checkout").iter().map(|e| e.command.clone()).collect();
+    assert!(cmds.iter().any(|c| c == "git checkout main"));
+    // subsequence-only ("gco") and gibberish do NOT match
     assert!(
-        cmds.contains(&"git checkout main"),
-        "abbreviation should still match: {cmds:?}"
+        by("gco").is_empty(),
+        "subsequence abbreviation should not match"
+    );
+    assert!(
+        by("adasdasdasreffsdscdsfeg").is_empty(),
+        "gibberish must not match"
     );
 }
 
@@ -217,8 +228,8 @@ fn test_fuzzy_score_ranking() {
         create_test_entry("cargo build"),
     ];
 
-    // "gco" should match git commands but not "echo" or "cargo build"
-    let scored = SearchApp::fuzzy_score(entries, "gco", None, SearchField::Command, 80, 33, 50);
+    // "git" should match git commands but not "echo" or "cargo build"
+    let scored = SearchApp::fuzzy_score(entries, "git", None, SearchField::Command, 80, 33, 50);
     assert!(!scored.is_empty());
     // Both git commands should match, non-git commands should not
     let cmds: Vec<&str> = scored.iter().map(|e| e.command.as_str()).collect();
