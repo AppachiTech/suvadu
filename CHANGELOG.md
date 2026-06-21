@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.4] - 2026-06-21
+
+### Added
+- **AI-agent commands are now hidden from history recall by default** — Up-arrow recall and `Ctrl+R` reverse search show your own (human-typed) commands only, so agent-issued commands no longer clutter your prompt history. Toggle agent commands on/off live with `Ctrl+A` (Up-arrow recall) or `Alt+A` (`Ctrl+R` search), per-invocation with `--include-agents`, or permanently via `search.recall_show_agents` in `config.toml`.
+- **`suv backup [--out PATH]`** — write a snapshot of your history database to a chosen path (defaults to a timestamped file in the backups directory). A snapshot is also taken automatically before any destructive `suv delete`; pass `--no-backup` to skip it.
+- **`suv bookmark pick`** — interactive picker that recalls a saved bookmark directly into your shell prompt for editing.
+- **"Failed only" search filter** — press `Ctrl+E` in the search TUI or run `suv search --failed` to restrict results to commands that exited non-zero.
+- **`suv stats --human`** — human-only analytics that exclude agent activity; also available as the `h` toggle inside the stats TUI.
+- **`suv agent report --fail-on <low|medium|high|critical>`** — exits non-zero when findings meet or exceed the given risk level, for use in local CI checks and git hooks.
+- **Configurable `agent.prompt_capture_max_chars`** — control how much prompt text is captured per agent command. Default raised from 500 to 4000 characters.
+- **Configurable `redaction.extra_patterns`** — supply your own secret-matching regexes to redact in addition to the built-in patterns.
+- **Idempotent JSONL import** — `suv import` now deduplicates, so re-importing the same export no longer creates duplicate entries. Pass `--allow-duplicates` to opt out.
+- **New risk patterns** — `git clean -f`, world-writable `chmod`, and recursive `chown -R` are now flagged by risk assessment.
+
+### Changed
+- **Search ranking overhauled** — results must now contain your typed words as literal substrings; the previous loose character-subsequence matching is gone (so `gco` no longer matches `git checkout`). Results are ranked prefix matches first, then contiguous matches, then in-order words, then any-order words.
+- **Up-arrow recall is now recency-first** — a command typed in another directory is no longer buried after a `cd`; the most recently used commands surface first.
+- **`suv alias suggest` is now human-only** — alias suggestions are derived from your own commands and ignore agent activity.
+- **`alias add` and `add-suggested` regenerate the alias file automatically** — no separate regenerate step is needed after adding an alias.
+- **MCP project-scoped tools now match the full directory subtree** — queries scoped to a project include commands run in nested subdirectories.
+- **MCP now honors `mcp.default_days` and `mcp.default_limit`** — configured defaults are applied to MCP queries.
+- **`agent.risk_ignore_patterns` now actually suppress matching risk findings** — previously configured ignore patterns had no effect.
+- **Dependencies** — `rusqlite` 0.38 → 0.40, `clap_mangen` 0.2 → 0.3; lockfile refreshed.
+
+### Fixed
+- **Redaction no longer corrupts legitimate command flags** — `docker -p`, `ssh -p`, and `curl -u` are left intact instead of being mangled by secret redaction.
+- **Password redaction edge cases** — passwords containing `@`, and password-only database connection URIs, are now redacted correctly instead of leaking; base64 values following a key are now detected.
+- **MCP multibyte panics** — fixed UTF-8 byte-slice panics when agent output or prompts contained multibyte characters.
+
+### Security
+- **Destructive prompts refuse non-TTY stdin** — `suv delete` and `suv uninstall` no longer accept a piped `y`, preventing accidental destructive actions when input is not an interactive terminal.
+- **`SECURITY.md` now documents the at-rest data model and redaction coverage** — clarifying what is stored locally and what redaction does and does not cover.
+
 ## [0.3.3] - 2026-04-25
 
 ### Fixed
