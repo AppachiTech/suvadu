@@ -16,12 +16,12 @@
 **Suvadu** replaces your shell history with a SQLite-backed store. Every command gets structured context — exit code, duration, directory, executor, session. AI agents can query it via MCP. 100% local.
 
 - **<2ms** recording overhead, **<10ms** search across 1M+ entries
-- **AI agent tracking** — auto-detects Claude Code, Cursor, OpenCode, Antigravity, pi.dev, Codex, Aider
+- **AI agent tracking** — auto-detects Claude Code, Cursor, OpenCode, Antigravity, Windsurf, pi.dev, Codex, Aider
 - **Prompt Explorer** — trace every command back to the prompt that triggered it
 - **MCP Server** — 15 tools + 7 resources. Agent session discovery, project context, failure learning, risk assessment. Configurable via `suv settings`
 - **100% local** — no cloud, no telemetry, no account. MIT licensed.
 
-> **Website & Docs:** [suvadu.sh](https://suvadu.sh) &middot; **CLI Reference:** [suvadu.sh/cli](https://suvadu.sh/cli/) &middot; **Blog:** [suvadu.sh/blog](https://suvadu.sh/blog/)
+> **Website & Docs:** [suvadu.sh](https://suvadu.sh) &middot; **CLI Reference:** [suvadu.sh/cli](https://suvadu.sh/cli/) &middot; **Blog:** [suvadu.sh/blog](https://suvadu.sh/blog/) &middot; **What's new:** [CHANGELOG](CHANGELOG.md)
 
 ---
 
@@ -32,7 +32,7 @@
 brew tap AppachiTech/suvadu && brew install suvadu
 
 # Install script (macOS & Linux)
-curl -fsSL https://downloads.appachi.tech/suvadu/install.sh | sh
+curl -fsSL https://downloads.appachi.tech/suvadu/install.sh | bash
 
 # Cargo
 cargo install suvadu
@@ -87,16 +87,16 @@ See the [full integration guide](https://suvadu.sh/blog/track-ai-agent-commands-
 
 | Feature | Details |
 |---------|---------|
-| **Search** | Fuzzy search TUI with filters, Smart mode, detail pane, bookmarks |
+| **Search** | Substring search TUI (your own commands by default; `Ctrl+A` shows agents, `Ctrl+E` shows failures only) with filters, Smart mode, detail pane, bookmarks |
 | **History** | Non-interactive `suv history` with filters, `--json`, pipeable to other tools |
-| **Agent Dashboard** | Timeline, risk assessment, per-agent analytics, exportable reports |
+| **Agent Dashboard** | Timeline, risk assessment, per-agent analytics, exportable reports; `suv agent report --fail-on <low\|medium\|high\|critical>` for local CI / git-hook gating |
 | **MCP Server** | 15 tools + 7 resources — agent session replay, project context, failure learning, configurable |
 | **Prompt Explorer** | Trace commands back to the prompt that triggered them |
-| **Stats** | Heatmap, hourly distribution, top commands, executor breakdown |
+| **Stats** | Heatmap, hourly distribution, top commands, executor breakdown; `--human` (or `h` in the TUI) excludes AI-agent activity |
 | **Doctor** | `suv doctor` checks shell, hooks, config, database, MCP, and agent hooks health |
-| **Organization** | Tags, bookmarks, notes, alias suggestions |
-| **Privacy** | Space-prefix exclusion, regex patterns, secret redaction, local-only |
-| **Arrow Keys** | Frecency-ranked Up/Down that prefers same-directory commands |
+| **Organization** | Tags, bookmarks (`suv bookmark pick` recalls one into your prompt), notes, alias suggestions |
+| **Privacy & Safety** | Space-prefix exclusion, regex patterns, secret redaction (extend via `redaction.extra_patterns`), local-only. `suv backup` + an automatic snapshot before any `suv delete`. |
+| **Arrow Keys** | Recency-first Up/Down recall — your most recent commands surface first, with the current directory as a tiebreaker. Agent commands are hidden by default; reveal them with `Alt+A` (per shell) or `--include-agents`. |
 | **Vim Bindings** | Optional vim-style `j`/`k`/`Ctrl+U`/`Ctrl+D` navigation in search TUI |
 
 Full feature documentation at [suvadu.sh/cli](https://suvadu.sh/cli/).
@@ -116,6 +116,12 @@ Full feature documentation at [suvadu.sh/cli](https://suvadu.sh/cli/).
   <img src="demo/suvadu-agent.gif" alt="Suvadu agent dashboard" width="700">
   <br>
   <em>Agent dashboard — track what your AI agents execute</em>
+</p>
+
+<p align="center">
+  <img src="demo/suvadu-prompts.gif" alt="Suvadu prompt explorer" width="700">
+  <br>
+  <em>Prompt Explorer — trace commands back to the prompt that triggered them</em>
 </p>
 
 </details>

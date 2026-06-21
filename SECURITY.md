@@ -75,7 +75,7 @@ command is stored. Coverage includes:
 ### Self-Update
 
 - Binary downloads are served over **HTTPS** from `downloads.appachi.tech`
-- Downloads are verified with **SHA256 checksums**
+- Downloads are verified with a **minisign signature** (the public key is compiled into the binary, so a compromised download server cannot forge updates) and a **SHA256 checksum**
 - Update files are written to a unique temporary directory to prevent TOCTOU attacks
 - Homebrew installs are handled through the official Homebrew tap
 
