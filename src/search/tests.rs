@@ -98,6 +98,41 @@ fn test_pagination_logic() {
 }
 
 #[test]
+fn test_fuzzy_contiguous_match_outranks_scattered_in_cwd() {
+    // Regression: a contiguous "git add" match must rank above a scattered
+    // atom match ("git ... add") even when the scattered one is in the current
+    // directory (and thus cwd/human-boosted). nucleo alone scores them equally.
+    let cwd = "/proj";
+    let mk = |cmd: &str, dir: &str| {
+        let mut e = create_test_entry(cmd);
+        e.cwd = dir.to_string();
+        e
+    };
+    let entries = vec![
+        // current dir, scattered matches (boosted)
+        mk("suv bookmark add \"git log --oneline -10\"", cwd),
+        mk("git remote add origin https://github.com/x/y.git", cwd),
+        // other dir, contiguous prefix match (not cwd-boosted)
+        mk("git add .", "/other"),
+    ];
+    let scored = SearchApp::fuzzy_score(
+        entries,
+        "git add",
+        Some(cwd),
+        SearchField::Command,
+        80,
+        33,
+        50,
+    );
+    assert_eq!(
+        scored.first().map(|e| e.command.as_str()),
+        Some("git add ."),
+        "contiguous 'git add' must rank first; got {:?}",
+        scored.iter().map(|e| &e.command).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn test_fuzzy_score_ranking() {
     let entries = vec![
         create_test_entry("git checkout main"),

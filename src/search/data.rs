@@ -78,7 +78,14 @@ impl SearchApp {
         let mut matcher = Matcher::new(MatcherConfig::DEFAULT);
         let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
 
-        let mut scored: Vec<(Entry, u32)> = Vec::new();
+        // Lower-cased, trimmed query for the contiguity tier (below). nucleo
+        // splits a multi-word query into independent atoms, so it ranks a
+        // scattered match ("git ... add") the same as a contiguous one
+        // ("git add"). We restore that phrase signal as the primary sort key.
+        let query_lc = query.trim().to_lowercase();
+
+        // (entry, match-quality tier, boosted fuzzy score)
+        let mut scored: Vec<(Entry, u8, u32)> = Vec::new();
         let mut buf = Vec::new();
 
         for entry in entries {
@@ -118,21 +125,37 @@ impl SearchApp {
                         (f64::from(final_score) * f64::from(cwd_boost_percent) / 100.0) as u32,
                     );
                 }
-                scored.push((entry, final_score));
+
+                // Match-quality tier: a command that contains the query as a
+                // contiguous phrase should outrank a scattered atom match,
+                // regardless of cwd/recency boosts. 2 = prefix, 1 = substring,
+                // 0 = scattered. Empty query → all 0 (pure fuzzy/recency).
+                let tier: u8 = if query_lc.is_empty() {
+                    0
+                } else {
+                    let fv_lc = field_value.to_lowercase();
+                    if fv_lc.starts_with(&query_lc) {
+                        2
+                    } else {
+                        // 1 = contiguous substring, 0 = scattered atom match
+                        u8::from(fv_lc.contains(&query_lc))
+                    }
+                };
+
+                scored.push((entry, tier, final_score));
             }
         }
 
         scored.sort_by(|a, b| {
-            // Primary: fuzzy score (descending)
-            let score_cmp = b.1.cmp(&a.1);
-            if score_cmp != std::cmp::Ordering::Equal {
-                return score_cmp;
-            }
-            // Tiebreaker: interactively-typed entries (terminal/IDE) first,
-            // above agent/bot/ci/script commands.
-            b.0.is_interactive().cmp(&a.0.is_interactive())
+            // Primary: match-quality tier (prefix > substring > scattered)
+            b.1.cmp(&a.1)
+                // Secondary: boosted fuzzy score (descending)
+                .then_with(|| b.2.cmp(&a.2))
+                // Tiebreaker: interactively-typed entries (terminal/IDE) first,
+                // above agent/bot/ci/script commands.
+                .then_with(|| b.0.is_interactive().cmp(&a.0.is_interactive()))
         });
-        scored.into_iter().map(|(e, _)| e).collect()
+        scored.into_iter().map(|(e, _, _)| e).collect()
     }
 
     /// Stable re-sort: combined context + human-first ranking in a single pass.
