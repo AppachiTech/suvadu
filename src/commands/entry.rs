@@ -866,8 +866,13 @@ mod tests {
 
     #[test]
     fn test_handle_delete_refuses_non_tty_without_yes() {
-        // Under `cargo test` stdin is not a terminal, so a confirm-required
-        // delete (skip_confirm=false) must refuse rather than read piped input.
+        // This exercises the confirm-required path (skip_confirm=false), which is
+        // only safe when stdin is NOT a terminal — otherwise it would block on
+        // the interactive y/N prompt and suspend `cargo test`. Skip when run from
+        // an interactive terminal; CI (non-tty) still validates the guard.
+        if crate::util::stdin_is_terminal() {
+            return;
+        }
         let (_dir, repo) = test_repo();
         seed_entries(&repo, &["git status", "git commit"]);
 
