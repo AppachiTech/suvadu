@@ -91,14 +91,6 @@ impl Entry {
             1_000_050,
         )
     }
-
-    /// Test helper: create an entry with a specific exit code.
-    #[cfg(test)]
-    pub fn test_with_exit(command: &str, exit_code: Option<i32>) -> Self {
-        let mut entry = Self::test(command);
-        entry.exit_code = exit_code;
-        entry
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

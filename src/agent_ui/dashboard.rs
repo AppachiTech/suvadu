@@ -928,7 +928,6 @@ impl AgentApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::KeyEvent;
 
     fn make_entry(cmd: &str, executor: Option<&str>, cwd: &str) -> Entry {
         let mut e = Entry::new(

@@ -10,7 +10,9 @@ use super::Repository;
 /// and for decoupling business logic from the storage backend.
 ///
 /// Trait-based dispatch for `Repository`; used in tests and integration tests.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Not every method has a caller (it's a complete mockable boundary), so
+/// `dead_code` is allowed in all build profiles.
+#[allow(dead_code)]
 pub trait RepositoryApi {
     // ── mod.rs (core) ───────────────────────────────────────────────────
     fn insert_session(&self, session: &Session) -> DbResult<()>;

@@ -130,14 +130,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn make_request(method: &str, id: Option<i64>) -> String {
-        let mut req = json!({"jsonrpc": "2.0", "method": method});
-        if let Some(i) = id {
-            req["id"] = json!(i);
-        }
-        serde_json::to_string(&req).unwrap()
-    }
-
     #[test]
     fn test_handle_tool_call_unknown() {
         let (_dir, repo) = crate::test_utils::test_repo();
