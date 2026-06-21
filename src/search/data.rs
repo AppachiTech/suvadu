@@ -167,6 +167,15 @@ impl SearchApp {
                 // a tier.
                 let tier = match_tier(&field_value.to_lowercase(), &query_lc, &atoms);
 
+                // For a multi-word query, require every word to actually appear
+                // (tier >= 1). Otherwise a loose subsequence (tier 0) surfaces
+                // unrelated commands — e.g. "git add" matching "git rev-parse",
+                // or "git mango" matching random JSON. Single-token queries keep
+                // fuzzy/abbreviation matching (e.g. "gco" → "git checkout").
+                if atoms.len() >= 2 && tier == 0 {
+                    continue;
+                }
+
                 scored.push((entry, tier, final_score));
             }
         }

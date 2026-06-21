@@ -141,6 +141,62 @@ fn test_fuzzy_contiguous_match_outranks_scattered_in_cwd() {
 }
 
 #[test]
+fn test_multi_word_query_requires_literal_words() {
+    // A 2+ word query must not return loose subsequence matches.
+    let entries = vec![
+        create_test_entry("git add ."),               // has both words
+        create_test_entry("git remote add origin x"), // has both words
+        create_test_entry("claude --resume $(git rev-parse)"), // 'git' but no 'add'
+        create_test_entry("AUTHOR_NAME=x git commit"), // 'git' but no 'add'
+    ];
+    let scored = SearchApp::fuzzy_score(entries, "git add", None, SearchField::Command, 80, 33, 50);
+    let cmds: Vec<&str> = scored.iter().map(|e| e.command.as_str()).collect();
+    assert!(cmds.contains(&"git add ."));
+    assert!(cmds.contains(&"git remote add origin x"));
+    assert!(
+        !cmds.iter().any(|c| c.contains("rev-parse")),
+        "subsequence-only match must be dropped: {cmds:?}"
+    );
+    assert!(
+        !cmds.iter().any(|c| c.contains("commit")),
+        "subsequence-only match must be dropped: {cmds:?}"
+    );
+}
+
+#[test]
+fn test_multi_word_query_absent_word_returns_nothing() {
+    // "git mango": no command contains "mango" → no results, despite the
+    // letters appearing as a subsequence in many commands.
+    let entries = vec![
+        create_test_entry("git add ."),
+        create_test_entry("echo '{\"method\":\"statistical\",\"name\":\"find_agent\"}'"),
+        create_test_entry("make migrate-organization"),
+    ];
+    let scored =
+        SearchApp::fuzzy_score(entries, "git mango", None, SearchField::Command, 80, 33, 50);
+    assert!(
+        scored.is_empty(),
+        "no command has 'mango'; got {:?}",
+        scored.iter().map(|e| &e.command).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_single_token_abbreviation_still_fuzzy() {
+    // Single-token queries keep subsequence/abbreviation matching.
+    let entries = vec![
+        create_test_entry("git checkout main"),
+        create_test_entry("cargo build"),
+    ];
+    let scored = SearchApp::fuzzy_score(entries, "gco", None, SearchField::Command, 80, 33, 50);
+    let cmds: Vec<&str> = scored.iter().map(|e| e.command.as_str()).collect();
+    assert!(
+        cmds.contains(&"git checkout main"),
+        "abbreviation should still match: {cmds:?}"
+    );
+}
+
+#[test]
 fn test_match_tier_levels() {
     use super::data::match_tier;
     let atoms = ["git", "add"];
