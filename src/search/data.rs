@@ -3,6 +3,40 @@ use crate::repository::{QueryFilter, Repository};
 
 use super::SearchApp;
 
+/// Textual match-quality tier used as the primary search-ranking key, so a
+/// closer textual match always beats a looser one regardless of cwd/recency
+/// boosts. `field_lc`/`query_lc` are lower-cased; `atoms` is the query split on
+/// whitespace. Higher is better:
+///   4 = `query` is a prefix of the field
+///   3 = `query` is a contiguous substring
+///   2 = every atom appears as a literal substring, in query order
+///   1 = every atom appears as a literal substring (any order)
+///   0 = matched only as a fuzzy subsequence (no literal atom) — e.g. an
+///       abbreviation like "gco" → "git checkout"
+pub(super) fn match_tier(field_lc: &str, query_lc: &str, atoms: &[&str]) -> u8 {
+    if query_lc.is_empty() {
+        return 0;
+    }
+    if field_lc.starts_with(query_lc) {
+        return 4;
+    }
+    if field_lc.contains(query_lc) {
+        return 3;
+    }
+    if !atoms.iter().all(|a| field_lc.contains(a)) {
+        return 0;
+    }
+    // All atoms are literal substrings — are they in query order (non-overlapping)?
+    let mut pos = 0;
+    for a in atoms {
+        match field_lc[pos..].find(a) {
+            Some(i) => pos += i + a.len(),
+            None => return 1, // present, but not in order
+        }
+    }
+    2
+}
+
 impl SearchApp {
     pub(super) fn get_selected_entry(&self) -> Option<&Entry> {
         self.table_state
@@ -78,11 +112,13 @@ impl SearchApp {
         let mut matcher = Matcher::new(MatcherConfig::DEFAULT);
         let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
 
-        // Lower-cased, trimmed query for the contiguity tier (below). nucleo
+        // Lower-cased, trimmed query for the match-quality tier (below). nucleo
         // splits a multi-word query into independent atoms, so it ranks a
         // scattered match ("git ... add") the same as a contiguous one
-        // ("git add"). We restore that phrase signal as the primary sort key.
+        // ("git add"). We restore that phrase/word-order signal as the primary
+        // sort key.
         let query_lc = query.trim().to_lowercase();
+        let atoms: Vec<&str> = query_lc.split_whitespace().collect();
 
         // (entry, match-quality tier, boosted fuzzy score)
         let mut scored: Vec<(Entry, u8, u32)> = Vec::new();
@@ -126,21 +162,10 @@ impl SearchApp {
                     );
                 }
 
-                // Match-quality tier: a command that contains the query as a
-                // contiguous phrase should outrank a scattered atom match,
-                // regardless of cwd/recency boosts. 2 = prefix, 1 = substring,
-                // 0 = scattered. Empty query → all 0 (pure fuzzy/recency).
-                let tier: u8 = if query_lc.is_empty() {
-                    0
-                } else {
-                    let fv_lc = field_value.to_lowercase();
-                    if fv_lc.starts_with(&query_lc) {
-                        2
-                    } else {
-                        // 1 = contiguous substring, 0 = scattered atom match
-                        u8::from(fv_lc.contains(&query_lc))
-                    }
-                };
+                // Match-quality tier (see `match_tier`): textual match quality
+                // dominates the cwd/recency boosts, which only break ties within
+                // a tier.
+                let tier = match_tier(&field_value.to_lowercase(), &query_lc, &atoms);
 
                 scored.push((entry, tier, final_score));
             }

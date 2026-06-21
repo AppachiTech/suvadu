@@ -124,12 +124,32 @@ fn test_fuzzy_contiguous_match_outranks_scattered_in_cwd() {
         33,
         50,
     );
+    let order: Vec<&str> = scored.iter().map(|e| e.command.as_str()).collect();
     assert_eq!(
-        scored.first().map(|e| e.command.as_str()),
-        Some("git add ."),
-        "contiguous 'git add' must rank first; got {:?}",
-        scored.iter().map(|e| &e.command).collect::<Vec<_>>()
+        order.first(),
+        Some(&"git add ."),
+        "contiguous 'git add' must rank first; got {order:?}"
     );
+    // In-order word match ("git" then "add") beats out-of-order ("add" before
+    // "git"), even though the latter is in the current (boosted) directory.
+    let remote = order.iter().position(|c| c.starts_with("git remote add"));
+    let bookmark = order.iter().position(|c| c.starts_with("suv bookmark add"));
+    assert!(
+        remote < bookmark,
+        "in-order 'git…add' should rank above out-of-order; got {order:?}"
+    );
+}
+
+#[test]
+fn test_match_tier_levels() {
+    use super::data::match_tier;
+    let atoms = ["git", "add"];
+    assert_eq!(match_tier("git add .", "git add", &atoms), 4); // prefix
+    assert_eq!(match_tier("sudo git add .", "git add", &atoms), 3); // substring
+    assert_eq!(match_tier("git remote add origin", "git add", &atoms), 2); // in order
+    assert_eq!(match_tier("suv bookmark add git log", "git add", &atoms), 1); // out of order
+                                                                              // pure subsequence (no literal "git"/"add" substring)
+    assert_eq!(match_tier("gradle dist", "git add", &atoms), 0);
 }
 
 #[test]
