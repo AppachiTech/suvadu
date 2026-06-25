@@ -52,6 +52,20 @@ Verify: `suv status`
 
 ---
 
+## Troubleshooting
+
+**`no such file or directory` pointing at an old path** (e.g. `suv:8: no such file or directory: /opt/homebrew/bin/suv`) — The shell hook records the absolute path of the `suv` binary when your session starts. If you move the binary — switching package managers (e.g. Homebrew → Cargo), running `brew unlink suvadu`, or uninstalling and reinstalling elsewhere — already-open shells keep pointing at the old, now-deleted path. Reload the shell to pick up the new location:
+
+```bash
+exec zsh    # or: exec bash
+```
+
+(or just open a new terminal). Also make sure the new location, such as `~/.cargo/bin`, is on your `PATH`.
+
+More at [suvadu.sh/cli/shell-integration](https://suvadu.sh/cli/shell-integration/).
+
+---
+
 ## Quick Start
 
 ```bash
