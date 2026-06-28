@@ -92,6 +92,11 @@ jobs:
     name: Publish Linux release
     runs-on: ubuntu-latest
     needs: build-linux
+    # Serialize against the macOS publish job: both update the same Homebrew
+    # formula in AppachiTech/homebrew-suvadu, so they must not push in parallel.
+    concurrency:
+      group: homebrew-tap-update
+      cancel-in-progress: false
 
     steps:
       - name: Checkout source repo
@@ -208,8 +213,25 @@ jobs:
           if git diff --cached --quiet; then
             echo "No Homebrew tap changes to commit."
           else
-            git commit -m "Update suvadu to ${TAG}"
-            git push
+            git commit -m "Update suvadu (linux) to ${TAG}"
+
+            # The concurrency group serializes us against the macOS workflow,
+            # but rebase-and-retry anyway in case the tap moved under us (e.g. a
+            # manual re-run). The linux/macOS edits touch disjoint blocks of the
+            # formula, so a rebase merges cleanly.
+            BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+            for attempt in 1 2 3 4 5; do
+              if git push origin "HEAD:${BRANCH}"; then
+                echo "Pushed tap update on attempt ${attempt}."
+                break
+              fi
+              if [ "${attempt}" -eq 5 ]; then
+                echo "ERROR: failed to push tap update after ${attempt} attempts." >&2
+                exit 1
+              fi
+              echo "Push rejected (attempt ${attempt}); rebasing on origin/${BRANCH}..."
+              git pull --rebase origin "${BRANCH}"
+            done
           fi
 
       - name: Create GitHub release
