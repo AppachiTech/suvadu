@@ -189,6 +189,25 @@ jobs:
 
           rm -f "${FORMULA_PATH}.bak"
 
+          # Fail loudly if the sed substitutions did not land — e.g. the formula
+          # layout changed, or homebrew-suvadu#3 (which defines that layout) is
+          # not merged yet. Without this check an unchanged formula would slip
+          # through the "nothing to commit" guard below and users would silently
+          # receive a stale tarball URL / checksum.
+          assert_in_formula() {
+            local label="$1" needle="$2"
+            if ! grep -qF -- "$needle" "$FORMULA_PATH"; then
+              echo "ERROR: ${label} not found in ${FORMULA_PATH} after sed: ${needle}" >&2
+              echo "       Formula layout may have changed or homebrew-suvadu#3 is unmerged;" >&2
+              echo "       refusing to push a stale formula." >&2
+              exit 1
+            fi
+          }
+          assert_in_formula "macos arm64 url"     "$ARM_URL"
+          assert_in_formula "macos arm64 sha256"  "$ARM_SHA"
+          assert_in_formula "macos x86_64 url"    "$X64_URL"
+          assert_in_formula "macos x86_64 sha256" "$X64_SHA"
+
           cd homebrew-tap
           git config user.name "Appachi Bot"
           git config user.email "bot@appachi.tech"
