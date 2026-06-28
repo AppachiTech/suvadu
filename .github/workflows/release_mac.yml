@@ -3,7 +3,7 @@ name: Release macOS
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*' # Triggers on tags like v0.1.0, v1.0.0
 
 jobs:
   build-macos:
@@ -26,7 +26,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
 
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust
@@ -34,17 +34,17 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Run tests
+      - name: Run Tests
         if: matrix.arch == 'arm64'
         run: cargo test
 
-      - name: Build binary
+      - name: Build Binary (Release)
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Install minisign
         run: brew install minisign
 
-      - name: Prepare release files
+      - name: Prepare Artifacts
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
@@ -65,7 +65,7 @@ jobs:
             -x "out/${{ matrix.archive_name }}.minisig"
           rm -f /tmp/minisign.key
 
-      - name: Upload workflow artifact
+      - name: Upload Workflow Artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-${{ matrix.arch }}
@@ -83,22 +83,22 @@ jobs:
       cancel-in-progress: false
 
     steps:
-      - name: Checkout source repo
+      - name: Checkout Source Repo
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Download arm64 artifact
+      - name: Download arm64 Artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: macos-arm64
           path: artifacts/arm64
 
-      - name: Download x86_64 artifact
+      - name: Download x86_64 Artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: macos-x86_64
           path: artifacts/x86_64
 
-      - name: Prepare combined artifacts tree
+      - name: Prepare Combined Artifacts Tree
         run: |
           set -euo pipefail
 
@@ -130,9 +130,9 @@ jobs:
           r2-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           r2-bucket: ${{ secrets.R2_BUCKET }}
           source-dir: artifacts
-          destination-dir: ./
+          destination-dir: ./ # Destination prefix in bucket
 
-      - name: Purge Cloudflare CDN cache
+      - name: Purge Cloudflare CDN Cache
         run: |
           curl -s -X POST \
             "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/purge_cache" \
@@ -150,14 +150,14 @@ jobs:
               ]
             }'
 
-      - name: Checkout Homebrew tap
+      - name: Checkout Homebrew Tap
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: AppachiTech/homebrew-suvadu
           token: ${{ secrets.GH_PAT }}
           path: homebrew-tap
 
-      - name: Update Homebrew tap
+      - name: Update Homebrew Tap
         run: |
           set -euo pipefail
 
@@ -237,7 +237,7 @@ jobs:
             done
           fi
 
-      - name: Create GitHub release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
         with:
           generate_release_notes: true
