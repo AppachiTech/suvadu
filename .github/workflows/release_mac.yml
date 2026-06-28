@@ -6,19 +6,25 @@ on:
       - 'v*' # Triggers on tags like v0.1.0, v1.0.0
 
 jobs:
-  deploy-mac:
+  build-macos:
+    name: Build macOS (${{ matrix.arch }})
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: aarch64-apple-darwin
             runner: macos-latest
             arch: arm64
             suffix: ""
+            archive_name: suv-macos-${{ github.ref_name }}.tar.gz
           - target: x86_64-apple-darwin
             runner: macos-latest
             arch: x86_64
             suffix: "-x86_64"
+            archive_name: suv-macos-x86_64-${{ github.ref_name }}.tar.gz
+
     runs-on: ${{ matrix.runner }}
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -29,7 +35,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Run Tests
-        if: matrix.suffix == ''
+        if: matrix.arch == 'arm64'
         run: cargo test
 
       - name: Build Binary (Release)
@@ -42,31 +48,79 @@ jobs:
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
-          # Create directory structure for R2
-          mkdir -p artifacts/macos/archive
+          set -euo pipefail
 
-          # Prepare binary
+          mkdir -p out
+
           cp target/${{ matrix.target }}/release/suv suv
 
-          # Create main tarball (e.g. suv-macos-latest.tar.gz or suv-macos-x86_64-latest.tar.gz)
-          tar -czf artifacts/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz suv LICENSE scripts/uninstall.sh
+          tar -czf "out/${{ matrix.archive_name }}" suv LICENSE scripts/uninstall.sh
+          shasum -a 256 "out/${{ matrix.archive_name }}" | awk '{print $1}' > "out/${{ matrix.archive_name }}.sha256"
 
-          # Generate SHA256 checksums
-          shasum -a 256 artifacts/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz | awk '{print $1}' > artifacts/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz.sha256
-
-          # Sign with minisign (secret key from GitHub Secrets, empty password piped)
           echo "$MINISIGN_SECRET_KEY" > /tmp/minisign.key
-          echo '' | minisign -S -s /tmp/minisign.key -m artifacts/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz \
-            -t "suvadu ${{ github.ref_name }} macOS${{ matrix.suffix }}" -x artifacts/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz.minisig
+          echo '' | minisign -S \
+            -s /tmp/minisign.key \
+            -m "out/${{ matrix.archive_name }}" \
+            -t "suvadu ${{ github.ref_name }} macOS ${{ matrix.arch }}" \
+            -x "out/${{ matrix.archive_name }}.minisig"
           rm -f /tmp/minisign.key
 
-          # Write version.txt for install script version checks
-          echo "${GITHUB_REF_NAME#v}" > artifacts/version.txt
+      - name: Upload Workflow Artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
 
-          # Create versioned tarball (e.g. suv-macos-v0.1.0.tar.gz)
-          cp artifacts/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz artifacts/macos/archive/suv-macos${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz
-          cp artifacts/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz.sha256 artifacts/macos/archive/suv-macos${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.sha256
-          cp artifacts/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz.minisig artifacts/macos/archive/suv-macos${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.minisig
+  publish-macos:
+    name: Publish macOS release
+    runs-on: macos-latest
+    needs: build-macos
+    # Serialize against the Linux publish job: both update the same Homebrew
+    # formula in AppachiTech/homebrew-suvadu, so they must not push in parallel.
+    concurrency:
+      group: homebrew-tap-update
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout Source Repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download arm64 Artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: macos-arm64
+          path: artifacts/arm64
+
+      - name: Download x86_64 Artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: macos-x86_64
+          path: artifacts/x86_64
+
+      - name: Prepare Combined Artifacts Tree
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifacts/macos/archive
+
+          cp artifacts/arm64/suv-macos-${{ github.ref_name }}.tar.gz artifacts/macos/archive/
+          cp artifacts/arm64/suv-macos-${{ github.ref_name }}.tar.gz.sha256 artifacts/macos/archive/
+          cp artifacts/arm64/suv-macos-${{ github.ref_name }}.tar.gz.minisig artifacts/macos/archive/
+
+          cp artifacts/x86_64/suv-macos-x86_64-${{ github.ref_name }}.tar.gz artifacts/macos/archive/
+          cp artifacts/x86_64/suv-macos-x86_64-${{ github.ref_name }}.tar.gz.sha256 artifacts/macos/archive/
+          cp artifacts/x86_64/suv-macos-x86_64-${{ github.ref_name }}.tar.gz.minisig artifacts/macos/archive/
+
+          cp artifacts/macos/archive/suv-macos-${{ github.ref_name }}.tar.gz artifacts/macos/suv-macos-latest.tar.gz
+          cp artifacts/macos/archive/suv-macos-${{ github.ref_name }}.tar.gz.sha256 artifacts/macos/suv-macos-latest.tar.gz.sha256
+          cp artifacts/macos/archive/suv-macos-${{ github.ref_name }}.tar.gz.minisig artifacts/macos/suv-macos-latest.tar.gz.minisig
+
+          cp artifacts/macos/archive/suv-macos-x86_64-${{ github.ref_name }}.tar.gz artifacts/macos/suv-macos-x86_64-latest.tar.gz
+          cp artifacts/macos/archive/suv-macos-x86_64-${{ github.ref_name }}.tar.gz.sha256 artifacts/macos/suv-macos-x86_64-latest.tar.gz.sha256
+          cp artifacts/macos/archive/suv-macos-x86_64-${{ github.ref_name }}.tar.gz.minisig artifacts/macos/suv-macos-x86_64-latest.tar.gz.minisig
+
+          echo "${GITHUB_REF_NAME#v}" > artifacts/version.txt
 
       - name: Upload to Cloudflare R2
         uses: ryand56/r2-upload-action@b801a390acbdeb034c5e684ff5e1361c06639e7c # v1.4
@@ -86,53 +140,112 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{
               "files": [
-                "https://downloads.appachi.tech/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz",
-                "https://downloads.appachi.tech/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz.sha256",
-                "https://downloads.appachi.tech/macos/suv-macos${{ matrix.suffix }}-latest.tar.gz.minisig",
+                "https://downloads.appachi.tech/macos/suv-macos-latest.tar.gz",
+                "https://downloads.appachi.tech/macos/suv-macos-latest.tar.gz.sha256",
+                "https://downloads.appachi.tech/macos/suv-macos-latest.tar.gz.minisig",
+                "https://downloads.appachi.tech/macos/suv-macos-x86_64-latest.tar.gz",
+                "https://downloads.appachi.tech/macos/suv-macos-x86_64-latest.tar.gz.sha256",
+                "https://downloads.appachi.tech/macos/suv-macos-x86_64-latest.tar.gz.minisig",
                 "https://downloads.appachi.tech/version.txt"
               ]
             }'
 
       - name: Checkout Homebrew Tap
-        if: matrix.suffix == ''
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: AppachiTech/homebrew-suvadu
           token: ${{ secrets.GH_PAT }}
           path: homebrew-tap
 
       - name: Update Homebrew Tap
-        if: matrix.suffix == ''
         run: |
-          TAG=${{ github.ref_name }}
-          TARBALL_NAME="suv-macos-${TAG}.tar.gz"
-          TARBALL_PATH="artifacts/macos/archive/${TARBALL_NAME}"
+          set -euo pipefail
 
-          # Calculate SHA256
-          SHASUM=$(shasum -a 256 "$TARBALL_PATH" | awk '{print $1}')
-          echo "SHA256: $SHASUM"
+          TAG="${GITHUB_REF_NAME}"
+          FORMULA_PATH="homebrew-tap/Formula/suvadu.rb"
+
+          ARM_TARBALL="suv-macos-${TAG}.tar.gz"
+          X64_TARBALL="suv-macos-x86_64-${TAG}.tar.gz"
+
+          ARM_URL="https://downloads.appachi.tech/macos/archive/${ARM_TARBALL}"
+          X64_URL="https://downloads.appachi.tech/macos/archive/${X64_TARBALL}"
+
+          ARM_SHA="$(awk '{print $1}' "artifacts/macos/archive/${ARM_TARBALL}.sha256")"
+          X64_SHA="$(awk '{print $1}' "artifacts/macos/archive/${X64_TARBALL}.sha256")"
+
+          sed -i.bak -e '/on_macos do/,/on_linux do/{
+            /if Hardware::CPU.arm\?/,/else/{
+              s|url ".*"|url "'"${ARM_URL}"'"|
+              s|sha256 ".*"|sha256 "'"${ARM_SHA}"'"|
+            }
+          }' "$FORMULA_PATH"
+
+          sed -i.bak -e '/on_macos do/,/on_linux do/{
+            /else/,/end/{
+              s|url ".*"|url "'"${X64_URL}"'"|
+              s|sha256 ".*"|sha256 "'"${X64_SHA}"'"|
+            }
+          }' "$FORMULA_PATH"
+
+          rm -f "${FORMULA_PATH}.bak"
+
+          # Fail loudly if the sed substitutions did not land — e.g. the formula
+          # layout changed, or homebrew-suvadu#3 (which defines that layout) is
+          # not merged yet. Without this check an unchanged formula would slip
+          # through the "nothing to commit" guard below and users would silently
+          # receive a stale tarball URL / checksum.
+          assert_in_formula() {
+            local label="$1" needle="$2"
+            if ! grep -qF -- "$needle" "$FORMULA_PATH"; then
+              echo "ERROR: ${label} not found in ${FORMULA_PATH} after sed: ${needle}" >&2
+              echo "       Formula layout may have changed or homebrew-suvadu#3 is unmerged;" >&2
+              echo "       refusing to push a stale formula." >&2
+              exit 1
+            fi
+          }
+          assert_in_formula "macos arm64 url"     "$ARM_URL"
+          assert_in_formula "macos arm64 sha256"  "$ARM_SHA"
+          assert_in_formula "macos x86_64 url"    "$X64_URL"
+          assert_in_formula "macos x86_64 sha256" "$X64_SHA"
 
           cd homebrew-tap
-          FORMULA_PATH="Formula/suvadu.rb"
-
-          # Update version, URL, and SHA256
-          sed -i '' "s/version \".*\"/version \"${TAG#v}\"/" "$FORMULA_PATH"
-          NEW_URL="https://downloads.appachi.tech/macos/archive/${TARBALL_NAME}"
-          sed -i '' "s|url \".*\"|url \"${NEW_URL}\"|" "$FORMULA_PATH"
-          sed -i '' "s/sha256 \".*\"/sha256 \"${SHASUM}\"/" "$FORMULA_PATH"
-
-          # Commit and push
           git config user.name "Appachi Bot"
           git config user.email "bot@appachi.tech"
-          git add "$FORMULA_PATH"
-          git commit -m "Update suvadu to $TAG"
-          git push
+          git add Formula/suvadu.rb
+
+          if git diff --cached --quiet; then
+            echo "No Homebrew tap changes to commit."
+          else
+            git commit -m "Update suvadu (macos) to ${TAG}"
+
+            # The concurrency group serializes us against the Linux workflow,
+            # but rebase-and-retry anyway in case the tap moved under us (e.g. a
+            # manual re-run). The macOS/linux edits touch disjoint blocks of the
+            # formula, so a rebase merges cleanly.
+            BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+            for attempt in 1 2 3 4 5; do
+              if git push origin "HEAD:${BRANCH}"; then
+                echo "Pushed tap update on attempt ${attempt}."
+                break
+              fi
+              if [ "${attempt}" -eq 5 ]; then
+                echo "ERROR: failed to push tap update after ${attempt} attempts." >&2
+                exit 1
+              fi
+              echo "Push rejected (attempt ${attempt}); rebasing on origin/${BRANCH}..."
+              git pull --rebase origin "${BRANCH}"
+            done
+          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
         with:
-          generate_release_notes: ${{ matrix.suffix == '' }}
+          generate_release_notes: true
           files: |
-            artifacts/macos/archive/suv-macos${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz
-            artifacts/macos/archive/suv-macos${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.sha256
-            artifacts/macos/archive/suv-macos${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.minisig
+            artifacts/macos/archive/suv-macos-${{ github.ref_name }}.tar.gz
+            artifacts/macos/archive/suv-macos-${{ github.ref_name }}.tar.gz.sha256
+            artifacts/macos/archive/suv-macos-${{ github.ref_name }}.tar.gz.minisig
+            artifacts/macos/archive/suv-macos-x86_64-${{ github.ref_name }}.tar.gz
+            artifacts/macos/archive/suv-macos-x86_64-${{ github.ref_name }}.tar.gz.sha256
+            artifacts/macos/archive/suv-macos-x86_64-${{ github.ref_name }}.tar.gz.minisig
+

@@ -6,19 +6,25 @@ on:
       - 'v*' # Triggers on tags like v0.1.0, v1.0.0
 
 jobs:
-  deploy-linux:
+  build-linux:
+    name: Build Linux (${{ matrix.arch }})
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             arch: x86_64
             suffix: ""
             use_cross: false
+            archive_name: suv-linux-${{ github.ref_name }}.tar.gz
           - target: aarch64-unknown-linux-gnu
             arch: aarch64
             suffix: "-aarch64"
             use_cross: true
+            archive_name: suv-linux-aarch64-${{ github.ref_name }}.tar.gz
+
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -38,6 +44,7 @@ jobs:
 
       - name: Build Binary (Release)
         run: |
+          set -euo pipefail
           if [ "${{ matrix.use_cross }}" = "true" ]; then
             cross build --release --target ${{ matrix.target }}
           else
@@ -46,6 +53,7 @@ jobs:
 
       - name: Install minisign
         run: |
+          set -euo pipefail
           curl -fsSL -o /tmp/minisign.tar.gz https://github.com/jedisct1/minisign/releases/download/0.11/minisign-0.11-linux.tar.gz
           echo "f0a0954413df8531befed169e447a66da6868d79052ed7e892e50a4291af7ae0  /tmp/minisign.tar.gz" | sha256sum -c -
           tar xzf /tmp/minisign.tar.gz
@@ -56,31 +64,79 @@ jobs:
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
-          # Create directory structure for R2
-          mkdir -p artifacts/linux/archive
+          set -euo pipefail
 
-          # Prepare binary
+          mkdir -p out
+
           cp target/${{ matrix.target }}/release/suv suv
 
-          # Create main tarball (e.g. suv-linux-latest.tar.gz or suv-linux-aarch64-latest.tar.gz)
-          tar -czf artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz suv LICENSE scripts/uninstall.sh
+          tar -czf "out/${{ matrix.archive_name }}" suv LICENSE scripts/uninstall.sh
+          sha256sum "out/${{ matrix.archive_name }}" | awk '{print $1}' > "out/${{ matrix.archive_name }}.sha256"
 
-          # Generate SHA256 checksums
-          sha256sum artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz | awk '{print $1}' > artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.sha256
-
-          # Sign with minisign (secret key from GitHub Secrets, empty password piped)
           echo "$MINISIGN_SECRET_KEY" > /tmp/minisign.key
-          echo '' | minisign -S -s /tmp/minisign.key -m artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz \
-            -t "suvadu ${{ github.ref_name }} linux${{ matrix.suffix }}" -x artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.minisig
+          echo '' | minisign -S \
+            -s /tmp/minisign.key \
+            -m "out/${{ matrix.archive_name }}" \
+            -t "suvadu ${{ github.ref_name }} linux ${{ matrix.arch }}" \
+            -x "out/${{ matrix.archive_name }}.minisig"
           rm -f /tmp/minisign.key
 
-          # Write version.txt for install script version checks
-          echo "${GITHUB_REF_NAME#v}" > artifacts/version.txt
+      - name: Upload Workflow Artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
 
-          # Create versioned tarball
-          cp artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz
-          cp artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.sha256 artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.sha256
-          cp artifacts/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.minisig artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.minisig
+  publish-linux:
+    name: Publish Linux release
+    runs-on: ubuntu-latest
+    needs: build-linux
+    # Serialize against the macOS publish job: both update the same Homebrew
+    # formula in AppachiTech/homebrew-suvadu, so they must not push in parallel.
+    concurrency:
+      group: homebrew-tap-update
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout Source Repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download x86_64 Artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: linux-x86_64
+          path: artifacts/x86_64
+
+      - name: Download aarch64 Artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: linux-aarch64
+          path: artifacts/aarch64
+
+      - name: Prepare Combined Artifacts Tree
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifacts/linux/archive
+
+          cp artifacts/x86_64/suv-linux-${{ github.ref_name }}.tar.gz artifacts/linux/archive/
+          cp artifacts/x86_64/suv-linux-${{ github.ref_name }}.tar.gz.sha256 artifacts/linux/archive/
+          cp artifacts/x86_64/suv-linux-${{ github.ref_name }}.tar.gz.minisig artifacts/linux/archive/
+
+          cp artifacts/aarch64/suv-linux-aarch64-${{ github.ref_name }}.tar.gz artifacts/linux/archive/
+          cp artifacts/aarch64/suv-linux-aarch64-${{ github.ref_name }}.tar.gz.sha256 artifacts/linux/archive/
+          cp artifacts/aarch64/suv-linux-aarch64-${{ github.ref_name }}.tar.gz.minisig artifacts/linux/archive/
+
+          cp artifacts/linux/archive/suv-linux-${{ github.ref_name }}.tar.gz artifacts/linux/suv-linux-latest.tar.gz
+          cp artifacts/linux/archive/suv-linux-${{ github.ref_name }}.tar.gz.sha256 artifacts/linux/suv-linux-latest.tar.gz.sha256
+          cp artifacts/linux/archive/suv-linux-${{ github.ref_name }}.tar.gz.minisig artifacts/linux/suv-linux-latest.tar.gz.minisig
+
+          cp artifacts/linux/archive/suv-linux-aarch64-${{ github.ref_name }}.tar.gz artifacts/linux/suv-linux-aarch64-latest.tar.gz
+          cp artifacts/linux/archive/suv-linux-aarch64-${{ github.ref_name }}.tar.gz.sha256 artifacts/linux/suv-linux-aarch64-latest.tar.gz.sha256
+          cp artifacts/linux/archive/suv-linux-aarch64-${{ github.ref_name }}.tar.gz.minisig artifacts/linux/suv-linux-aarch64-latest.tar.gz.minisig
+
+          echo "${GITHUB_REF_NAME#v}" > artifacts/version.txt
 
       - name: Upload to Cloudflare R2
         uses: ryand56/r2-upload-action@b801a390acbdeb034c5e684ff5e1361c06639e7c # v1.4
@@ -100,18 +156,112 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{
               "files": [
-                "https://downloads.appachi.tech/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz",
-                "https://downloads.appachi.tech/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.sha256",
-                "https://downloads.appachi.tech/linux/suv-linux${{ matrix.suffix }}-latest.tar.gz.minisig",
+                "https://downloads.appachi.tech/linux/suv-linux-latest.tar.gz",
+                "https://downloads.appachi.tech/linux/suv-linux-latest.tar.gz.sha256",
+                "https://downloads.appachi.tech/linux/suv-linux-latest.tar.gz.minisig",
+                "https://downloads.appachi.tech/linux/suv-linux-aarch64-latest.tar.gz",
+                "https://downloads.appachi.tech/linux/suv-linux-aarch64-latest.tar.gz.sha256",
+                "https://downloads.appachi.tech/linux/suv-linux-aarch64-latest.tar.gz.minisig",
                 "https://downloads.appachi.tech/version.txt"
               ]
             }'
+
+      - name: Checkout Homebrew Tap
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: AppachiTech/homebrew-suvadu
+          token: ${{ secrets.GH_PAT }}
+          path: homebrew-tap
+
+      - name: Update Homebrew Tap
+        run: |
+          set -euo pipefail
+
+          TAG="${GITHUB_REF_NAME}"
+          FORMULA_PATH="homebrew-tap/Formula/suvadu.rb"
+
+          X64_TARBALL="suv-linux-${TAG}.tar.gz"
+          ARM_TARBALL="suv-linux-aarch64-${TAG}.tar.gz"
+
+          X64_URL="https://downloads.appachi.tech/linux/archive/${X64_TARBALL}"
+          ARM_URL="https://downloads.appachi.tech/linux/archive/${ARM_TARBALL}"
+
+          X64_SHA="$(awk '{print $1}' "artifacts/linux/archive/${X64_TARBALL}.sha256")"
+          ARM_SHA="$(awk '{print $1}' "artifacts/linux/archive/${ARM_TARBALL}.sha256")"
+
+          sed -i.bak -e '/on_linux do/,/end/{
+            /if Hardware::CPU.arm\?/,/else/{
+              s|url ".*"|url "'"${ARM_URL}"'"|
+              s|sha256 ".*"|sha256 "'"${ARM_SHA}"'"|
+            }
+          }' "$FORMULA_PATH"
+
+          sed -i.bak -e '/on_linux do/,/end/{
+            /else/,/end/{
+              s|url ".*"|url "'"${X64_URL}"'"|
+              s|sha256 ".*"|sha256 "'"${X64_SHA}"'"|
+            }
+          }' "$FORMULA_PATH"
+
+          rm -f "${FORMULA_PATH}.bak"
+
+          # Fail loudly if the sed substitutions did not land — e.g. the formula
+          # layout changed, or homebrew-suvadu#3 (which defines that layout) is
+          # not merged yet. Without this check an unchanged formula would slip
+          # through the "nothing to commit" guard below and users would silently
+          # receive a stale tarball URL / checksum.
+          assert_in_formula() {
+            local label="$1" needle="$2"
+            if ! grep -qF -- "$needle" "$FORMULA_PATH"; then
+              echo "ERROR: ${label} not found in ${FORMULA_PATH} after sed: ${needle}" >&2
+              echo "       Formula layout may have changed or homebrew-suvadu#3 is unmerged;" >&2
+              echo "       refusing to push a stale formula." >&2
+              exit 1
+            fi
+          }
+          assert_in_formula "linux x86_64 url"     "$X64_URL"
+          assert_in_formula "linux x86_64 sha256"  "$X64_SHA"
+          assert_in_formula "linux aarch64 url"    "$ARM_URL"
+          assert_in_formula "linux aarch64 sha256" "$ARM_SHA"
+
+          cd homebrew-tap
+          git config user.name "Appachi Bot"
+          git config user.email "bot@appachi.tech"
+          git add Formula/suvadu.rb
+
+          if git diff --cached --quiet; then
+            echo "No Homebrew tap changes to commit."
+          else
+            git commit -m "Update suvadu (linux) to ${TAG}"
+
+            # The concurrency group serializes us against the macOS workflow,
+            # but rebase-and-retry anyway in case the tap moved under us (e.g. a
+            # manual re-run). The linux/macOS edits touch disjoint blocks of the
+            # formula, so a rebase merges cleanly.
+            BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+            for attempt in 1 2 3 4 5; do
+              if git push origin "HEAD:${BRANCH}"; then
+                echo "Pushed tap update on attempt ${attempt}."
+                break
+              fi
+              if [ "${attempt}" -eq 5 ]; then
+                echo "ERROR: failed to push tap update after ${attempt} attempts." >&2
+                exit 1
+              fi
+              echo "Push rejected (attempt ${attempt}); rebasing on origin/${BRANCH}..."
+              git pull --rebase origin "${BRANCH}"
+            done
+          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
         with:
           generate_release_notes: false
           files: |
-            artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz
-            artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.sha256
-            artifacts/linux/archive/suv-linux${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.minisig
+            artifacts/linux/archive/suv-linux-${{ github.ref_name }}.tar.gz
+            artifacts/linux/archive/suv-linux-${{ github.ref_name }}.tar.gz.sha256
+            artifacts/linux/archive/suv-linux-${{ github.ref_name }}.tar.gz.minisig
+            artifacts/linux/archive/suv-linux-aarch64-${{ github.ref_name }}.tar.gz
+            artifacts/linux/archive/suv-linux-aarch64-${{ github.ref_name }}.tar.gz.sha256
+            artifacts/linux/archive/suv-linux-aarch64-${{ github.ref_name }}.tar.gz.minisig
+
