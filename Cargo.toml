@@ -1,7 +1,7 @@
 [package]
 name = "suvadu"
 default-run = "suv"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 description = "Shell history replacement with AI agent tracking and MCP server. Built in Rust, 100% local."
 license = "MIT"

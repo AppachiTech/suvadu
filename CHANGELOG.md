@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.5] - 2026-07-22
+
+### Added
+- **Bookmarks-only filter in the `Ctrl+R` search UI** — press `Ctrl+O` to show only bookmarked commands, mirroring the existing failed-only/agent filters.
+
+### Fixed
+- **`brew install` on Linux now installs the correct binary** — the Homebrew formula only ever pointed at the macOS build, so Linux installs (x86_64 and aarch64) silently downloaded a macOS binary and failed with "Exec format error". The formula and release automation now publish and select the right binary per OS/architecture.
+- **Shell hooks self-heal a stale `suv` binary path** — switching install methods (e.g. `cargo install` → `brew`, or `brew unlink`) no longer silently breaks command recording; the zsh/bash wrappers now re-resolve the binary automatically or show a clear error if none can be found.
+- **Recorded timestamps and durations were wrong under comma-decimal locales** (Polish, German, French, and others) — `$EPOCHREALTIME` parsing now forces `LC_ALL=C`, since locale-dependent decimal separators were silently corrupting the millisecond calculation.
+
 ## [0.3.4] - 2026-06-21
 
 ### Added
