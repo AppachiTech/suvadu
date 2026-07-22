@@ -152,10 +152,29 @@ _SUVADU_START_TIME=0
 _SUVADU_OFFSET=-1
 _SUVADU_BIN={escaped}
 
+# Re-resolve the suv binary if its recorded path goes stale (e.g. after
+# switching package managers, running `brew unlink`, or reinstalling elsewhere).
+# `whence -p` finds the external binary on PATH, bypassing the suv() function
+# below. Returns non-zero when no binary can be found.
+__suvadu_ensure_bin() {{
+    [[ -x "$_SUVADU_BIN" ]] && return 0
+    local _resolved
+    _resolved=$(whence -p suv 2>/dev/null)
+    if [[ -n "$_resolved" && -x "$_resolved" ]]; then
+        _SUVADU_BIN="$_resolved"
+        return 0
+    fi
+    return 1
+}}
+
 # Shell function wrapper: intercepts `suv search` and `suv bookmark pick` so the
 # selected command is placed into the editing buffer (via print -z) instead of
 # being printed as dead text.  All other subcommands pass straight through.
 suv() {{
+    if ! __suvadu_ensure_bin; then
+        print -u2 -- "[suvadu] suv binary not found (recorded path: $_SUVADU_BIN). Run 'exec zsh' or reinstall suvadu."
+        return 127
+    fi
     if [[ "${{1:-}}" == "search" || ("${{1:-}}" == "bookmark" && "${{2:-}}" == "pick") ]]; then
         local selected
         selected="$("$_SUVADU_BIN" "$@")"
@@ -191,6 +210,10 @@ _suvadu_precmd() {
     if [ -z "$_SUVADU_CMD" ]; then
         return
     fi
+
+    # Self-heal a stale binary path; skip recording silently if unresolvable
+    # (the suv() wrapper surfaces an actionable message when run interactively).
+    __suvadu_ensure_bin || { _SUVADU_CMD=""; return; }
 
     # Detect executor
     local executor_info=$(__suvadu_detect_executor)
@@ -255,6 +278,12 @@ _suvadu_search_widget() {
     # dead text rather than being placed in the readline buffer.
     local stty_state
     stty_state=$(stty -g 2>/dev/null)
+
+    # If the binary path is stale and unrecoverable, fall back to default search
+    if ! __suvadu_ensure_bin; then
+        zle .history-incremental-search-backward
+        return
+    fi
 
     # If suvadu is disabled (exit code 10), fallback to default search
     selected="$($_SUVADU_BIN search --query "$BUFFER" < "$tty_dev")"
@@ -396,10 +425,29 @@ _SUVADU_START_TIME=0
 _SUVADU_CMD=""
 _SUVADU_BIN={escaped}
 
+# Re-resolve the suv binary if its recorded path goes stale (e.g. after
+# switching package managers, running `brew unlink`, or reinstalling elsewhere).
+# `type -P` finds the external binary on PATH, bypassing the suv() function
+# below. Returns non-zero when no binary can be found.
+__suvadu_ensure_bin() {{
+    [[ -x "$_SUVADU_BIN" ]] && return 0
+    local _resolved
+    _resolved=$(type -P suv 2>/dev/null)
+    if [[ -n "$_resolved" && -x "$_resolved" ]]; then
+        _SUVADU_BIN="$_resolved"
+        return 0
+    fi
+    return 1
+}}
+
 # Shell function wrapper: intercepts `suv search` and `suv bookmark pick` so the
 # selected command is placed into readline history (press Up to recall) instead
 # of being printed as dead text.  All other subcommands pass straight through.
 suv() {{
+    if ! __suvadu_ensure_bin; then
+        echo "[suvadu] suv binary not found (recorded path: $_SUVADU_BIN). Run 'exec bash' or reinstall suvadu." >&2
+        return 127
+    fi
     if [[ "${{1:-}}" == "search" || ("${{1:-}}" == "bookmark" && "${{2:-}}" == "pick") ]]; then
         local selected
         selected="$("$_SUVADU_BIN" "$@")"
@@ -461,6 +509,10 @@ __suvadu_precmd() {
         return
     fi
 
+    # Self-heal a stale binary path; skip recording silently if unresolvable
+    # (the suv() wrapper surfaces an actionable message when run interactively).
+    __suvadu_ensure_bin || { _SUVADU_CMD=""; return; }
+
     # Detect executor
     local executor_info=$(__suvadu_detect_executor)
     local executor_type="${executor_info%%:*}"
@@ -515,6 +567,9 @@ __suvadu_search_widget() {
             return
         fi
     fi
+
+    # If the binary path is stale and unrecoverable, skip (default search still works)
+    __suvadu_ensure_bin || return
 
     selected=$("$_SUVADU_BIN" search --query "$READLINE_LINE" < "$tty_dev" 2>"$tty_dev")
     local ret=$?
@@ -676,6 +731,20 @@ mod tests {
             "suv() wrapper must use print -z to inject into buffer"
         );
 
+        // Verify self-healing binary resolver (stale path after pkg-manager switch)
+        assert!(
+            hook.contains("__suvadu_ensure_bin"),
+            "zsh hook must define the self-healing binary resolver"
+        );
+        assert!(
+            hook.contains("whence -p suv"),
+            "zsh resolver must re-resolve via `whence -p` (bypasses the suv function)"
+        );
+        assert!(
+            hook.contains("Run 'exec zsh' or reinstall suvadu."),
+            "suv() wrapper must surface an actionable message when the binary is missing"
+        );
+
         // Verify executor detection logic
         assert!(hook.contains("ANTIGRAVITY_AGENT"));
         assert!(hook.contains("GITHUB_ACTIONS"));
@@ -716,6 +785,20 @@ mod tests {
         assert!(
             hook.contains("history -s -- \"$selected\""),
             "bash suv() wrapper must use history -s to recall via Up arrow"
+        );
+
+        // Verify self-healing binary resolver (stale path after pkg-manager switch)
+        assert!(
+            hook.contains("__suvadu_ensure_bin"),
+            "bash hook must define the self-healing binary resolver"
+        );
+        assert!(
+            hook.contains("type -P suv"),
+            "bash resolver must re-resolve via `type -P` (bypasses the suv function)"
+        );
+        assert!(
+            hook.contains("Run 'exec bash' or reinstall suvadu."),
+            "bash suv() wrapper must surface an actionable message when the binary is missing"
         );
     }
 
