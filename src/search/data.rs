@@ -69,6 +69,9 @@ impl SearchApp {
         if self.filters.failed_only {
             count += 1;
         }
+        if self.filters.bookmarks_only {
+            count += 1;
+        }
         count
     }
 
@@ -87,6 +90,7 @@ impl SearchApp {
             exclude_agents: !self.filters.show_agents,
             cwd_prefix: false,
             failed_only: self.filters.failed_only,
+            bookmarked_only: self.filters.bookmarks_only,
         }
     }
 

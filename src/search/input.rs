@@ -256,6 +256,7 @@ impl SearchApp {
         (self.entries.len() / 2).max(1)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn handle_ctrl_shortcut(&mut self, code: KeyCode) -> Option<SearchAction> {
         match code {
             KeyCode::Char('g') => {
@@ -346,6 +347,19 @@ impl SearchApp {
                         "Failed commands only".into()
                     } else {
                         "All exit codes".into()
+                    },
+                    std::time::Instant::now(),
+                ));
+                self.pagination.page = 1;
+                return Some(SearchAction::Reload);
+            }
+            KeyCode::Char('o') => {
+                self.filters.bookmarks_only = !self.filters.bookmarks_only;
+                self.status_message = Some((
+                    if self.filters.bookmarks_only {
+                        "Bookmarked commands only".into()
+                    } else {
+                        "All commands".into()
                     },
                     std::time::Instant::now(),
                 ));

@@ -272,6 +272,15 @@ impl SearchApp {
                 },
                 badge_label_style,
             ),
+            Span::styled(" ^O ", badge_key_style),
+            Span::styled(
+                if self.filters.bookmarks_only {
+                    " All  "
+                } else {
+                    " Marked  "
+                },
+                badge_label_style,
+            ),
             Span::styled(" Tab ", badge_key_style),
             Span::styled(
                 if self.view.detail_pane_open {
@@ -1225,6 +1234,7 @@ fn build_help_lines(t: &crate::theme::Theme) -> Vec<Line<'static>> {
         help_row("  ^L              ", "Toggle directory filter", t),
         help_row("  ^A              ", "Toggle AI-agent commands", t),
         help_row("  ^E              ", "Toggle failed-only (errors)", t),
+        help_row("  ^O              ", "Toggle bookmarked-only", t),
         Line::from(""),
         help_section("\u{2500}\u{2500} Display \u{2500}\u{2500}", t),
         help_row("  ^U              ", "Toggle unique/all mode", t),

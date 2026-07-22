@@ -1181,6 +1181,49 @@ fn test_bookmark_crud() {
 }
 
 #[test]
+fn test_entries_filtering_by_bookmarked_only() {
+    let (_temp, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 1000);
+    repo.insert_session(&session).unwrap();
+
+    for (i, cmd) in ["git status", "cargo test", "ls -la"].iter().enumerate() {
+        repo.insert_entry(&Entry::new(
+            session.id.clone(),
+            (*cmd).to_string(),
+            "/proj".to_string(),
+            Some(0),
+            1000 + i as i64,
+            1000 + i as i64,
+        ))
+        .unwrap();
+    }
+
+    // Bookmark two of the three distinct commands.
+    repo.add_bookmark("git status", None).unwrap();
+    repo.add_bookmark("cargo test", None).unwrap();
+
+    let filter = QueryFilter {
+        bookmarked_only: true,
+        ..Default::default()
+    };
+
+    let entries = repo.get_entries_filtered(10, 0, &filter).unwrap();
+    assert_eq!(
+        entries.len(),
+        2,
+        "only bookmarked commands should be returned"
+    );
+    assert!(entries.iter().all(|e| e.command != "ls -la"));
+
+    let count = repo.count_filtered(&filter).unwrap();
+    assert_eq!(count, 2, "count must agree with the filtered entries");
+
+    // Disabling the filter returns everything again.
+    let all = repo.count_filtered(&QueryFilter::default()).unwrap();
+    assert_eq!(all, 3);
+}
+
+#[test]
 fn test_bookmark_duplicate_upsert() {
     let (_dir, repo) = setup_test_db();
 

@@ -313,6 +313,7 @@ fn check_database() -> CheckResult {
             exclude_agents: false,
             cwd_prefix: false,
             failed_only: false,
+            bookmarked_only: false,
         })
         .unwrap_or(0);
 

@@ -1073,6 +1073,24 @@ fn test_ctrl_l_toggles_cwd_filter() {
 }
 
 #[test]
+fn test_ctrl_o_toggles_bookmarks_only() {
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    assert!(!app.filters.bookmarks_only);
+
+    // Toggle on
+    let action = app.handle_input(ctrl_key('o'));
+    assert!(matches!(action, SearchAction::Reload));
+    assert!(app.filters.bookmarks_only);
+    assert_eq!(app.pagination.page, 1);
+    assert!(app.status_message.is_some());
+
+    // Toggle off
+    let action = app.handle_input(ctrl_key('o'));
+    assert!(matches!(action, SearchAction::Reload));
+    assert!(!app.filters.bookmarks_only);
+}
+
+#[test]
 fn test_ctrl_d_no_entry_id() {
     let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
     app.table_state.select(Some(0));

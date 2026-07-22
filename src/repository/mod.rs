@@ -83,6 +83,10 @@ pub struct QueryFilter<'a> {
     /// code). Combined with an explicit `exit_code` it is redundant; on its own
     /// it answers "what did I run that failed?". Defaults to `false`.
     pub failed_only: bool,
+    /// When `true`, return only commands that are bookmarked (the command text
+    /// exists in the `bookmarks` table). Powers the Ctrl+O "only bookmarks"
+    /// filter in the search TUI. Defaults to `false`.
+    pub bookmarked_only: bool,
 }
 
 impl QueryFilter<'_> {
@@ -98,6 +102,7 @@ impl QueryFilter<'_> {
             // An explicit executor filter takes precedence over the agent hide.
             .with_exclude_agents(self.exclude_agents && self.executor.is_none())
             .with_failed_only(self.failed_only)
+            .with_bookmarked_only(self.bookmarked_only)
     }
 }
 
@@ -273,6 +278,17 @@ impl FilterBuilder {
         if failed_only {
             self.clauses
                 .push("(e.exit_code IS NOT NULL AND e.exit_code != 0)".into());
+        }
+        self
+    }
+
+    /// Restrict to bookmarked commands. Matches by command text against the
+    /// `bookmarks` table (same key bookmarks are stored under). The subquery
+    /// contains only hardcoded SQL and adds no bound parameters.
+    pub fn with_bookmarked_only(mut self, bookmarked_only: bool) -> Self {
+        if bookmarked_only {
+            self.clauses
+                .push("e.command IN (SELECT command FROM bookmarks)".into());
         }
         self
     }

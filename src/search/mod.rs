@@ -90,6 +90,8 @@ pub struct FilterState {
     pub show_agents: bool,
     /// When `true`, show only failed commands (non-zero exit). Toggled with Ctrl+E.
     pub failed_only: bool,
+    /// When `true`, show only bookmarked commands. Toggled with Ctrl+O.
+    pub bookmarks_only: bool,
 
     // Dialog text inputs (persist across filter-dialog open/close)
     pub start_date_input: String,
@@ -210,6 +212,7 @@ impl SearchApp {
                 cwd: cfg.filter_cwd,
                 show_agents: cfg.show_agents,
                 failed_only: cfg.failed_only,
+                bookmarks_only: false,
                 start_date_input: start_default,
                 end_date_input: end_default,
                 tag_filter_input: cfg.tag_filter_input.unwrap_or_default(),
@@ -484,6 +487,7 @@ pub fn run_search(
         exclude_agents: !args.include_agents,
         cwd_prefix: false,
         failed_only: args.failed_only,
+        bookmarked_only: false,
     };
 
     let (entries, total_count, unique_counts) =

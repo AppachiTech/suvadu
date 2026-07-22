@@ -68,6 +68,7 @@ pub fn handle_status() -> Result<(), Box<dyn std::error::Error>> {
                     exclude_agents: false,
                     cwd_prefix: false,
                     failed_only: false,
+                    bookmarked_only: false,
                 })
                 .unwrap_or(0);
             println!("  Commands: {total} recorded");

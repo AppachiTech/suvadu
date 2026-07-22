@@ -383,6 +383,7 @@ fn handle_search_commands(
         exclude_agents: false,
         cwd_prefix: false,
         failed_only: false,
+        bookmarked_only: false,
     };
 
     let entries = repo
@@ -432,6 +433,7 @@ fn handle_recent_commands(
             exclude_agents: false,
             cwd_prefix: false,
             failed_only: false,
+            bookmarked_only: false,
         };
         repo.get_entries_filtered(limit, 0, &qf)
             .map_err(|e| format!("query failed: {e}"))?
@@ -631,6 +633,7 @@ fn handle_get_stats(
         // get_stats is project-scoped: include the directory's subtree.
         cwd_prefix: true,
         failed_only: false,
+        bookmarked_only: false,
     };
 
     let total = repo
@@ -818,6 +821,7 @@ fn handle_what_changed(repo: &Repository, args: &Value) -> Result<String, String
         // what_changed is project-scoped: include the directory's subtree.
         cwd_prefix: true,
         failed_only: false,
+        bookmarked_only: false,
     };
 
     let entries = repo
@@ -883,6 +887,7 @@ fn handle_what_changed(repo: &Repository, args: &Value) -> Result<String, String
     Ok(out)
 }
 
+#[allow(clippy::too_many_lines)]
 fn handle_what_failed(
     repo: &Repository,
     args: &Value,
@@ -911,6 +916,7 @@ fn handle_what_failed(
         exclude_agents: false,
         cwd_prefix: false,
         failed_only: false,
+        bookmarked_only: false,
     };
 
     let entries = repo
@@ -1027,6 +1033,7 @@ fn handle_suggest_next(repo: &Repository, args: &Value) -> Result<String, String
         exclude_agents: false,
         cwd_prefix: false,
         failed_only: false,
+        bookmarked_only: false,
     };
 
     let entries = repo
@@ -1346,6 +1353,7 @@ fn handle_find_agent_session(repo: &Repository, args: &Value) -> Result<String, 
         // find_agent_session is project-scoped: include the directory's subtree.
         cwd_prefix: true,
         failed_only: false,
+        bookmarked_only: false,
     };
 
     let entries = repo
@@ -1581,6 +1589,7 @@ fn handle_learn_from_failures(
         // Project-scoped: include the directory's subtree.
         cwd_prefix: true,
         failed_only: false,
+        bookmarked_only: false,
         ..QueryFilter::default()
     };
 
@@ -1726,6 +1735,7 @@ fn handle_project_context(
         // Project-scoped: include the directory's subtree.
         cwd_prefix: true,
         failed_only: false,
+        bookmarked_only: false,
         ..QueryFilter::default()
     };
 

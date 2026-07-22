@@ -46,6 +46,7 @@ pub fn handle_history(
             exclude_agents: false,
             cwd_prefix: false,
             failed_only: false,
+            bookmarked_only: false,
         },
     )?;
 
