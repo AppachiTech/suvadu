@@ -194,6 +194,10 @@ suv() {{
 const fn zsh_hook_functions() -> &'static str {
     r#"# Capture command start time (registered via add-zsh-hook)
 _suvadu_preexec() {
+    # LC_ALL=C keeps the EPOCHREALTIME decimal point a literal '.' — under
+    # comma-decimal locales (e.g. pl_PL) it comes back as "1784724300,751987",
+    # silently corrupting the arithmetic below. `local` scopes it to this call.
+    local LC_ALL=C
     _SUVADU_CMD="$1"
     _SUVADU_START_TIME=$(( ${EPOCHREALTIME%.*} * 1000 + ${${EPOCHREALTIME#*.}:0:3} ))
 }
@@ -201,6 +205,8 @@ _suvadu_preexec() {
 # Capture command completion and save to DB (registered via add-zsh-hook)
 _suvadu_precmd() {
     local exit_code=$?
+    # See _suvadu_preexec: force the '.' decimal point regardless of locale.
+    local LC_ALL=C
     local end_time=$(( ${EPOCHREALTIME%.*} * 1000 + ${${EPOCHREALTIME#*.}:0:3} ))
 
     # Reset history offset for new prompt
@@ -470,6 +476,11 @@ suv() {{
 const fn bash_hook_functions() -> &'static str {
     r#"# Get current time in milliseconds (Bash 5+ has EPOCHREALTIME, fallback to date)
 __suvadu_time_ms() {
+    # LC_ALL=C keeps the EPOCHREALTIME decimal point a literal '.' — under
+    # comma-decimal locales (e.g. pl_PL) it comes back as "1784724300,751987",
+    # silently corrupting the arithmetic below. `local` scopes it to this call.
+    # (LC_NUMERIC alone is not enough: LC_ALL, when set, overrides it.)
+    local LC_ALL=C
     if [[ -n "$EPOCHREALTIME" ]]; then
         local secs="${EPOCHREALTIME%%.*}"
         local frac="${EPOCHREALTIME##*.}"
@@ -745,6 +756,15 @@ mod tests {
             "suv() wrapper must surface an actionable message when the binary is missing"
         );
 
+        // Verify EPOCHREALTIME parsing is locale-safe (issue #25 — comma-decimal
+        // locales like pl_PL corrupt the '.'-based split, and LC_NUMERIC alone
+        // isn't enough since LC_ALL overrides it when set).
+        assert_eq!(
+            hook.matches("local LC_ALL=C").count(),
+            2,
+            "both _suvadu_preexec and _suvadu_precmd must force LC_ALL=C before reading EPOCHREALTIME"
+        );
+
         // Verify executor detection logic
         assert!(hook.contains("ANTIGRAVITY_AGENT"));
         assert!(hook.contains("GITHUB_ACTIONS"));
@@ -799,6 +819,14 @@ mod tests {
         assert!(
             hook.contains("Run 'exec bash' or reinstall suvadu."),
             "bash suv() wrapper must surface an actionable message when the binary is missing"
+        );
+
+        // Verify EPOCHREALTIME parsing is locale-safe (issue #25 — comma-decimal
+        // locales like pl_PL corrupt the '.'-based split, and LC_NUMERIC alone
+        // isn't enough since LC_ALL overrides it when set).
+        assert!(
+            hook.contains("local LC_ALL=C"),
+            "__suvadu_time_ms must force LC_ALL=C before reading EPOCHREALTIME"
         );
     }
 
