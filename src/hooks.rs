@@ -72,6 +72,9 @@ __suvadu_detect_executor() {
     elif [[ -n "$COPILOT_WORKSPACE" ]]; then
         executor_type="agent"
         executor="copilot"
+    elif [[ -n "$OPENCODE" ]]; then
+        executor_type="agent"
+        executor="opencode"
     elif [[ "$CURSOR_AGENT" == "1" ]]; then
         executor_type="agent"
         executor="cursor"
@@ -1132,6 +1135,7 @@ mod tests {
         // Should still have built-in agents
         assert!(script.contains("CLAUDE_CODE"));
         assert!(script.contains("CURSOR_INJECTION"));
+        assert!(script.contains("OPENCODE"));
         // No custom elif blocks between CI and built-in agents
         let ci_end = script.find("ci-unknown").unwrap();
         let agent_start = script.find("CLAUDE_CODE").unwrap();
