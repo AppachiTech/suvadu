@@ -60,7 +60,7 @@ __suvadu_detect_executor() {
     elif [[ -n "$CLAUDE_CODE" ]] || [[ "$TERM_PROGRAM" == "claude" ]]; then
         executor_type="agent"
         executor="claude-code"
-    elif [[ -n "$CODEX_CLI" ]]; then
+    elif [[ -n "$CODEX_THREAD_ID" ]]; then
         executor_type="agent"
         executor="openai-codex"
     elif [[ -n "$AIDER" ]] || [[ -n "$AIDER_SESSION" ]]; then
