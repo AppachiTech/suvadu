@@ -1071,14 +1071,47 @@ fn detect_shell_aliases(programs: &[&str]) -> Option<HashMap<String, String>> {
         .collect();
     let script = type_cmds.join("; ");
 
-    let output = std::process::Command::new(&shell)
-        .args(["-ic", &script])
-        .output()
-        .ok()?;
+    let mut cmd = std::process::Command::new(&shell);
+    cmd.args(["-ic", &script]);
+    detach_from_controlling_terminal(&mut cmd);
+
+    let output = cmd.output().ok()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     Some(parse_type_output(&stdout))
 }
+
+/// Put a spawned interactive shell into its own session so it has no
+/// controlling terminal to fight over.
+///
+/// `-i` is required so bash/zsh actually source `~/.bashrc`/`~/.zshrc` (where
+/// aliases live — a non-interactive shell won't load them). But an
+/// interactive shell also tries to grab job control by opening `/dev/tty` and
+/// calling `tcsetpgrp` on it, independent of its own stdio (which `.output()`
+/// already redirects). When several of these run concurrently from a real
+/// terminal — e.g. `cargo test`'s default parallel test execution — they
+/// race over that terminal and can raise `SIGTTOU`, stopping the whole
+/// calling process group (reported as `cargo test` itself being suspended).
+/// `setsid()` detaches the child into a new session with no controlling
+/// terminal at all, so that job-control setup harmlessly no-ops instead of
+/// contending for a real one. See issue #26.
+#[cfg(unix)]
+fn detach_from_controlling_terminal(cmd: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+
+    #[allow(unsafe_code)]
+    // SAFETY: `libc::setsid()` is async-signal-safe and is the only thing
+    // done between fork and exec here, satisfying `pre_exec`'s contract.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn detach_from_controlling_terminal(_cmd: &mut std::process::Command) {}
 
 /// Parse the output of shell `type` commands to extract alias mappings.
 ///

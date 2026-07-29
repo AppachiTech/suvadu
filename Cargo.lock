@@ -1921,6 +1921,7 @@ dependencies = [
  "crossterm",
  "directories",
  "hostname",
+ "libc",
  "minisign-verify",
  "nucleo-matcher",
  "ratatui",

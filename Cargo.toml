@@ -37,6 +37,9 @@ tempfile = "3"
 unicode-width = "0.2"
 minisign-verify = "0.2"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 
 [build-dependencies]

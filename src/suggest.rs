@@ -5,10 +5,11 @@ use crate::{repository, suggest_ui};
 fn get_shell_aliases() -> String {
     // Try zsh first, then bash
     for shell in &["zsh", "bash"] {
-        if let Ok(output) = std::process::Command::new(shell)
-            .args(["-ic", "alias"])
-            .output()
-        {
+        let mut cmd = std::process::Command::new(shell);
+        cmd.args(["-ic", "alias"]);
+        detach_from_controlling_terminal(&mut cmd);
+
+        if let Ok(output) = cmd.output() {
             if output.status.success() {
                 return String::from_utf8_lossy(&output.stdout).to_string();
             }
@@ -16,6 +17,36 @@ fn get_shell_aliases() -> String {
     }
     String::new()
 }
+
+/// Put a spawned interactive shell into its own session so it has no
+/// controlling terminal to fight over.
+///
+/// `-i` is required so bash/zsh actually source `~/.bashrc`/`~/.zshrc` (where
+/// aliases live — a non-interactive shell won't load them). But an
+/// interactive shell also tries to grab job control by opening `/dev/tty` and
+/// calling `tcsetpgrp` on it, independent of its own stdio (which `.output()`
+/// already redirects). Running this from a real terminal alongside other
+/// interactive-shell spawns can raise `SIGTTOU` and stop the calling process
+/// group. `setsid()` detaches the child into a new session with no
+/// controlling terminal at all, so job-control setup harmlessly no-ops
+/// instead of contending for a real one. See issue #26.
+#[cfg(unix)]
+fn detach_from_controlling_terminal(cmd: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+
+    #[allow(unsafe_code)]
+    // SAFETY: `libc::setsid()` is async-signal-safe and is the only thing
+    // done between fork and exec here, satisfying `pre_exec`'s contract.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn detach_from_controlling_terminal(_cmd: &mut std::process::Command) {}
 
 /// Parse alias output into (set of alias values/commands, set of alias names).
 /// Handles zsh format `name='value'` and bash format `alias name='value'`.
