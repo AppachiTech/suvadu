@@ -788,6 +788,78 @@ fn test_handle_input_up_down_navigation() {
 }
 
 #[test]
+fn test_handle_input_page_down_scrolls_ten_rows() {
+    let entries: Vec<Entry> = (0..20)
+        .map(|i| create_test_entry(&format!("cmd{i}")))
+        .collect();
+    let mut app = SearchApp::new(test_search_config(entries, 20));
+    app.table_state.select(Some(0));
+
+    app.handle_input(KeyEvent::from(KeyCode::PageDown));
+    assert_eq!(app.table_state.selected(), Some(10));
+}
+
+#[test]
+fn test_handle_input_page_down_clamps_at_bottom() {
+    let entries: Vec<Entry> = (0..15)
+        .map(|i| create_test_entry(&format!("cmd{i}")))
+        .collect();
+    let mut app = SearchApp::new(test_search_config(entries, 15));
+    app.table_state.select(Some(8));
+
+    app.handle_input(KeyEvent::from(KeyCode::PageDown));
+    assert_eq!(app.table_state.selected(), Some(14));
+}
+
+#[test]
+fn test_handle_input_page_up_scrolls_ten_rows() {
+    let entries: Vec<Entry> = (0..20)
+        .map(|i| create_test_entry(&format!("cmd{i}")))
+        .collect();
+    let mut app = SearchApp::new(test_search_config(entries, 20));
+    app.table_state.select(Some(15));
+
+    app.handle_input(KeyEvent::from(KeyCode::PageUp));
+    assert_eq!(app.table_state.selected(), Some(5));
+}
+
+#[test]
+fn test_handle_input_page_up_clamps_at_top() {
+    let entries: Vec<Entry> = (0..15)
+        .map(|i| create_test_entry(&format!("cmd{i}")))
+        .collect();
+    let mut app = SearchApp::new(test_search_config(entries, 15));
+    app.table_state.select(Some(3));
+
+    app.handle_input(KeyEvent::from(KeyCode::PageUp));
+    assert_eq!(app.table_state.selected(), Some(0));
+}
+
+#[test]
+fn test_handle_input_home_jumps_to_top() {
+    let entries: Vec<Entry> = (0..5)
+        .map(|i| create_test_entry(&format!("cmd{i}")))
+        .collect();
+    let mut app = SearchApp::new(test_search_config(entries, 5));
+    app.table_state.select(Some(4));
+
+    app.handle_input(KeyEvent::from(KeyCode::Home));
+    assert_eq!(app.table_state.selected(), Some(0));
+}
+
+#[test]
+fn test_handle_input_end_jumps_to_bottom() {
+    let entries: Vec<Entry> = (0..5)
+        .map(|i| create_test_entry(&format!("cmd{i}")))
+        .collect();
+    let mut app = SearchApp::new(test_search_config(entries, 5));
+    app.table_state.select(Some(0));
+
+    app.handle_input(KeyEvent::from(KeyCode::End));
+    assert_eq!(app.table_state.selected(), Some(4));
+}
+
+#[test]
 fn test_handle_input_left_right_pages() {
     let entries = vec![create_test_entry("cmd")];
     let mut app = SearchApp::new(test_search_config(entries, 200));
@@ -1858,6 +1930,62 @@ fn test_vim_shift_g_jumps_to_bottom() {
 
     app.handle_input(KeyEvent::from(KeyCode::Char('G')));
     assert_eq!(app.table_state.selected(), Some(2));
+}
+
+#[test]
+fn test_vim_home_jumps_to_top() {
+    let entries = vec![
+        create_test_entry("cmd1"),
+        create_test_entry("cmd2"),
+        create_test_entry("cmd3"),
+    ];
+    let mut app = SearchApp::new(test_vim_config(entries, 3));
+    app.vim_mode = VimMode::Normal;
+    app.table_state.select(Some(2));
+
+    app.handle_input(KeyEvent::from(KeyCode::Home));
+    assert_eq!(app.table_state.selected(), Some(0));
+}
+
+#[test]
+fn test_vim_end_jumps_to_bottom() {
+    let entries = vec![
+        create_test_entry("cmd1"),
+        create_test_entry("cmd2"),
+        create_test_entry("cmd3"),
+    ];
+    let mut app = SearchApp::new(test_vim_config(entries, 3));
+    app.vim_mode = VimMode::Normal;
+    assert_eq!(app.table_state.selected(), Some(0));
+
+    app.handle_input(KeyEvent::from(KeyCode::End));
+    assert_eq!(app.table_state.selected(), Some(2));
+}
+
+#[test]
+fn test_vim_page_down_scrolls_ten_rows() {
+    let entries: Vec<Entry> = (0..20)
+        .map(|i| create_test_entry(&format!("cmd{i}")))
+        .collect();
+    let mut app = SearchApp::new(test_vim_config(entries, 20));
+    app.vim_mode = VimMode::Normal;
+    app.table_state.select(Some(0));
+
+    app.handle_input(KeyEvent::from(KeyCode::PageDown));
+    assert_eq!(app.table_state.selected(), Some(10));
+}
+
+#[test]
+fn test_vim_page_up_scrolls_ten_rows() {
+    let entries: Vec<Entry> = (0..20)
+        .map(|i| create_test_entry(&format!("cmd{i}")))
+        .collect();
+    let mut app = SearchApp::new(test_vim_config(entries, 20));
+    app.vim_mode = VimMode::Normal;
+    app.table_state.select(Some(15));
+
+    app.handle_input(KeyEvent::from(KeyCode::PageUp));
+    assert_eq!(app.table_state.selected(), Some(5));
 }
 
 #[test]

@@ -6,6 +6,9 @@ use crate::util;
 /// Maximum length for any text input field (query, filters, notes, etc.).
 const MAX_INPUT_LEN: usize = 2000;
 
+/// Rows to move per `PageUp`/`PageDown` press.
+const PAGE_SCROLL_LINES: usize = 10;
+
 impl SearchApp {
     /// Handle a bracketed-paste event. Returns `true` if the paste modified
     /// the main search query (caller should reload), `false` otherwise.
@@ -152,6 +155,18 @@ impl SearchApp {
                     self.table_state.select(Some(0));
                 }
             }
+            KeyCode::PageUp => {
+                self.move_selection_up(PAGE_SCROLL_LINES);
+            }
+            KeyCode::PageDown => {
+                self.move_selection_down(PAGE_SCROLL_LINES);
+            }
+            KeyCode::Home if !self.entries.is_empty() => {
+                self.table_state.select(Some(0));
+            }
+            KeyCode::End if !self.entries.is_empty() => {
+                self.table_state.select(Some(self.entries.len() - 1));
+            }
             KeyCode::Enter => {
                 if let Some(cmd) = self.get_selected_command() {
                     return SearchAction::Select(cmd);
@@ -190,11 +205,17 @@ impl SearchApp {
                 }
             }
             // Half-page scroll
-            KeyCode::Char('G') if !self.entries.is_empty() => {
+            KeyCode::Char('G') | KeyCode::End if !self.entries.is_empty() => {
                 self.table_state.select(Some(self.entries.len() - 1));
             }
-            KeyCode::Char('g') if !self.entries.is_empty() => {
+            KeyCode::Char('g') | KeyCode::Home if !self.entries.is_empty() => {
                 self.table_state.select(Some(0));
+            }
+            KeyCode::PageUp => {
+                self.move_selection_up(PAGE_SCROLL_LINES);
+            }
+            KeyCode::PageDown => {
+                self.move_selection_down(PAGE_SCROLL_LINES);
             }
             // Page navigation
             KeyCode::Left | KeyCode::Char('h') if self.pagination.page > 1 => {
