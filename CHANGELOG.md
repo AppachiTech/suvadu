@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.6] - 2026-08-01
+
+### Added
+- **`PageUp`/`PageDown`/`Home`/`End` navigation in the `Ctrl+R` search UI** — `PageUp`/`PageDown` scroll the selection 10 rows at a time, and `Home`/`End` jump to the first/last result. Works in both normal and vim-normal modes. Closes #29.
+
+### Fixed
+- **Codex CLI commands are now auto-recognized as agent activity** — detection previously checked for `CODEX_CLI`, which Codex CLI never actually sets; it now checks `CODEX_THREAD_ID`, the variable Codex really exports. Closes #30.
+- **`cargo test` no longer backgrounds itself under Bash/Zsh alias detection** — running several interactive alias-detection shells concurrently (as `cargo test` does) could raise `SIGTTOU` and suspend the whole test process. These shells are now detached into their own session so they no longer contend for the controlling terminal. Closes #26.
+
 ## [0.3.5] - 2026-07-22
 
 ### Added
