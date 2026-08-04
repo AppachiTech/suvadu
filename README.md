@@ -88,6 +88,7 @@ suv init claude-code    # Claude Code — hooks + MCP + prompt capture
 suv init cursor         # Cursor — hooks + MCP + prompt capture
 suv init opencode       # OpenCode — plugin + prompt capture
 suv init pi             # pi.dev — extension + prompt capture
+suv init codex          # Codex — hooks + MCP + prompt capture
 suv init antigravity    # Antigravity — auto-detect
 ```
 
