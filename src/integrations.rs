@@ -1413,7 +1413,26 @@ fn try_merge_codex_hooks(
     Ok(true)
 }
 
+/// Generate the JSON snippet for Codex hooks.json (matches the shape
+/// `try_merge_codex_hooks` writes).
+fn generate_codex_hooks_snippet(hook_path: &str, prompt_hook_path: &str) -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "hooks": {
+            "PostToolUse": [{
+                "matcher": "^Bash$",
+                "hooks": [{"type": "command", "command": hook_path}]
+            }],
+            "UserPromptSubmit": [{
+                "hooks": [{"type": "command", "command": prompt_hook_path}]
+            }]
+        }
+    }))
+    .unwrap_or_default()
+}
+
 /// Auto-configure the MCP server in Codex's `~/.codex/config.toml`.
+/// Deliberately overwrites `command`/`args` on every run so re-installs
+/// refresh a stale suv binary path, while leaving unrelated settings intact.
 fn try_configure_codex_mcp(bin_path: &str) -> Result<bool, Box<dyn std::error::Error>> {
     let home = std::env::var("HOME")?;
     let codex_dir = PathBuf::from(&home).join(".codex");
@@ -1495,7 +1514,8 @@ pub fn handle_init_codex() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&codex_dir)?;
     let hooks_json_path = codex_dir.join("hooks.json");
 
-    try_merge_codex_hooks(&hooks_json_path, &hook_path_str, &prompt_hook_path_str)?;
+    let auto_configured =
+        try_merge_codex_hooks(&hooks_json_path, &hook_path_str, &prompt_hook_path_str);
 
     let color = crate::util::color_enabled();
     let (b, r) = if color {
@@ -1512,10 +1532,28 @@ pub fn handle_init_codex() -> Result<(), Box<dyn std::error::Error>> {
     println!("  {hook_path_str}");
     println!("  {prompt_hook_path_str}");
     println!();
-    println!(
-        "{green}\u{2713}{r} Hooks merged into: {}",
-        hooks_json_path.display()
-    );
+
+    if matches!(auto_configured, Ok(true)) {
+        println!(
+            "{green}\u{2713}{r} Hooks merged into: {}",
+            hooks_json_path.display()
+        );
+        println!();
+        println!("Restart Codex to activate.");
+    } else {
+        println!(
+            "Could not auto-merge into {} (existing file may be malformed).",
+            hooks_json_path.display()
+        );
+        println!("Add this to ~/.codex/hooks.json:");
+        println!();
+        println!(
+            "{}",
+            generate_codex_hooks_snippet(&hook_path_str, &prompt_hook_path_str)
+        );
+        println!();
+        println!("Then restart Codex to activate.");
+    }
 
     // Auto-configure MCP server
     let mcp_configured = try_configure_codex_mcp(&bin_path);
