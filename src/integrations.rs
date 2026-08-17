@@ -307,6 +307,7 @@ fn codex_exit_code(event: &serde_json::Value) -> Option<i32> {
             event
                 .get("error")
                 .or_else(|| event.get("tool_response").and_then(|tr| tr.get("error")))
+                .filter(|err| !err.is_null())
                 .map(|err| {
                     err.as_str()
                         .and_then(parse_exit_code_from_error)
@@ -1539,7 +1540,6 @@ pub fn handle_init_codex() -> Result<(), Box<dyn std::error::Error>> {
             hooks_json_path.display()
         );
         println!();
-        println!("Restart Codex to activate.");
     } else {
         println!(
             "Could not auto-merge into {} (existing file may be malformed).",
@@ -2322,6 +2322,13 @@ mod tests {
 
     #[test]
     fn test_configure_codex_mcp_idempotent() {
+        // Warm the process-wide `PROJECT_DIRS` `LazyLock` (src/util/mod.rs) under the
+        // real HOME before we redirect it below. Otherwise, if another test running in
+        // parallel is the first to call `project_dirs()` while HOME points at our temp
+        // dir, this test's temp path gets permanently cached for the rest of the
+        // process, breaking unrelated tests.
+        let _ = crate::util::project_dirs();
+
         let temp_dir = tempfile::TempDir::new().unwrap();
         let home_backup = std::env::var("HOME").ok();
         std::env::set_var("HOME", temp_dir.path());
@@ -2418,5 +2425,15 @@ mod tests {
             "tool_response": {"error": "Something broke"}
         });
         assert_eq!(codex_exit_code(&generic_error), Some(1));
+
+        // Error key present but explicitly null (e.g. Option<String> serialized without
+        // skip_serializing_if) → still unknown (None), not a guessed failure
+        let null_error = serde_json::json!({
+            "session_id": "thr_1",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cargo build"},
+            "tool_response": {"stdout": "done", "error": null}
+        });
+        assert_eq!(codex_exit_code(&null_error), None);
     }
 }
