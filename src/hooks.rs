@@ -429,6 +429,7 @@ alias suvadu="suv"
 export SUVADU_SESSION_ID="${{SUVADU_SESSION_ID:-$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null || head -c16 /dev/urandom 2>/dev/null | od -A n -t x1 | tr -d ' \n' || echo "bash-$$-$RANDOM-$RANDOM-$RANDOM")}}"
 _SUVADU_START_TIME=0
 _SUVADU_CMD=""
+_SUVADU_PROMPT_READY=""
 _SUVADU_BIN={escaped}
 
 # Re-resolve the suv binary if its recorded path goes stale (e.g. after
@@ -513,6 +514,19 @@ __suvadu_preexec() {
 # Capture command completion (precmd equivalent via PROMPT_COMMAND)
 __suvadu_precmd() {
     local exit_code=$?
+
+    # The first time PROMPT_COMMAND runs, bash is drawing the shell's very
+    # first prompt — no user command has run yet. Whatever is in _SUVADU_CMD
+    # at that point is just the last command the DEBUG trap saw while the
+    # rc file (e.g. .bashrc) was still being sourced (the trap fires for
+    # every command bash runs, not just ones typed at a prompt), so it must
+    # be discarded rather than recorded as something the user ran.
+    if [[ -z "$_SUVADU_PROMPT_READY" ]]; then
+        _SUVADU_PROMPT_READY=1
+        _SUVADU_CMD=""
+        return
+    fi
+
     local end_time=$(__suvadu_time_ms)
 
     # Skip if no command was captured
