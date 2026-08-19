@@ -11,16 +11,36 @@ use crate::util::atomic_write;
 /// Maximum bytes to read from stdin for hook input (1 MB).
 const MAX_HOOK_INPUT_BYTES: u64 = 1_048_576;
 
-/// Handle `PostToolUse` hook from Claude Code — reads JSON event from stdin and records the command.
-pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
+/// Read a hook event from stdin, capped at `MAX_HOOK_INPUT_BYTES`.
+fn read_hook_event() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     use std::io::Read;
 
     let mut input = String::new();
     std::io::stdin()
         .take(MAX_HOOK_INPUT_BYTES)
         .read_to_string(&mut input)?;
+    Ok(serde_json::from_str(&input)?)
+}
 
-    let event: serde_json::Value = serde_json::from_str(&input)?;
+/// Record a Bash tool call from an agent hook event on stdin.
+///
+/// Claude Code (`PostToolUse`, `PostToolUseFailure`) and Codex (`PostToolUse`)
+/// all deliver the same payload keys — `tool_name`, `tool_input.command`, `cwd`,
+/// `session_id` — verified against codex-cli 0.148. They differ only in how the
+/// exit code is reported (Codex does not report one at all), hence the
+/// `exit_code` closure. `prefix` namespaces the session id against zsh sessions,
+/// and `executor` is the agent recorded on the entry.
+///
+/// An absent or unsafe `session_id` still records the command under a synthetic
+/// one — losing the command from history is worse than losing prompt grouping.
+/// The prompt hooks deliberately do the opposite and drop the event: a prompt
+/// cached under an id no command will ever look up is dead weight.
+fn record_agent_bash_hook(
+    prefix: &str,
+    executor: &str,
+    exit_code: impl FnOnce(&serde_json::Value) -> Option<i32>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let event = read_hook_event()?;
 
     // Only process Bash tool calls
     let tool_name = event
@@ -31,7 +51,6 @@ pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Extract the command
     let command = event
         .get("tool_input")
         .and_then(|ti| ti.get("command"))
@@ -41,39 +60,22 @@ pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Extract working directory
     let cwd = event
         .get("cwd")
         .and_then(serde_json::Value::as_str)
         .unwrap_or(".");
 
-    // PostToolUse only fires on successful commands (exit 0).
-    // Try to read an explicit exit_code from tool_response for forward-compat,
-    // but default to 0 since this hook only fires on success.
-    let exit_code = event
-        .get("tool_response")
-        .and_then(|tr| {
-            tr.get("exit_code")
-                .or_else(|| tr.get("exitCode"))
-                .or_else(|| tr.get("status_code"))
-        })
-        .and_then(serde_json::Value::as_i64)
-        .and_then(|ec| i32::try_from(ec).ok())
-        .or(Some(0));
-
-    // Use Claude Code's session_id, prefixed to avoid collision with zsh sessions
     let session_id = event
         .get("session_id")
         .and_then(serde_json::Value::as_str)
         .filter(|s| is_valid_session_id(s))
         .map_or_else(
-            || format!("claude-{}", uuid::Uuid::new_v4()),
-            |s| format!("claude-{s}"),
+            || format!("{prefix}-{}", uuid::Uuid::new_v4()),
+            |s| format!("{prefix}-{s}"),
         );
 
     let now = chrono::Utc::now().timestamp_millis();
 
-    // Read cached prompt for this session (set by UserPromptSubmit hook)
     let context = get_cached_prompt(&session_id).map(|prompt| {
         let mut ctx = HashMap::new();
         ctx.insert("agent_prompt".to_string(), prompt);
@@ -84,25 +86,21 @@ pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
         session_id,
         command: command.to_string(),
         cwd: cwd.to_string(),
-        exit_code,
+        exit_code: exit_code(&event),
         started_at: now,
         ended_at: now,
         executor_type: Some("agent".to_string()),
-        executor: Some("claude-code".to_string()),
+        executor: Some(executor.to_string()),
         context,
     })
 }
 
-/// Handle `UserPromptSubmit` hook from Claude Code — caches the prompt text
-pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Read;
-
-    let mut input = String::new();
-    std::io::stdin()
-        .take(MAX_HOOK_INPUT_BYTES)
-        .read_to_string(&mut input)?;
-
-    let event: serde_json::Value = serde_json::from_str(&input)?;
+/// Cache the prompt text from a `UserPromptSubmit` hook event on stdin.
+///
+/// Drops events whose `session_id` is absent or unsafe: the id becomes a file
+/// name, and no command lookup would ever match it anyway.
+fn cache_agent_prompt(prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let event = read_hook_event()?;
 
     let session_id = event
         .get("session_id")
@@ -123,7 +121,7 @@ pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
     // Store prompt in cache file (atomic write to avoid corruption on crash)
     let prompts_dir = get_prompts_dir()?;
     std::fs::create_dir_all(&prompts_dir)?;
-    let prompt_file = prompts_dir.join(format!("claude-{session_id}.prompt"));
+    let prompt_file = prompts_dir.join(format!("{prefix}-{session_id}.prompt"));
     // Cap length to keep the cache lightweight (configurable).
     let max_chars =
         crate::config::load_config_cached().map_or(4000, |c| c.agent.prompt_capture_max_chars);
@@ -140,160 +138,8 @@ pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Handle `PostToolUseFailure` hook from Claude Code — records failed commands.
-///
-/// This hook fires when a Bash command exits with a non-zero status code.
-/// The payload has an `error` string (no `tool_response`) from which we
-/// parse the exit code.
-pub fn handle_hook_claude_code_failure() -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Read;
-
-    let mut input = String::new();
-    std::io::stdin()
-        .take(MAX_HOOK_INPUT_BYTES)
-        .read_to_string(&mut input)?;
-
-    let event: serde_json::Value = serde_json::from_str(&input)?;
-
-    // Only process Bash tool calls
-    let tool_name = event
-        .get("tool_name")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    if tool_name != "Bash" {
-        return Ok(());
-    }
-
-    // Extract the command
-    let command = event
-        .get("tool_input")
-        .and_then(|ti| ti.get("command"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    if command.is_empty() {
-        return Ok(());
-    }
-
-    let cwd = event
-        .get("cwd")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or(".");
-
-    // Parse exit code from error string, e.g. "non-zero status code 1"
-    let exit_code = event
-        .get("error")
-        .and_then(serde_json::Value::as_str)
-        .and_then(parse_exit_code_from_error)
-        .or(Some(1)); // default to 1 if we can't parse
-
-    let session_id = event
-        .get("session_id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|s| is_valid_session_id(s))
-        .map_or_else(
-            || format!("claude-{}", uuid::Uuid::new_v4()),
-            |s| format!("claude-{s}"),
-        );
-
-    let now = chrono::Utc::now().timestamp_millis();
-
-    let context = get_cached_prompt(&session_id).map(|prompt| {
-        let mut ctx = HashMap::new();
-        ctx.insert("agent_prompt".to_string(), prompt);
-        ctx
-    });
-
-    crate::commands::entry::handle_add_with_context(crate::commands::entry::AddParams {
-        session_id,
-        command: command.to_string(),
-        cwd: cwd.to_string(),
-        exit_code,
-        started_at: now,
-        ended_at: now,
-        executor_type: Some("agent".to_string()),
-        executor: Some("claude-code".to_string()),
-        context,
-    })
-}
-
-/// Handle Codex `PostToolUse` hook event — records the command.
-///
-/// Codex runs `PostToolUse` after both successful and failed Bash calls, so a
-/// single handler captures both. The payload shares Claude Code's shape
-/// (`tool_name`, `tool_input.command`, `cwd`, `session_id`).
-pub fn handle_hook_codex() -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Read;
-
-    let mut input = String::new();
-    std::io::stdin()
-        .take(MAX_HOOK_INPUT_BYTES)
-        .read_to_string(&mut input)?;
-
-    let event: serde_json::Value = serde_json::from_str(&input)?;
-
-    let tool_name = event
-        .get("tool_name")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    if tool_name != "Bash" {
-        return Ok(());
-    }
-
-    let command = event
-        .get("tool_input")
-        .and_then(|ti| ti.get("command"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    if command.is_empty() {
-        return Ok(());
-    }
-
-    let cwd = event
-        .get("cwd")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or(".");
-
-    let exit_code = codex_exit_code(&event);
-
-    let session_id = event
-        .get("session_id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|s| is_valid_session_id(s))
-        .map_or_else(
-            || format!("codex-{}", uuid::Uuid::new_v4()),
-            |s| format!("codex-{s}"),
-        );
-
-    let now = chrono::Utc::now().timestamp_millis();
-
-    let context = get_cached_prompt(&session_id).map(|prompt| {
-        let mut ctx = HashMap::new();
-        ctx.insert("agent_prompt".to_string(), prompt);
-        ctx
-    });
-
-    crate::commands::entry::handle_add_with_context(crate::commands::entry::AddParams {
-        session_id,
-        command: command.to_string(),
-        cwd: cwd.to_string(),
-        exit_code,
-        started_at: now,
-        ended_at: now,
-        executor_type: Some("agent".to_string()),
-        executor: Some("openai-codex".to_string()),
-        context,
-    })
-}
-
-/// Derive an exit code from a Codex `PostToolUse` event.
-///
-/// Prefers an explicit `exit_code`/`exitCode`/`status_code` from `tool_response`.
-/// Otherwise, a reported `error` (on `tool_response` or top-level) counts as a
-/// failure: parse the exit code out of the message, defaulting to 1. Codex fires
-/// `PostToolUse` for both success and failure and does not reliably expose the
-/// shell's exit code, so with neither signal we return `None` (unknown) rather
-/// than guessing, to avoid labelling failed commands as successful.
-fn codex_exit_code(event: &serde_json::Value) -> Option<i32> {
+/// Read an explicit exit code out of a `PostToolUse` payload's `tool_response`.
+fn tool_response_exit_code(event: &serde_json::Value) -> Option<i32> {
     event
         .get("tool_response")
         .and_then(|tr| {
@@ -303,61 +149,79 @@ fn codex_exit_code(event: &serde_json::Value) -> Option<i32> {
         })
         .and_then(serde_json::Value::as_i64)
         .and_then(|ec| i32::try_from(ec).ok())
-        .or_else(|| {
-            event
-                .get("error")
-                .or_else(|| event.get("tool_response").and_then(|tr| tr.get("error")))
-                .filter(|err| !err.is_null())
-                .map(|err| {
-                    err.as_str()
-                        .and_then(parse_exit_code_from_error)
-                        .unwrap_or(1)
-                })
-        })
+}
+
+/// Derive an exit code from a Codex `PostToolUse` event.
+///
+/// codex-cli 0.148 exposes no exit code at all: it fires `PostToolUse` for both
+/// success and failure with an identical key set, and `tool_response` is a plain
+/// string (stdout on success, stderr text on failure). So in practice this
+/// returns `None` — unknown — rather than guessing 0 and labelling failed
+/// commands as successful.
+///
+/// The structured reads below are forward-compat for a Codex that starts
+/// reporting one, and are not exercised by any payload Codex sends today: an
+/// explicit `exit_code`/`exitCode`/`status_code` on a `tool_response` object
+/// wins, else a non-null `error` (on `tool_response` or top-level) counts as a
+/// failure whose code is parsed out of the message, defaulting to 1.
+fn codex_exit_code(event: &serde_json::Value) -> Option<i32> {
+    tool_response_exit_code(event).or_else(|| {
+        event
+            .get("error")
+            .or_else(|| event.get("tool_response").and_then(|tr| tr.get("error")))
+            .filter(|err| !err.is_null())
+            .map(|err| {
+                err.as_str()
+                    .and_then(parse_exit_code_from_error)
+                    .unwrap_or(1)
+            })
+    })
+}
+
+/// Handle `PostToolUse` hook from Claude Code — records the command.
+///
+/// Only fires on success, so we default to exit 0; the `tool_response` read is
+/// forward-compat for when Claude Code starts reporting it.
+pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
+    record_agent_bash_hook("claude", "claude-code", |event| {
+        tool_response_exit_code(event).or(Some(0))
+    })
+}
+
+/// Handle `UserPromptSubmit` hook from Claude Code — caches the prompt text.
+pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
+    cache_agent_prompt("claude")
+}
+
+/// Handle `PostToolUseFailure` hook from Claude Code — records failed commands.
+///
+/// Fires when a Bash command exits non-zero. The payload carries an `error`
+/// string (no `tool_response`) from which we parse the exit code.
+pub fn handle_hook_claude_code_failure() -> Result<(), Box<dyn std::error::Error>> {
+    record_agent_bash_hook("claude", "claude-code", |event| {
+        event
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .and_then(parse_exit_code_from_error)
+            .or(Some(1))
+    })
+}
+
+/// Handle Codex `PostToolUse` hook event — records the command.
+///
+/// Codex runs `PostToolUse` after both successful and failed Bash calls, so a
+/// single handler captures both.
+pub fn handle_hook_codex() -> Result<(), Box<dyn std::error::Error>> {
+    record_agent_bash_hook("codex", "openai-codex", codex_exit_code)
 }
 
 /// Handle Codex `UserPromptSubmit` hook event — caches the prompt text.
+///
+/// codex-cli 0.148 sends `session_id`, `turn_id`, `transcript_path`, `cwd`,
+/// `model`, `permission_mode` and `prompt` — the same `session_id` the matching
+/// `PostToolUse` events carry, which is what makes prompt grouping work.
 pub fn handle_hook_codex_prompt() -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Read;
-
-    let mut input = String::new();
-    std::io::stdin()
-        .take(MAX_HOOK_INPUT_BYTES)
-        .read_to_string(&mut input)?;
-
-    let event: serde_json::Value = serde_json::from_str(&input)?;
-
-    let session_id = event
-        .get("session_id")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    if !is_valid_session_id(session_id) {
-        return Ok(());
-    }
-
-    let prompt = event
-        .get("prompt")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    if prompt.is_empty() {
-        return Ok(());
-    }
-
-    let prompts_dir = get_prompts_dir()?;
-    std::fs::create_dir_all(&prompts_dir)?;
-    let prompt_file = prompts_dir.join(format!("codex-{session_id}.prompt"));
-    let max_chars =
-        crate::config::load_config_cached().map_or(4000, |c| c.agent.prompt_capture_max_chars);
-    let truncated = crate::util::truncate_str(prompt, max_chars, "...");
-    atomic_write(&prompt_file, &truncated)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&prompt_file, std::fs::Permissions::from_mode(0o600));
-    }
-
-    Ok(())
+    cache_agent_prompt("codex")
 }
 
 /// Handle `afterShellExecution` hook from Cursor — reads JSON event from stdin and records the command.
@@ -2435,5 +2299,60 @@ mod tests {
             "tool_response": {"stdout": "done", "error": null}
         });
         assert_eq!(codex_exit_code(&null_error), None);
+    }
+
+    /// Real `PostToolUse` payloads from codex-cli 0.148 (captured from a live
+    /// session): `tool_response` is a plain string, and success and failure are
+    /// indistinguishable, so both must record an unknown exit code.
+    #[test]
+    fn test_codex_exit_code_real_codex_payload_shape() {
+        let success = serde_json::json!({
+            "session_id": "01a01ade-c43e-76f1-963f-1202e7c394a0",
+            "turn_id": "01a01ade-c524-7fe0-b7c6-41b998616b9e",
+            "cwd": "/Users/dev/code/suvadu",
+            "hook_event_name": "PostToolUse",
+            "model": "gpt-5.6-sol",
+            "permission_mode": "default",
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo hello"},
+            "tool_response": "hello\n",
+            "tool_use_id": "exec-837af453-534c-47b5-9a47-fb3d9f65b912"
+        });
+        let failure = serde_json::json!({
+            "session_id": "01a01adf-4321-7713-aab3-084b2edc6f0f",
+            "turn_id": "01a01adf-4400-7000-8000-084b2edc6f0f",
+            "cwd": "/Users/dev/code/suvadu",
+            "hook_event_name": "PostToolUse",
+            "model": "gpt-5.6-sol",
+            "permission_mode": "default",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls /nonexistent"},
+            "tool_response": "ls: /nonexistent: No such file or directory\n",
+            "tool_use_id": "exec-4e8e6741-361a-4b97-bedf-9ed151cfc939"
+        });
+
+        assert_eq!(codex_exit_code(&success), None);
+        assert_eq!(codex_exit_code(&failure), None);
+
+        for event in [&success, &failure] {
+            assert_eq!(event["tool_name"], "Bash");
+            assert!(!event["tool_input"]["command"].as_str().unwrap().is_empty());
+            assert!(event["cwd"].as_str().unwrap().starts_with('/'));
+            assert!(is_valid_session_id(event["session_id"].as_str().unwrap()));
+        }
+    }
+
+    #[test]
+    fn test_tool_response_exit_code_accepts_all_spellings() {
+        for key in ["exit_code", "exitCode", "status_code"] {
+            let event = serde_json::json!({"tool_response": {key: 3}});
+            assert_eq!(tool_response_exit_code(&event), Some(3), "key {key}");
+        }
+
+        // Absent tool_response → None, which the Claude Code hook defaults to 0
+        assert_eq!(
+            tool_response_exit_code(&serde_json::json!({"tool_name": "Bash"})),
+            None
+        );
     }
 }
