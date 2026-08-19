@@ -1295,46 +1295,65 @@ fn generate_codex_hooks_snippet(hook_path: &str, prompt_hook_path: &str) -> Stri
     .unwrap_or_default()
 }
 
+/// Set `key` in `table` to `new`, leaving the existing entry's surrounding decor
+/// (whitespace and trailing comments) intact, and touching nothing at all when
+/// the value already matches.
+fn set_toml_value_keeping_decor(table: &mut toml_edit::Table, key: &str, new: toml_edit::Value) {
+    let bare = |v: &toml_edit::Value| v.clone().decorated("", "").to_string();
+    match table.get_mut(key).and_then(toml_edit::Item::as_value_mut) {
+        Some(existing) if bare(existing) == bare(&new) => {}
+        Some(existing) => {
+            let decor = existing.decor().clone();
+            *existing = new;
+            *existing.decor_mut() = decor;
+        }
+        _ => table[key] = toml_edit::Item::Value(new),
+    }
+}
+
 /// Auto-configure the MCP server in Codex's `~/.codex/config.toml`.
-/// Deliberately overwrites `command`/`args` on every run so re-installs
-/// refresh a stale suv binary path, while leaving unrelated settings intact.
+///
+/// Edits in place with `toml_edit` so the rest of the file survives untouched —
+/// comments, key order and formatting included. Codex's `config.toml` is a
+/// hand-maintained file, so a parse-and-reserialize round trip would silently
+/// strip every comment in it.
+///
+/// The `command`/`args` we own are refreshed on every run so a re-install picks
+/// up a moved `suv` binary, but the file is only written when that actually
+/// changes something.
 fn try_configure_codex_mcp(bin_path: &str) -> Result<bool, Box<dyn std::error::Error>> {
     let home = std::env::var("HOME")?;
     let codex_dir = PathBuf::from(&home).join(".codex");
     std::fs::create_dir_all(&codex_dir)?;
     let config_path = codex_dir.join("config.toml");
 
-    let mut config: toml::Value = if config_path.exists() {
-        let content = std::fs::read_to_string(&config_path)?;
-        toml::from_str(&content)?
-    } else {
-        toml::Value::Table(toml::map::Map::new())
-    };
+    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = existing.parse()?;
 
-    let servers = config
+    let fresh_servers = !doc.contains_key("mcp_servers");
+    let servers = doc
+        .entry("mcp_servers")
+        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
         .as_table_mut()
-        .ok_or("config.toml root is not a table")?
-        .entry("mcp_servers".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-    let servers_obj = servers.as_table_mut().ok_or("mcp_servers is not a table")?;
+        .ok_or("mcp_servers is not a table")?;
+    if fresh_servers {
+        servers.set_implicit(true);
+    }
 
-    let server = servers_obj
-        .entry("suvadu".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-    let server = server
+    let server = servers
+        .entry("suvadu")
+        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
         .as_table_mut()
         .ok_or("mcp_servers.suvadu is not a table")?;
-    server.insert(
-        "command".to_string(),
-        toml::Value::String(bin_path.to_string()),
-    );
-    server.insert(
-        "args".to_string(),
-        toml::Value::Array(vec![toml::Value::String("mcp-serve".to_string())]),
-    );
+    set_toml_value_keeping_decor(server, "command", bin_path.into());
+    let mut args = toml_edit::Array::new();
+    args.push("mcp-serve");
+    set_toml_value_keeping_decor(server, "args", args.into());
 
-    let updated = toml::to_string_pretty(&config)?;
-    atomic_write(&config_path, &updated)?;
+    let updated = doc.to_string();
+    if updated != existing {
+        atomic_write(&config_path, &updated)?;
+    }
     Ok(true)
 }
 
@@ -2240,6 +2259,37 @@ mod tests {
         assert_eq!(
             servers["suvadu"]["startup_timeout_sec"].as_integer(),
             Some(15)
+        );
+
+        let hand_written = concat!(
+            "# my codex config\n",
+            "# keep these comments\n",
+            "model = \"gpt-5.6-sol\"\n",
+            "\n",
+            "[mcp_servers.context7]\n",
+            "command = \"npx\"\n",
+            "args = [\"-y\", \"@upstash/context7-mcp\"]\n",
+            "\n",
+            "# suvadu: local shell history\n",
+            "[mcp_servers.suvadu]\n",
+            "command = \"/old/bin/suv\" # stale path\n",
+            "args = [\"mcp-serve\"] # leave me alone\n",
+        );
+        std::fs::write(&config_path, hand_written).unwrap();
+
+        try_configure_codex_mcp("/new/bin/suv").unwrap();
+        let refreshed = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(
+            refreshed,
+            hand_written.replace("/old/bin/suv", "/new/bin/suv")
+        );
+
+        let mtime_before_noop_rerun = std::fs::metadata(&config_path).unwrap().modified().unwrap();
+        try_configure_codex_mcp("/new/bin/suv").unwrap();
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), refreshed);
+        assert_eq!(
+            std::fs::metadata(&config_path).unwrap().modified().unwrap(),
+            mtime_before_noop_rerun
         );
 
         if let Some(h) = home_backup {
