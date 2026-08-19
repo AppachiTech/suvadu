@@ -37,7 +37,7 @@ src/
   repository.rs    # Database queries (CRUD, filtering, pagination, stats)
   util.rs          # Date parsing, exclusion matching, path formatting, shared utilities
   hooks.rs         # Shell hook generation (Zsh, Bash)
-  integrations.rs  # Claude Code, Cursor, Antigravity IDE integrations
+  integrations.rs  # Claude Code, Cursor, Codex, Antigravity, OpenCode, pi.dev integrations
   import_export.rs # History import (JSONL, Zsh history) and export (JSONL, CSV)
   update.rs        # Self-update mechanism
   suggest.rs       # Alias suggestion logic and handlers

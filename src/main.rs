@@ -83,6 +83,8 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
         Commands::HookCursor => integrations::handle_hook_cursor(),
         Commands::HookCursorPrompt => integrations::handle_hook_cursor_prompt(),
         Commands::HookClaudePrompt => integrations::handle_hook_claude_prompt(),
+        Commands::HookCodex => integrations::handle_hook_codex(),
+        Commands::HookCodexPrompt => integrations::handle_hook_codex_prompt(),
         Commands::McpServe => mcp::run(),
         cmd @ Commands::Search { .. } => run_search(cmd),
         Commands::Get {
@@ -338,6 +340,7 @@ fn run_init(target: cli::InitTarget) -> Result<(), Box<dyn std::error::Error>> {
         ),
         cli::InitTarget::Opencode => integrations::handle_init_opencode(),
         cli::InitTarget::Pi => integrations::handle_init_pi(),
+        cli::InitTarget::Codex => integrations::handle_init_codex(),
     }
 }
 
@@ -366,6 +369,8 @@ const fn is_user_facing_command(cmd: &Commands) -> bool {
             | Commands::HookCursorPrompt
             | Commands::McpServe
             | Commands::HookClaudePrompt
+            | Commands::HookCodex
+            | Commands::HookCodexPrompt
             | Commands::Completions { .. }
             | Commands::Man
             | Commands::Wrap { .. }
@@ -452,6 +457,8 @@ mod tests {
         assert!(!is_user_facing_command(&Commands::HookCursorPrompt));
         assert!(!is_user_facing_command(&Commands::McpServe));
         assert!(!is_user_facing_command(&Commands::HookClaudePrompt));
+        assert!(!is_user_facing_command(&Commands::HookCodex));
+        assert!(!is_user_facing_command(&Commands::HookCodexPrompt));
         assert!(!is_user_facing_command(&Commands::Man));
         assert!(!is_user_facing_command(&Commands::Completions {
             shell: clap_complete::Shell::Zsh,

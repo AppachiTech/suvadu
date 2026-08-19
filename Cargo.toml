@@ -36,6 +36,7 @@ clap_mangen = "0.3"
 tempfile = "3"
 unicode-width = "0.2"
 minisign-verify = "0.2"
+toml_edit = "0.25.13"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

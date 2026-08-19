@@ -11,16 +11,36 @@ use crate::util::atomic_write;
 /// Maximum bytes to read from stdin for hook input (1 MB).
 const MAX_HOOK_INPUT_BYTES: u64 = 1_048_576;
 
-/// Handle `PostToolUse` hook from Claude Code — reads JSON event from stdin and records the command.
-pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
+/// Read a hook event from stdin, capped at `MAX_HOOK_INPUT_BYTES`.
+fn read_hook_event() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     use std::io::Read;
 
     let mut input = String::new();
     std::io::stdin()
         .take(MAX_HOOK_INPUT_BYTES)
         .read_to_string(&mut input)?;
+    Ok(serde_json::from_str(&input)?)
+}
 
-    let event: serde_json::Value = serde_json::from_str(&input)?;
+/// Record a Bash tool call from an agent hook event on stdin.
+///
+/// Claude Code (`PostToolUse`, `PostToolUseFailure`) and Codex (`PostToolUse`)
+/// all deliver the same payload keys — `tool_name`, `tool_input.command`, `cwd`,
+/// `session_id` — verified against codex-cli 0.148. They differ only in how the
+/// exit code is reported (Codex does not report one at all), hence the
+/// `exit_code` closure. `prefix` namespaces the session id against zsh sessions,
+/// and `executor` is the agent recorded on the entry.
+///
+/// An absent or unsafe `session_id` still records the command under a synthetic
+/// one — losing the command from history is worse than losing prompt grouping.
+/// The prompt hooks deliberately do the opposite and drop the event: a prompt
+/// cached under an id no command will ever look up is dead weight.
+fn record_agent_bash_hook(
+    prefix: &str,
+    executor: &str,
+    exit_code: impl FnOnce(&serde_json::Value) -> Option<i32>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let event = read_hook_event()?;
 
     // Only process Bash tool calls
     let tool_name = event
@@ -31,7 +51,6 @@ pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Extract the command
     let command = event
         .get("tool_input")
         .and_then(|ti| ti.get("command"))
@@ -41,39 +60,22 @@ pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Extract working directory
     let cwd = event
         .get("cwd")
         .and_then(serde_json::Value::as_str)
         .unwrap_or(".");
 
-    // PostToolUse only fires on successful commands (exit 0).
-    // Try to read an explicit exit_code from tool_response for forward-compat,
-    // but default to 0 since this hook only fires on success.
-    let exit_code = event
-        .get("tool_response")
-        .and_then(|tr| {
-            tr.get("exit_code")
-                .or_else(|| tr.get("exitCode"))
-                .or_else(|| tr.get("status_code"))
-        })
-        .and_then(serde_json::Value::as_i64)
-        .and_then(|ec| i32::try_from(ec).ok())
-        .or(Some(0));
-
-    // Use Claude Code's session_id, prefixed to avoid collision with zsh sessions
     let session_id = event
         .get("session_id")
         .and_then(serde_json::Value::as_str)
         .filter(|s| is_valid_session_id(s))
         .map_or_else(
-            || format!("claude-{}", uuid::Uuid::new_v4()),
-            |s| format!("claude-{s}"),
+            || format!("{prefix}-{}", uuid::Uuid::new_v4()),
+            |s| format!("{prefix}-{s}"),
         );
 
     let now = chrono::Utc::now().timestamp_millis();
 
-    // Read cached prompt for this session (set by UserPromptSubmit hook)
     let context = get_cached_prompt(&session_id).map(|prompt| {
         let mut ctx = HashMap::new();
         ctx.insert("agent_prompt".to_string(), prompt);
@@ -84,25 +86,21 @@ pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
         session_id,
         command: command.to_string(),
         cwd: cwd.to_string(),
-        exit_code,
+        exit_code: exit_code(&event),
         started_at: now,
         ended_at: now,
         executor_type: Some("agent".to_string()),
-        executor: Some("claude-code".to_string()),
+        executor: Some(executor.to_string()),
         context,
     })
 }
 
-/// Handle `UserPromptSubmit` hook from Claude Code — caches the prompt text
-pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Read;
-
-    let mut input = String::new();
-    std::io::stdin()
-        .take(MAX_HOOK_INPUT_BYTES)
-        .read_to_string(&mut input)?;
-
-    let event: serde_json::Value = serde_json::from_str(&input)?;
+/// Cache the prompt text from a `UserPromptSubmit` hook event on stdin.
+///
+/// Drops events whose `session_id` is absent or unsafe: the id becomes a file
+/// name, and no command lookup would ever match it anyway.
+fn cache_agent_prompt(prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let event = read_hook_event()?;
 
     let session_id = event
         .get("session_id")
@@ -123,7 +121,7 @@ pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
     // Store prompt in cache file (atomic write to avoid corruption on crash)
     let prompts_dir = get_prompts_dir()?;
     std::fs::create_dir_all(&prompts_dir)?;
-    let prompt_file = prompts_dir.join(format!("claude-{session_id}.prompt"));
+    let prompt_file = prompts_dir.join(format!("{prefix}-{session_id}.prompt"));
     // Cap length to keep the cache lightweight (configurable).
     let max_chars =
         crate::config::load_config_cached().map_or(4000, |c| c.agent.prompt_capture_max_chars);
@@ -140,80 +138,90 @@ pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Read an explicit exit code out of a `PostToolUse` payload's `tool_response`.
+fn tool_response_exit_code(event: &serde_json::Value) -> Option<i32> {
+    event
+        .get("tool_response")
+        .and_then(|tr| {
+            tr.get("exit_code")
+                .or_else(|| tr.get("exitCode"))
+                .or_else(|| tr.get("status_code"))
+        })
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|ec| i32::try_from(ec).ok())
+}
+
+/// Derive an exit code from a Codex `PostToolUse` event.
+///
+/// codex-cli 0.148 exposes no exit code at all: it fires `PostToolUse` for both
+/// success and failure with an identical key set, and `tool_response` is a plain
+/// string (stdout on success, stderr text on failure). So in practice this
+/// returns `None` — unknown — rather than guessing 0 and labelling failed
+/// commands as successful.
+///
+/// The structured reads below are forward-compat for a Codex that starts
+/// reporting one, and are not exercised by any payload Codex sends today: an
+/// explicit `exit_code`/`exitCode`/`status_code` on a `tool_response` object
+/// wins, else a non-null `error` (on `tool_response` or top-level) counts as a
+/// failure whose code is parsed out of the message, defaulting to 1.
+fn codex_exit_code(event: &serde_json::Value) -> Option<i32> {
+    tool_response_exit_code(event).or_else(|| {
+        event
+            .get("error")
+            .or_else(|| event.get("tool_response").and_then(|tr| tr.get("error")))
+            .filter(|err| !err.is_null())
+            .map(|err| {
+                err.as_str()
+                    .and_then(parse_exit_code_from_error)
+                    .unwrap_or(1)
+            })
+    })
+}
+
+/// Handle `PostToolUse` hook from Claude Code — records the command.
+///
+/// Only fires on success, so we default to exit 0; the `tool_response` read is
+/// forward-compat for when Claude Code starts reporting it.
+pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
+    record_agent_bash_hook("claude", "claude-code", |event| {
+        tool_response_exit_code(event).or(Some(0))
+    })
+}
+
+/// Handle `UserPromptSubmit` hook from Claude Code — caches the prompt text.
+pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
+    cache_agent_prompt("claude")
+}
+
 /// Handle `PostToolUseFailure` hook from Claude Code — records failed commands.
 ///
-/// This hook fires when a Bash command exits with a non-zero status code.
-/// The payload has an `error` string (no `tool_response`) from which we
-/// parse the exit code.
+/// Fires when a Bash command exits non-zero. The payload carries an `error`
+/// string (no `tool_response`) from which we parse the exit code.
 pub fn handle_hook_claude_code_failure() -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Read;
-
-    let mut input = String::new();
-    std::io::stdin()
-        .take(MAX_HOOK_INPUT_BYTES)
-        .read_to_string(&mut input)?;
-
-    let event: serde_json::Value = serde_json::from_str(&input)?;
-
-    // Only process Bash tool calls
-    let tool_name = event
-        .get("tool_name")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    if tool_name != "Bash" {
-        return Ok(());
-    }
-
-    // Extract the command
-    let command = event
-        .get("tool_input")
-        .and_then(|ti| ti.get("command"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    if command.is_empty() {
-        return Ok(());
-    }
-
-    let cwd = event
-        .get("cwd")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or(".");
-
-    // Parse exit code from error string, e.g. "non-zero status code 1"
-    let exit_code = event
-        .get("error")
-        .and_then(serde_json::Value::as_str)
-        .and_then(parse_exit_code_from_error)
-        .or(Some(1)); // default to 1 if we can't parse
-
-    let session_id = event
-        .get("session_id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|s| is_valid_session_id(s))
-        .map_or_else(
-            || format!("claude-{}", uuid::Uuid::new_v4()),
-            |s| format!("claude-{s}"),
-        );
-
-    let now = chrono::Utc::now().timestamp_millis();
-
-    let context = get_cached_prompt(&session_id).map(|prompt| {
-        let mut ctx = HashMap::new();
-        ctx.insert("agent_prompt".to_string(), prompt);
-        ctx
-    });
-
-    crate::commands::entry::handle_add_with_context(crate::commands::entry::AddParams {
-        session_id,
-        command: command.to_string(),
-        cwd: cwd.to_string(),
-        exit_code,
-        started_at: now,
-        ended_at: now,
-        executor_type: Some("agent".to_string()),
-        executor: Some("claude-code".to_string()),
-        context,
+    record_agent_bash_hook("claude", "claude-code", |event| {
+        event
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .and_then(parse_exit_code_from_error)
+            .or(Some(1))
     })
+}
+
+/// Handle Codex `PostToolUse` hook event — records the command.
+///
+/// Codex runs `PostToolUse` after both successful and failed Bash calls, so a
+/// single handler captures both.
+pub fn handle_hook_codex() -> Result<(), Box<dyn std::error::Error>> {
+    record_agent_bash_hook("codex", "openai-codex", codex_exit_code)
+}
+
+/// Handle Codex `UserPromptSubmit` hook event — caches the prompt text.
+///
+/// codex-cli 0.148 sends `session_id`, `turn_id`, `transcript_path`, `cwd`,
+/// `model`, `permission_mode` and `prompt` — the same `session_id` the matching
+/// `PostToolUse` events carry, which is what makes prompt grouping work.
+pub fn handle_hook_codex_prompt() -> Result<(), Box<dyn std::error::Error>> {
+    cache_agent_prompt("codex")
 }
 
 /// Handle `afterShellExecution` hook from Cursor — reads JSON event from stdin and records the command.
@@ -489,6 +497,26 @@ fn is_suvadu_hook_command(cmd: &str) -> bool {
 /// Replaces `'` with `'\''` (end quote, literal quote, restart quote).
 fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn codex_hook_script(
+    bin_path: &str,
+    hook_name: &str,
+    description: &str,
+    subcommand: &str,
+) -> String {
+    let escaped_bin = shell_escape(bin_path);
+    format!(
+        "#!/bin/bash\n\
+         # Suvadu — Codex {hook_name} Hook\n\
+         # {description}\n\
+         # Generated by: suv init codex\n\
+         _SUVADU_BIN={escaped_bin}\n\
+         if [[ ! -x \"$_SUVADU_BIN\" ]]; then\n\
+           _SUVADU_BIN=$(type -P suv 2>/dev/null) || exit 0\n\
+         fi\n\
+         exec \"$_SUVADU_BIN\" {subcommand} 2>/dev/null\n"
+    )
 }
 
 /// Install Claude Code hooks and configure `~/.claude/settings.json`.
@@ -1197,6 +1225,238 @@ pub fn handle_init_pi() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Add a suvadu hook group to a Codex hooks event, unless such a group already exists.
+fn add_codex_hook_group(
+    hooks_obj: &mut serde_json::Map<String, serde_json::Value>,
+    event: &str,
+    group: serde_json::Value,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    if has_suvadu_hook_in_obj(hooks_obj, event) {
+        return Ok(false);
+    }
+    add_hook_entry(hooks_obj, event, group)?;
+    Ok(true)
+}
+
+/// Merge suvadu hooks into an existing Codex hooks.json, preserving any other
+/// hooks the user already configured (Claude Code and Cursor behave this way).
+/// Idempotent — re-running `suv init codex` does not duplicate suvadu hooks.
+fn try_merge_codex_hooks(
+    hooks_json_path: &Path,
+    hook_path: &str,
+    prompt_hook_path: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let mut config: serde_json::Value = if hooks_json_path.exists() {
+        let content = std::fs::read_to_string(hooks_json_path)?;
+        serde_json::from_str(&content)?
+    } else {
+        serde_json::json!({})
+    };
+
+    let hooks_obj = config
+        .as_object_mut()
+        .ok_or("hooks.json root is not an object")?
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
+    let hooks_obj = hooks_obj.as_object_mut().ok_or("hooks is not an object")?;
+
+    let post_tool_group = serde_json::json!({
+        "matcher": "^Bash$",
+        "hooks": [{"type": "command", "command": hook_path}]
+    });
+    let prompt_group = serde_json::json!({
+        "hooks": [{"type": "command", "command": prompt_hook_path}]
+    });
+
+    let added_post = add_codex_hook_group(hooks_obj, "PostToolUse", post_tool_group)?;
+    let added_prompt = add_codex_hook_group(hooks_obj, "UserPromptSubmit", prompt_group)?;
+
+    if added_post || added_prompt {
+        let updated = serde_json::to_string_pretty(&config)?;
+        atomic_write(hooks_json_path, &updated)?;
+    }
+    Ok(true)
+}
+
+/// Generate the JSON snippet for Codex hooks.json (matches the shape
+/// `try_merge_codex_hooks` writes).
+fn generate_codex_hooks_snippet(hook_path: &str, prompt_hook_path: &str) -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "hooks": {
+            "PostToolUse": [{
+                "matcher": "^Bash$",
+                "hooks": [{"type": "command", "command": hook_path}]
+            }],
+            "UserPromptSubmit": [{
+                "hooks": [{"type": "command", "command": prompt_hook_path}]
+            }]
+        }
+    }))
+    .unwrap_or_default()
+}
+
+/// Set `key` in `table` to `new`, leaving the existing entry's surrounding decor
+/// (whitespace and trailing comments) intact, and touching nothing at all when
+/// the value already matches.
+fn set_toml_value_keeping_decor(table: &mut toml_edit::Table, key: &str, new: toml_edit::Value) {
+    let bare = |v: &toml_edit::Value| v.clone().decorated("", "").to_string();
+    match table.get_mut(key).and_then(toml_edit::Item::as_value_mut) {
+        Some(existing) if bare(existing) == bare(&new) => {}
+        Some(existing) => {
+            let decor = existing.decor().clone();
+            *existing = new;
+            *existing.decor_mut() = decor;
+        }
+        _ => table[key] = toml_edit::Item::Value(new),
+    }
+}
+
+/// Auto-configure the MCP server in Codex's `~/.codex/config.toml`.
+///
+/// Edits in place with `toml_edit` so the rest of the file survives untouched —
+/// comments, key order and formatting included. Codex's `config.toml` is a
+/// hand-maintained file, so a parse-and-reserialize round trip would silently
+/// strip every comment in it.
+///
+/// The `command`/`args` we own are refreshed on every run so a re-install picks
+/// up a moved `suv` binary, but the file is only written when that actually
+/// changes something.
+fn try_configure_codex_mcp(bin_path: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    let home = std::env::var("HOME")?;
+    let codex_dir = PathBuf::from(&home).join(".codex");
+    std::fs::create_dir_all(&codex_dir)?;
+    let config_path = codex_dir.join("config.toml");
+
+    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = existing.parse()?;
+
+    let fresh_servers = !doc.contains_key("mcp_servers");
+    let servers = doc
+        .entry("mcp_servers")
+        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .ok_or("mcp_servers is not a table")?;
+    if fresh_servers {
+        servers.set_implicit(true);
+    }
+
+    let server = servers
+        .entry("suvadu")
+        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .ok_or("mcp_servers.suvadu is not a table")?;
+    set_toml_value_keeping_decor(server, "command", bin_path.into());
+    let mut args = toml_edit::Array::new();
+    args.push("mcp-serve");
+    set_toml_value_keeping_decor(server, "args", args.into());
+
+    let updated = doc.to_string();
+    if updated != existing {
+        atomic_write(&config_path, &updated)?;
+    }
+    Ok(true)
+}
+
+/// Install Codex hooks and configure `~/.codex/hooks.json` + MCP server.
+pub fn handle_init_codex() -> Result<(), Box<dyn std::error::Error>> {
+    let current_exe = std::env::current_exe()?;
+    let bin_path = current_exe.to_string_lossy().to_string();
+
+    let home = std::env::var("HOME")?;
+    let hooks_dir = PathBuf::from(&home)
+        .join(".config")
+        .join("suvadu")
+        .join("hooks");
+    std::fs::create_dir_all(&hooks_dir)?;
+
+    // Write the PostToolUse hook script
+    let hook_script_path = hooks_dir.join("codex-post-tool.sh");
+    let script = codex_hook_script(
+        &bin_path,
+        "PostToolUse",
+        "Records AI-executed commands in your shell history",
+        "hook-codex",
+    );
+    crate::util::atomic_write_with_mode(&hook_script_path, &script, 0o700)?;
+
+    // Write the UserPromptSubmit hook script
+    let prompt_hook_path = hooks_dir.join("codex-prompt.sh");
+    let prompt_script = codex_hook_script(
+        &bin_path,
+        "UserPromptSubmit",
+        "Captures the user prompt for agent command grouping",
+        "hook-codex-prompt",
+    );
+    crate::util::atomic_write_with_mode(&prompt_hook_path, &prompt_script, 0o700)?;
+
+    let hook_path_str = hook_script_path.to_string_lossy().to_string();
+    let prompt_hook_path_str = prompt_hook_path.to_string_lossy().to_string();
+
+    // Write ~/.codex/hooks.json to register the hooks with Codex, preserving
+    // any hooks (e.g. synapse, plannotator) the user already configured.
+    let codex_dir = PathBuf::from(&home).join(".codex");
+    std::fs::create_dir_all(&codex_dir)?;
+    let hooks_json_path = codex_dir.join("hooks.json");
+
+    let auto_configured =
+        try_merge_codex_hooks(&hooks_json_path, &hook_path_str, &prompt_hook_path_str);
+
+    let color = crate::util::color_enabled();
+    let (b, r) = if color {
+        ("\x1b[1m", "\x1b[0m")
+    } else {
+        ("", "")
+    };
+    let green = if color { "\x1b[32m" } else { "" };
+    let cyan = if color { "\x1b[36m" } else { "" };
+
+    println!("{b}Suvadu \u{2014} Codex Integration{r}");
+    println!();
+    println!("Hook scripts installed:");
+    println!("  {hook_path_str}");
+    println!("  {prompt_hook_path_str}");
+    println!();
+
+    if matches!(auto_configured, Ok(true)) {
+        println!(
+            "{green}\u{2713}{r} Hooks merged into: {}",
+            hooks_json_path.display()
+        );
+        println!();
+    } else {
+        println!(
+            "Could not auto-merge into {} (existing file may be malformed).",
+            hooks_json_path.display()
+        );
+        println!("Add this to ~/.codex/hooks.json:");
+        println!();
+        println!(
+            "{}",
+            generate_codex_hooks_snippet(&hook_path_str, &prompt_hook_path_str)
+        );
+        println!();
+        println!("Then restart Codex to activate.");
+    }
+
+    // Auto-configure MCP server
+    let mcp_configured = try_configure_codex_mcp(&bin_path);
+    if matches!(mcp_configured, Ok(true)) {
+        println!("{green}\u{2713}{r} MCP server auto-configured in ~/.codex/config.toml");
+        println!("  AI agents can now query your shell history via MCP.");
+    }
+
+    println!();
+    println!("{green}\u{2713}{r} Codex hooks require trust before they run. Start codex and run {cyan}/hooks{r}");
+    println!("  to review and trust the suvadu hooks (PostToolUse + UserPromptSubmit).");
+    println!();
+    println!("Restart Codex to activate.");
+    println!();
+    println!("Verify with: {cyan}suv search --executor openai-codex{r}");
+    print_post_install_tips(cyan, r, true, true);
+
+    Ok(())
+}
+
 /// Set up Cursor AI agent integration via `afterShellExecution` hook.
 pub fn handle_init_cursor() -> Result<(), Box<dyn std::error::Error>> {
     let current_exe = std::env::current_exe()?;
@@ -1843,6 +2103,306 @@ mod tests {
         assert!(
             path_str.ends_with("prompts"),
             "Prompts dir should end with 'prompts', got: {path_str}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_codex_hook_script_resolves_stale_binary_from_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let suv_path = temp_dir.path().join("suv");
+        std::fs::write(&suv_path, "#!/bin/sh\nprintf '%s' \"$1\"\n").unwrap();
+        std::fs::set_permissions(&suv_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let script = codex_hook_script(
+            "/stale/bin/suv",
+            "PostToolUse",
+            "Records commands",
+            "hook-codex",
+        );
+        let output = std::process::Command::new("/bin/bash")
+            .arg("-c")
+            .arg(script)
+            .env("PATH", temp_dir.path())
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"hook-codex");
+    }
+
+    #[test]
+    fn test_merge_codex_hooks_preserves_existing_and_idempotent() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let hooks_json_path = temp_dir.path().join("hooks.json");
+        let hook_path = "/home/u/.config/suvadu/hooks/codex-post-tool.sh";
+        let prompt_hook_path = "/home/u/.config/suvadu/hooks/codex-prompt.sh";
+
+        // Pre-existing codex hooks we must not clobber (e.g. synapse, plannotator)
+        let existing = serde_json::json!({
+            "hooks": {
+                "SessionStart": [{
+                    "matcher": "startup|resume|clear|compact",
+                    "hooks": [{"type": "command", "command": "/home/u/.codex/hooks/synapse-session-start.sh"}]
+                }],
+                "Stop": [{
+                    "hooks": [{"type": "command", "command": "/home/u/.local/bin/plannotator"}]
+                }]
+            }
+        });
+        std::fs::write(
+            &hooks_json_path,
+            serde_json::to_string_pretty(&existing).unwrap(),
+        )
+        .unwrap();
+
+        // First merge adds suvadu PostToolUse + UserPromptSubmit
+        let result = try_merge_codex_hooks(&hooks_json_path, hook_path, prompt_hook_path).unwrap();
+        assert!(result);
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&hooks_json_path).unwrap()).unwrap();
+
+        // Existing hooks preserved
+        assert!(parsed["hooks"]["SessionStart"].is_array());
+        assert_eq!(
+            parsed["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+            "/home/u/.codex/hooks/synapse-session-start.sh"
+        );
+        assert!(parsed["hooks"]["Stop"].is_array());
+
+        // suvadu hooks added
+        assert_eq!(parsed["hooks"]["PostToolUse"][0]["matcher"], "^Bash$");
+        assert_eq!(
+            parsed["hooks"]["PostToolUse"][0]["hooks"][0]["command"],
+            hook_path
+        );
+        assert!(parsed["hooks"]["UserPromptSubmit"].is_array());
+        assert_eq!(
+            parsed["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
+            prompt_hook_path
+        );
+
+        // Second merge is idempotent — no duplicate suvadu groups
+        let result2 = try_merge_codex_hooks(&hooks_json_path, hook_path, prompt_hook_path).unwrap();
+        assert!(result2);
+        let parsed2: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&hooks_json_path).unwrap()).unwrap();
+        assert_eq!(parsed2["hooks"]["PostToolUse"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            parsed2["hooks"]["UserPromptSubmit"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        // Still no clobbering
+        assert!(parsed2["hooks"]["SessionStart"].is_array());
+        assert!(parsed2["hooks"]["Stop"].is_array());
+    }
+
+    #[test]
+    fn test_configure_codex_mcp_idempotent() {
+        // Warm the process-wide `PROJECT_DIRS` `LazyLock` (src/util/mod.rs) under the
+        // real HOME before we redirect it below. Otherwise, if another test running in
+        // parallel is the first to call `project_dirs()` while HOME points at our temp
+        // dir, this test's temp path gets permanently cached for the rest of the
+        // process, breaking unrelated tests.
+        let _ = crate::util::project_dirs();
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let home_backup = std::env::var("HOME").ok();
+        std::env::set_var("HOME", temp_dir.path());
+
+        // First run creates config.toml with our server
+        let first = try_configure_codex_mcp("/usr/local/bin/suv").unwrap();
+        assert!(first);
+
+        let config_path = temp_dir.path().join(".codex").join("config.toml");
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("mcp_servers"));
+        assert!(content.contains("mcp-serve"));
+
+        // The registered server is a STDIO server pointing at `suv mcp-serve`,
+        // exactly the launcher Codex's MCP client needs.
+        let parsed: toml::Value = toml::from_str(&content).unwrap();
+        let server = &parsed["mcp_servers"]["suvadu"];
+        assert_eq!(server["command"].as_str(), Some("/usr/local/bin/suv"));
+        let args = server["args"]
+            .as_array()
+            .map(|a| a.iter().map(|v| v.as_str().unwrap()).collect::<Vec<_>>())
+            .unwrap();
+        assert_eq!(args, vec!["mcp-serve"]);
+
+        let mut stale: toml::Value = toml::from_str(&content).unwrap();
+        let server = stale["mcp_servers"]["suvadu"].as_table_mut().unwrap();
+        server.insert(
+            "command".to_string(),
+            toml::Value::String("/stale/bin/suv".to_string()),
+        );
+        server.insert("startup_timeout_sec".to_string(), toml::Value::Integer(15));
+        std::fs::write(&config_path, toml::to_string_pretty(&stale).unwrap()).unwrap();
+
+        // Re-running init refreshes Suvadu's launcher without replacing other settings.
+        let second = try_configure_codex_mcp("/opt/homebrew/bin/suv").unwrap();
+        assert!(second);
+        let content2 = std::fs::read_to_string(&config_path).unwrap();
+        let parsed2: toml::Value = toml::from_str(&content2).unwrap();
+        let servers = parsed2["mcp_servers"].as_table().unwrap();
+        assert_eq!(servers.len(), 1, "should not duplicate the suvadu server");
+        assert_eq!(
+            servers["suvadu"]["command"].as_str(),
+            Some("/opt/homebrew/bin/suv")
+        );
+        assert_eq!(
+            servers["suvadu"]["startup_timeout_sec"].as_integer(),
+            Some(15)
+        );
+
+        let hand_written = concat!(
+            "# my codex config\n",
+            "# keep these comments\n",
+            "model = \"gpt-5.6-sol\"\n",
+            "\n",
+            "[mcp_servers.context7]\n",
+            "command = \"npx\"\n",
+            "args = [\"-y\", \"@upstash/context7-mcp\"]\n",
+            "\n",
+            "# suvadu: local shell history\n",
+            "[mcp_servers.suvadu]\n",
+            "command = \"/old/bin/suv\" # stale path\n",
+            "args = [\"mcp-serve\"] # leave me alone\n",
+        );
+        std::fs::write(&config_path, hand_written).unwrap();
+
+        try_configure_codex_mcp("/new/bin/suv").unwrap();
+        let refreshed = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(
+            refreshed,
+            hand_written.replace("/old/bin/suv", "/new/bin/suv")
+        );
+
+        let mtime_before_noop_rerun = std::fs::metadata(&config_path).unwrap().modified().unwrap();
+        try_configure_codex_mcp("/new/bin/suv").unwrap();
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), refreshed);
+        assert_eq!(
+            std::fs::metadata(&config_path).unwrap().modified().unwrap(),
+            mtime_before_noop_rerun
+        );
+
+        if let Some(h) = home_backup {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    fn test_codex_exit_code_helper() {
+        // No exit code or error exposed → unknown (None), not a guessed 0
+        let unknown = serde_json::json!({
+            "session_id": "thr_1",
+            "cwd": "/repo",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cargo build"},
+            "tool_response": {"stdout": "done"}
+        });
+        assert_eq!(codex_exit_code(&unknown), None);
+
+        // Explicit failure exit code wins
+        let explicit = serde_json::json!({
+            "session_id": "thr_1",
+            "cwd": "/repo",
+            "tool_name": "Bash",
+            "tool_input": {"command": "failing"},
+            "tool_response": {"exit_code": 2}
+        });
+        assert_eq!(codex_exit_code(&explicit), Some(2));
+
+        // Failure reported via error string → parsed exit code
+        let errored = serde_json::json!({
+            "session_id": "thr_1",
+            "cwd": "/repo",
+            "tool_name": "Bash",
+            "tool_input": {"command": "make"},
+            "tool_response": {"error": "Command exited with non-zero status code 127"}
+        });
+        assert_eq!(codex_exit_code(&errored), Some(127));
+
+        // Error present but code not parseable → default 1
+        let generic_error = serde_json::json!({
+            "session_id": "thr_1",
+            "tool_name": "Bash",
+            "tool_input": {"command": "make"},
+            "tool_response": {"error": "Something broke"}
+        });
+        assert_eq!(codex_exit_code(&generic_error), Some(1));
+
+        // Error key present but explicitly null (e.g. Option<String> serialized without
+        // skip_serializing_if) → still unknown (None), not a guessed failure
+        let null_error = serde_json::json!({
+            "session_id": "thr_1",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cargo build"},
+            "tool_response": {"stdout": "done", "error": null}
+        });
+        assert_eq!(codex_exit_code(&null_error), None);
+    }
+
+    /// Real `PostToolUse` payloads from codex-cli 0.148 (captured from a live
+    /// session): `tool_response` is a plain string, and success and failure are
+    /// indistinguishable, so both must record an unknown exit code.
+    #[test]
+    fn test_codex_exit_code_real_codex_payload_shape() {
+        let success = serde_json::json!({
+            "session_id": "01a01ade-c43e-76f1-963f-1202e7c394a0",
+            "turn_id": "01a01ade-c524-7fe0-b7c6-41b998616b9e",
+            "cwd": "/Users/dev/code/suvadu",
+            "hook_event_name": "PostToolUse",
+            "model": "gpt-5.6-sol",
+            "permission_mode": "default",
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo hello"},
+            "tool_response": "hello\n",
+            "tool_use_id": "exec-837af453-534c-47b5-9a47-fb3d9f65b912"
+        });
+        let failure = serde_json::json!({
+            "session_id": "01a01adf-4321-7713-aab3-084b2edc6f0f",
+            "turn_id": "01a01adf-4400-7000-8000-084b2edc6f0f",
+            "cwd": "/Users/dev/code/suvadu",
+            "hook_event_name": "PostToolUse",
+            "model": "gpt-5.6-sol",
+            "permission_mode": "default",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls /nonexistent"},
+            "tool_response": "ls: /nonexistent: No such file or directory\n",
+            "tool_use_id": "exec-4e8e6741-361a-4b97-bedf-9ed151cfc939"
+        });
+
+        assert_eq!(codex_exit_code(&success), None);
+        assert_eq!(codex_exit_code(&failure), None);
+
+        for event in [&success, &failure] {
+            assert_eq!(event["tool_name"], "Bash");
+            assert!(!event["tool_input"]["command"].as_str().unwrap().is_empty());
+            assert!(event["cwd"].as_str().unwrap().starts_with('/'));
+            assert!(is_valid_session_id(event["session_id"].as_str().unwrap()));
+        }
+    }
+
+    #[test]
+    fn test_tool_response_exit_code_accepts_all_spellings() {
+        for key in ["exit_code", "exitCode", "status_code"] {
+            let event = serde_json::json!({"tool_response": {key: 3}});
+            assert_eq!(tool_response_exit_code(&event), Some(3), "key {key}");
+        }
+
+        // Absent tool_response → None, which the Claude Code hook defaults to 0
+        assert_eq!(
+            tool_response_exit_code(&serde_json::json!({"tool_name": "Bash"})),
+            None
         );
     }
 }

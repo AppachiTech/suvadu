@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **`suv init codex`** — first-class Codex CLI integration, on par with the Claude Code and OpenCode integrations. Installs `PostToolUse` and `UserPromptSubmit` hooks into `~/.codex/hooks.json`, records Codex-run Bash commands to the agent dashboard (`executor=openai-codex`), captures prompts for prompt-grouped sessions, and auto-registers the suvadu MCP server via `~/.codex/config.toml`. Once installed, start Codex and run `/hooks` to trust the suvadu hooks. Closes #30.
+
 ## [0.3.6] - 2026-08-01
 
 ### Added
