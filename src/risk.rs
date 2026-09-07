@@ -426,7 +426,7 @@ fn is_non_executing(cmd: &str) -> bool {
 
 /// Check if the command contains shell operators that chain execution.
 /// Quote-aware: ignores operators inside single or double-quoted strings.
-fn has_shell_chaining(cmd: &str) -> bool {
+const fn has_shell_chaining(cmd: &str) -> bool {
     let bytes = cmd.as_bytes();
     let len = bytes.len();
     let mut i = 0;
