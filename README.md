@@ -85,13 +85,23 @@ suv agent prompts           # Browse prompts and their commands
 
 ```bash
 suv init claude-code    # Claude Code — hooks + MCP + prompt capture
+suv init codex          # Codex — shell-command hooks + prompt capture
 suv init cursor         # Cursor — hooks + MCP + prompt capture
 suv init opencode       # OpenCode — plugin + prompt capture
 suv init pi             # pi.dev — extension + prompt capture
 suv init antigravity    # Antigravity — auto-detect
 ```
 
-Then ask your agent: *"What commands failed in this project recently?"*
+For Codex, restart after setup and review/trust the Suvadu hooks when prompted (or use `/hooks`). Setup preserves unrelated hooks and backs up existing `hooks.json` before changing it. It uses `CODEX_HOME` when set, otherwise `~/.codex`.
+
+```bash
+suv history --executor openai-codex
+suv agent prompts --executor openai-codex
+```
+
+Codex shell commands link to the prompt from the same turn. Prompts without recorded commands do not appear in the prompt explorer. Capture respects Suvadu's recording and redaction settings. Hook timestamps reflect receipt time; exit status stays unknown when Codex does not provide a structured exit code. This requires a Codex version supporting `UserPromptSubmit` and `PostToolUse` hooks (tested with CLI 0.153.4).
+
+For agents configured with MCP, ask: *"What commands failed in this project recently?"* Codex hook setup does not configure MCP.
 
 See the [full integration guide](https://suvadu.sh/blog/track-ai-agent-commands-with-suvadu/) and [MCP server docs](https://suvadu.sh/cli/mcp-server/).
 

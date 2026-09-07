@@ -568,7 +568,7 @@ impl<'a> PromptExplorerApp<'a> {
 
         if self.groups.is_empty() {
             let hint = Paragraph::new(Line::from(Span::styled(
-                "  No agent prompts found. Prompts are captured from Claude Code and OpenCode sessions.",
+                "  No prompts with recorded commands found. Configure prompt capture with suv init <agent>.",
                 Style::default().fg(t.text_muted),
             )));
             let hint_area = Rect {

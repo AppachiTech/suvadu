@@ -431,41 +431,78 @@ fn check_agent_hooks() -> CheckResult {
         };
     };
 
-    // Hooks are installed to ~/.config/suvadu/hooks/ by `suv init claude-code` and `suv init cursor`
-    let hooks_dir = PathBuf::from(home)
-        .join(".config")
-        .join("suvadu")
-        .join("hooks");
-    if !hooks_dir.exists() {
+    let hooks_dir = PathBuf::from(home).join(".config/suvadu/hooks");
+    let entries = match std::fs::read_dir(&hooks_dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return CheckResult {
+                name: "Agent hooks".into(),
+                status: Status::Warn,
+                detail: format!(
+                "cannot read hooks directory ({error}); run suv init <agent> to set up recording"
+            ),
+            }
+        }
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry) if entry.path().extension().is_some_and(|ext| ext == "sh") => {
+                paths.push(entry.path());
+            }
+            Ok(_) => {}
+            Err(error) => {
+                return CheckResult {
+                    name: "Agent hooks".into(),
+                    status: Status::Warn,
+                    detail: format!("cannot inspect hooks ({error}); run suv init <agent>"),
+                }
+            }
+        }
+    }
+    paths.sort();
+    if paths.is_empty() {
         return CheckResult {
-            name: "Agent hooks".to_string(),
+            name: "Agent hooks".into(),
             status: Status::Warn,
-            detail: "no hooks directory (run: suv init claude-code)".to_string(),
+            detail: "no hook scripts (run suv init codex, claude-code, or cursor)".into(),
         };
     }
-
-    let hook_files: Vec<String> = std::fs::read_dir(&hooks_dir)
-        .ok()
-        .map(|entries| {
-            entries
-                .filter_map(std::result::Result::ok)
-                .map(|e| e.file_name().to_string_lossy().to_string())
-                .collect()
+    let failures: Vec<_> = paths
+        .iter()
+        .filter_map(|path| {
+            crate::integrations::agent_hook::inspect(path)
+                .err()
+                .map(|reason| {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    let agent = if name.starts_with("codex") {
+                        "codex"
+                    } else if name.starts_with("claude-code") {
+                        "claude-code"
+                    } else if name.starts_with("cursor") {
+                        "cursor"
+                    } else {
+                        "<agent>"
+                    };
+                    format!("{name}: {reason} (run: suv init {agent})")
+                })
         })
-        .unwrap_or_default();
-
-    if hook_files.is_empty() {
-        CheckResult {
-            name: "Agent hooks".to_string(),
-            status: Status::Warn,
-            detail: "hooks directory is empty".to_string(),
-        }
-    } else {
-        CheckResult {
-            name: "Agent hooks".to_string(),
-            status: Status::Pass,
-            detail: format!("{} hook script(s) installed", hook_files.len()),
-        }
+        .collect();
+    CheckResult {
+        name: "Agent hooks".into(),
+        status: if failures.is_empty() {
+            Status::Pass
+        } else {
+            Status::Fail
+        },
+        detail: if failures.is_empty() {
+            format!(
+                "{} executable hook script(s), binary paths available",
+                paths.len()
+            )
+        } else {
+            failures.join("; ")
+        },
     }
 }
 

@@ -78,6 +78,7 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
         }
         cmd @ Commands::Add { .. } => run_add(cmd),
         Commands::Init { target } => run_init(target),
+        Commands::HookCodex => integrations::codex::handle_hook(),
         Commands::HookClaudeCode => integrations::handle_hook_claude_code(),
         Commands::HookClaudeCodeFailure => integrations::handle_hook_claude_code_failure(),
         Commands::HookCursor => integrations::handle_hook_cursor(),
@@ -329,6 +330,7 @@ fn run_init(target: cli::InitTarget) -> Result<(), Box<dyn std::error::Error>> {
             print_first_run_tip();
             Ok(())
         }
+        cli::InitTarget::Codex => integrations::codex::handle_init(),
         cli::InitTarget::ClaudeCode => integrations::handle_init_claude_code(),
         cli::InitTarget::Cursor => integrations::handle_init_cursor(),
         cli::InitTarget::Antigravity => integrations::handle_init_ide(
@@ -361,6 +363,7 @@ const fn is_user_facing_command(cmd: &Commands) -> bool {
             | Commands::Add { .. }
             | Commands::Get { .. }
             | Commands::HookClaudeCode
+            | Commands::HookCodex
             | Commands::HookClaudeCodeFailure
             | Commands::HookCursor
             | Commands::HookCursorPrompt

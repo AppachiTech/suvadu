@@ -259,7 +259,7 @@ fn uninstall_cargo() -> bool {
     }
 }
 
-/// Clean up shell hooks and Claude Code integrations.
+/// Clean up shell hooks and agent integrations.
 fn cleanup_integrations() {
     if let Err(e) = util::cleanup_zshrc() {
         eprintln!("Warning: Failed to clean up .zshrc: {e}");
@@ -273,17 +273,30 @@ fn cleanup_integrations() {
         println!("✓ Removed shell integration from ~/.bashrc");
     }
 
-    // Remove Claude Code hook scripts
+    let codex_cleaned = match crate::integrations::codex::cleanup() {
+        Ok(changed) => {
+            if changed {
+                println!("✓ Removed Suvadu hooks from Codex configuration");
+            }
+            true
+        }
+        Err(e) => {
+            eprintln!("Warning: Failed to clean up Codex hooks: {e}. Hook scripts retained.");
+            false
+        }
+    };
+
+    // Retain scripts if their Codex registrations could not be removed.
     if let Ok(home) = std::env::var("HOME") {
         let hooks_dir = std::path::PathBuf::from(&home)
             .join(".config")
             .join("suvadu")
             .join("hooks");
-        if hooks_dir.exists() {
+        if codex_cleaned && hooks_dir.exists() {
             if let Err(e) = std::fs::remove_dir_all(&hooks_dir) {
                 eprintln!("Warning: Failed to remove hooks directory: {e}");
             } else {
-                println!("✓ Removed Claude Code hook scripts");
+                println!("✓ Removed agent hook scripts");
             }
         }
     }

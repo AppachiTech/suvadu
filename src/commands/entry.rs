@@ -590,6 +590,16 @@ fn process_old_files(dir: &std::path::Path, max_age_secs: u64, delete: bool) -> 
     let now = std::time::SystemTime::now();
     let mut count = 0u64;
     for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            count += process_old_files(&entry.path(), max_age_secs, delete);
+            continue;
+        }
+        if !kind.is_file() {
+            continue;
+        }
         let Ok(meta) = entry.metadata() else { continue };
         if !meta.is_file() {
             continue;
@@ -617,6 +627,24 @@ fn process_old_files(dir: &std::path::Path, max_age_secs: u64, delete: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_cleanup_includes_codex_turn_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("codex/session-one");
+        std::fs::create_dir_all(&directory).unwrap();
+        let old = directory.join("turn-one.prompt");
+        let fresh = directory.join("turn-two.prompt");
+        let file = std::fs::File::create(&old).unwrap();
+        file.set_modified(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap();
+        std::fs::write(&fresh, "recent prompt").unwrap();
+        assert_eq!(process_old_files(temp.path(), 60, false), 1);
+        assert!(old.exists(), "Preview must not delete prompts");
+        assert_eq!(process_old_files(temp.path(), 60, true), 1);
+        assert!(!old.exists());
+        assert!(fresh.exists());
+    }
 
     /// Integration test: exercises the full handle_add_with_context pipeline
     /// (timestamp normalize → session ensure → entry insert) with a temp DB.
