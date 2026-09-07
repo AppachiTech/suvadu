@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.7] - 2026-09-07
+
+### Added
+- **Codex CLI is now a first-class agent integration** — `suv init codex` installs hooks that capture both prompts and shell commands, merging into any hooks you already have in `~/.codex/hooks.json` (synapse, plannotator, etc.) rather than overwriting them, and auto-registers the suvadu MCP server in `~/.codex/config.toml` so Codex can query your shell history directly. The config file is edited in place, so existing comments and formatting survive untouched. Closes #30.
+
+### Fixed
+- **`.bashrc` commands sourced before the first prompt are no longer recorded as if you'd typed them** — bash's `DEBUG` trap fires for every command bash runs, not just ones typed at an interactive prompt, so setup lines left in `.bashrc` after the `eval "$(suv init bash)"` line (an `export`, say) were getting captured and recorded when the first prompt was drawn. Fixes #32.
+
 ## [0.3.6] - 2026-08-01
 
 ### Added
