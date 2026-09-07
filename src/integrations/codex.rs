@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::{config, util};
 use serde_json::{json, Value};
+use util::atomic_write;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -156,7 +157,71 @@ pub fn handle_init() -> Result<()> {
     println!("Prompts are cached locally per turn; recorded commands link to their turn's prompt.");
     println!("View commands: suv history --executor openai-codex");
     println!("View prompts with commands: suv agent prompts --executor openai-codex");
+    let mcp_configured = try_configure_codex_mcp(&codex_home, &binary.to_string_lossy());
+    if matches!(mcp_configured, Ok(true)) {
+        println!(
+            "MCP server auto-configured in {}",
+            codex_home.join("config.toml").display()
+        );
+    }
     Ok(())
+}
+
+/// Sets `table[key]`, preserving the existing value's comment/formatting decor
+/// (a trailing `# comment`, spacing, etc.) when the value already matches.
+fn set_toml_value_keeping_decor(table: &mut toml_edit::Table, key: &str, new: toml_edit::Value) {
+    let bare = |v: &toml_edit::Value| v.clone().decorated("", "").to_string();
+    match table.get_mut(key).and_then(toml_edit::Item::as_value_mut) {
+        Some(existing) if bare(existing) == bare(&new) => {}
+        Some(existing) => {
+            let decor = existing.decor().clone();
+            *existing = new;
+            *existing.decor_mut() = decor;
+        }
+        _ => table[key] = toml_edit::Item::Value(new),
+    }
+}
+
+/// Auto-configure the MCP server in Codex's `config.toml`.
+///
+/// Edits in place with `toml_edit` so the rest of the file survives untouched —
+/// comments, key order and formatting included. `config.toml` is a
+/// hand-maintained file, so a parse-and-reserialize round trip would silently
+/// strip every comment in it.
+///
+/// The `command`/`args` we own are refreshed on every run so a re-install picks
+/// up a moved `suv` binary, but the file is only written when that actually
+/// changes something.
+fn try_configure_codex_mcp(codex_home: &Path, bin_path: &str) -> Result<bool> {
+    let config_path = codex_home.join("config.toml");
+    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = existing.parse()?;
+
+    let fresh_servers = !doc.contains_key("mcp_servers");
+    let servers = doc
+        .entry("mcp_servers")
+        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .ok_or("mcp_servers is not a table")?;
+    if fresh_servers {
+        servers.set_implicit(true);
+    }
+
+    let server = servers
+        .entry("suvadu")
+        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .ok_or("mcp_servers.suvadu is not a table")?;
+    set_toml_value_keeping_decor(server, "command", bin_path.into());
+    let mut args = toml_edit::Array::new();
+    args.push("mcp-serve");
+    set_toml_value_keeping_decor(server, "args", args.into());
+
+    let updated = doc.to_string();
+    if updated != existing {
+        atomic_write(&config_path, &updated)?;
+    }
+    Ok(true)
 }
 
 /// Remove only known Suvadu scripts, preserving other handlers within a mixed group.
@@ -298,6 +363,83 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(backups[0].path()).unwrap(),
             original.to_string()
+        );
+    }
+
+    #[test]
+    fn configure_mcp_is_idempotent_and_preserves_comments() {
+        let temp = tempfile::tempdir().unwrap();
+        let codex_home = temp.path();
+
+        // First run creates config.toml with our server.
+        let first = try_configure_codex_mcp(codex_home, "/usr/local/bin/suv").unwrap();
+        assert!(first);
+        let config_path = codex_home.join("config.toml");
+        let content = std::fs::read_to_string(&config_path).unwrap();
+
+        let parsed: toml::Value = toml::from_str(&content).unwrap();
+        let server = &parsed["mcp_servers"]["suvadu"];
+        assert_eq!(server["command"].as_str(), Some("/usr/local/bin/suv"));
+        assert_eq!(
+            server["args"].as_array().unwrap(),
+            &vec![toml::Value::String("mcp-serve".into())]
+        );
+
+        // A stale binary path and an unrelated key added by hand.
+        let mut stale: toml::Value = toml::from_str(&content).unwrap();
+        let server = stale["mcp_servers"]["suvadu"].as_table_mut().unwrap();
+        server.insert(
+            "command".to_string(),
+            toml::Value::String("/stale/bin/suv".to_string()),
+        );
+        server.insert("startup_timeout_sec".to_string(), toml::Value::Integer(15));
+        std::fs::write(&config_path, toml::to_string_pretty(&stale).unwrap()).unwrap();
+
+        // Re-running refreshes our launcher without touching other settings.
+        try_configure_codex_mcp(codex_home, "/opt/homebrew/bin/suv").unwrap();
+        let content2 = std::fs::read_to_string(&config_path).unwrap();
+        let parsed2: toml::Value = toml::from_str(&content2).unwrap();
+        let servers = parsed2["mcp_servers"].as_table().unwrap();
+        assert_eq!(servers.len(), 1, "should not duplicate the suvadu server");
+        assert_eq!(
+            servers["suvadu"]["command"].as_str(),
+            Some("/opt/homebrew/bin/suv")
+        );
+        assert_eq!(
+            servers["suvadu"]["startup_timeout_sec"].as_integer(),
+            Some(15)
+        );
+
+        // A hand-maintained file's comments and other tables must survive untouched.
+        let hand_written = concat!(
+            "# my codex config\n",
+            "# keep these comments\n",
+            "model = \"gpt-5.6-sol\"\n",
+            "\n",
+            "[mcp_servers.context7]\n",
+            "command = \"npx\"\n",
+            "args = [\"-y\", \"@upstash/context7-mcp\"]\n",
+            "\n",
+            "# suvadu: local shell history\n",
+            "[mcp_servers.suvadu]\n",
+            "command = \"/old/bin/suv\" # stale path\n",
+            "args = [\"mcp-serve\"] # leave me alone\n",
+        );
+        std::fs::write(&config_path, hand_written).unwrap();
+        try_configure_codex_mcp(codex_home, "/new/bin/suv").unwrap();
+        let refreshed = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(
+            refreshed,
+            hand_written.replace("/old/bin/suv", "/new/bin/suv")
+        );
+
+        // A no-op rerun must not touch the file at all.
+        let mtime_before = std::fs::metadata(&config_path).unwrap().modified().unwrap();
+        try_configure_codex_mcp(codex_home, "/new/bin/suv").unwrap();
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), refreshed);
+        assert_eq!(
+            std::fs::metadata(&config_path).unwrap().modified().unwrap(),
+            mtime_before
         );
     }
 }
