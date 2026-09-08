@@ -43,6 +43,10 @@ pub(crate) fn filtered_skill_indices(skills: &[Skill], query: &str) -> Vec<usize
     scored.into_iter().map(|(i, _)| i).collect()
 }
 
+pub(crate) fn copy_feedback_message(name: &str) -> String {
+    format!("Copied '{name}' to clipboard")
+}
+
 use crate::models::SKILL_STATUS_ACTIVE;
 use crate::repository::Repository;
 use crate::theme::theme;
@@ -134,6 +138,21 @@ pub fn run(repo: &Repository) -> Result<(), Box<dyn std::error::Error>> {
                     let i = app.list_state.selected().unwrap_or(0);
                     app.list_state
                         .select(Some((i + 1).min(app.filtered.len() - 1)));
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(skill) = app.selected_skill() {
+                    let name = skill.name.clone();
+                    let body = skill.body.clone();
+                    app.status_message = match arboard::Clipboard::new()
+                        .and_then(|mut c| c.set_text(body))
+                    {
+                        Ok(()) => Some((StatusLevel::Info, copy_feedback_message(&name))),
+                        Err(e) => Some((
+                            StatusLevel::Error,
+                            format!("Could not copy to clipboard: {e}"),
+                        )),
+                    };
                 }
             }
             KeyCode::Backspace => {
@@ -255,6 +274,14 @@ fn render(f: &mut ratatui::Frame, app: &mut SkillsApp) {
 mod tests {
     use super::*;
     use crate::models::SKILL_SCOPE_GLOBAL;
+
+    #[test]
+    fn copy_feedback_names_the_skill() {
+        assert_eq!(
+            copy_feedback_message("release"),
+            "Copied 'release' to clipboard"
+        );
+    }
 
     fn skill(name: &str, description: &str, triggers: &[&str]) -> Skill {
         Skill {
