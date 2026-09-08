@@ -171,6 +171,11 @@ pub struct FormState {
     triggers: String,
     scope_is_global: bool,
     focus: FormField,
+    /// The body most recently returned by `$EDITOR`, kept even if the save
+    /// that followed it failed (e.g. a duplicate name) — without this, a
+    /// failed save would discard the content the user just wrote and force
+    /// a full rewrite on retry.
+    pending_body: Option<String>,
 }
 
 impl FormState {
@@ -182,6 +187,7 @@ impl FormState {
             triggers: String::new(),
             scope_is_global: true,
             focus: FormField::Name,
+            pending_body: None,
         }
     }
 
@@ -212,6 +218,7 @@ pub fn form_from_existing(skill: &Skill) -> FormState {
         triggers: skill.triggers.join(", "),
         scope_is_global: skill.scope == crate::models::SKILL_SCOPE_GLOBAL,
         focus: FormField::Description,
+        pending_body: None,
     }
 }
 
@@ -399,13 +406,17 @@ fn handle_confirm_delete_key(
     match key.code {
         KeyCode::Char('y' | 'Y') => {
             match repo.delete_skill(name, scope) {
-                Ok(_) => {
+                Ok(removed) => {
                     let removed_index = app.list_state.selected().unwrap_or(0);
                     app.skills = repo.list_skills(None, Some(SKILL_STATUS_ACTIVE))?;
                     app.refresh_filter();
                     app.list_state
                         .select(reselect_after_removal(removed_index, app.filtered.len()));
-                    app.status_message = Some((StatusLevel::Info, format!("Deleted '{name}'")));
+                    app.status_message = Some(if removed {
+                        (StatusLevel::Info, format!("Deleted '{name}'"))
+                    } else {
+                        (StatusLevel::Info, format!("'{name}' was already gone"))
+                    });
                 }
                 Err(e) => {
                     app.status_message = Some((StatusLevel::Error, format!("Delete failed: {e}")));
@@ -443,7 +454,12 @@ fn handle_form_key(
             }
             app.mode = Mode::Form(form);
         }
-        KeyCode::Char(c) if form.focus != FormField::Scope => {
+        // Excludes Ctrl+<letter> so Browse's shortcuts (Ctrl+A/E/D/S/P/C)
+        // don't leak a literal character into whatever field has focus if
+        // muscle memory triggers one of them while a form is open.
+        KeyCode::Char(c)
+            if form.focus != FormField::Scope && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
             if let Some(field) = form.focused_text_mut() {
                 field.push(c);
             }
@@ -461,10 +477,13 @@ fn submit_form(
     repo: &Repository,
     terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let initial = form
-        .editing
-        .as_ref()
-        .map_or_else(String::new, |s| s.body.clone());
+    // Prefer a body from a previous failed save attempt over the
+    // pre-existing/empty starting point, so a retry doesn't lose work.
+    let initial = form.pending_body.clone().unwrap_or_else(|| {
+        form.editing
+            .as_ref()
+            .map_or_else(String::new, |s| s.body.clone())
+    });
     let edited = suspend_for_editor(terminal, || edit_body(&initial))?;
     match edited {
         None => {
@@ -478,7 +497,11 @@ fn submit_form(
             ));
             app.mode = Mode::Form(form);
         }
-        Some(body) => save_form(app, form, repo, body)?,
+        Some(body) => {
+            let mut form = form;
+            form.pending_body = Some(body.clone());
+            save_form(app, form, repo, body)?;
+        }
     }
     Ok(())
 }
