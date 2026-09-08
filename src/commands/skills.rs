@@ -26,7 +26,7 @@ fn resolve_scope(scope_arg: Option<&str>) -> Result<String, Box<dyn std::error::
     match scope_arg {
         None | Some(SKILL_SCOPE_GLOBAL) => Ok(SKILL_SCOPE_GLOBAL.to_string()),
         Some("here") => Ok(std::env::current_dir()?.to_string_lossy().to_string()),
-        Some(other) => Ok(other.to_string()),
+        Some(other) => Ok(crate::models::normalize_scope_path(other)),
     }
 }
 
@@ -267,8 +267,14 @@ fn handle_rm(
     scope: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let existing = resolve_target(repo, name, scope)?;
-    repo.delete_skill(&existing.name, &existing.scope)?;
-    println!("✓ Skill '{}' removed ({})", existing.name, existing.scope);
+    if repo.delete_skill(&existing.name, &existing.scope)? {
+        println!("✓ Skill '{}' removed ({})", existing.name, existing.scope);
+    } else {
+        println!(
+            "Skill '{}' was already gone ({})",
+            existing.name, existing.scope
+        );
+    }
     Ok(())
 }
 

@@ -231,8 +231,9 @@ pub struct McpConfig {
     /// Directories to exclude from MCP queries.
     pub exclude_dirs: Vec<String>,
     /// Allow agents to call `propose_skill` over MCP, writing a new skill
-    /// with `status = "pending_review"` for a human to approve via
-    /// `suv skills review`. Off by default: a skill store that agents can
+    /// with `status = "pending_review"` for a human to approve from the
+    /// review queue in `suv skills` (Ctrl+P). Off by default: a skill store
+    /// that agents can
     /// both read and write is a shared-memory poisoning target, so writes
     /// require an explicit opt-in even though they only ever land as
     /// pending, never active.

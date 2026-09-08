@@ -230,6 +230,21 @@ pub struct AliasSuggestion {
 
 /// Scope value meaning a skill applies to every project (not tied to a directory).
 pub const SKILL_SCOPE_GLOBAL: &str = "global";
+
+/// Strip a trailing `/` from an explicit project-scope path so it matches
+/// `cwd.to_string_lossy()` (which never has one) during `suv skills sync`'s
+/// exact string comparison. A bare `/` is left as-is. Doesn't canonicalize
+/// symlinks or `..` components — that would risk introducing a *new*
+/// mismatch against whatever raw form `std::env::current_dir()` returns,
+/// which this function's callers need to match exactly.
+pub fn normalize_scope_path(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        path.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
 /// A skill that is live and should be surfaced/materialized.
 pub const SKILL_STATUS_ACTIVE: &str = "active";
 /// A skill an agent proposed that has not been approved by a human yet.
@@ -297,6 +312,17 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_scope_path_strips_trailing_slash() {
+        assert_eq!(normalize_scope_path("/Users/me/proj/"), "/Users/me/proj");
+        assert_eq!(normalize_scope_path("/Users/me/proj"), "/Users/me/proj");
+    }
+
+    #[test]
+    fn normalize_scope_path_leaves_bare_root_alone() {
+        assert_eq!(normalize_scope_path("/"), "/");
+    }
 
     #[test]
     fn test_entry_creation() {

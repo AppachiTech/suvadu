@@ -343,7 +343,7 @@ fn get_skill_def() -> Value {
             "type": "object",
             "properties": {
                 "name": { "type": "string", "description": "Skill name" },
-                "scope": { "type": "string", "description": "\"global\" or a project directory path. If omitted, the best match (this directory, then global) is returned." },
+                "scope": { "type": "string", "description": "\"global\" or a project directory path. If omitted, the global skill is returned when one exists, otherwise the most recently updated skill with this name in any scope — this tool has no visibility into your working directory, so pass it explicitly to target a specific project-scoped skill." },
                 "directory": { "type": "string", "description": "Alias for scope" }
             },
             "required": ["name"]
@@ -369,7 +369,7 @@ fn search_skills_def() -> Value {
 fn propose_skill_def() -> Value {
     json!({
         "name": "propose_skill",
-        "description": "Propose a new skill for Suvadu's shared skills library. The skill is saved as pending review — it is NOT active and other agents will not see it via list_skills/get_skill until a human approves it with `suv skills review`. Use this when you notice a reusable instruction/checklist worth sharing, not for anything sensitive.",
+        "description": "Propose a new skill for Suvadu's shared skills library. The skill is saved as pending review — it is NOT active and other agents will not see it via list_skills/get_skill until a human approves it from the review queue in `suv skills` (Ctrl+P). Use this when you notice a reusable instruction/checklist worth sharing, not for anything sensitive.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1972,10 +1972,21 @@ fn handle_propose_skill(args: &Value, mcp: &crate::config::McpConfig) -> Result<
         return Err(
             "Skill proposals are disabled. A human can enable them by setting \
              mcp.allow_skill_proposals = true in config.toml — proposals still land as \
-             pending_review only, never active, until reviewed with `suv skills review`."
+             pending_review only, never active, until reviewed from the review queue in \
+             `suv skills` (Ctrl+P)."
                 .to_string(),
         );
     }
+    // Deliberate exception to "the MCP server only ever holds a read-only
+    // connection" (see `server::run`'s doc comment): this is the one tool
+    // that writes, so it needs its own read-write connection rather than
+    // the shared read-only one every other handler receives. Safe here
+    // specifically because (a) it's gated behind the opt-in check above,
+    // (b) the database runs in WAL mode (one writer + readers coexist
+    // without blocking), and (c) the server's request loop is synchronous —
+    // this connection is never open at the same instant another request is
+    // being handled. Do NOT copy this pattern for a future tool without
+    // re-checking all three of those still hold.
     let repo = crate::repository::Repository::init()
         .map_err(|e| format!("failed to open database: {e}"))?;
     propose_skill_with_repo(&repo, args)
@@ -1988,9 +1999,9 @@ fn propose_skill_with_repo(repo: &Repository, args: &Value) -> Result<String, St
     let name = get_str(args, "name").ok_or("name is required")?;
     let body = get_str(args, "body").ok_or("body is required")?;
     let description = get_str(args, "description").unwrap_or("").to_string();
-    let scope = get_str(args, "scope")
-        .unwrap_or(crate::models::SKILL_SCOPE_GLOBAL)
-        .to_string();
+    let scope = crate::models::normalize_scope_path(
+        get_str(args, "scope").unwrap_or(crate::models::SKILL_SCOPE_GLOBAL),
+    );
     let source_agent = get_str(args, "source_agent").unwrap_or("unknown");
     let triggers = args
         .get("triggers")
@@ -2016,7 +2027,7 @@ fn propose_skill_with_repo(repo: &Repository, args: &Value) -> Result<String, St
         .create_skill(&new)
         .map_err(|e| format!("failed to save proposal: {e}"))?;
     Ok(format!(
-        "Proposal saved as pending review: '{}' ({}). A human must approve it with `suv skills review` before it becomes active.",
+        "Proposal saved as pending review: '{}' ({}). A human must approve it from the review queue in `suv skills` (Ctrl+P) before it becomes active.",
         skill.name, skill.scope
     ))
 }
