@@ -9,6 +9,17 @@ use super::tools;
 /// Run the MCP server: read JSON-RPC from stdin, write responses to stdout.
 /// All logging goes to stderr. The database is opened read-only.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // `Repository::init_read_only()` below deliberately skips migrations (see
+    // its doc comment) so the long-lived server session never writes. But
+    // that means a fresh install (no DB file yet) or a DB left on an older
+    // schema version right after an upgrade would otherwise surface a raw
+    // "no such table" error on the first tool call instead of the intended
+    // empty-state message. Open-migrate-drop once up front to guarantee the
+    // schema is current before the read-only connection is opened.
+    {
+        let db_path = crate::db::get_db_path()?;
+        crate::db::init_db(&db_path)?;
+    }
     let repo = Repository::init_read_only()?;
     let config = crate::config::load_config().unwrap_or_default();
     // Apply user risk-ignore suppressions so the assess_risk tool honors them.
