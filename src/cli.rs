@@ -475,10 +475,12 @@ pub enum Commands {
     /// Manage the shared skills library — reusable instructions any
     /// MCP-capable AI agent can read, instead of each agent keeping its own copy
     #[command(
-        subcommand,
-        after_help = "Examples:\n  suv skills add deploy-checklist --description \"Steps before a deploy\" < deploy.md\n  suv skills list\n  suv skills show deploy-checklist\n  suv skills sync --target claude-code\n  suv skills review"
+        after_help = "Examples:\n  suv skills                              # interactive management TUI\n  suv skills add deploy-checklist --description \"Steps before a deploy\" < deploy.md\n  suv skills list\n  suv skills show deploy-checklist\n  suv skills sync --target claude-code"
     )]
-    Skills(SkillsCommands),
+    Skills {
+        #[command(subcommand)]
+        command: Option<SkillsCommands>,
+    },
 
     /// Remove orphaned data and compact the database
     #[command(
@@ -818,12 +820,6 @@ pub enum SkillsCommands {
         scope: Option<String>,
     },
 
-    /// Interactively pick a skill and print its body to stdout
-    Pick,
-
-    /// Approve or reject agent-proposed skills awaiting review
-    Review,
-
     /// Materialize active skills into each AI agent's native file format
     #[command(
         after_help = "Examples:\n  suv skills sync                       # all configured targets\n  suv skills sync --target claude-code  # just Claude Code\n  suv skills sync --dry-run             # preview without writing"
@@ -950,5 +946,28 @@ mod tests {
             }
             _ => panic!("Expected Wrap command"),
         }
+    }
+
+    #[test]
+    fn test_cli_parses_bare_skills_as_none() {
+        let cli = Cli::try_parse_from(["suv", "skills"]).unwrap();
+        assert!(matches!(cli.command, Commands::Skills { command: None }));
+    }
+
+    #[test]
+    fn test_cli_parses_skills_list_unchanged() {
+        let cli = Cli::try_parse_from(["suv", "skills", "list", "--json"]).unwrap();
+        match cli.command {
+            Commands::Skills {
+                command: Some(SkillsCommands::List { json, .. }),
+            } => assert!(json),
+            _ => panic!("Expected Skills{{ command: Some(List) }}"),
+        }
+    }
+
+    #[test]
+    fn test_cli_rejects_removed_pick_and_review_subcommands() {
+        assert!(Cli::try_parse_from(["suv", "skills", "pick"]).is_err());
+        assert!(Cli::try_parse_from(["suv", "skills", "review"]).is_err());
     }
 }

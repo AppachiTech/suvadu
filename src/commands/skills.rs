@@ -12,9 +12,12 @@ use crate::repository::Repository;
 use crate::util;
 use std::io::Read;
 
-pub fn handle_skills(cmd: SkillsCommands) -> Result<(), Box<dyn std::error::Error>> {
+pub fn handle_skills(cmd: Option<SkillsCommands>) -> Result<(), Box<dyn std::error::Error>> {
     let repo = Repository::init()?;
-    handle_skills_with_repo(&repo, cmd)
+    match cmd {
+        Some(cmd) => handle_skills_with_repo(&repo, cmd),
+        None => crate::skills_ui::run(&repo),
+    }
 }
 
 /// "global" (default), "here" (resolved to the current directory), or a
@@ -62,8 +65,6 @@ fn handle_skills_with_repo(
             &triggers,
         ),
         SkillsCommands::Rm { name, scope } => handle_rm(repo, &name, scope.as_deref()),
-        SkillsCommands::Pick => handle_pick(repo),
-        SkillsCommands::Review => handle_review(repo),
         SkillsCommands::Sync { target, dry_run } => handle_sync(repo, target, dry_run),
     }
 }
@@ -271,27 +272,16 @@ fn handle_rm(
     Ok(())
 }
 
-fn handle_pick(repo: &Repository) -> Result<(), Box<dyn std::error::Error>> {
-    let skills = repo.list_skills(None, Some(SKILL_STATUS_ACTIVE))?;
-    if skills.is_empty() {
-        eprintln!("No skills yet. Use `suv skills add <name>` to save one.");
-        return Ok(());
-    }
-    if let Some(body) = crate::commands::picker::pick_skill(&skills)? {
-        println!("{body}");
-    }
-    Ok(())
-}
-
 /// A human's decision on one pending skill proposal.
-enum ReviewDecision {
+pub(crate) enum ReviewDecision {
     Approve,
     Reject,
 }
 
-/// Apply a review decision to a pending skill. Separated from the interactive
-/// loop in [`handle_review`] so the decision logic is directly testable.
-fn apply_review_decision(
+/// Apply a review decision to a pending skill. Shared between the TUI's
+/// review queue (see `skills_ui.rs`) and this module's tests, so the
+/// decision logic is defined once and tested once.
+pub(crate) fn apply_review_decision(
     repo: &Repository,
     skill: &Skill,
     decision: &ReviewDecision,
@@ -304,40 +294,6 @@ fn apply_review_decision(
             // Kept as archived rather than deleted, so a rejected proposal
             // stays visible in `suv skills list --all` for audit purposes.
             repo.set_skill_status(&skill.name, &skill.scope, SKILL_STATUS_ARCHIVED)?;
-        }
-    }
-    Ok(())
-}
-
-fn handle_review(repo: &Repository) -> Result<(), Box<dyn std::error::Error>> {
-    let pending = repo.list_skills(None, Some(SKILL_STATUS_PENDING))?;
-    if pending.is_empty() {
-        println!("No skills awaiting review.");
-        return Ok(());
-    }
-
-    println!(
-        "{} skill(s) awaiting review. For each: [a]pprove, [r]eject, [s]kip, [q]uit.\n",
-        pending.len()
-    );
-
-    for skill in &pending {
-        print_skill(skill);
-        print!("\n{} — a/r/s/q? ", skill.name);
-        std::io::Write::flush(&mut std::io::stdout())?;
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        match input.trim().to_lowercase().as_str() {
-            "a" => {
-                apply_review_decision(repo, skill, &ReviewDecision::Approve)?;
-                println!("✓ Approved '{}'\n", skill.name);
-            }
-            "r" => {
-                apply_review_decision(repo, skill, &ReviewDecision::Reject)?;
-                println!("✗ Rejected '{}'\n", skill.name);
-            }
-            "q" => break,
-            _ => println!("Skipped '{}'\n", skill.name),
         }
     }
     Ok(())
