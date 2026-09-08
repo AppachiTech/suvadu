@@ -12,7 +12,7 @@ use crate::models::Skill;
 /// Fuzzy-rank `skills` against `query` (matched against name, description,
 /// and triggers) and return their indices best-match-first. Returns every
 /// index, in original order, when `query` is empty.
-pub(crate) fn filtered_skill_indices(skills: &[Skill], query: &str) -> Vec<usize> {
+pub fn filtered_skill_indices(skills: &[Skill], query: &str) -> Vec<usize> {
     use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
     use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
 
@@ -43,20 +43,22 @@ pub(crate) fn filtered_skill_indices(skills: &[Skill], query: &str) -> Vec<usize
     scored.into_iter().map(|(i, _)| i).collect()
 }
 
-pub(crate) fn copy_feedback_message(name: &str) -> String {
+pub fn copy_feedback_message(name: &str) -> String {
     format!("Copied '{name}' to clipboard")
 }
 
 /// Write `initial` to a temp file, run $EDITOR/$VISUAL (falling back to
 /// `vi`) on it, and read the result back. Returns `None` if the editor
 /// exits non-zero (treated as a cancel), matching `git commit`'s convention.
-pub(crate) fn edit_body(initial: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+pub fn edit_body(initial: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "vi".to_string());
     let tmp = tempfile::Builder::new().suffix(".md").tempfile()?;
     std::fs::write(tmp.path(), initial)?;
-    let status = std::process::Command::new(&editor).arg(tmp.path()).status()?;
+    let status = std::process::Command::new(&editor)
+        .arg(tmp.path())
+        .status()?;
     if !status.success() {
         return Ok(None);
     }
@@ -89,7 +91,7 @@ fn suspend_for_editor<T>(
     result
 }
 
-pub(crate) fn parse_triggers(input: &str) -> Vec<String> {
+pub fn parse_triggers(input: &str) -> Vec<String> {
     input
         .split(',')
         .map(str::trim)
@@ -98,7 +100,7 @@ pub(crate) fn parse_triggers(input: &str) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn format_sync_status(report: &crate::skills_sync::SyncReport) -> (StatusLevel, String) {
+pub fn format_sync_status(report: &crate::skills_sync::SyncReport) -> (StatusLevel, String) {
     if report.written == 0 {
         (
             StatusLevel::Info,
@@ -115,7 +117,7 @@ pub(crate) fn format_sync_status(report: &crate::skills_sync::SyncReport) -> (St
 /// After removing the item at `removed_index` from a list, what selection
 /// index should follow it? `remaining_len` is the list's length *after*
 /// removal. Returns `None` if the list is now empty.
-pub(crate) fn reselect_after_removal(removed_index: usize, remaining_len: usize) -> Option<usize> {
+pub fn reselect_after_removal(removed_index: usize, remaining_len: usize) -> Option<usize> {
     if remaining_len == 0 {
         None
     } else {
@@ -137,26 +139,32 @@ use ratatui::{
 };
 use std::io;
 
-pub(crate) enum StatusLevel {
+pub enum StatusLevel {
     Info,
     Error,
 }
 
+// `Mode` lives in exactly one `SkillsApp` field (never in a collection), so
+// the size difference between variants is a few hundred bytes on one struct,
+// not a real cost — not worth the churn of boxing `FormState` everywhere
+// it's constructed/matched.
+#[allow(clippy::large_enum_variant)]
 enum Mode {
     Browse,
     ConfirmDelete { name: String, scope: String },
     Form(FormState),
+    Review,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FormField {
+pub enum FormField {
     Name,
     Description,
     Triggers,
     Scope,
 }
 
-pub(crate) struct FormState {
+pub struct FormState {
     editing: Option<Skill>, // Some = edit, None = add
     name: String,
     description: String,
@@ -166,7 +174,7 @@ pub(crate) struct FormState {
 }
 
 impl FormState {
-    fn new_add() -> Self {
+    const fn new_add() -> Self {
         Self {
             editing: None,
             name: String::new(),
@@ -177,7 +185,7 @@ impl FormState {
         }
     }
 
-    fn next_field(&mut self) {
+    const fn next_field(&mut self) {
         self.focus = match self.focus {
             FormField::Name => FormField::Description,
             FormField::Description => FormField::Triggers,
@@ -186,7 +194,7 @@ impl FormState {
         };
     }
 
-    fn focused_text_mut(&mut self) -> Option<&mut String> {
+    const fn focused_text_mut(&mut self) -> Option<&mut String> {
         match self.focus {
             FormField::Name if self.editing.is_none() => Some(&mut self.name),
             FormField::Description => Some(&mut self.description),
@@ -196,7 +204,7 @@ impl FormState {
     }
 }
 
-pub(crate) fn form_from_existing(skill: &Skill) -> FormState {
+pub fn form_from_existing(skill: &Skill) -> FormState {
     FormState {
         editing: Some(skill.clone()),
         name: skill.name.clone(),
@@ -207,13 +215,15 @@ pub(crate) fn form_from_existing(skill: &Skill) -> FormState {
     }
 }
 
-pub(crate) struct SkillsApp {
+pub struct SkillsApp {
     skills: Vec<Skill>,
     query: String,
     filtered: Vec<usize>,
     list_state: ListState,
     status_message: Option<(StatusLevel, String)>,
     mode: Mode,
+    pending: Vec<Skill>,
+    pending_state: ListState,
 }
 
 impl SkillsApp {
@@ -231,6 +241,8 @@ impl SkillsApp {
             list_state,
             status_message: None,
             mode: Mode::Browse,
+            pending: Vec::new(),
+            pending_state: ListState::default(),
         })
     }
 
@@ -269,232 +281,336 @@ pub fn run(repo: &Repository) -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        match &app.mode {
-            Mode::Browse => match key.code {
-                KeyCode::Esc => break,
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    app.mode = Mode::Form(FormState::new_add());
-                }
-                KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if let Some(skill) = app.selected_skill() {
-                        app.mode = Mode::Form(form_from_existing(skill));
-                    }
-                }
-                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if let Some(skill) = app.selected_skill() {
-                        app.mode = Mode::ConfirmDelete {
-                            name: skill.name.clone(),
-                            scope: skill.scope.clone(),
-                        };
-                    }
-                }
-                KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    let targets = [
-                        crate::cli::SyncTarget::ClaudeCode,
-                        crate::cli::SyncTarget::Cursor,
-                        crate::cli::SyncTarget::Codex,
-                    ];
-                    let cwd = std::env::current_dir()?;
-                    app.status_message = match crate::skills_sync::sync(repo, &targets, &cwd, false)
-                    {
-                        Ok(report) => Some(format_sync_status(&report)),
-                        Err(e) => Some((StatusLevel::Error, format!("Sync failed: {e}"))),
-                    };
-                }
-                KeyCode::Up => {
-                    let i = app.list_state.selected().unwrap_or(0);
-                    app.list_state.select(Some(i.saturating_sub(1)));
-                }
-                KeyCode::Down => {
-                    if !app.filtered.is_empty() {
-                        let i = app.list_state.selected().unwrap_or(0);
-                        app.list_state
-                            .select(Some((i + 1).min(app.filtered.len() - 1)));
-                    }
-                }
-                KeyCode::Enter => {
-                    if let Some(skill) = app.selected_skill() {
-                        let name = skill.name.clone();
-                        let body = skill.body.clone();
-                        app.status_message = match arboard::Clipboard::new()
-                            .and_then(|mut c| c.set_text(body))
-                        {
-                            Ok(()) => Some((StatusLevel::Info, copy_feedback_message(&name))),
-                            Err(e) => Some((
-                                StatusLevel::Error,
-                                format!("Could not copy to clipboard: {e}"),
-                            )),
-                        };
-                    }
-                }
-                KeyCode::Backspace => {
-                    app.query.pop();
-                    app.refresh_filter();
-                }
-                KeyCode::Char(c) => {
-                    app.query.push(c);
-                    app.refresh_filter();
-                }
-                _ => {}
-            },
-            Mode::ConfirmDelete { name, scope } => {
-                let (name, scope) = (name.clone(), scope.clone());
-                match key.code {
-                    KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        match repo.delete_skill(&name, &scope) {
-                            Ok(_) => {
-                                let removed_index = app.list_state.selected().unwrap_or(0);
-                                app.skills = repo.list_skills(None, Some(SKILL_STATUS_ACTIVE))?;
-                                app.refresh_filter();
-                                app.list_state.select(reselect_after_removal(
-                                    removed_index,
-                                    app.filtered.len(),
-                                ));
-                                app.status_message =
-                                    Some((StatusLevel::Info, format!("Deleted '{name}'")));
-                            }
-                            Err(e) => {
-                                app.status_message =
-                                    Some((StatusLevel::Error, format!("Delete failed: {e}")));
-                            }
-                        }
-                        app.mode = Mode::Browse;
-                    }
-                    _ => app.mode = Mode::Browse,
+        match std::mem::replace(&mut app.mode, Mode::Browse) {
+            Mode::Browse => {
+                app.mode = Mode::Browse;
+                if handle_browse_key(&mut app, key, repo)? {
+                    break;
                 }
             }
-            Mode::Form(_) => {
-                let Mode::Form(mut form) = std::mem::replace(&mut app.mode, Mode::Browse) else {
-                    unreachable!()
-                };
-                match key.code {
-                    KeyCode::Esc => { /* discard `form`, stay in Browse */ }
-                    KeyCode::Tab => {
-                        form.next_field();
-                        app.mode = Mode::Form(form);
-                    }
-                    KeyCode::Char(' ') if form.focus == FormField::Scope => {
-                        form.scope_is_global = !form.scope_is_global;
-                        app.mode = Mode::Form(form);
-                    }
-                    KeyCode::Backspace => {
-                        if let Some(field) = form.focused_text_mut() {
-                            field.pop();
-                        }
-                        app.mode = Mode::Form(form);
-                    }
-                    KeyCode::Char(c) if form.focus != FormField::Scope => {
-                        if let Some(field) = form.focused_text_mut() {
-                            field.push(c);
-                        }
-                        app.mode = Mode::Form(form);
-                    }
-                    KeyCode::Enter => {
-                        let initial = form
-                            .editing
-                            .as_ref()
-                            .map_or_else(String::new, |s| s.body.clone());
-                        let edited = suspend_for_editor(&mut terminal, || edit_body(&initial))?;
-                        match edited {
-                            None => {
-                                app.status_message =
-                                    Some((StatusLevel::Error, "Editor cancelled".to_string()));
-                                app.mode = Mode::Form(form);
-                            }
-                            Some(body) if body.trim().is_empty() => {
-                                app.status_message = Some((
-                                    StatusLevel::Error,
-                                    "Skill body is empty — not saved".to_string(),
-                                ));
-                                app.mode = Mode::Form(form);
-                            }
-                            Some(body) => {
-                                let triggers = parse_triggers(&form.triggers);
-                                match &form.editing {
-                                    None => {
-                                        // Resolved at submit time, not when the form opened —
-                                        // equivalent in practice since nothing in this app changes
-                                        // the process's cwd during its lifetime.
-                                        let scope = if form.scope_is_global {
-                                            crate::models::SKILL_SCOPE_GLOBAL.to_string()
-                                        } else {
-                                            std::env::current_dir()?.to_string_lossy().to_string()
-                                        };
-                                        let new = crate::models::NewSkill {
-                                            name: form.name.clone(),
-                                            description: form.description.clone(),
-                                            body,
-                                            triggers,
-                                            scope,
-                                            source: crate::models::SKILL_SOURCE_HUMAN.to_string(),
-                                            status: SKILL_STATUS_ACTIVE.to_string(),
-                                        };
-                                        match repo.create_skill(&new) {
-                                            Ok(skill) => {
-                                                app.skills =
-                                                    repo.list_skills(None, Some(SKILL_STATUS_ACTIVE))?;
-                                                app.refresh_filter();
-                                                app.status_message = Some((
-                                                    StatusLevel::Info,
-                                                    format!("Added '{}'", skill.name),
-                                                ));
-                                            }
-                                            Err(e) => {
-                                                app.status_message = Some((
-                                                    StatusLevel::Error,
-                                                    format!("Add failed: {e}"),
-                                                ));
-                                                app.mode = Mode::Form(form);
-                                            }
-                                        }
-                                    }
-                                    Some(existing) => {
-                                        match repo.update_skill(
-                                            &existing.name,
-                                            &existing.scope,
-                                            Some(&form.description),
-                                            Some(&body),
-                                            Some(&triggers),
-                                        ) {
-                                            Ok(Some(updated)) => {
-                                                app.skills =
-                                                    repo.list_skills(None, Some(SKILL_STATUS_ACTIVE))?;
-                                                app.refresh_filter();
-                                                app.status_message = Some((
-                                                    StatusLevel::Info,
-                                                    format!(
-                                                        "Updated '{}' (v{})",
-                                                        updated.name, updated.version
-                                                    ),
-                                                ));
-                                            }
-                                            Ok(None) => {
-                                                app.status_message = Some((
-                                                    StatusLevel::Error,
-                                                    "Skill disappeared during edit".to_string(),
-                                                ));
-                                            }
-                                            Err(e) => {
-                                                app.status_message = Some((
-                                                    StatusLevel::Error,
-                                                    format!("Edit failed: {e}"),
-                                                ));
-                                                app.mode = Mode::Form(form);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    _ => app.mode = Mode::Form(form),
-                }
+            Mode::ConfirmDelete { name, scope } => {
+                handle_confirm_delete_key(&mut app, key, repo, &name, &scope)?;
+            }
+            Mode::Form(form) => {
+                app.mode = Mode::Form(form);
+                handle_form_key(&mut app, key, repo, &mut terminal)?;
+            }
+            Mode::Review => {
+                app.mode = Mode::Review;
+                handle_review_key(&mut app, key, repo)?;
             }
         }
     }
 
     terminal.show_cursor()?;
+    Ok(())
+}
+
+/// Returns `true` if the app should quit.
+fn handle_browse_key(
+    app: &mut SkillsApp,
+    key: crossterm::event::KeyEvent,
+    repo: &Repository,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    match key.code {
+        KeyCode::Esc => return Ok(true),
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.mode = Mode::Form(FormState::new_add());
+        }
+        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(skill) = app.selected_skill() {
+                app.mode = Mode::Form(form_from_existing(skill));
+            }
+        }
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.pending = repo.list_skills(None, Some(crate::models::SKILL_STATUS_PENDING))?;
+            app.pending_state = ListState::default();
+            if !app.pending.is_empty() {
+                app.pending_state.select(Some(0));
+            }
+            app.mode = Mode::Review;
+        }
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(skill) = app.selected_skill() {
+                app.mode = Mode::ConfirmDelete {
+                    name: skill.name.clone(),
+                    scope: skill.scope.clone(),
+                };
+            }
+        }
+        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let targets = [
+                crate::cli::SyncTarget::ClaudeCode,
+                crate::cli::SyncTarget::Cursor,
+                crate::cli::SyncTarget::Codex,
+            ];
+            let cwd = std::env::current_dir()?;
+            app.status_message = match crate::skills_sync::sync(repo, &targets, &cwd, false) {
+                Ok(report) => Some(format_sync_status(&report)),
+                Err(e) => Some((StatusLevel::Error, format!("Sync failed: {e}"))),
+            };
+        }
+        KeyCode::Up => {
+            let i = app.list_state.selected().unwrap_or(0);
+            app.list_state.select(Some(i.saturating_sub(1)));
+        }
+        KeyCode::Down => {
+            if !app.filtered.is_empty() {
+                let i = app.list_state.selected().unwrap_or(0);
+                app.list_state
+                    .select(Some((i + 1).min(app.filtered.len() - 1)));
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(skill) = app.selected_skill() {
+                let name = skill.name.clone();
+                let body = skill.body.clone();
+                app.status_message =
+                    match arboard::Clipboard::new().and_then(|mut c| c.set_text(body)) {
+                        Ok(()) => Some((StatusLevel::Info, copy_feedback_message(&name))),
+                        Err(e) => Some((
+                            StatusLevel::Error,
+                            format!("Could not copy to clipboard: {e}"),
+                        )),
+                    };
+            }
+        }
+        KeyCode::Backspace => {
+            app.query.pop();
+            app.refresh_filter();
+        }
+        KeyCode::Char(c) => {
+            app.query.push(c);
+            app.refresh_filter();
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
+fn handle_confirm_delete_key(
+    app: &mut SkillsApp,
+    key: crossterm::event::KeyEvent,
+    repo: &Repository,
+    name: &str,
+    scope: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match key.code {
+        KeyCode::Char('y' | 'Y') => {
+            match repo.delete_skill(name, scope) {
+                Ok(_) => {
+                    let removed_index = app.list_state.selected().unwrap_or(0);
+                    app.skills = repo.list_skills(None, Some(SKILL_STATUS_ACTIVE))?;
+                    app.refresh_filter();
+                    app.list_state
+                        .select(reselect_after_removal(removed_index, app.filtered.len()));
+                    app.status_message = Some((StatusLevel::Info, format!("Deleted '{name}'")));
+                }
+                Err(e) => {
+                    app.status_message = Some((StatusLevel::Error, format!("Delete failed: {e}")));
+                }
+            }
+            app.mode = Mode::Browse;
+        }
+        _ => app.mode = Mode::Browse,
+    }
+    Ok(())
+}
+
+fn handle_form_key(
+    app: &mut SkillsApp,
+    key: crossterm::event::KeyEvent,
+    repo: &Repository,
+    terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Mode::Form(mut form) = std::mem::replace(&mut app.mode, Mode::Browse) else {
+        unreachable!()
+    };
+    match key.code {
+        KeyCode::Esc => { /* discard `form`, stay in Browse */ }
+        KeyCode::Tab => {
+            form.next_field();
+            app.mode = Mode::Form(form);
+        }
+        KeyCode::Char(' ') if form.focus == FormField::Scope => {
+            form.scope_is_global = !form.scope_is_global;
+            app.mode = Mode::Form(form);
+        }
+        KeyCode::Backspace => {
+            if let Some(field) = form.focused_text_mut() {
+                field.pop();
+            }
+            app.mode = Mode::Form(form);
+        }
+        KeyCode::Char(c) if form.focus != FormField::Scope => {
+            if let Some(field) = form.focused_text_mut() {
+                field.push(c);
+            }
+            app.mode = Mode::Form(form);
+        }
+        KeyCode::Enter => submit_form(app, form, repo, terminal)?,
+        _ => app.mode = Mode::Form(form),
+    }
+    Ok(())
+}
+
+fn submit_form(
+    app: &mut SkillsApp,
+    form: FormState,
+    repo: &Repository,
+    terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let initial = form
+        .editing
+        .as_ref()
+        .map_or_else(String::new, |s| s.body.clone());
+    let edited = suspend_for_editor(terminal, || edit_body(&initial))?;
+    match edited {
+        None => {
+            app.status_message = Some((StatusLevel::Error, "Editor cancelled".to_string()));
+            app.mode = Mode::Form(form);
+        }
+        Some(body) if body.trim().is_empty() => {
+            app.status_message = Some((
+                StatusLevel::Error,
+                "Skill body is empty — not saved".to_string(),
+            ));
+            app.mode = Mode::Form(form);
+        }
+        Some(body) => save_form(app, form, repo, body)?,
+    }
+    Ok(())
+}
+
+fn save_form(
+    app: &mut SkillsApp,
+    form: FormState,
+    repo: &Repository,
+    body: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let triggers = parse_triggers(&form.triggers);
+    match &form.editing {
+        None => {
+            // Resolved at submit time, not when the form opened — equivalent in
+            // practice since nothing in this app changes the process's cwd
+            // during its lifetime.
+            let scope = if form.scope_is_global {
+                crate::models::SKILL_SCOPE_GLOBAL.to_string()
+            } else {
+                std::env::current_dir()?.to_string_lossy().to_string()
+            };
+            let new = crate::models::NewSkill {
+                name: form.name.clone(),
+                description: form.description.clone(),
+                body,
+                triggers,
+                scope,
+                source: crate::models::SKILL_SOURCE_HUMAN.to_string(),
+                status: SKILL_STATUS_ACTIVE.to_string(),
+            };
+            match repo.create_skill(&new) {
+                Ok(skill) => {
+                    app.skills = repo.list_skills(None, Some(SKILL_STATUS_ACTIVE))?;
+                    app.refresh_filter();
+                    app.status_message =
+                        Some((StatusLevel::Info, format!("Added '{}'", skill.name)));
+                }
+                Err(e) => {
+                    app.status_message = Some((StatusLevel::Error, format!("Add failed: {e}")));
+                    app.mode = Mode::Form(form);
+                }
+            }
+        }
+        Some(existing) => {
+            match repo.update_skill(
+                &existing.name,
+                &existing.scope,
+                Some(&form.description),
+                Some(&body),
+                Some(&triggers),
+            ) {
+                Ok(Some(updated)) => {
+                    app.skills = repo.list_skills(None, Some(SKILL_STATUS_ACTIVE))?;
+                    app.refresh_filter();
+                    app.status_message = Some((
+                        StatusLevel::Info,
+                        format!("Updated '{}' (v{})", updated.name, updated.version),
+                    ));
+                }
+                Ok(None) => {
+                    app.status_message = Some((
+                        StatusLevel::Error,
+                        "Skill disappeared during edit".to_string(),
+                    ));
+                }
+                Err(e) => {
+                    app.status_message = Some((StatusLevel::Error, format!("Edit failed: {e}")));
+                    app.mode = Mode::Form(form);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn handle_review_key(
+    app: &mut SkillsApp,
+    key: crossterm::event::KeyEvent,
+    repo: &Repository,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match key.code {
+        KeyCode::Char('q') | KeyCode::Esc => app.mode = Mode::Browse,
+        KeyCode::Char('a' | 'r') => apply_review_key(app, key, repo)?,
+        KeyCode::Char('s') | KeyCode::Down => {
+            if !app.pending.is_empty() {
+                let i = app.pending_state.selected().unwrap_or(0);
+                app.pending_state
+                    .select(Some((i + 1).min(app.pending.len() - 1)));
+            }
+        }
+        KeyCode::Up => {
+            let i = app.pending_state.selected().unwrap_or(0);
+            app.pending_state.select(Some(i.saturating_sub(1)));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn apply_review_key(
+    app: &mut SkillsApp,
+    key: crossterm::event::KeyEvent,
+    repo: &Repository,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(&i) = app.pending_state.selected().as_ref() else {
+        return Ok(());
+    };
+    let Some(skill) = app.pending.get(i).cloned() else {
+        return Ok(());
+    };
+    let approve = key.code == KeyCode::Char('a');
+    let decision = if approve {
+        crate::commands::skills::ReviewDecision::Approve
+    } else {
+        crate::commands::skills::ReviewDecision::Reject
+    };
+    match crate::commands::skills::apply_review_decision(repo, &skill, &decision) {
+        Ok(()) => {
+            app.pending.remove(i);
+            app.pending_state
+                .select(reselect_after_removal(i, app.pending.len()));
+            let verb = if approve { "Approved" } else { "Rejected" };
+            app.status_message = Some((StatusLevel::Info, format!("{verb} '{}'", skill.name)));
+            if approve {
+                app.skills = repo.list_skills(None, Some(SKILL_STATUS_ACTIVE))?;
+                app.refresh_filter();
+            }
+        }
+        Err(e) => {
+            app.status_message = Some((StatusLevel::Error, format!("Review failed: {e}")));
+        }
+    }
     Ok(())
 }
 
@@ -517,6 +633,27 @@ fn render(f: &mut ratatui::Frame, app: &mut SkillsApp) {
         ])
         .split(f.area());
 
+    if matches!(app.mode, Mode::Review) {
+        render_review(f, app, rows[1]);
+        let help = Paragraph::new(Line::from(
+            " a approve · r reject · s/↓ skip · ↑ back · q/Esc return ",
+        ))
+        .style(Style::default().fg(t.text_muted));
+        f.render_widget(help, rows[2]);
+        return;
+    }
+
+    render_browse(f, app, t, &rows);
+    render_delete_dialog(f, app, t);
+    render_form_dialog(f, app, t);
+}
+
+fn render_browse(
+    f: &mut ratatui::Frame,
+    app: &mut SkillsApp,
+    t: &crate::theme::Theme,
+    rows: &[ratatui::layout::Rect],
+) {
     let input = Paragraph::new(Line::from(app.query.as_str())).block(
         Block::default()
             .borders(Borders::ALL)
@@ -535,7 +672,13 @@ fn render(f: &mut ratatui::Frame, app: &mut SkillsApp) {
         .filtered
         .iter()
         .filter_map(|&i| app.skills.get(i))
-        .map(|s| ListItem::new(Line::from(format!("{}  ({})", s.name, scope_label(&s.scope)))))
+        .map(|s| {
+            ListItem::new(Line::from(format!(
+                "{}  ({})",
+                s.name,
+                scope_label(&s.scope)
+            )))
+        })
         .collect();
     let empty = items.is_empty();
 
@@ -595,64 +738,145 @@ fn render(f: &mut ratatui::Frame, app: &mut SkillsApp) {
         .style(Style::default().fg(t.text_muted)),
     };
     f.render_widget(Paragraph::new(status_line), rows[2]);
+}
 
-    if let Mode::ConfirmDelete { name, .. } = &app.mode {
-        let area = centered_rect(50, 3, f.area());
-        f.render_widget(ratatui::widgets::Clear, area);
-        let dialog = Paragraph::new(Line::from(format!("Delete skill '{name}'? [y/N]"))).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(t.error))
-                .title(" Confirm delete "),
-        );
-        f.render_widget(dialog, area);
-    }
+fn render_delete_dialog(f: &mut ratatui::Frame, app: &SkillsApp, t: &crate::theme::Theme) {
+    let Mode::ConfirmDelete { name, .. } = &app.mode else {
+        return;
+    };
+    let area = centered_rect(50, 3, f.area());
+    f.render_widget(ratatui::widgets::Clear, area);
+    let dialog = Paragraph::new(Line::from(format!("Delete skill '{name}'? [y/N]"))).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(t.error))
+            .title(" Confirm delete "),
+    );
+    f.render_widget(dialog, area);
+}
 
-    if let Mode::Form(form) = &app.mode {
-        let area = centered_rect(60, 9, f.area());
-        f.render_widget(ratatui::widgets::Clear, area);
-        let title = if form.editing.is_some() {
-            " Edit skill "
-        } else {
-            " Add skill "
-        };
-        let scope_text = if form.scope_is_global { "Global" } else { "Here" };
-        let lines = vec![
-            Line::from(format!(
-                "{} Name:        {}",
-                if form.focus == FormField::Name { ">" } else { " " },
-                form.editing
-                    .as_ref()
-                    .map_or(form.name.as_str(), |s| s.name.as_str())
-            )),
-            Line::from(format!(
-                "{} Description: {}",
-                if form.focus == FormField::Description { ">" } else { " " },
-                form.description
-            )),
-            Line::from(format!(
-                "{} Triggers:    {}",
-                if form.focus == FormField::Triggers { ">" } else { " " },
-                form.triggers
-            )),
-            Line::from(format!(
-                "{} Scope:       {} (space to toggle)",
-                if form.focus == FormField::Scope { ">" } else { " " },
-                scope_text
-            )),
-            Line::from(""),
-            Line::from("Tab: next field · Enter: edit body in $EDITOR & save · Esc: cancel"),
-        ];
-        let dialog = Paragraph::new(lines).block(
+fn render_form_dialog(f: &mut ratatui::Frame, app: &SkillsApp, t: &crate::theme::Theme) {
+    let Mode::Form(form) = &app.mode else {
+        return;
+    };
+    let area = centered_rect(60, 9, f.area());
+    f.render_widget(ratatui::widgets::Clear, area);
+    let title = if form.editing.is_some() {
+        " Edit skill "
+    } else {
+        " Add skill "
+    };
+    let scope_text = if form.scope_is_global {
+        "Global"
+    } else {
+        "Here"
+    };
+    let marker = |field: FormField| if form.focus == field { ">" } else { " " };
+    let lines = vec![
+        Line::from(format!(
+            "{} Name:        {}",
+            marker(FormField::Name),
+            form.editing
+                .as_ref()
+                .map_or(form.name.as_str(), |s| s.name.as_str())
+        )),
+        Line::from(format!(
+            "{} Description: {}",
+            marker(FormField::Description),
+            form.description
+        )),
+        Line::from(format!(
+            "{} Triggers:    {}",
+            marker(FormField::Triggers),
+            form.triggers
+        )),
+        Line::from(format!(
+            "{} Scope:       {} (space to toggle)",
+            marker(FormField::Scope),
+            scope_text
+        )),
+        Line::from(""),
+        Line::from("Tab: next field · Enter: edit body in $EDITOR & save · Esc: cancel"),
+    ];
+    let dialog = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(t.border))
+            .title(title),
+    );
+    f.render_widget(dialog, area);
+}
+
+fn render_review(f: &mut ratatui::Frame, app: &mut SkillsApp, area: ratatui::layout::Rect) {
+    let t = theme();
+    if app.pending.is_empty() {
+        let msg = Paragraph::new(Line::from("No skills awaiting review.")).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(t.border))
-                .title(title),
+                .title(" Review queue "),
         );
-        f.render_widget(dialog, area);
+        f.render_widget(msg, area);
+        return;
     }
+
+    let panes = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(area);
+
+    let items: Vec<ListItem> = app
+        .pending
+        .iter()
+        .map(|s| {
+            ListItem::new(Line::from(format!(
+                "{}  ({})",
+                s.name,
+                scope_label(&s.scope)
+            )))
+        })
+        .collect();
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(t.border))
+                .title(format!(" Review queue ({}) ", app.pending.len())),
+        )
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD).fg(t.primary))
+        .highlight_symbol(" > ");
+    f.render_stateful_widget(list, panes[0], &mut app.pending_state);
+
+    let preview_text = app
+        .pending_state
+        .selected()
+        .and_then(|i| app.pending.get(i))
+        .map(|s| {
+            use std::fmt::Write;
+            let mut out = format!("{}\n", s.name);
+            let _ = writeln!(out, "scope:   {}", s.scope);
+            let _ = writeln!(out, "source:  {}", s.source);
+            if !s.description.is_empty() {
+                let _ = write!(out, "\n{}\n", s.description);
+            }
+            let _ = write!(out, "\n{}", s.body);
+            out
+        })
+        .unwrap_or_default();
+    let preview = Paragraph::new(preview_text)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(t.border))
+                .title(" Preview "),
+        );
+    f.render_widget(preview, panes[1]);
 }
 
 fn centered_rect(width: u16, height: u16, area: ratatui::layout::Rect) -> ratatui::layout::Rect {
@@ -787,7 +1011,7 @@ mod tests {
             name: name.to_string(),
             description: description.to_string(),
             body: format!("body of {name}"),
-            triggers: triggers.iter().map(|s| s.to_string()).collect(),
+            triggers: triggers.iter().map(ToString::to_string).collect(),
             scope: SKILL_SCOPE_GLOBAL.to_string(),
             source: "human".to_string(),
             status: "active".to_string(),

@@ -6,7 +6,7 @@ use crate::cli::SkillsCommands;
 use crate::db;
 use crate::models::{
     NewSkill, Skill, SKILL_SCOPE_GLOBAL, SKILL_SOURCE_HUMAN, SKILL_STATUS_ACTIVE,
-    SKILL_STATUS_ARCHIVED, SKILL_STATUS_PENDING,
+    SKILL_STATUS_ARCHIVED,
 };
 use crate::repository::Repository;
 use crate::util;
@@ -14,10 +14,10 @@ use std::io::Read;
 
 pub fn handle_skills(cmd: Option<SkillsCommands>) -> Result<(), Box<dyn std::error::Error>> {
     let repo = Repository::init()?;
-    match cmd {
-        Some(cmd) => handle_skills_with_repo(&repo, cmd),
-        None => crate::skills_ui::run(&repo),
-    }
+    cmd.map_or_else(
+        || crate::skills_ui::run(&repo),
+        |cmd| handle_skills_with_repo(&repo, cmd),
+    )
 }
 
 /// "global" (default), "here" (resolved to the current directory), or a
@@ -273,7 +273,7 @@ fn handle_rm(
 }
 
 /// A human's decision on one pending skill proposal.
-pub(crate) enum ReviewDecision {
+pub enum ReviewDecision {
     Approve,
     Reject,
 }
@@ -281,7 +281,7 @@ pub(crate) enum ReviewDecision {
 /// Apply a review decision to a pending skill. Shared between the TUI's
 /// review queue (see `skills_ui.rs`) and this module's tests, so the
 /// decision logic is defined once and tested once.
-pub(crate) fn apply_review_decision(
+pub fn apply_review_decision(
     repo: &Repository,
     skill: &Skill,
     decision: &ReviewDecision,
@@ -336,6 +336,7 @@ fn handle_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::SKILL_STATUS_PENDING;
     use crate::test_utils::test_repo;
 
     fn add(
