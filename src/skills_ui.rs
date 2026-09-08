@@ -47,6 +47,57 @@ pub(crate) fn copy_feedback_message(name: &str) -> String {
     format!("Copied '{name}' to clipboard")
 }
 
+/// Write `initial` to a temp file, run $EDITOR/$VISUAL (falling back to
+/// `vi`) on it, and read the result back. Returns `None` if the editor
+/// exits non-zero (treated as a cancel), matching `git commit`'s convention.
+pub(crate) fn edit_body(initial: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+    let tmp = tempfile::Builder::new().suffix(".md").tempfile()?;
+    std::fs::write(tmp.path(), initial)?;
+    let status = std::process::Command::new(&editor).arg(tmp.path()).status()?;
+    if !status.success() {
+        return Ok(None);
+    }
+    Ok(Some(std::fs::read_to_string(tmp.path())?))
+}
+
+/// Suspend the TUI (leave raw mode + the alternate screen) for the duration
+/// of `f`, then restore it and force a full repaint. Used around `edit_body`
+/// since `$EDITOR` needs a normal terminal to draw into.
+///
+/// Rebuilds `terminal` from scratch afterward rather than calling
+/// `Terminal::clear()` — `clear()` snapshots and restores the cursor
+/// position via `crossterm::cursor::position()`, which hardcodes writing its
+/// query to stdout and reading the reply from stdin regardless of which
+/// stream the backend itself renders to. Since this app deliberately renders
+/// to stderr (keeping stdout clean for piping, matching the rest of this
+/// codebase's pickers), that query can go unanswered. A fresh `Terminal`
+/// resets the same internal diff-buffer state without needing cursor
+/// position at all — construction alone never queries it.
+fn suspend_for_editor<T>(
+    terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
+    f: impl FnOnce() -> Result<T, Box<dyn std::error::Error>>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    crossterm::terminal::disable_raw_mode()?;
+    crossterm::execute!(io::stderr(), crossterm::terminal::LeaveAlternateScreen)?;
+    let result = f();
+    crossterm::execute!(io::stderr(), crossterm::terminal::EnterAlternateScreen)?;
+    crossterm::terminal::enable_raw_mode()?;
+    *terminal = Terminal::new(CrosstermBackend::new(io::stderr()))?;
+    result
+}
+
+pub(crate) fn parse_triggers(input: &str) -> Vec<String> {
+    input
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 pub(crate) fn format_sync_status(report: &crate::skills_sync::SyncReport) -> (StatusLevel, String) {
     if report.written == 0 {
         (
@@ -94,6 +145,55 @@ pub(crate) enum StatusLevel {
 enum Mode {
     Browse,
     ConfirmDelete { name: String, scope: String },
+    Form(FormState),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FormField {
+    Name,
+    Description,
+    Triggers,
+    Scope,
+}
+
+struct FormState {
+    editing: Option<Skill>, // Some = edit, None = add
+    name: String,
+    description: String,
+    triggers: String,
+    scope_is_global: bool,
+    focus: FormField,
+}
+
+impl FormState {
+    fn new_add() -> Self {
+        Self {
+            editing: None,
+            name: String::new(),
+            description: String::new(),
+            triggers: String::new(),
+            scope_is_global: true,
+            focus: FormField::Name,
+        }
+    }
+
+    fn next_field(&mut self) {
+        self.focus = match self.focus {
+            FormField::Name => FormField::Description,
+            FormField::Description => FormField::Triggers,
+            FormField::Triggers => FormField::Scope,
+            FormField::Scope => FormField::Name,
+        };
+    }
+
+    fn focused_text_mut(&mut self) -> Option<&mut String> {
+        match self.focus {
+            FormField::Name if self.editing.is_none() => Some(&mut self.name),
+            FormField::Description => Some(&mut self.description),
+            FormField::Triggers => Some(&mut self.triggers),
+            _ => None,
+        }
+    }
 }
 
 pub(crate) struct SkillsApp {
@@ -162,6 +262,9 @@ pub fn run(repo: &Repository) -> Result<(), Box<dyn std::error::Error>> {
             Mode::Browse => match key.code {
                 KeyCode::Esc => break,
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    app.mode = Mode::Form(FormState::new_add());
+                }
                 KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     if let Some(skill) = app.selected_skill() {
                         app.mode = Mode::ConfirmDelete {
@@ -243,6 +346,94 @@ pub fn run(repo: &Repository) -> Result<(), Box<dyn std::error::Error>> {
                         app.mode = Mode::Browse;
                     }
                     _ => app.mode = Mode::Browse,
+                }
+            }
+            Mode::Form(_) => {
+                let Mode::Form(mut form) = std::mem::replace(&mut app.mode, Mode::Browse) else {
+                    unreachable!()
+                };
+                match key.code {
+                    KeyCode::Esc => { /* discard `form`, stay in Browse */ }
+                    KeyCode::Tab => {
+                        form.next_field();
+                        app.mode = Mode::Form(form);
+                    }
+                    KeyCode::Char(' ') if form.focus == FormField::Scope => {
+                        form.scope_is_global = !form.scope_is_global;
+                        app.mode = Mode::Form(form);
+                    }
+                    KeyCode::Backspace => {
+                        if let Some(field) = form.focused_text_mut() {
+                            field.pop();
+                        }
+                        app.mode = Mode::Form(form);
+                    }
+                    KeyCode::Char(c) if form.focus != FormField::Scope => {
+                        if let Some(field) = form.focused_text_mut() {
+                            field.push(c);
+                        }
+                        app.mode = Mode::Form(form);
+                    }
+                    KeyCode::Enter => {
+                        let initial = form
+                            .editing
+                            .as_ref()
+                            .map_or_else(String::new, |s| s.body.clone());
+                        let edited = suspend_for_editor(&mut terminal, || edit_body(&initial))?;
+                        match edited {
+                            None => {
+                                app.status_message =
+                                    Some((StatusLevel::Error, "Editor cancelled".to_string()));
+                                app.mode = Mode::Form(form);
+                            }
+                            Some(body) if body.trim().is_empty() => {
+                                app.status_message = Some((
+                                    StatusLevel::Error,
+                                    "Skill body is empty — not saved".to_string(),
+                                ));
+                                app.mode = Mode::Form(form);
+                            }
+                            Some(body) => {
+                                let triggers = parse_triggers(&form.triggers);
+                                // Resolved at submit time, not when the form opened —
+                                // equivalent in practice since nothing in this app changes
+                                // the process's cwd during its lifetime.
+                                let scope = if form.scope_is_global {
+                                    crate::models::SKILL_SCOPE_GLOBAL.to_string()
+                                } else {
+                                    std::env::current_dir()?.to_string_lossy().to_string()
+                                };
+                                let new = crate::models::NewSkill {
+                                    name: form.name.clone(),
+                                    description: form.description.clone(),
+                                    body,
+                                    triggers,
+                                    scope,
+                                    source: crate::models::SKILL_SOURCE_HUMAN.to_string(),
+                                    status: SKILL_STATUS_ACTIVE.to_string(),
+                                };
+                                match repo.create_skill(&new) {
+                                    Ok(skill) => {
+                                        app.skills =
+                                            repo.list_skills(None, Some(SKILL_STATUS_ACTIVE))?;
+                                        app.refresh_filter();
+                                        app.status_message = Some((
+                                            StatusLevel::Info,
+                                            format!("Added '{}'", skill.name),
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        app.status_message = Some((
+                                            StatusLevel::Error,
+                                            format!("Add failed: {e}"),
+                                        ));
+                                        app.mode = Mode::Form(form);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => app.mode = Mode::Form(form),
                 }
             }
         }
@@ -362,6 +553,51 @@ fn render(f: &mut ratatui::Frame, app: &mut SkillsApp) {
         );
         f.render_widget(dialog, area);
     }
+
+    if let Mode::Form(form) = &app.mode {
+        let area = centered_rect(60, 9, f.area());
+        f.render_widget(ratatui::widgets::Clear, area);
+        let title = if form.editing.is_some() {
+            " Edit skill "
+        } else {
+            " Add skill "
+        };
+        let scope_text = if form.scope_is_global { "Global" } else { "Here" };
+        let lines = vec![
+            Line::from(format!(
+                "{} Name:        {}",
+                if form.focus == FormField::Name { ">" } else { " " },
+                form.editing
+                    .as_ref()
+                    .map_or(form.name.as_str(), |s| s.name.as_str())
+            )),
+            Line::from(format!(
+                "{} Description: {}",
+                if form.focus == FormField::Description { ">" } else { " " },
+                form.description
+            )),
+            Line::from(format!(
+                "{} Triggers:    {}",
+                if form.focus == FormField::Triggers { ">" } else { " " },
+                form.triggers
+            )),
+            Line::from(format!(
+                "{} Scope:       {} (space to toggle)",
+                if form.focus == FormField::Scope { ">" } else { " " },
+                scope_text
+            )),
+            Line::from(""),
+            Line::from("Tab: next field · Enter: edit body in $EDITOR & save · Esc: cancel"),
+        ];
+        let dialog = Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(t.border))
+                .title(title),
+        );
+        f.render_widget(dialog, area);
+    }
 }
 
 fn centered_rect(width: u16, height: u16, area: ratatui::layout::Rect) -> ratatui::layout::Rect {
@@ -386,6 +622,58 @@ mod tests {
             copy_feedback_message("release"),
             "Copied 'release' to clipboard"
         );
+    }
+
+    #[test]
+    fn edit_body_roundtrips_through_a_fake_editor() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let fake_editor = dir.path().join("fake_editor.sh");
+        std::fs::write(
+            &fake_editor,
+            "#!/bin/sh\necho 'edited by fake editor' >> \"$1\"\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_editor).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&fake_editor, perms).unwrap();
+
+        let prev = std::env::var("EDITOR").ok();
+        std::env::set_var("EDITOR", &fake_editor);
+        let result = edit_body("original content\n").unwrap();
+        match prev {
+            Some(v) => std::env::set_var("EDITOR", v),
+            None => std::env::remove_var("EDITOR"),
+        }
+
+        let content = result.unwrap();
+        assert!(content.contains("original content"));
+        assert!(content.contains("edited by fake editor"));
+    }
+
+    #[test]
+    fn edit_body_returns_none_when_editor_exits_nonzero() {
+        let prev = std::env::var("EDITOR").ok();
+        std::env::set_var("EDITOR", "false");
+        let result = edit_body("content").unwrap();
+        match prev {
+            Some(v) => std::env::set_var("EDITOR", v),
+            None => std::env::remove_var("EDITOR"),
+        }
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_triggers_splits_trims_and_drops_empties() {
+        assert_eq!(
+            parse_triggers("release, changelog ,, ship it "),
+            vec!["release", "changelog", "ship it"]
+        );
+    }
+
+    #[test]
+    fn parse_triggers_empty_string_yields_empty_vec() {
+        assert!(parse_triggers("").is_empty());
+        assert!(parse_triggers("   ").is_empty());
     }
 
     #[test]
