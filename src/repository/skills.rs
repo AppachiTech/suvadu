@@ -28,11 +28,34 @@ fn skill_from_row(row: &rusqlite::Row) -> rusqlite::Result<Skill> {
 const SKILL_COLUMNS: &str =
     "id, name, description, body, triggers, scope, source, status, version, created_at, updated_at";
 
+/// A skill's `name` is later joined as a filesystem path segment by
+/// `skills_sync` (e.g. `~/.claude/skills/<name>/SKILL.md`) and interpolated
+/// unescaped into generated YAML frontmatter (`name: <name>`). Restricting it
+/// to the same character set as `util::is_valid_session_id` rules out both
+/// path traversal (no `/`, no `..`) and frontmatter injection (no newlines,
+/// no `:`) in one place — every creation path (CLI `add`, the skills TUI,
+/// and the `propose_skill` MCP tool) goes through `create_skill`, so
+/// enforcing it here covers all three.
+fn is_valid_skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 impl Repository {
     /// Create a new skill. Fails with a `UNIQUE` constraint violation if a
     /// skill with the same `(name, scope)` already exists — callers should
     /// use [`Repository::update_skill`] to edit an existing one.
     pub fn create_skill(&self, new: &NewSkill) -> DbResult<Skill> {
+        if !is_valid_skill_name(&new.name) {
+            return Err(DbError::Validation(format!(
+                "invalid skill name '{}' — names may only contain letters, digits, '-', and '_' \
+                 (max 128 chars); this keeps them safe to use as file paths during `suv skills sync`",
+                new.name
+            )));
+        }
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().timestamp_millis();
         let triggers_json = serde_json::to_string(&new.triggers).unwrap_or_else(|_| "[]".into());
@@ -89,11 +112,18 @@ impl Repository {
         let triggers_json = serde_json::to_string(new_triggers).unwrap_or_else(|_| "[]".into());
         let now = chrono::Utc::now().timestamp_millis();
 
-        self.conn.execute(
+        // Checked (unlike a plain `?`) so a skill deleted between the fetch
+        // above and this statement short-circuits to `Ok(None)` instead of
+        // issuing a write that's guaranteed to affect nothing, matching
+        // `set_skill_status`'s existing affected-row check.
+        let changed = self.conn.execute(
             "UPDATE skills SET description = ?1, body = ?2, triggers = ?3, version = version + 1, updated_at = ?4
              WHERE name = ?5 AND scope = ?6",
             params![new_description, new_body, triggers_json, now, name, scope],
         )?;
+        if changed == 0 {
+            return Ok(None);
+        }
 
         self.get_skill(name, scope)
     }
@@ -252,6 +282,38 @@ mod tests {
             source: SKILL_SOURCE_HUMAN.to_string(),
             status: status.to_string(),
         }
+    }
+
+    #[test]
+    fn is_valid_skill_name_accepts_typical_slugs() {
+        assert!(is_valid_skill_name("deploy-checklist"));
+        assert!(is_valid_skill_name("commit_style"));
+        assert!(is_valid_skill_name("a"));
+    }
+
+    #[test]
+    fn is_valid_skill_name_rejects_empty_and_path_like_names() {
+        assert!(!is_valid_skill_name(""));
+        assert!(!is_valid_skill_name("../../etc/passwd"));
+        assert!(!is_valid_skill_name("/absolute/path"));
+        assert!(!is_valid_skill_name("has/slash"));
+        assert!(!is_valid_skill_name("has\\backslash"));
+        assert!(!is_valid_skill_name("has\nnewline"));
+        assert!(!is_valid_skill_name("has:colon"));
+        assert!(!is_valid_skill_name(&"a".repeat(129)));
+    }
+
+    #[test]
+    fn create_skill_rejects_path_like_name() {
+        let (_dir, repo) = test_repo();
+        let err = repo
+            .create_skill(&new_skill(
+                "/tmp/attacker-controlled",
+                SKILL_SCOPE_GLOBAL,
+                SKILL_STATUS_ACTIVE,
+            ))
+            .unwrap_err();
+        assert!(matches!(err, DbError::Validation(_)));
     }
 
     #[test]
