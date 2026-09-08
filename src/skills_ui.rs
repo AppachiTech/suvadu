@@ -149,14 +149,14 @@ enum Mode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FormField {
+pub(crate) enum FormField {
     Name,
     Description,
     Triggers,
     Scope,
 }
 
-struct FormState {
+pub(crate) struct FormState {
     editing: Option<Skill>, // Some = edit, None = add
     name: String,
     description: String,
@@ -193,6 +193,17 @@ impl FormState {
             FormField::Triggers => Some(&mut self.triggers),
             _ => None,
         }
+    }
+}
+
+pub(crate) fn form_from_existing(skill: &Skill) -> FormState {
+    FormState {
+        editing: Some(skill.clone()),
+        name: skill.name.clone(),
+        description: skill.description.clone(),
+        triggers: skill.triggers.join(", "),
+        scope_is_global: skill.scope == crate::models::SKILL_SCOPE_GLOBAL,
+        focus: FormField::Description,
     }
 }
 
@@ -264,6 +275,11 @@ pub fn run(repo: &Repository) -> Result<(), Box<dyn std::error::Error>> {
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
                 KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     app.mode = Mode::Form(FormState::new_add());
+                }
+                KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(skill) = app.selected_skill() {
+                        app.mode = Mode::Form(form_from_existing(skill));
+                    }
                 }
                 KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     if let Some(skill) = app.selected_skill() {
@@ -395,39 +411,78 @@ pub fn run(repo: &Repository) -> Result<(), Box<dyn std::error::Error>> {
                             }
                             Some(body) => {
                                 let triggers = parse_triggers(&form.triggers);
-                                // Resolved at submit time, not when the form opened —
-                                // equivalent in practice since nothing in this app changes
-                                // the process's cwd during its lifetime.
-                                let scope = if form.scope_is_global {
-                                    crate::models::SKILL_SCOPE_GLOBAL.to_string()
-                                } else {
-                                    std::env::current_dir()?.to_string_lossy().to_string()
-                                };
-                                let new = crate::models::NewSkill {
-                                    name: form.name.clone(),
-                                    description: form.description.clone(),
-                                    body,
-                                    triggers,
-                                    scope,
-                                    source: crate::models::SKILL_SOURCE_HUMAN.to_string(),
-                                    status: SKILL_STATUS_ACTIVE.to_string(),
-                                };
-                                match repo.create_skill(&new) {
-                                    Ok(skill) => {
-                                        app.skills =
-                                            repo.list_skills(None, Some(SKILL_STATUS_ACTIVE))?;
-                                        app.refresh_filter();
-                                        app.status_message = Some((
-                                            StatusLevel::Info,
-                                            format!("Added '{}'", skill.name),
-                                        ));
+                                match &form.editing {
+                                    None => {
+                                        // Resolved at submit time, not when the form opened —
+                                        // equivalent in practice since nothing in this app changes
+                                        // the process's cwd during its lifetime.
+                                        let scope = if form.scope_is_global {
+                                            crate::models::SKILL_SCOPE_GLOBAL.to_string()
+                                        } else {
+                                            std::env::current_dir()?.to_string_lossy().to_string()
+                                        };
+                                        let new = crate::models::NewSkill {
+                                            name: form.name.clone(),
+                                            description: form.description.clone(),
+                                            body,
+                                            triggers,
+                                            scope,
+                                            source: crate::models::SKILL_SOURCE_HUMAN.to_string(),
+                                            status: SKILL_STATUS_ACTIVE.to_string(),
+                                        };
+                                        match repo.create_skill(&new) {
+                                            Ok(skill) => {
+                                                app.skills =
+                                                    repo.list_skills(None, Some(SKILL_STATUS_ACTIVE))?;
+                                                app.refresh_filter();
+                                                app.status_message = Some((
+                                                    StatusLevel::Info,
+                                                    format!("Added '{}'", skill.name),
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                app.status_message = Some((
+                                                    StatusLevel::Error,
+                                                    format!("Add failed: {e}"),
+                                                ));
+                                                app.mode = Mode::Form(form);
+                                            }
+                                        }
                                     }
-                                    Err(e) => {
-                                        app.status_message = Some((
-                                            StatusLevel::Error,
-                                            format!("Add failed: {e}"),
-                                        ));
-                                        app.mode = Mode::Form(form);
+                                    Some(existing) => {
+                                        match repo.update_skill(
+                                            &existing.name,
+                                            &existing.scope,
+                                            Some(&form.description),
+                                            Some(&body),
+                                            Some(&triggers),
+                                        ) {
+                                            Ok(Some(updated)) => {
+                                                app.skills =
+                                                    repo.list_skills(None, Some(SKILL_STATUS_ACTIVE))?;
+                                                app.refresh_filter();
+                                                app.status_message = Some((
+                                                    StatusLevel::Info,
+                                                    format!(
+                                                        "Updated '{}' (v{})",
+                                                        updated.name, updated.version
+                                                    ),
+                                                ));
+                                            }
+                                            Ok(None) => {
+                                                app.status_message = Some((
+                                                    StatusLevel::Error,
+                                                    "Skill disappeared during edit".to_string(),
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                app.status_message = Some((
+                                                    StatusLevel::Error,
+                                                    format!("Edit failed: {e}"),
+                                                ));
+                                                app.mode = Mode::Form(form);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -622,6 +677,16 @@ mod tests {
             copy_feedback_message("release"),
             "Copied 'release' to clipboard"
         );
+    }
+
+    #[test]
+    fn form_from_existing_prefills_editable_fields() {
+        let s = skill("release", "cut a release", &["release", "changelog"]);
+        let form = form_from_existing(&s);
+        assert!(form.editing.is_some());
+        assert_eq!(form.description, "cut a release");
+        assert_eq!(form.triggers, "release, changelog");
+        assert_eq!(form.focus, FormField::Description);
     }
 
     #[test]
