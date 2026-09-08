@@ -228,6 +228,50 @@ pub struct AliasSuggestion {
     pub selected: bool,
 }
 
+/// Scope value meaning a skill applies to every project (not tied to a directory).
+pub const SKILL_SCOPE_GLOBAL: &str = "global";
+/// A skill that is live and should be surfaced/materialized.
+pub const SKILL_STATUS_ACTIVE: &str = "active";
+/// A skill an agent proposed that has not been approved by a human yet.
+pub const SKILL_STATUS_PENDING: &str = "pending_review";
+/// A skill that was removed from active use but kept for history.
+pub const SKILL_STATUS_ARCHIVED: &str = "archived";
+/// Source value for a human-authored skill (as opposed to `agent:<name>`).
+pub const SKILL_SOURCE_HUMAN: &str = "human";
+
+/// A reusable instruction/prompt shared across AI coding agents via MCP.
+///
+/// `scope` is either [`SKILL_SCOPE_GLOBAL`] or an absolute directory path the
+/// skill is specific to. `source` is [`SKILL_SOURCE_HUMAN`] or `agent:<name>`
+/// for agent-proposed skills (see [`SKILL_STATUS_PENDING`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Skill {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub body: String,
+    pub triggers: Vec<String>,
+    pub scope: String,
+    pub source: String,
+    pub status: String,
+    pub version: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Parameters for creating a new skill. Grouped into a struct to avoid a
+/// long positional argument list.
+#[derive(Debug, Clone)]
+pub struct NewSkill {
+    pub name: String,
+    pub description: String,
+    pub body: String,
+    pub triggers: Vec<String>,
+    pub scope: String,
+    pub source: String,
+    pub status: String,
+}
+
 /// Represents a shell session
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {

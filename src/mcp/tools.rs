@@ -27,7 +27,17 @@ pub fn list_tools(id: &Value, mcp: &crate::config::McpConfig) -> Value {
         replay_agent_session_def(),
         learn_from_failures_def(),
         project_context_def(),
+        list_skills_def(),
+        get_skill_def(),
+        search_skills_def(),
     ];
+    let mut all_tools = all_tools;
+    // `propose_skill` writes a pending-review skill and is off by default:
+    // a store agents can both read and write is a shared-memory poisoning
+    // target, so it's only advertised when explicitly opted into.
+    if mcp.allow_skill_proposals {
+        all_tools.push(propose_skill_def());
+    }
     let tools: Vec<Value> = all_tools
         .into_iter()
         .filter(|t| {
@@ -68,6 +78,10 @@ pub fn call_tool(
         "replay_agent_session" => handle_replay_agent_session(repo, args),
         "learn_from_failures" => handle_learn_from_failures(repo, args, mcp),
         "project_context" => handle_project_context(repo, args, mcp),
+        "list_skills" => handle_list_skills(repo, args),
+        "get_skill" => handle_get_skill(repo, args),
+        "search_skills" => handle_search_skills(repo, args),
+        "propose_skill" => handle_propose_skill(args, mcp),
         _ => Err(format!("Unknown tool: {name}")),
     }
 }
@@ -303,6 +317,70 @@ fn project_context_def() -> Value {
                 "directory": { "type": "string", "description": "Directory to analyze (defaults to all)" },
                 "days": { "type": "integer", "description": "Time window in days (default: 7)", "default": 7 }
             }
+        }
+    })
+}
+
+fn list_skills_def() -> Value {
+    json!({
+        "name": "list_skills",
+        "description": "List skills in Suvadu's shared cross-agent skills library — reusable instructions any MCP-capable agent can read instead of each tool keeping its own copy. Use this to discover what conventions/checklists/instructions already exist before starting work.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "scope": { "type": "string", "description": "Filter to \"global\", or a specific project directory path" },
+                "directory": { "type": "string", "description": "Alias for scope — filter to skills scoped to this directory" }
+            }
+        }
+    })
+}
+
+fn get_skill_def() -> Value {
+    json!({
+        "name": "get_skill",
+        "description": "Get the full content of one skill by name from Suvadu's shared skills library.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Skill name" },
+                "scope": { "type": "string", "description": "\"global\" or a project directory path. If omitted, the best match (this directory, then global) is returned." },
+                "directory": { "type": "string", "description": "Alias for scope" }
+            },
+            "required": ["name"]
+        }
+    })
+}
+
+fn search_skills_def() -> Value {
+    json!({
+        "name": "search_skills",
+        "description": "Search Suvadu's shared skills library by keyword across name, description, and triggers. Use this before writing a new checklist/instruction to see if one already exists.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Text to search for" },
+                "scope": { "type": "string", "description": "Filter to \"global\" or a project directory path" }
+            },
+            "required": ["query"]
+        }
+    })
+}
+
+fn propose_skill_def() -> Value {
+    json!({
+        "name": "propose_skill",
+        "description": "Propose a new skill for Suvadu's shared skills library. The skill is saved as pending review — it is NOT active and other agents will not see it via list_skills/get_skill until a human approves it with `suv skills review`. Use this when you notice a reusable instruction/checklist worth sharing, not for anything sensitive.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Skill name (slug)" },
+                "description": { "type": "string", "description": "One-line summary" },
+                "body": { "type": "string", "description": "Full skill content (markdown)" },
+                "triggers": { "type": "array", "items": { "type": "string" }, "description": "Keywords this skill is relevant for" },
+                "scope": { "type": "string", "description": "\"global\" or a project directory path (default: global)" },
+                "source_agent": { "type": "string", "description": "Name of the proposing agent (e.g. claude-code) — recorded for the human reviewer" }
+            },
+            "required": ["name", "body"]
         }
     })
 }
@@ -1812,6 +1890,137 @@ fn handle_project_context(
     Ok(out)
 }
 
+// ── Skills tools ─────────────────────────────────────────────
+
+fn format_skill_summary(s: &crate::models::Skill) -> String {
+    let triggers = if s.triggers.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", s.triggers.join(", "))
+    };
+    format!("- {} ({}) — {}{}", s.name, s.scope, s.description, triggers)
+}
+
+fn handle_list_skills(repo: &Repository, args: &Value) -> Result<String, String> {
+    let scope = get_str(args, "scope").or_else(|| get_str(args, "directory"));
+    let skills = repo
+        .list_skills(scope, Some(crate::models::SKILL_STATUS_ACTIVE))
+        .map_err(|e| format!("query failed: {e}"))?;
+
+    if skills.is_empty() {
+        return Ok(
+            "No skills in the shared library yet. Add one with `suv skills add <name>`."
+                .to_string(),
+        );
+    }
+
+    let mut out = format!("{} skill(s):\n\n", skills.len());
+    for s in &skills {
+        let _ = writeln!(out, "{}", format_skill_summary(s));
+    }
+    Ok(out)
+}
+
+fn handle_get_skill(repo: &Repository, args: &Value) -> Result<String, String> {
+    let name = get_str(args, "name").ok_or("name is required")?;
+    let scope = get_str(args, "scope").or_else(|| get_str(args, "directory"));
+
+    let skill = repo
+        .find_skill(name, scope)
+        .map_err(|e| format!("query failed: {e}"))?
+        .ok_or_else(|| format!("No active skill named '{name}' found."))?;
+
+    let mut out = format!("{} ({})\n", skill.name, skill.scope);
+    if !skill.description.is_empty() {
+        let _ = writeln!(out, "{}", skill.description);
+    }
+    if !skill.triggers.is_empty() {
+        let _ = writeln!(out, "triggers: {}", skill.triggers.join(", "));
+    }
+    out.push('\n');
+    out.push_str(&skill.body);
+    Ok(out)
+}
+
+fn handle_search_skills(repo: &Repository, args: &Value) -> Result<String, String> {
+    let query = get_str(args, "query").ok_or("query is required")?;
+    let scope = get_str(args, "scope");
+
+    let skills = repo
+        .search_skills(query, scope)
+        .map_err(|e| format!("query failed: {e}"))?;
+
+    if skills.is_empty() {
+        return Ok(format!("No skills found matching \"{query}\"."));
+    }
+
+    let mut out = format!("{} skill(s) matching \"{query}\":\n\n", skills.len());
+    for s in &skills {
+        let _ = writeln!(out, "{}", format_skill_summary(s));
+    }
+    Ok(out)
+}
+
+/// Writes a proposed skill with `status = pending_review`. Unlike every
+/// other MCP tool, this needs a write-capable connection — it opens its own
+/// short-lived one on demand rather than relaxing the read-only guarantee
+/// the server opens with for every other tool (see `mcp/server.rs`). The gate
+/// check happens before that connection is ever opened, so a disabled call
+/// never touches the database at all.
+fn handle_propose_skill(args: &Value, mcp: &crate::config::McpConfig) -> Result<String, String> {
+    if !mcp.allow_skill_proposals {
+        return Err(
+            "Skill proposals are disabled. A human can enable them by setting \
+             mcp.allow_skill_proposals = true in config.toml — proposals still land as \
+             pending_review only, never active, until reviewed with `suv skills review`."
+                .to_string(),
+        );
+    }
+    let repo = crate::repository::Repository::init()
+        .map_err(|e| format!("failed to open database: {e}"))?;
+    propose_skill_with_repo(&repo, args)
+}
+
+/// Core of [`handle_propose_skill`], parameterized on the repository so
+/// tests can pass a temp-database `Repository` instead of exercising the
+/// real on-disk database path.
+fn propose_skill_with_repo(repo: &Repository, args: &Value) -> Result<String, String> {
+    let name = get_str(args, "name").ok_or("name is required")?;
+    let body = get_str(args, "body").ok_or("body is required")?;
+    let description = get_str(args, "description").unwrap_or("").to_string();
+    let scope = get_str(args, "scope")
+        .unwrap_or(crate::models::SKILL_SCOPE_GLOBAL)
+        .to_string();
+    let source_agent = get_str(args, "source_agent").unwrap_or("unknown");
+    let triggers = args
+        .get("triggers")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let new = crate::models::NewSkill {
+        name: name.to_string(),
+        description,
+        body: body.to_string(),
+        triggers,
+        scope,
+        source: format!("agent:{source_agent}"),
+        status: crate::models::SKILL_STATUS_PENDING.to_string(),
+    };
+
+    let skill = repo
+        .create_skill(&new)
+        .map_err(|e| format!("failed to save proposal: {e}"))?;
+    Ok(format!(
+        "Proposal saved as pending review: '{}' ({}). A human must approve it with `suv skills review` before it becomes active.",
+        skill.name, skill.scope
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1826,7 +2035,7 @@ mod tests {
         mcp.disabled_tools = vec!["assess_risk".to_string(), "suggest_next".to_string()];
         let resp = list_tools(&json!(1), &mcp);
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), 16);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(!names.contains(&"assess_risk"));
         assert!(!names.contains(&"suggest_next"));
@@ -1847,7 +2056,7 @@ mod tests {
     fn test_list_tools_count() {
         let resp = list_tools(&json!(1), &default_mcp());
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 15);
+        assert_eq!(tools.len(), 18);
 
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"search_commands"));
@@ -2807,5 +3016,193 @@ mod tests {
             !text.contains("grep"),
             "should NOT show claude commands from /project: {text}"
         );
+    }
+
+    // ── Skills tools ─────────────────────────────────────────
+
+    fn seed_skill(repo: &Repository, name: &str, scope: &str, status: &str) {
+        repo.create_skill(&crate::models::NewSkill {
+            name: name.to_string(),
+            description: format!("{name} description"),
+            body: format!("# {name}\n\nDo the thing."),
+            triggers: vec!["deploy".to_string()],
+            scope: scope.to_string(),
+            source: crate::models::SKILL_SOURCE_HUMAN.to_string(),
+            status: status.to_string(),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_list_skills_empty() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let result = call_tool(&repo, "list_skills", &json!({}), &default_mcp());
+        assert_eq!(
+            result.unwrap(),
+            "No skills in the shared library yet. Add one with `suv skills add <name>`."
+        );
+    }
+
+    #[test]
+    fn test_list_skills_only_shows_active() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_skill(
+            &repo,
+            "active-one",
+            crate::models::SKILL_SCOPE_GLOBAL,
+            crate::models::SKILL_STATUS_ACTIVE,
+        );
+        seed_skill(
+            &repo,
+            "pending-one",
+            crate::models::SKILL_SCOPE_GLOBAL,
+            crate::models::SKILL_STATUS_PENDING,
+        );
+
+        let result = call_tool(&repo, "list_skills", &json!({}), &default_mcp()).unwrap();
+        assert!(result.contains("active-one"));
+        assert!(!result.contains("pending-one"));
+    }
+
+    #[test]
+    fn test_list_skills_filters_by_scope() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_skill(
+            &repo,
+            "global-one",
+            crate::models::SKILL_SCOPE_GLOBAL,
+            crate::models::SKILL_STATUS_ACTIVE,
+        );
+        seed_skill(
+            &repo,
+            "proj-one",
+            "/proj",
+            crate::models::SKILL_STATUS_ACTIVE,
+        );
+
+        let result = call_tool(
+            &repo,
+            "list_skills",
+            &json!({"scope": "/proj"}),
+            &default_mcp(),
+        )
+        .unwrap();
+        assert!(result.contains("proj-one"));
+        assert!(!result.contains("global-one"));
+    }
+
+    #[test]
+    fn test_get_skill_returns_body() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_skill(
+            &repo,
+            "deploy",
+            crate::models::SKILL_SCOPE_GLOBAL,
+            crate::models::SKILL_STATUS_ACTIVE,
+        );
+
+        let result = call_tool(
+            &repo,
+            "get_skill",
+            &json!({"name": "deploy"}),
+            &default_mcp(),
+        )
+        .unwrap();
+        assert!(result.contains("Do the thing."));
+        assert!(result.contains("deploy description"));
+    }
+
+    #[test]
+    fn test_get_skill_missing_name_errors() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let result = call_tool(&repo, "get_skill", &json!({}), &default_mcp());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_skill_not_found() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let result = call_tool(&repo, "get_skill", &json!({"name": "nope"}), &default_mcp());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_search_skills_matches_trigger() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_skill(
+            &repo,
+            "deploy-checklist",
+            crate::models::SKILL_SCOPE_GLOBAL,
+            crate::models::SKILL_STATUS_ACTIVE,
+        );
+
+        let result = call_tool(
+            &repo,
+            "search_skills",
+            &json!({"query": "deploy"}),
+            &default_mcp(),
+        )
+        .unwrap();
+        assert!(result.contains("deploy-checklist"));
+    }
+
+    #[test]
+    fn test_propose_skill_disabled_by_default_never_touches_db() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        // allow_skill_proposals defaults to false, so this must short-circuit
+        // before ever opening a (real, on-disk) Repository::init().
+        let result = call_tool(
+            &repo,
+            "propose_skill",
+            &json!({"name": "x", "body": "y"}),
+            &default_mcp(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("disabled"));
+    }
+
+    #[test]
+    fn test_propose_skill_saves_as_pending_review() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let result = propose_skill_with_repo(
+            &repo,
+            &json!({
+                "name": "new-idea",
+                "description": "worth sharing",
+                "body": "do X then Y",
+                "triggers": ["ci"],
+                "source_agent": "claude-code"
+            }),
+        )
+        .unwrap();
+        assert!(result.contains("pending review"));
+
+        let saved = repo
+            .get_skill("new-idea", crate::models::SKILL_SCOPE_GLOBAL)
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.status, crate::models::SKILL_STATUS_PENDING);
+        assert_eq!(saved.source, "agent:claude-code");
+
+        // Pending proposals must not surface through the read tools.
+        let listed = call_tool(&repo, "list_skills", &json!({}), &default_mcp()).unwrap();
+        assert!(!listed.contains("new-idea"));
+    }
+
+    #[test]
+    fn test_list_tools_hides_propose_skill_by_default() {
+        let mcp = default_mcp();
+        let resp = list_tools(&json!(1), &mcp);
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        assert!(!tools.iter().any(|t| t["name"] == "propose_skill"));
+    }
+
+    #[test]
+    fn test_list_tools_shows_propose_skill_when_enabled() {
+        let mut mcp = default_mcp();
+        mcp.allow_skill_proposals = true;
+        let resp = list_tools(&json!(1), &mcp);
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        assert!(tools.iter().any(|t| t["name"] == "propose_skill"));
     }
 }

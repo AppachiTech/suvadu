@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Shared skills library** — `suv skills` keeps reusable instructions in one place instead of every AI tool maintaining its own copy. `suv skills add/list/show/edit/rm/pick` manage skills scoped to `global` or a specific project directory; three new read-only MCP tools (`list_skills`, `get_skill`, `search_skills`) plus an auto-injected `suvadu://skills/index` resource let any MCP-capable agent discover and read them directly.
+- **`suv skills sync`** — materializes active skills into each agent's own native format (`~/.claude/skills/<name>/SKILL.md`, `.cursor/rules/<name>.mdc`, a managed block in `AGENTS.md` for Codex) for hosts that don't pull from MCP. Idempotent — only rewrites a file when its content actually changed, and never touches hand-written content around its managed section.
+- **`propose_skill` MCP tool** (off by default) — lets an agent propose a new skill, saved as `pending_review` only, never active. Enable with `mcp.allow_skill_proposals = true` in `config.toml`; a human approves or rejects proposals with `suv skills review`. Disabled by default since a skills store readable and writable by agents is a shared-memory poisoning target — the gate is checked before any database connection is opened.
+
 ## [0.3.7] - 2026-09-07
 
 ### Added

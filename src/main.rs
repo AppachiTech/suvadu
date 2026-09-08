@@ -18,6 +18,7 @@ mod risk;
 mod search;
 mod session_ui;
 mod settings_ui;
+mod skills_sync;
 mod stats_ui;
 mod suggest;
 mod suggest_ui;
@@ -217,6 +218,7 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
             limit,
         ),
         Commands::Agent(cmd) => agent::handle_agent(cmd),
+        Commands::Skills(cmd) => commands::skills::handle_skills(cmd),
     }
 }
 

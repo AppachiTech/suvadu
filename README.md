@@ -18,7 +18,7 @@
 - **<2ms** recording overhead, **<10ms** search across 1M+ entries
 - **AI agent tracking** — auto-detects Claude Code, Cursor, OpenCode, Antigravity, Windsurf, pi.dev, Codex, Aider
 - **Prompt Explorer** — trace every command back to the prompt that triggered it
-- **MCP Server** — 15 tools + 7 resources. Agent session discovery, project context, failure learning, risk assessment. Configurable via `suv settings`
+- **MCP Server** — 18 tools + 8 resources. Agent session discovery, project context, failure learning, risk assessment, a shared skills library. Configurable via `suv settings`
 - **100% local** — no cloud, no telemetry, no account. MIT licensed.
 
 > **Website & Docs:** [suvadu.sh](https://suvadu.sh) &middot; **CLI Reference:** [suvadu.sh/cli](https://suvadu.sh/cli/) &middot; **Blog:** [suvadu.sh/blog](https://suvadu.sh/blog/) &middot; **What's new:** [CHANGELOG](CHANGELOG.md)
@@ -77,6 +77,8 @@ suv replay --after today    # Timeline of today's commands
 suv doctor                  # Check installation health
 suv agent dashboard         # Monitor AI agent activity
 suv agent prompts           # Browse prompts and their commands
+suv skills add my-skill     # Add a skill any MCP-capable agent can read
+suv skills sync             # Materialize skills into Claude Code/Cursor/Codex
 ```
 
 ---
@@ -114,7 +116,8 @@ See the [full integration guide](https://suvadu.sh/blog/track-ai-agent-commands-
 | **Search** | Substring search TUI (your own commands by default; `Ctrl+A` shows agents, `Ctrl+E` shows failures only) with filters, Smart mode, detail pane, bookmarks |
 | **History** | Non-interactive `suv history` with filters, `--json`, pipeable to other tools |
 | **Agent Dashboard** | Timeline, risk assessment, per-agent analytics, exportable reports; `suv agent report --fail-on <low\|medium\|high\|critical>` for local CI / git-hook gating |
-| **MCP Server** | 15 tools + 7 resources — agent session replay, project context, failure learning, configurable |
+| **MCP Server** | 18 tools + 8 resources — agent session replay, project context, failure learning, configurable |
+| **Skills Library** | `suv skills add/list/edit/sync` — reusable instructions any MCP-capable agent can read instead of each tool keeping its own copy; `suv skills sync` also materializes them into Claude Code/Cursor/Codex's native formats |
 | **Prompt Explorer** | Trace commands back to the prompt that triggered them |
 | **Stats** | Heatmap, hourly distribution, top commands, executor breakdown; `--human` (or `h` in the TUI) excludes AI-agent activity |
 | **Doctor** | `suv doctor` checks shell, hooks, config, database, MCP, and agent hooks health |

@@ -230,6 +230,13 @@ pub struct McpConfig {
     pub default_limit: u32,
     /// Directories to exclude from MCP queries.
     pub exclude_dirs: Vec<String>,
+    /// Allow agents to call `propose_skill` over MCP, writing a new skill
+    /// with `status = "pending_review"` for a human to approve via
+    /// `suv skills review`. Off by default: a skill store that agents can
+    /// both read and write is a shared-memory poisoning target, so writes
+    /// require an explicit opt-in even though they only ever land as
+    /// pending, never active.
+    pub allow_skill_proposals: bool,
 }
 
 impl Default for McpConfig {
@@ -240,6 +247,7 @@ impl Default for McpConfig {
             default_days: 7,
             default_limit: 20,
             exclude_dirs: Vec::new(),
+            allow_skill_proposals: false,
         }
     }
 }
@@ -635,6 +643,17 @@ enabled = true
         assert!(config.mcp.disabled_tools.is_empty());
         assert!(config.mcp.disabled_resources.is_empty());
         assert!(config.mcp.exclude_dirs.is_empty());
+        assert!(!config.mcp.allow_skill_proposals);
+    }
+
+    #[test]
+    fn test_mcp_allow_skill_proposals_deserialization() {
+        let toml_str = r#"
+[mcp]
+allow_skill_proposals = true
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.mcp.allow_skill_proposals);
     }
 
     #[test]

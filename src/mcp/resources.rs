@@ -20,6 +20,7 @@ pub fn list_resources(id: &Value, mcp: &crate::config::McpConfig) -> Value {
         json!({"uri": "suvadu://agents/activity", "name": "Agent Activity", "description": "Overview of AI agent activity: which agents, how many commands, success rates", "mimeType": "text/plain"}),
         json!({"uri": "suvadu://agents/sessions", "name": "Recent Agent Sessions", "description": "Summary of the 5 most recent AI agent sessions, with prompts and command counts", "mimeType": "text/plain"}),
         json!({"uri": "suvadu://context/project", "name": "Project Context", "description": "Project briefing for the current directory: common commands, recent failures, agent activity, and workflow tips", "mimeType": "text/plain"}),
+        json!({"uri": "suvadu://skills/index", "name": "Skills Index", "description": "Active skills in the shared cross-agent skills library — reusable instructions any MCP-capable agent can read instead of keeping its own copy", "mimeType": "text/plain"}),
     ];
     let resources: Vec<Value> = all_resources
         .into_iter()
@@ -76,6 +77,7 @@ pub fn read_resource(
         "suvadu://agents/activity" => read_agent_activity(repo)?,
         "suvadu://agents/sessions" => read_agent_sessions(repo)?,
         "suvadu://context/project" => read_project_context(repo)?,
+        "suvadu://skills/index" => read_skills_index(repo)?,
         _ if uri.starts_with("suvadu://history/session/") => {
             let session_id = uri.strip_prefix("suvadu://history/session/").unwrap_or("");
             read_session_history(repo, session_id)?
@@ -647,6 +649,45 @@ fn read_project_context(repo: &Repository) -> Result<String, String> {
     Ok(out)
 }
 
+fn read_skills_index(repo: &Repository) -> Result<String, String> {
+    const MAX_SHOWN: usize = 30;
+    let skills = repo
+        .list_skills(None, Some(crate::models::SKILL_STATUS_ACTIVE))
+        .map_err(|e| format!("query failed: {e}"))?;
+
+    if skills.is_empty() {
+        return Ok(
+            "No skills in the shared library yet. Add one with `suv skills add <name>`, \
+             or propose one via the propose_skill tool if enabled."
+                .to_string(),
+        );
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(out, "{} active skill(s):\n", skills.len());
+    for s in skills.iter().take(MAX_SHOWN) {
+        let triggers = if s.triggers.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", s.triggers.join(", "))
+        };
+        let _ = writeln!(
+            out,
+            "- {} ({}) — {}{}",
+            s.name, s.scope, s.description, triggers
+        );
+    }
+    if skills.len() > MAX_SHOWN {
+        let _ = writeln!(
+            out,
+            "... and {} more (use search_skills)",
+            skills.len() - MAX_SHOWN
+        );
+    }
+    out.push_str("\nUse get_skill(name) for the full content of any skill above.");
+    Ok(out)
+}
+
 fn read_session_history(repo: &Repository, session_id: &str) -> Result<String, String> {
     if session_id.is_empty() {
         return Err("session_id is required".to_string());
@@ -697,7 +738,7 @@ mod tests {
         let mcp = crate::config::McpConfig::default();
         let resp = list_resources(&json!(1), &mcp);
         let resources = resp["result"]["resources"].as_array().unwrap();
-        assert_eq!(resources.len(), 7);
+        assert_eq!(resources.len(), 8);
         for r in resources {
             assert!(r["uri"].is_string());
             assert!(r["name"].is_string());
@@ -711,7 +752,7 @@ mod tests {
         mcp.disabled_resources = vec!["context/project".to_string(), "risk/summary".to_string()];
         let resp = list_resources(&json!(1), &mcp);
         let resources = resp["result"]["resources"].as_array().unwrap();
-        assert_eq!(resources.len(), 5);
+        assert_eq!(resources.len(), 6);
         let uris: Vec<&str> = resources
             .iter()
             .map(|r| r["uri"].as_str().unwrap())
@@ -934,6 +975,62 @@ mod tests {
             "should show common commands: {text}"
         );
         assert!(text.contains("cargo"), "should contain cargo: {text}");
+    }
+
+    #[test]
+    fn test_read_skills_index_empty() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let result = read_resource(
+            &repo,
+            "suvadu://skills/index",
+            &crate::config::McpConfig::default(),
+        );
+        assert!(result.is_ok());
+        assert!(result.unwrap()["contents"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("No skills"));
+    }
+
+    #[test]
+    fn test_read_skills_index_with_data() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        repo.create_skill(&crate::models::NewSkill {
+            name: "deploy-checklist".into(),
+            description: "Steps before a deploy".into(),
+            body: "1. run tests\n2. tag release".into(),
+            triggers: vec!["deploy".into()],
+            scope: crate::models::SKILL_SCOPE_GLOBAL.into(),
+            source: crate::models::SKILL_SOURCE_HUMAN.into(),
+            status: crate::models::SKILL_STATUS_ACTIVE.into(),
+        })
+        .unwrap();
+        repo.create_skill(&crate::models::NewSkill {
+            name: "hidden-draft".into(),
+            description: "not ready".into(),
+            body: "wip".into(),
+            triggers: vec![],
+            scope: crate::models::SKILL_SCOPE_GLOBAL.into(),
+            source: "agent:claude-code".into(),
+            status: crate::models::SKILL_STATUS_PENDING.into(),
+        })
+        .unwrap();
+
+        let result = read_resource(
+            &repo,
+            "suvadu://skills/index",
+            &crate::config::McpConfig::default(),
+        );
+        let text = result.unwrap()["contents"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(text.contains("deploy-checklist"));
+        assert!(text.contains("Steps before a deploy"));
+        assert!(
+            !text.contains("hidden-draft"),
+            "pending skills must not appear: {text}"
+        );
     }
 
     #[test]

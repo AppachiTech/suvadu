@@ -472,6 +472,14 @@ pub enum Commands {
     )]
     Agent(AgentCommands),
 
+    /// Manage the shared skills library — reusable instructions any
+    /// MCP-capable AI agent can read, instead of each agent keeping its own copy
+    #[command(
+        subcommand,
+        after_help = "Examples:\n  suv skills add deploy-checklist --description \"Steps before a deploy\" < deploy.md\n  suv skills list\n  suv skills show deploy-checklist\n  suv skills sync --target claude-code\n  suv skills review"
+    )]
+    Skills(SkillsCommands),
+
     /// Remove orphaned data and compact the database
     #[command(
         after_help = "Examples:\n  suv gc              # Remove orphaned sessions/notes\n  suv gc --dry-run    # Preview what would be cleaned\n  suv gc --vacuum     # Also compact the database file"
@@ -727,6 +735,106 @@ pub enum AgentCommands {
         /// Output plain text instead of interactive TUI
         #[arg(long)]
         text: bool,
+    },
+}
+
+/// Native format to materialize skills into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SyncTarget {
+    ClaudeCode,
+    Cursor,
+    Codex,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SkillsCommands {
+    /// Add a new skill. Body comes from --body, or stdin if omitted
+    #[command(
+        after_help = "Examples:\n  suv skills add deploy-checklist --description \"Pre-deploy steps\" < deploy.md\n  suv skills add local-fix --scope here --body \"Always run cargo fmt first\""
+    )]
+    Add {
+        /// Skill name (slug)
+        name: String,
+        /// One-line summary shown in listings
+        #[arg(short, long)]
+        description: Option<String>,
+        /// Skill body (markdown). Reads stdin if omitted
+        #[arg(long)]
+        body: Option<String>,
+        /// "global" (default), "here" (current directory), or an explicit directory path
+        #[arg(long)]
+        scope: Option<String>,
+        /// Keyword/trigger this skill is relevant for (repeatable)
+        #[arg(long = "trigger")]
+        triggers: Vec<String>,
+    },
+
+    /// List skills in the shared library
+    List {
+        /// Filter to "global", "here", or an explicit directory path
+        #[arg(long)]
+        scope: Option<String>,
+        /// Include archived and pending-review skills
+        #[arg(long)]
+        all: bool,
+        /// Output as JSON for scripting
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show a skill's full content
+    Show {
+        /// Skill name
+        name: String,
+        /// "global", "here", or an explicit directory path (default: best match)
+        #[arg(long)]
+        scope: Option<String>,
+    },
+
+    /// Edit an existing skill's content
+    Edit {
+        /// Skill name
+        name: String,
+        /// "global", "here", or an explicit directory path (default: best match)
+        #[arg(long)]
+        scope: Option<String>,
+        /// New one-line summary
+        #[arg(short, long)]
+        description: Option<String>,
+        /// New body (markdown). Reads stdin if `--body -` is passed
+        #[arg(long)]
+        body: Option<String>,
+        /// Replace triggers with these (repeatable). Omit to leave unchanged
+        #[arg(long = "trigger")]
+        triggers: Vec<String>,
+    },
+
+    /// Remove a skill
+    Rm {
+        /// Skill name
+        name: String,
+        /// "global", "here", or an explicit directory path (default: best match)
+        #[arg(long)]
+        scope: Option<String>,
+    },
+
+    /// Interactively pick a skill and print its body to stdout
+    Pick,
+
+    /// Approve or reject agent-proposed skills awaiting review
+    Review,
+
+    /// Materialize active skills into each AI agent's native file format
+    #[command(
+        after_help = "Examples:\n  suv skills sync                       # all configured targets\n  suv skills sync --target claude-code  # just Claude Code\n  suv skills sync --dry-run             # preview without writing"
+    )]
+    Sync {
+        /// Sync only this target (default: all)
+        #[arg(long, value_enum)]
+        target: Option<SyncTarget>,
+        /// Preview what would be written without writing
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 

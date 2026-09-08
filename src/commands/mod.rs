@@ -7,6 +7,7 @@ pub mod replay;
 pub mod search;
 pub mod session;
 pub mod settings;
+pub mod skills;
 pub mod stats;
 pub mod tag;
 pub mod wrap;

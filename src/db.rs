@@ -17,7 +17,7 @@ pub enum DbError {
 pub type DbResult<T> = Result<T, DbError>;
 
 /// Current schema version. Increment when adding new migrations.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// Get the path to the suvadu database file
 pub fn get_db_path() -> DbResult<PathBuf> {
@@ -304,6 +304,7 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
         (3, migrate_v3),
         (4, migrate_v4),
         (5, migrate_v5),
+        (6, migrate_v6),
     ];
 
     for &(target_version, migrate_fn) in migrations {
@@ -385,6 +386,34 @@ fn migrate_v5(conn: &Connection) -> DbResult<()> {
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_entries_started_command ON entries(started_at, command);
          CREATE INDEX IF NOT EXISTS idx_entries_started_cwd     ON entries(started_at, cwd);",
+    )?;
+    Ok(())
+}
+
+/// Migration v6: `skills` table — the shared cross-agent skills library.
+///
+/// `(name, scope)` is unique so the same skill name can exist once globally
+/// and once per project directory. `triggers` is a JSON array of strings.
+fn migrate_v6(conn: &Connection) -> DbResult<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS skills (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            body TEXT NOT NULL,
+            triggers TEXT,
+            scope TEXT NOT NULL DEFAULT 'global',
+            source TEXT NOT NULL DEFAULT 'human',
+            status TEXT NOT NULL DEFAULT 'active',
+            version INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_name_scope ON skills(name, scope);
+         CREATE INDEX IF NOT EXISTS idx_skills_status ON skills(status);",
     )?;
     Ok(())
 }
@@ -539,7 +568,38 @@ mod tests {
         assert!(tables.contains(&"entries".to_string()));
         assert!(tables.contains(&"bookmarks".to_string()));
         assert!(tables.contains(&"notes".to_string()));
+        assert!(tables.contains(&"skills".to_string()));
         assert!(tables.contains(&"schema_version".to_string()));
+    }
+
+    #[test]
+    fn test_skills_name_scope_unique() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let conn = init_db(&db_path).unwrap();
+
+        conn.execute(
+            "INSERT INTO skills (id, name, body, scope, created_at, updated_at)
+             VALUES ('a', 'deploy', 'body', 'global', 1, 1)",
+            [],
+        )
+        .unwrap();
+
+        // Same name + same scope should violate the unique index.
+        let dup = conn.execute(
+            "INSERT INTO skills (id, name, body, scope, created_at, updated_at)
+             VALUES ('b', 'deploy', 'other', 'global', 2, 2)",
+            [],
+        );
+        assert!(dup.is_err());
+
+        // Same name, different scope is fine.
+        let ok = conn.execute(
+            "INSERT INTO skills (id, name, body, scope, created_at, updated_at)
+             VALUES ('c', 'deploy', 'other', '/tmp/project', 3, 3)",
+            [],
+        );
+        assert!(ok.is_ok());
     }
 
     #[test]

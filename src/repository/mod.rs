@@ -3,6 +3,7 @@ mod api;
 mod bookmarks;
 mod entries;
 mod notes;
+mod skills;
 mod stats;
 mod tags;
 
