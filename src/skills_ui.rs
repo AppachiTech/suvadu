@@ -47,6 +47,17 @@ pub(crate) fn copy_feedback_message(name: &str) -> String {
     format!("Copied '{name}' to clipboard")
 }
 
+/// After removing the item at `removed_index` from a list, what selection
+/// index should follow it? `remaining_len` is the list's length *after*
+/// removal. Returns `None` if the list is now empty.
+pub(crate) fn reselect_after_removal(removed_index: usize, remaining_len: usize) -> Option<usize> {
+    if remaining_len == 0 {
+        None
+    } else {
+        Some(removed_index.min(remaining_len - 1))
+    }
+}
+
 use crate::models::SKILL_STATUS_ACTIVE;
 use crate::repository::Repository;
 use crate::theme::theme;
@@ -66,12 +77,18 @@ pub(crate) enum StatusLevel {
     Error,
 }
 
+enum Mode {
+    Browse,
+    ConfirmDelete { name: String, scope: String },
+}
+
 pub(crate) struct SkillsApp {
     skills: Vec<Skill>,
     query: String,
     filtered: Vec<usize>,
     list_state: ListState,
     status_message: Option<(StatusLevel, String)>,
+    mode: Mode,
 }
 
 impl SkillsApp {
@@ -88,6 +105,7 @@ impl SkillsApp {
             filtered,
             list_state,
             status_message: None,
+            mode: Mode::Browse,
         })
     }
 
@@ -126,44 +144,80 @@ pub fn run(repo: &Repository) -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        match key.code {
-            KeyCode::Esc => break,
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-            KeyCode::Up => {
-                let i = app.list_state.selected().unwrap_or(0);
-                app.list_state.select(Some(i.saturating_sub(1)));
-            }
-            KeyCode::Down => {
-                if !app.filtered.is_empty() {
+        match &app.mode {
+            Mode::Browse => match key.code {
+                KeyCode::Esc => break,
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(skill) = app.selected_skill() {
+                        app.mode = Mode::ConfirmDelete {
+                            name: skill.name.clone(),
+                            scope: skill.scope.clone(),
+                        };
+                    }
+                }
+                KeyCode::Up => {
                     let i = app.list_state.selected().unwrap_or(0);
-                    app.list_state
-                        .select(Some((i + 1).min(app.filtered.len() - 1)));
+                    app.list_state.select(Some(i.saturating_sub(1)));
+                }
+                KeyCode::Down => {
+                    if !app.filtered.is_empty() {
+                        let i = app.list_state.selected().unwrap_or(0);
+                        app.list_state
+                            .select(Some((i + 1).min(app.filtered.len() - 1)));
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(skill) = app.selected_skill() {
+                        let name = skill.name.clone();
+                        let body = skill.body.clone();
+                        app.status_message = match arboard::Clipboard::new()
+                            .and_then(|mut c| c.set_text(body))
+                        {
+                            Ok(()) => Some((StatusLevel::Info, copy_feedback_message(&name))),
+                            Err(e) => Some((
+                                StatusLevel::Error,
+                                format!("Could not copy to clipboard: {e}"),
+                            )),
+                        };
+                    }
+                }
+                KeyCode::Backspace => {
+                    app.query.pop();
+                    app.refresh_filter();
+                }
+                KeyCode::Char(c) => {
+                    app.query.push(c);
+                    app.refresh_filter();
+                }
+                _ => {}
+            },
+            Mode::ConfirmDelete { name, scope } => {
+                let (name, scope) = (name.clone(), scope.clone());
+                match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        match repo.delete_skill(&name, &scope) {
+                            Ok(_) => {
+                                let removed_index = app.list_state.selected().unwrap_or(0);
+                                app.skills = repo.list_skills(None, Some(SKILL_STATUS_ACTIVE))?;
+                                app.refresh_filter();
+                                app.list_state.select(reselect_after_removal(
+                                    removed_index,
+                                    app.filtered.len(),
+                                ));
+                                app.status_message =
+                                    Some((StatusLevel::Info, format!("Deleted '{name}'")));
+                            }
+                            Err(e) => {
+                                app.status_message =
+                                    Some((StatusLevel::Error, format!("Delete failed: {e}")));
+                            }
+                        }
+                        app.mode = Mode::Browse;
+                    }
+                    _ => app.mode = Mode::Browse,
                 }
             }
-            KeyCode::Enter => {
-                if let Some(skill) = app.selected_skill() {
-                    let name = skill.name.clone();
-                    let body = skill.body.clone();
-                    app.status_message = match arboard::Clipboard::new()
-                        .and_then(|mut c| c.set_text(body))
-                    {
-                        Ok(()) => Some((StatusLevel::Info, copy_feedback_message(&name))),
-                        Err(e) => Some((
-                            StatusLevel::Error,
-                            format!("Could not copy to clipboard: {e}"),
-                        )),
-                    };
-                }
-            }
-            KeyCode::Backspace => {
-                app.query.pop();
-                app.refresh_filter();
-            }
-            KeyCode::Char(c) => {
-                app.query.push(c);
-                app.refresh_filter();
-            }
-            _ => {}
         }
     }
 
@@ -268,6 +322,30 @@ fn render(f: &mut ratatui::Frame, app: &mut SkillsApp) {
         .style(Style::default().fg(t.text_muted)),
     };
     f.render_widget(Paragraph::new(status_line), rows[2]);
+
+    if let Mode::ConfirmDelete { name, .. } = &app.mode {
+        let area = centered_rect(50, 3, f.area());
+        f.render_widget(ratatui::widgets::Clear, area);
+        let dialog = Paragraph::new(Line::from(format!("Delete skill '{name}'? [y/N]"))).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(t.error))
+                .title(" Confirm delete "),
+        );
+        f.render_widget(dialog, area);
+    }
+}
+
+fn centered_rect(width: u16, height: u16, area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    ratatui::layout::Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    }
 }
 
 #[cfg(test)]
@@ -281,6 +359,21 @@ mod tests {
             copy_feedback_message("release"),
             "Copied 'release' to clipboard"
         );
+    }
+
+    #[test]
+    fn reselect_after_removal_keeps_same_index_when_items_remain_after_it() {
+        assert_eq!(reselect_after_removal(0, 2), Some(0));
+    }
+
+    #[test]
+    fn reselect_after_removal_clamps_to_new_last_index_when_it_was_last() {
+        assert_eq!(reselect_after_removal(2, 2), Some(1));
+    }
+
+    #[test]
+    fn reselect_after_removal_returns_none_when_list_becomes_empty() {
+        assert_eq!(reselect_after_removal(0, 0), None);
     }
 
     fn skill(name: &str, description: &str, triggers: &[&str]) -> Skill {
