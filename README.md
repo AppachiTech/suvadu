@@ -77,6 +77,7 @@ suv replay --after today    # Timeline of today's commands
 suv doctor                  # Check installation health
 suv agent dashboard         # Monitor AI agent activity
 suv agent prompts           # Browse prompts and their commands
+suv skills                  # Interactive skills management (browse, add, edit, sync, review)
 suv skills add my-skill     # Add a skill any MCP-capable agent can read
 suv skills sync             # Materialize skills into Claude Code/Cursor/Codex
 ```
@@ -117,7 +118,7 @@ See the [full integration guide](https://suvadu.sh/blog/track-ai-agent-commands-
 | **History** | Non-interactive `suv history` with filters, `--json`, pipeable to other tools |
 | **Agent Dashboard** | Timeline, risk assessment, per-agent analytics, exportable reports; `suv agent report --fail-on <low\|medium\|high\|critical>` for local CI / git-hook gating |
 | **MCP Server** | 18 tools + 8 resources — agent session replay, project context, failure learning, configurable |
-| **Skills Library** | `suv skills add/list/edit/sync` — reusable instructions any MCP-capable agent can read instead of each tool keeping its own copy; `suv skills sync` also materializes them into Claude Code/Cursor/Codex's native formats |
+| **Skills Library** | `suv skills` — interactive TUI to browse, add, edit, delete, sync, and review shared skills any MCP-capable agent can read instead of each tool keeping its own copy; `add/list/edit/sync` also work as scriptable subcommands |
 | **Prompt Explorer** | Trace commands back to the prompt that triggered them |
 | **Stats** | Heatmap, hourly distribution, top commands, executor breakdown; `--human` (or `h` in the TUI) excludes AI-agent activity |
 | **Doctor** | `suv doctor` checks shell, hooks, config, database, MCP, and agent hooks health |
