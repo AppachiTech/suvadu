@@ -47,6 +47,20 @@ pub(crate) fn copy_feedback_message(name: &str) -> String {
     format!("Copied '{name}' to clipboard")
 }
 
+pub(crate) fn format_sync_status(report: &crate::skills_sync::SyncReport) -> (StatusLevel, String) {
+    if report.written == 0 {
+        (
+            StatusLevel::Info,
+            "Nothing to sync — no active skills, or everything already up to date".to_string(),
+        )
+    } else {
+        (
+            StatusLevel::Info,
+            format!("Synced: {} file(s) written", report.written),
+        )
+    }
+}
+
 /// After removing the item at `removed_index` from a list, what selection
 /// index should follow it? `remaining_len` is the list's length *after*
 /// removal. Returns `None` if the list is now empty.
@@ -155,6 +169,19 @@ pub fn run(repo: &Repository) -> Result<(), Box<dyn std::error::Error>> {
                             scope: skill.scope.clone(),
                         };
                     }
+                }
+                KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let targets = [
+                        crate::cli::SyncTarget::ClaudeCode,
+                        crate::cli::SyncTarget::Cursor,
+                        crate::cli::SyncTarget::Codex,
+                    ];
+                    let cwd = std::env::current_dir()?;
+                    app.status_message = match crate::skills_sync::sync(repo, &targets, &cwd, false)
+                    {
+                        Ok(report) => Some(format_sync_status(&report)),
+                        Err(e) => Some((StatusLevel::Error, format!("Sync failed: {e}"))),
+                    };
                 }
                 KeyCode::Up => {
                     let i = app.list_state.selected().unwrap_or(0);
@@ -358,6 +385,31 @@ mod tests {
         assert_eq!(
             copy_feedback_message("release"),
             "Copied 'release' to clipboard"
+        );
+    }
+
+    #[test]
+    fn format_sync_status_reports_written_count() {
+        let report = crate::skills_sync::SyncReport {
+            written: 3,
+            lines: vec!["wrote a".into(), "wrote b".into()],
+        };
+        let (level, msg) = format_sync_status(&report);
+        assert!(matches!(level, StatusLevel::Info));
+        assert_eq!(msg, "Synced: 3 file(s) written");
+    }
+
+    #[test]
+    fn format_sync_status_reports_nothing_to_sync() {
+        let report = crate::skills_sync::SyncReport {
+            written: 0,
+            lines: vec![],
+        };
+        let (level, msg) = format_sync_status(&report);
+        assert!(matches!(level, StatusLevel::Info));
+        assert_eq!(
+            msg,
+            "Nothing to sync — no active skills, or everything already up to date"
         );
     }
 
