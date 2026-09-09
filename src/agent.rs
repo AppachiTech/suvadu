@@ -496,7 +496,14 @@ fn handle_agent_prompts(
     let entries = agent_ui::load_entries(&repo, after_ms, executor, cwd_filter.as_deref());
 
     let mut guard = util::TerminalGuard::new()?;
-    let res = agent_ui::run_prompt_explorer(guard.terminal(), &entries, Some(&repo));
+    let res = agent_ui::run_prompt_explorer(
+        guard.terminal(),
+        &entries,
+        Some(&repo),
+        after_ms,
+        executor,
+        cwd_filter.as_deref(),
+    );
     drop(guard);
 
     if let Err(e) = res {

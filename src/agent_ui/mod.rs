@@ -14,7 +14,7 @@ use crate::models::Entry;
 use crate::repository::Repository;
 // ── Period selector ──────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Period {
     Today,
     Days7,
