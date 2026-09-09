@@ -7,7 +7,8 @@ pub use crate::models::SearchField;
     name = "suvadu",
     version,
     about = "Total recall for your terminal. A high-performance, database-backed shell history.",
-    long_about = None
+    long_about = None,
+    after_help = "Shortcuts (after `suv init <shell>`):\n  Ctrl+R    Interactive search, replaces your shell's reverse search (suv search)\n  Up/Down   Recall your history, most relevant command first\n\nRun `suv <command> --help` for a command's own flags and examples."
 )]
 pub struct Cli {
     #[command(subcommand)]
