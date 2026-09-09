@@ -5,6 +5,7 @@
 
 pub mod agent_hook;
 pub mod codex;
+pub mod registry;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

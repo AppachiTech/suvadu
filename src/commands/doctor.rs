@@ -353,26 +353,20 @@ fn check_mcp() -> Vec<CheckResult> {
     let Ok(home) = std::env::var("HOME") else {
         return vec![];
     };
+    let home = PathBuf::from(home);
 
-    let mut results = Vec::new();
-
-    // Claude Code: ~/.claude.json
-    let claude_path = PathBuf::from(&home).join(".claude.json");
-    results.push(check_mcp_file(
-        &claude_path,
-        "MCP (Claude Code)",
-        "suv init claude-code",
-    ));
-
-    // Cursor: ~/.cursor/mcp.json
-    let cursor_path = PathBuf::from(&home).join(".cursor").join("mcp.json");
-    results.push(check_mcp_file(
-        &cursor_path,
-        "MCP (Cursor)",
-        "suv init cursor",
-    ));
-
-    results
+    crate::integrations::registry::REGISTRY
+        .iter()
+        .filter_map(|agent| {
+            let relpath = agent.mcp_config_relpath?;
+            let name = format!("MCP ({})", agent.display_name);
+            Some(check_mcp_file(
+                &home.join(relpath),
+                &name,
+                &agent.init_hint(),
+            ))
+        })
+        .collect()
 }
 
 fn check_mcp_file(path: &Path, name: &str, fix_cmd: &str) -> CheckResult {
@@ -475,15 +469,8 @@ fn check_agent_hooks() -> CheckResult {
                 .err()
                 .map(|reason| {
                     let name = path.file_name().unwrap_or_default().to_string_lossy();
-                    let agent = if name.starts_with("codex") {
-                        "codex"
-                    } else if name.starts_with("claude-code") {
-                        "claude-code"
-                    } else if name.starts_with("cursor") {
-                        "cursor"
-                    } else {
-                        "<agent>"
-                    };
+                    let agent = crate::integrations::registry::find_by_hook_filename(&name)
+                        .map_or("<agent>", |a| a.id);
                     format!("{name}: {reason} (run: suv init {agent})")
                 })
         })
