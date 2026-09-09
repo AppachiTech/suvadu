@@ -250,7 +250,7 @@ mod tests {
         assert_eq!(s.tag_id, Some(tags[0].id));
     }
 
-    /// Test the logic: when session_id is None and SUVADU_SESSION_ID env var
+    /// Test the logic: when `session_id` is None and `SUVADU_SESSION_ID` env var
     /// is empty/missing, `handle_tag_associate` should return an error.
     /// We test the parsing logic directly instead of mutating process env
     /// (which is not thread-safe and deprecated in Rust 2024).

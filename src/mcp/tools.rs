@@ -2375,8 +2375,8 @@ mod tests {
                 cmd.to_string(),
                 "/project".to_string(),
                 Some(0),
-                now - (i as i64 * 1000),
-                now - (i as i64 * 1000) + 100,
+                now - (i64::try_from(i).unwrap() * 1000),
+                now - (i64::try_from(i).unwrap() * 1000) + 100,
             );
             repo.insert_entry(&entry).unwrap();
         }

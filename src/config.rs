@@ -722,8 +722,7 @@ mod tests {
     #[test]
     fn test_is_paused_logic() {
         fn paused_from(val: Option<&str>) -> bool {
-            val.map(|v| v == "1" || v.to_lowercase() == "true")
-                .unwrap_or(false)
+            val.is_some_and(|v| v == "1" || v.to_lowercase() == "true")
         }
 
         assert!(!paused_from(None));
@@ -793,9 +792,9 @@ env_var = "OPENCODE"
 
     #[test]
     fn test_empty_agents_section() {
-        let toml_str = r#"
+        let toml_str = r"
 enabled = true
-"#;
+";
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.agents.is_empty());
     }
@@ -813,10 +812,10 @@ enabled = true
 
     #[test]
     fn test_mcp_allow_skill_proposals_deserialization() {
-        let toml_str = r#"
+        let toml_str = r"
 [mcp]
 allow_skill_proposals = true
-"#;
+";
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.mcp.allow_skill_proposals);
     }
@@ -849,11 +848,11 @@ exclude_dirs = ["/secrets", "~/.ssh"]
 
     #[test]
     fn test_mcp_config_missing_section_uses_defaults() {
-        let toml_str = r#"
+        let toml_str = r"
 enabled = true
 [search]
 page_limit = 100
-"#;
+";
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.mcp.default_days, 7);
         assert_eq!(config.mcp.default_limit, 20);

@@ -1993,8 +1993,10 @@ mod tests {
 
     #[test]
     fn test_remove_exclusion_pattern() {
-        let mut config = Config::default();
-        config.exclusions = vec!["^ls$".to_string(), "password".to_string()];
+        let config = Config {
+            exclusions: vec!["^ls$".to_string(), "password".to_string()],
+            ..Default::default()
+        };
 
         let mut app = AppState::new(config);
         app.current_tab = SettingsTab::Exclusions;
@@ -2084,12 +2086,14 @@ mod tests {
 
     #[test]
     fn test_exclusion_item_navigation() {
-        let mut config = Config::default();
-        config.exclusions = vec![
-            "pattern1".to_string(),
-            "pattern2".to_string(),
-            "pattern3".to_string(),
-        ];
+        let config = Config {
+            exclusions: vec![
+                "pattern1".to_string(),
+                "pattern2".to_string(),
+                "pattern3".to_string(),
+            ],
+            ..Default::default()
+        };
 
         let mut app = AppState::new(config);
         app.current_tab = SettingsTab::Exclusions;
@@ -2284,8 +2288,10 @@ mod tests {
     // ── Exclusion delete when list becomes empty ───────────────────────
     #[test]
     fn test_exclusion_delete_empties_list() {
-        let mut config = Config::default();
-        config.exclusions = vec!["only_one".to_string()];
+        let config = Config {
+            exclusions: vec!["only_one".to_string()],
+            ..Default::default()
+        };
 
         let mut app = AppState::new(config);
         app.current_tab = SettingsTab::Exclusions;
@@ -2302,8 +2308,10 @@ mod tests {
     // ── Exclusion delete last item adjusts selected_item ───────────────
     #[test]
     fn test_exclusion_delete_last_adjusts_selected() {
-        let mut config = Config::default();
-        config.exclusions = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+        let config = Config {
+            exclusions: vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()],
+            ..Default::default()
+        };
 
         let mut app = AppState::new(config);
         app.current_tab = SettingsTab::Exclusions;
@@ -2572,8 +2580,10 @@ mod tests {
     // ── Exclusion delete middle item ─────────────────────────────────
     #[test]
     fn test_exclusion_delete_middle_item() {
-        let mut config = Config::default();
-        config.exclusions = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+        let config = Config {
+            exclusions: vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()],
+            ..Default::default()
+        };
 
         let mut app = AppState::new(config);
         app.current_tab = SettingsTab::Exclusions;

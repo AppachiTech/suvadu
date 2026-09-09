@@ -40,7 +40,7 @@ fn seed(repo: &Repository, hostname: &str, commands: &[&str], base_ts: i64) -> (
         .iter()
         .enumerate()
         .map(|(i, cmd)| {
-            let ts = base_ts + (i as i64) * 1000;
+            let ts = base_ts + (i64::try_from(i).unwrap()) * 1000;
             let entry = Entry::new(
                 session.id.clone(),
                 cmd.to_string(),
@@ -73,8 +73,8 @@ fn test_add_search_roundtrip() {
             cmd.to_string(),
             "/home/user".to_string(),
             Some(0),
-            2000 + (i as i64) * 100,
-            2050 + (i as i64) * 100,
+            2000 + (i64::try_from(i).unwrap()) * 100,
+            2050 + (i64::try_from(i).unwrap()) * 100,
         );
         repo.insert_entry(&entry).unwrap();
     }
@@ -300,8 +300,8 @@ fn test_delete_with_pattern() {
             cmd.to_string(),
             "/project".to_string(),
             Some(0),
-            4000 + (i as i64) * 100,
-            4050 + (i as i64) * 100,
+            4000 + (i64::try_from(i).unwrap()) * 100,
+            4050 + (i64::try_from(i).unwrap()) * 100,
         );
         repo.insert_entry(&entry).unwrap();
     }
@@ -562,7 +562,7 @@ fn test_stats_aggregation() {
     ];
 
     for (i, (cmd, cwd, exit_code)) in data.iter().enumerate() {
-        let ts = 1_700_000_000_000 + (i as i64) * 60_000; // 1 minute apart
+        let ts = 1_700_000_000_000 + (i64::try_from(i).unwrap()) * 60_000; // 1 minute apart
         let entry = Entry::new(
             session.id.clone(),
             cmd.to_string(),
@@ -825,7 +825,7 @@ fn test_export_import_preserves_fields() {
 
     // Insert an entry with executor info and non-zero exit code.
     let mut entry = Entry::new(
-        session.id.clone(),
+        session.id,
         "npm test".to_string(),
         "/app".to_string(),
         Some(1),

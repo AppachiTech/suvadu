@@ -19,8 +19,8 @@ fn test_cwd_prefix_matches_subtree() {
             format!("cmd {i}"),
             (*d).to_string(),
             Some(0),
-            1000 + i as i64,
-            1000 + i as i64,
+            1000 + i64::try_from(i).unwrap(),
+            1000 + i64::try_from(i).unwrap(),
         ))
         .unwrap();
     }
@@ -107,7 +107,7 @@ fn test_insert_and_get_entry() {
     repo.insert_session(&session).unwrap();
 
     let entry = Entry::new(
-        session.id.clone(),
+        session.id,
         "ls -la".to_string(),
         "/home/user".to_string(),
         Some(0),
@@ -139,7 +139,7 @@ fn test_entry_with_context() {
     context.insert("user".to_string(), "testuser".to_string());
 
     let mut entry = Entry::new(
-        session.id.clone(),
+        session.id,
         "echo test".to_string(),
         "/tmp".to_string(),
         Some(0),
@@ -194,7 +194,7 @@ fn test_count_entries() {
     assert_eq!(repo.count_entries().unwrap(), 0);
 
     let entry = Entry::new(
-        session.id.clone(),
+        session.id,
         "test".to_string(),
         "/tmp".to_string(),
         Some(0),
@@ -218,7 +218,7 @@ fn test_tag_limits_and_constraints() {
         assert!(err.is_err());
         match err.unwrap_err() {
             crate::db::DbError::Validation(msg) => assert!(msg.contains("Maximum number")),
-            other => panic!("Expected Validation error, got {:?}", other),
+            other => panic!("Expected Validation error, got {other:?}"),
         }
     }
 
@@ -243,7 +243,7 @@ fn test_entries_filtering_by_tag() {
     repo.tag_session(&session_work.id, Some(work_tag)).unwrap();
 
     let entry_work = Entry::new(
-        session_work.id.clone(),
+        session_work.id,
         "git commit".to_string(),
         "/work".to_string(),
         None,
@@ -259,7 +259,7 @@ fn test_entries_filtering_by_tag() {
         .unwrap();
 
     let entry_personal = Entry::new(
-        session_personal.id.clone(),
+        session_personal.id,
         "steam".to_string(),
         "/games".to_string(),
         None,
@@ -271,7 +271,7 @@ fn test_entries_filtering_by_tag() {
     let session_untagged = Session::new("host".to_string(), 300);
     repo.insert_session(&session_untagged).unwrap();
     let entry_untagged = Entry::new(
-        session_untagged.id.clone(),
+        session_untagged.id,
         "ls".to_string(),
         "/".to_string(),
         None,
@@ -348,7 +348,7 @@ fn test_unique_entries_filtering_by_tag() {
     ))
     .unwrap();
     repo.insert_entry(&Entry::new(
-        session_work.id.clone(),
+        session_work.id,
         "make".into(),
         "/".into(),
         None,
@@ -360,7 +360,7 @@ fn test_unique_entries_filtering_by_tag() {
     let session_other = Session::new("host".to_string(), 200);
     repo.insert_session(&session_other).unwrap();
     repo.insert_entry(&Entry::new(
-        session_other.id.clone(),
+        session_other.id,
         "ls".into(),
         "/".into(),
         None,
@@ -466,7 +466,7 @@ fn test_unique_entries_query() {
     .unwrap();
 
     repo.insert_entry(&Entry::new(
-        session.id.clone(),
+        session.id,
         "ls".to_string(),
         "/tmp".to_string(),
         None,
@@ -593,7 +593,7 @@ fn test_unique_entries_recency_priority() {
     .unwrap();
 
     repo.insert_entry(&Entry::new(
-        session.id.clone(),
+        session.id,
         "cmd_C".into(),
         "/".into(),
         None,
@@ -648,7 +648,7 @@ fn test_unique_entries_reexecution() {
     .unwrap();
 
     repo.insert_entry(&Entry::new(
-        session.id.clone(),
+        session.id,
         "cmd_A".into(),
         "/".into(),
         None,
@@ -689,7 +689,7 @@ fn test_recent_entries_shows_failed_commands() {
 
     // Same command succeeds at T=2000
     repo.insert_entry(&Entry::new(
-        session.id.clone(),
+        session.id,
         "cargo build".into(),
         "/project".into(),
         Some(0), // success
@@ -733,7 +733,7 @@ fn test_recent_entries_recency_beats_cwd_boost() {
 
     // Newer command in /other (e.g. typed, then user cd'd to /project)
     repo.insert_entry(&Entry::new(
-        session.id.clone(),
+        session.id,
         "ls".into(),
         "/other".into(),
         Some(0),
@@ -772,7 +772,7 @@ fn test_recent_entries_cwd_boost_breaks_ties() {
     ))
     .unwrap();
     repo.insert_entry(&Entry::new(
-        session.id.clone(),
+        session.id,
         "project dir cmd".into(),
         "/project".into(),
         Some(0),
@@ -822,7 +822,7 @@ fn test_recent_entries_hides_agent_commands_by_default() {
     repo.insert_entry(&ide).unwrap();
 
     let mut agent = Entry::new(
-        session.id.clone(),
+        session.id,
         "grep -rn foo".into(),
         "/p".into(),
         Some(0),
@@ -869,7 +869,7 @@ fn test_recent_entries_prefix_match() {
     .unwrap();
 
     repo.insert_entry(&Entry::new(
-        session.id.clone(),
+        session.id,
         "grep foo".into(),
         "/".into(),
         Some(0),
@@ -894,7 +894,7 @@ fn test_executor_tracking() {
     repo.insert_session(&session).unwrap();
 
     let mut entry = Entry::new(
-        session.id.clone(),
+        session.id,
         "cargo build".to_string(),
         "/home/user/project".to_string(),
         Some(0),
@@ -928,7 +928,7 @@ fn test_executor_types() {
     for (exec_type, exec_name) in executors {
         let mut entry = Entry::new(
             session.id.clone(),
-            format!("test command for {}", exec_type),
+            format!("test command for {exec_type}"),
             "/tmp".to_string(),
             Some(0),
             1000,
@@ -953,7 +953,7 @@ fn test_executor_null_values() {
     repo.insert_session(&session).unwrap();
 
     let entry = Entry::new(
-        session.id.clone(),
+        session.id,
         "old command".to_string(),
         "/tmp".to_string(),
         Some(0),
@@ -988,7 +988,7 @@ fn test_executor_filter_in_count() {
     repo.insert_entry(&entry1).unwrap();
 
     let mut entry2 = Entry::new(
-        session.id.clone(),
+        session.id,
         "git status".to_string(),
         "/tmp".to_string(),
         Some(0),
@@ -1067,7 +1067,7 @@ fn test_stats_with_entries() {
     repo.insert_entry(&entry).unwrap();
 
     let mut entry = Entry::new(
-        session.id.clone(),
+        session.id,
         "cargo build".to_string(),
         "/other".to_string(),
         Some(1),
@@ -1128,7 +1128,7 @@ fn test_stats_with_days_filter() {
     // Old entry (60 days ago)
     let old_ms = now_ms - 60 * 24 * 60 * 60 * 1000;
     let entry = Entry::new(
-        session.id.clone(),
+        session.id,
         "old".to_string(),
         "/tmp".to_string(),
         Some(0),
@@ -1192,8 +1192,8 @@ fn test_entries_filtering_by_bookmarked_only() {
             (*cmd).to_string(),
             "/proj".to_string(),
             Some(0),
-            1000 + i as i64,
-            1000 + i as i64,
+            1000 + i64::try_from(i).unwrap(),
+            1000 + i64::try_from(i).unwrap(),
         ))
         .unwrap();
     }
@@ -1281,7 +1281,7 @@ fn test_filter_by_cwd() {
     ))
     .unwrap();
     repo.insert_entry(&Entry::new(
-        session.id.clone(),
+        session.id,
         "cargo test".into(),
         "/home/user/project".into(),
         Some(0),
@@ -1353,7 +1353,7 @@ fn test_cwd_filter_with_other_filters() {
     repo.insert_entry(&entry1).unwrap();
 
     let mut entry2 = Entry::new(
-        session.id.clone(),
+        session.id,
         "cargo test".into(),
         "/home/user/project".into(),
         Some(1),
@@ -1402,7 +1402,7 @@ fn test_note_crud() {
 
     let entry_id = repo
         .insert_entry(&Entry::new(
-            session.id.clone(),
+            session.id,
             "cargo build".into(),
             "/tmp".into(),
             Some(0),
@@ -1436,7 +1436,7 @@ fn test_note_upsert_overwrites() {
 
     let entry_id = repo
         .insert_entry(&Entry::new(
-            session.id.clone(),
+            session.id,
             "git push".into(),
             "/tmp".into(),
             Some(0),
@@ -1483,7 +1483,7 @@ fn test_get_noted_entry_ids() {
         .unwrap();
     let id3 = repo
         .insert_entry(&Entry::new(
-            session.id.clone(),
+            session.id,
             "cmd3".into(),
             "/tmp".into(),
             Some(0),
@@ -1639,8 +1639,8 @@ fn test_get_frequent_commands_dir_diversity_ranking() {
             "git log --oneline".into(),
             dirs[i % 4].into(),
             Some(0),
-            now + 100_000 + i as i64 * 1000,
-            now + 100_000 + i as i64 * 1000 + 50_000,
+            now + 100_000 + i64::try_from(i).unwrap() * 1000,
+            now + 100_000 + i64::try_from(i).unwrap() * 1000 + 50_000,
         ))
         .unwrap();
     }
@@ -1686,7 +1686,7 @@ fn test_delete_entries_by_pattern() {
     ))
     .unwrap();
     repo.insert_entry(&Entry::new(
-        session.id.clone(),
+        session.id,
         "cargo build".into(),
         "/tmp".into(),
         Some(0),
@@ -1726,7 +1726,7 @@ fn test_delete_entries_by_regex() {
     ))
     .unwrap();
     repo.insert_entry(&Entry::new(
-        session.id.clone(),
+        session.id,
         "cargo build".into(),
         "/tmp".into(),
         Some(0),
@@ -1757,7 +1757,7 @@ fn test_delete_entries_with_before_timestamp() {
     ))
     .unwrap();
     repo.insert_entry(&Entry::new(
-        session.id.clone(),
+        session.id,
         "git commit".into(),
         "/tmp".into(),
         Some(0),
@@ -1788,7 +1788,7 @@ fn test_delete_entries_regex_with_before() {
     ))
     .unwrap();
     repo.insert_entry(&Entry::new(
-        session.id.clone(),
+        session.id,
         "git push".into(),
         "/tmp".into(),
         Some(0),
@@ -1810,7 +1810,7 @@ fn test_delete_entries_no_match() {
     repo.insert_session(&session).unwrap();
 
     repo.insert_entry(&Entry::new(
-        session.id.clone(),
+        session.id,
         "ls -la".into(),
         "/tmp".into(),
         Some(0),
@@ -1853,7 +1853,7 @@ fn test_count_entries_by_pattern() {
     ))
     .unwrap();
     repo.insert_entry(&Entry::new(
-        session.id.clone(),
+        session.id,
         "cargo build".into(),
         "/tmp".into(),
         Some(0),
@@ -1904,7 +1904,7 @@ fn test_delete_entry_by_id() {
 
     let id = repo
         .insert_entry(&Entry::new(
-            session.id.clone(),
+            session.id,
             "ls".into(),
             "/tmp".into(),
             Some(0),
@@ -1948,7 +1948,7 @@ fn test_get_replay_entries_by_session() {
     ))
     .unwrap();
     repo.insert_entry(&Entry::new(
-        other_session.id.clone(),
+        other_session.id,
         "other_cmd".into(),
         "/tmp".into(),
         Some(0),
@@ -1982,7 +1982,7 @@ fn test_get_replay_entries_with_date_filter() {
     ))
     .unwrap();
     repo.insert_entry(&Entry::new(
-        session.id.clone(),
+        session.id,
         "new_cmd".into(),
         "/tmp".into(),
         Some(0),
@@ -2034,7 +2034,7 @@ fn test_get_replay_entries_with_exit_code_filter() {
     ))
     .unwrap();
     repo.insert_entry(&Entry::new(
-        session.id.clone(),
+        session.id,
         "fail_cmd".into(),
         "/tmp".into(),
         Some(1),
@@ -2072,7 +2072,7 @@ fn test_get_replay_entries_with_cwd_filter() {
     ))
     .unwrap();
     repo.insert_entry(&Entry::new(
-        session.id.clone(),
+        session.id,
         "cmd_b".into(),
         "/other".into(),
         Some(0),
@@ -2112,7 +2112,7 @@ fn test_get_replay_entries_with_executor_filter() {
     repo.insert_entry(&entry1).unwrap();
 
     let mut entry2 = Entry::new(
-        session.id.clone(),
+        session.id,
         "agent_cmd".into(),
         "/tmp".into(),
         Some(0),
@@ -2154,7 +2154,7 @@ fn test_export_entries_all() {
     ))
     .unwrap();
     repo.insert_entry(&Entry::new(
-        session.id.clone(),
+        session.id,
         "cmd2".into(),
         "/tmp".into(),
         Some(0),
@@ -2186,7 +2186,7 @@ fn test_export_entries_with_date_filter() {
     ))
     .unwrap();
     repo.insert_entry(&Entry::new(
-        session.id.clone(),
+        session.id,
         "new".into(),
         "/tmp".into(),
         Some(0),
@@ -2254,7 +2254,7 @@ fn test_entry_exists() {
     ))
     .unwrap();
     repo.insert_entry(&Entry::new(
-        session.id.clone(),
+        session.id,
         "cargo build".into(),
         "/tmp".into(),
         Some(0),
@@ -2282,7 +2282,7 @@ fn test_begin_and_commit_transaction() {
 
     let tx = repo.transaction().unwrap();
     repo.insert_entry(&Entry::new(
-        session.id.clone(),
+        session.id,
         "in_transaction".into(),
         "/tmp".into(),
         Some(0),
@@ -2305,7 +2305,7 @@ fn test_transaction_guard_rollback_on_drop() {
     {
         let _tx = repo.transaction().unwrap();
         repo.insert_entry(&Entry::new(
-            session.id.clone(),
+            session.id,
             "should_be_rolled_back".into(),
             "/tmp".into(),
             Some(0),
@@ -2342,7 +2342,7 @@ fn test_transaction_guard_recommit() {
     tx.recommit().unwrap();
 
     repo.insert_entry(&Entry::new(
-        session.id.clone(),
+        session.id,
         "batch2".into(),
         "/tmp".into(),
         Some(0),
@@ -2368,7 +2368,7 @@ fn test_gc_orphaned_sessions() {
 
     // Only s1 has entries
     repo.insert_entry(&Entry::new(
-        s1.id.clone(),
+        s1.id,
         "cmd".into(),
         "/tmp".into(),
         Some(0),
@@ -2391,7 +2391,7 @@ fn test_gc_orphaned_notes() {
 
     let id = repo
         .insert_entry(&Entry::new(
-            session.id.clone(),
+            session.id,
             "cmd".into(),
             "/tmp".into(),
             Some(0),
@@ -2410,7 +2410,7 @@ fn test_gc_orphaned_notes() {
     // SQLite ON DELETE CASCADE should clean up, but our GC catches stragglers
     let orphaned = repo.count_orphaned_notes().unwrap();
     let deleted = repo.delete_orphaned_notes().unwrap();
-    assert_eq!(orphaned, deleted as i64);
+    assert_eq!(orphaned, i64::try_from(deleted).unwrap());
 }
 
 #[test]
@@ -2661,7 +2661,7 @@ fn test_stats_single_entry() {
 
     let now = chrono::Utc::now().timestamp_millis();
     let entry = Entry::new(
-        session.id.clone(),
+        session.id,
         "echo hello".to_string(),
         "/home/user".to_string(),
         Some(0),
@@ -2747,7 +2747,7 @@ fn test_stats_with_period_filter() {
 
     // Insert an old entry (20 days ago)
     let old = Entry::new(
-        session.id.clone(),
+        session.id,
         "old-cmd".to_string(),
         "/old".to_string(),
         Some(1),

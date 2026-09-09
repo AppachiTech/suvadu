@@ -72,7 +72,7 @@ impl Sandbox {
 fn prompt(turn: &str, text: &str) -> serde_json::Value {
     serde_json::json!({"hook_event_name":"UserPromptSubmit", "session_id":"session-123", "turn_id":turn, "cwd":"/project", "prompt":text})
 }
-fn tool(turn: &str, command: &str, response: serde_json::Value) -> serde_json::Value {
+fn tool(turn: &str, command: &str, response: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({"hook_event_name":"PostToolUse", "session_id":"session-123", "turn_id":turn, "tool_use_id":format!("call-{turn}"), "tool_name":"Bash", "cwd":"/project", "tool_input":{"command":command}, "tool_response":response})
 }
 
@@ -84,12 +84,12 @@ fn codex_commands_keep_their_turn_prompt_and_real_executor() {
     s.event(&tool(
         "turn-one",
         "git status",
-        serde_json::json!({"exit_code":0}),
+        &serde_json::json!({"exit_code":0}),
     ));
     s.event(&tool(
         "turn-two",
         "false",
-        serde_json::json!({"exit_code":1}),
+        &serde_json::json!({"exit_code":1}),
     ));
     let entries = s.history();
     assert_eq!(entries.len(), 2);
@@ -114,7 +114,7 @@ fn codex_does_not_assume_success_or_attach_another_turn_prompt() {
     s.event(&tool(
         "new-turn",
         "some-command",
-        serde_json::json!("arbitrary output"),
+        &serde_json::json!("arbitrary output"),
     ));
     let entries = s.history();
     assert_eq!(entries.len(), 1);
@@ -128,7 +128,7 @@ fn codex_ignores_non_shell_events_invalid_ids_and_disabled_recording() {
     let mut event = tool(
         "turn-one",
         "do not record",
-        serde_json::json!({"exit_code":0}),
+        &serde_json::json!({"exit_code":0}),
     );
     event["tool_name"] = "apply_patch".into();
     s.event(&event);
@@ -140,28 +140,13 @@ fn codex_ignores_non_shell_events_invalid_ids_and_disabled_recording() {
     s.event(&tool(
         "turn-one",
         "echo disabled",
-        serde_json::json!({"exit_code":0}),
+        &serde_json::json!({"exit_code":0}),
     ));
     assert!(s.history().is_empty());
 }
 
 #[test]
 fn codex_redacts_prompts_before_caching_and_recording() {
-    let s = Sandbox::new();
-    let secret = "sample_password_for_hook_regression";
-    s.event(&prompt(
-        "turn-secret",
-        &format!("Check curl --password={secret}"),
-    ));
-    s.event(&tool(
-        "turn-secret",
-        "echo redaction-check",
-        serde_json::json!({"exit_code":0}),
-    ));
-    let entries = s.history();
-    let stored = entries[0]["context"]["agent_prompt"].as_str().unwrap();
-    assert!(stored.contains("REDACTED"));
-    assert!(!stored.contains(secret));
     fn check_cache(path: &Path, secret: &str) -> usize {
         let mut count = 0;
         for entry in std::fs::read_dir(path).unwrap().flatten() {
@@ -184,6 +169,22 @@ fn codex_redacts_prompts_before_caching_and_recording() {
         }
         count
     }
+
+    let s = Sandbox::new();
+    let secret = "sample_password_for_hook_regression";
+    s.event(&prompt(
+        "turn-secret",
+        &format!("Check curl --password={secret}"),
+    ));
+    s.event(&tool(
+        "turn-secret",
+        "echo redaction-check",
+        &serde_json::json!({"exit_code":0}),
+    ));
+    let entries = s.history();
+    let stored = entries[0]["context"]["agent_prompt"].as_str().unwrap();
+    assert!(stored.contains("REDACTED"));
+    assert!(!stored.contains(secret));
     assert_eq!(check_cache(s.home.path(), secret), 1);
 }
 

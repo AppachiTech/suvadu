@@ -993,7 +993,7 @@ mod tests {
     }
 
     /// Regression: const fn hook strings were using `{{`/`}}` (format! escapes)
-    /// but were emitted via push_str, producing literal doubled braces in the
+    /// but were emitted via `push_str`, producing literal doubled braces in the
     /// shell output and causing `bad substitution` errors.
     #[test]
     fn test_no_doubled_braces_in_output() {

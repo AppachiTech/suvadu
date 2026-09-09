@@ -368,7 +368,7 @@ mod tests {
             .map(|i| AliasSuggestion {
                 name: format!("alias{i}"),
                 command: format!("command{i}"),
-                count: (i + 1) as i64,
+                count: i64::try_from(i + 1).unwrap(),
                 dir_count: 1,
                 selected: false,
             })

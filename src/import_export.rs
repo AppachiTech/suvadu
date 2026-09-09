@@ -806,8 +806,8 @@ mod tests {
         repo.insert_session(&session).unwrap();
 
         let parsed = vec![
-            ("".to_string(), 1_700_000_000_000i64, 0i64), // empty
-            ("   ".to_string(), 1_700_000_001_000, 0),    // whitespace-only
+            (String::new(), 1_700_000_000_000i64, 0i64), // empty
+            ("   ".to_string(), 1_700_000_001_000, 0),   // whitespace-only
             (" secret-cmd".to_string(), 1_700_000_002_000, 0), // space-prefixed (private)
             ("valid-cmd".to_string(), 1_700_000_003_000, 0), // should be imported
         ];
@@ -994,7 +994,7 @@ mod tests {
                 1_700_000_000_100,
             ),
             Entry::new(
-                session.id.clone(),
+                session.id,
                 "cargo build".into(),
                 "/p".into(),
                 Some(0),

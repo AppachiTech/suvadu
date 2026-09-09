@@ -727,6 +727,40 @@ fn render_entry_row(
     ])
 }
 
+pub fn run_session_timeline<B: Backend>(
+    terminal: &mut Terminal<B>,
+    session: Session,
+    tag_name: Option<String>,
+    entries: Vec<Entry>,
+    noted_ids: HashSet<i64>,
+) -> io::Result<()>
+where
+    io::Error: From<B::Error>,
+{
+    let mut app = SessionApp::new(session, tag_name, entries, noted_ids);
+
+    loop {
+        terminal.draw(|f| app.render(f))?;
+
+        let timeout = if app.status_message.is_some() {
+            std::time::Duration::from_secs(2)
+        } else {
+            std::time::Duration::from_mins(1)
+        };
+        if !event::poll(timeout)? {
+            continue;
+        }
+        if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            if !app.handle_input(key) {
+                return Ok(());
+            }
+        }
+    }
+}
+
 // ── Public entry ────────────────────────────────────────────
 
 #[cfg(test)]
@@ -945,39 +979,5 @@ mod tests {
         let key = crossterm::event::KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
         app.handle_input(key);
         assert_eq!(app.page, app.total_pages());
-    }
-}
-
-pub fn run_session_timeline<B: Backend>(
-    terminal: &mut Terminal<B>,
-    session: Session,
-    tag_name: Option<String>,
-    entries: Vec<Entry>,
-    noted_ids: HashSet<i64>,
-) -> io::Result<()>
-where
-    io::Error: From<B::Error>,
-{
-    let mut app = SessionApp::new(session, tag_name, entries, noted_ids);
-
-    loop {
-        terminal.draw(|f| app.render(f))?;
-
-        let timeout = if app.status_message.is_some() {
-            std::time::Duration::from_secs(2)
-        } else {
-            std::time::Duration::from_mins(1)
-        };
-        if !event::poll(timeout)? {
-            continue;
-        }
-        if let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
-            if !app.handle_input(key) {
-                return Ok(());
-            }
-        }
     }
 }

@@ -1466,7 +1466,7 @@ mod tests {
         // Insert a session first (entries have a FK on session_id)
         let session = Session::new("test-host".to_string(), now);
         repo.insert_session(&session).unwrap();
-        let sid = session.id.clone();
+        let sid = session.id;
 
         // Insert some commands so the tables are non-empty
         repo.insert_entry(&Entry::new(
@@ -1525,7 +1525,7 @@ mod tests {
 
         let session = Session::new("test-host".to_string(), now);
         repo.insert_session(&session).unwrap();
-        let sid = session.id.clone();
+        let sid = session.id;
 
         repo.insert_entry(&Entry::new(
             sid.clone(),
@@ -1631,7 +1631,7 @@ mod tests {
 
     #[test]
     fn compute_program_groups_empty_string_commands() {
-        let commands = vec![("".to_string(), 5)];
+        let commands = vec![(String::new(), 5)];
         let groups = compute_program_groups(&commands, &HashMap::new());
         // split_whitespace().next() on "" returns None, so unwrap_or(cmd) gives ""
         assert_eq!(groups.len(), 1);
@@ -1750,7 +1750,7 @@ mod tests {
 
         let session = Session::new("test-host".to_string(), now);
         repo.insert_session(&session).unwrap();
-        let sid = session.id.clone();
+        let sid = session.id;
 
         // Insert entries spread across today and yesterday
         repo.insert_entry(&Entry::new(
@@ -1763,7 +1763,7 @@ mod tests {
         ))
         .unwrap();
         repo.insert_entry(&Entry::new(
-            sid.clone(),
+            sid,
             "cmd2".to_string(),
             "/tmp".to_string(),
             Some(0),
@@ -1809,7 +1809,7 @@ mod tests {
 
         let session = Session::new("test-host".to_string(), now);
         repo.insert_session(&session).unwrap();
-        let sid = session.id.clone();
+        let sid = session.id;
 
         // Insert 2 distinct commands
         repo.insert_entry(&Entry::new(
@@ -1850,7 +1850,7 @@ mod tests {
 
         let session = Session::new("test-host".to_string(), now);
         repo.insert_session(&session).unwrap();
-        let sid = session.id.clone();
+        let sid = session.id;
 
         // Insert entries with 2 distinct directories
         repo.insert_entry(&Entry::new(
@@ -1890,7 +1890,7 @@ mod tests {
 
         let session = Session::new("test-host".to_string(), now);
         repo.insert_session(&session).unwrap();
-        let sid = session.id.clone();
+        let sid = session.id;
 
         // Insert entries with 2 distinct programs
         repo.insert_entry(&Entry::new(
@@ -1932,7 +1932,7 @@ mod tests {
 
         let session = Session::new("test-host".to_string(), now);
         repo.insert_session(&session).unwrap();
-        let sid = session.id.clone();
+        let sid = session.id;
 
         repo.insert_entry(&Entry::new(
             sid,
@@ -1965,7 +1965,7 @@ mod tests {
 
         let session = Session::new("test-host".to_string(), now);
         repo.insert_session(&session).unwrap();
-        let sid = session.id.clone();
+        let sid = session.id;
 
         repo.insert_entry(&Entry::new(
             sid,
@@ -2081,9 +2081,9 @@ mod tests {
     #[test]
     fn test_success_rate_calculation_high() {
         // 95 out of 100 commands successful => 95.0% => >= 90% (success)
-        let total: i64 = 100;
-        let success: i64 = 95;
-        let rate = (success as f64 / total as f64) * 100.0;
+        let total: f64 = 100.0;
+        let success: f64 = 95.0;
+        let rate = (success / total) * 100.0;
         assert!((rate - 95.0).abs() < f64::EPSILON);
         assert!(rate >= 90.0);
     }
@@ -2091,9 +2091,9 @@ mod tests {
     #[test]
     fn test_success_rate_calculation_warning_zone() {
         // 75 out of 100 => 75.0% => >= 70% but < 90% (warning)
-        let total: i64 = 100;
-        let success: i64 = 75;
-        let rate = (success as f64 / total as f64) * 100.0;
+        let total: f64 = 100.0;
+        let success: f64 = 75.0;
+        let rate = (success / total) * 100.0;
         assert!((rate - 75.0).abs() < f64::EPSILON);
         assert!(rate >= 70.0);
         assert!(rate < 90.0);
@@ -2102,9 +2102,9 @@ mod tests {
     #[test]
     fn test_success_rate_calculation_error_zone() {
         // 50 out of 100 => 50.0% => < 70% (error)
-        let total: i64 = 100;
-        let success: i64 = 50;
-        let rate = (success as f64 / total as f64) * 100.0;
+        let total: f64 = 100.0;
+        let success: f64 = 50.0;
+        let rate = (success / total) * 100.0;
         assert!((rate - 50.0).abs() < f64::EPSILON);
         assert!(rate < 70.0);
     }
@@ -2119,9 +2119,9 @@ mod tests {
 
     #[test]
     fn test_success_rate_boundary_exactly_90() {
-        let total: i64 = 100;
-        let success: i64 = 90;
-        let rate = (success as f64 / total as f64) * 100.0;
+        let total: f64 = 100.0;
+        let success: f64 = 90.0;
+        let rate = (success / total) * 100.0;
         assert!((rate - 90.0).abs() < f64::EPSILON);
         // >= 90.0 means success color
         assert!(rate >= 90.0);
@@ -2129,9 +2129,9 @@ mod tests {
 
     #[test]
     fn test_success_rate_boundary_exactly_70() {
-        let total: i64 = 100;
-        let success: i64 = 70;
-        let rate = (success as f64 / total as f64) * 100.0;
+        let total: f64 = 100.0;
+        let success: f64 = 70.0;
+        let rate = (success / total) * 100.0;
         assert!((rate - 70.0).abs() < f64::EPSILON);
         // >= 70.0 but < 90.0 means warning color
         assert!(rate >= 70.0);
@@ -2140,9 +2140,9 @@ mod tests {
 
     #[test]
     fn test_success_rate_boundary_69() {
-        let total: i64 = 100;
-        let success: i64 = 69;
-        let rate = (success as f64 / total as f64) * 100.0;
+        let total: f64 = 100.0;
+        let success: f64 = 69.0;
+        let rate = (success / total) * 100.0;
         // < 70.0 means error color
         assert!(rate < 70.0);
     }
@@ -2218,7 +2218,7 @@ mod tests {
 
         let session = Session::new("test-host".to_string(), now);
         repo.insert_session(&session).unwrap();
-        let sid = session.id.clone();
+        let sid = session.id;
 
         repo.insert_entry(&Entry::new(
             sid.clone(),
@@ -2284,7 +2284,7 @@ mod tests {
 
         let session = Session::new("test-host".to_string(), now);
         repo.insert_session(&session).unwrap();
-        let sid = session.id.clone();
+        let sid = session.id;
 
         repo.insert_entry(&Entry::new(
             sid.clone(),

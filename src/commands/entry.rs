@@ -645,7 +645,7 @@ mod tests {
         assert!(fresh.exists());
     }
 
-    /// Integration test: exercises the full handle_add_with_context pipeline
+    /// Integration test: exercises the full `handle_add_with_context` pipeline
     /// (timestamp normalize → session ensure → entry insert) with a temp DB.
     #[test]
     fn test_handle_add_pipeline() {
@@ -719,9 +719,9 @@ mod tests {
     #[test]
     fn test_normalize_timestamp_microseconds() {
         // Microseconds (16 digits) → divide by 1000
-        let ts_us = 1_770_574_211_585_923;
-        let ts_ms = ts_us / 1000;
-        assert_eq!(normalize_timestamp(ts_us), ts_ms);
+        let ts_micros = 1_770_574_211_585_923;
+        let ts_millis = ts_micros / 1000;
+        assert_eq!(normalize_timestamp(ts_micros), ts_millis);
     }
 
     #[test]
@@ -770,12 +770,12 @@ mod tests {
     #[test]
     fn test_normalize_timestamp_current_epoch() {
         // Current epoch in seconds (~1.7 billion)
-        let ts_s = 1_709_683_200; // 2024-03-06 in seconds
-        assert_eq!(normalize_timestamp(ts_s), ts_s * 1000);
+        let ts_secs = 1_709_683_200; // 2024-03-06 in seconds
+        assert_eq!(normalize_timestamp(ts_secs), ts_secs * 1000);
 
         // Same in milliseconds
-        let ts_ms = 1_709_683_200_000;
-        assert_eq!(normalize_timestamp(ts_ms), ts_ms);
+        let ts_millis = 1_709_683_200_000;
+        assert_eq!(normalize_timestamp(ts_millis), ts_millis);
     }
 
     #[test]
@@ -822,7 +822,7 @@ mod tests {
 
         let mut ids = Vec::new();
         for (i, cmd) in commands.iter().enumerate() {
-            let ts = 1_700_000_000_000 + (i as i64 * 1000);
+            let ts = 1_700_000_000_000 + (i64::try_from(i).unwrap() * 1000);
             let entry = Entry::new(
                 session_id.to_string(),
                 cmd.to_string(),

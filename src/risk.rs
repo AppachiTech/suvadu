@@ -776,6 +776,10 @@ mod tests {
     use super::*;
 
     #[test]
+    // matches_any takes &[Regex] (it backs real user-configured ignore patterns,
+    // which are always regexes); a literal pattern here is still exercising that
+    // Regex-based path, not a plain string comparison, so `==` isn't equivalent.
+    #[allow(clippy::trivial_regex)]
     fn test_ignore_patterns_suppress_match() {
         // The pure matcher backs is_ignored(); a matching ignore pattern makes
         // assess_risk return None for that command. (Tested without touching the

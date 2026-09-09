@@ -234,8 +234,8 @@ mod tests {
                 format!("cmd-{i}"),
                 "/tmp".to_string(),
                 Some(0),
-                1_700_000_000_000 + (i as i64) * 1000,
-                1_700_000_000_000 + (i as i64) * 1000 + 500,
+                1_700_000_000_000 + (i64::try_from(i).unwrap()) * 1000,
+                1_700_000_000_000 + (i64::try_from(i).unwrap()) * 1000 + 500,
             );
             repo.insert_entry(&entry).unwrap();
         }

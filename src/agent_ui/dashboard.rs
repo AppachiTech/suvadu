@@ -885,6 +885,54 @@ impl AgentApp {
     }
 }
 
+// ── Public entry: Agent Dashboard ────────────────────────────
+
+pub fn run_agent_ui<B: Backend>(
+    terminal: &mut Terminal<B>,
+    repo: &Repository,
+    initial_after_ms: Option<i64>,
+    executor: Option<&str>,
+    cwd: Option<&str>,
+) -> io::Result<()>
+where
+    io::Error: From<B::Error>,
+{
+    let mut app = AgentApp::new(repo, initial_after_ms, executor, cwd);
+
+    loop {
+        terminal.draw(|f| app.render(f))?;
+
+        // Poll with timeout so stale status messages get cleared even without user input
+        let timeout = if app.status_message.is_some() {
+            std::time::Duration::from_secs(2)
+        } else {
+            std::time::Duration::from_mins(1)
+        };
+        if !event::poll(timeout)? {
+            continue; // timeout — re-render to clear stale status
+        }
+        if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            match app.handle_input(key, repo) {
+                DashboardAction::Quit => return Ok(()),
+                DashboardAction::OpenPrompts => {
+                    super::prompts::run_prompt_explorer(
+                        terminal,
+                        &app.entries,
+                        Some(repo),
+                        app.period.after_ms(),
+                        app.cli_executor.as_deref(),
+                        app.cwd_filter.as_deref(),
+                    )?;
+                }
+                DashboardAction::Continue => {}
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1235,53 +1283,5 @@ mod tests {
         app.handle_input(one, &repo);
         assert_eq!(app.period, original_period);
         assert_eq!(app.search, "1");
-    }
-}
-
-// ── Public entry: Agent Dashboard ────────────────────────────
-
-pub fn run_agent_ui<B: Backend>(
-    terminal: &mut Terminal<B>,
-    repo: &Repository,
-    initial_after_ms: Option<i64>,
-    executor: Option<&str>,
-    cwd: Option<&str>,
-) -> io::Result<()>
-where
-    io::Error: From<B::Error>,
-{
-    let mut app = AgentApp::new(repo, initial_after_ms, executor, cwd);
-
-    loop {
-        terminal.draw(|f| app.render(f))?;
-
-        // Poll with timeout so stale status messages get cleared even without user input
-        let timeout = if app.status_message.is_some() {
-            std::time::Duration::from_secs(2)
-        } else {
-            std::time::Duration::from_mins(1)
-        };
-        if !event::poll(timeout)? {
-            continue; // timeout — re-render to clear stale status
-        }
-        if let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
-            match app.handle_input(key, repo) {
-                DashboardAction::Quit => return Ok(()),
-                DashboardAction::OpenPrompts => {
-                    super::prompts::run_prompt_explorer(
-                        terminal,
-                        &app.entries,
-                        Some(repo),
-                        app.period.after_ms(),
-                        app.cli_executor.as_deref(),
-                        app.cwd_filter.as_deref(),
-                    )?;
-                }
-                DashboardAction::Continue => {}
-            }
-        }
     }
 }

@@ -748,8 +748,10 @@ mod tests {
 
     #[test]
     fn test_list_resources_with_disabled() {
-        let mut mcp = crate::config::McpConfig::default();
-        mcp.disabled_resources = vec!["context/project".to_string(), "risk/summary".to_string()];
+        let mcp = crate::config::McpConfig {
+            disabled_resources: vec!["context/project".to_string(), "risk/summary".to_string()],
+            ..Default::default()
+        };
         let resp = list_resources(&json!(1), &mcp);
         let resources = resp["result"]["resources"].as_array().unwrap();
         assert_eq!(resources.len(), 6);
@@ -765,8 +767,10 @@ mod tests {
     #[test]
     fn test_read_disabled_resource_returns_error() {
         let (_dir, repo) = crate::test_utils::test_repo();
-        let mut mcp = crate::config::McpConfig::default();
-        mcp.disabled_resources = vec!["history/recent".to_string()];
+        let mcp = crate::config::McpConfig {
+            disabled_resources: vec!["history/recent".to_string()],
+            ..Default::default()
+        };
         let result = read_resource(&repo, "suvadu://history/recent", &mcp);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("disabled"));
@@ -951,7 +955,7 @@ mod tests {
                 "claude-ctx1".into(),
                 "cargo test".into(),
                 "/project".into(),
-                Some(if i < 3 { 0 } else { 1 }),
+                Some(i32::from(i >= 3)),
                 now - (i * 60_000) - 3_600_000,
                 now - (i * 60_000) - 3_599_000,
             );

@@ -365,8 +365,7 @@ fn test_fuzzy_score_single_char() {
 
     let scored = SearchApp::fuzzy_score(entries, "l", None, SearchField::Command, 80, 33, 50);
     // Should match "ls -la" at minimum
-    let cmds: Vec<&str> = scored.iter().map(|e| e.command.as_str()).collect();
-    assert!(cmds.contains(&"ls -la"));
+    assert!(scored.iter().any(|e| e.command == "ls -la"));
 }
 
 #[test]
@@ -720,7 +719,7 @@ fn test_handle_input_delete_dialog_no() {
 #[test]
 fn test_handle_input_goto_enter() {
     let entries = vec![create_test_entry("ls")];
-    let mut app = SearchApp::new(test_search_config(entries.clone(), 500));
+    let mut app = SearchApp::new(test_search_config(entries, 500));
 
     // Open goto dialog
     app.handle_input(ctrl_key('g'));
@@ -1997,7 +1996,7 @@ fn test_vim_enter_selects_in_normal_mode() {
     let action = app.handle_input(KeyEvent::from(KeyCode::Enter));
     match action {
         SearchAction::Select(cmd) => assert_eq!(cmd, "cargo test"),
-        other => panic!("Expected Select, got {:?}", other),
+        other => panic!("Expected Select, got {other:?}"),
     }
 }
 
@@ -2103,7 +2102,7 @@ fn test_vim_h_prev_page() {
     let action = app.handle_input(KeyEvent::from(KeyCode::Char('h')));
     match action {
         SearchAction::SetPage(p) => assert_eq!(p, 2),
-        other => panic!("Expected SetPage(2), got {:?}", other),
+        other => panic!("Expected SetPage(2), got {other:?}"),
     }
 }
 
@@ -2117,7 +2116,7 @@ fn test_vim_l_next_page() {
     let action = app.handle_input(KeyEvent::from(KeyCode::Char('l')));
     match action {
         SearchAction::SetPage(p) => assert_eq!(p, 2),
-        other => panic!("Expected SetPage(2), got {:?}", other),
+        other => panic!("Expected SetPage(2), got {other:?}"),
     }
 }
 

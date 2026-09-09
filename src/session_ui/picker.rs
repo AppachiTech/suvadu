@@ -528,6 +528,135 @@ impl PickerApp {
     }
 }
 
+// ── Public entry point ──────────────────────────────────────
+
+impl PickerApp {
+    fn handle_filter_popup_key(&mut self, key: crossterm::event::KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.filter.popup_open = false;
+                // Discard pending edits -- restore from applied values
+                self.filter.tag_input = self.filter.tag_query.clone();
+                self.filter.start_date_input = self
+                    .filter
+                    .after_ms
+                    .map_or_else(String::new, |_| self.filter.start_date_input.clone());
+                self.filter.end_date_input = self
+                    .filter
+                    .before_ms
+                    .map_or_else(String::new, |_| self.filter.end_date_input.clone());
+            }
+            KeyCode::Tab => {
+                self.filter.focus_index = (self.filter.focus_index + 1) % NUM_FILTER_FIELDS;
+            }
+            KeyCode::BackTab => {
+                self.filter.focus_index = if self.filter.focus_index == 0 {
+                    NUM_FILTER_FIELDS - 1
+                } else {
+                    self.filter.focus_index - 1
+                };
+            }
+            KeyCode::Enter => {
+                // Apply filters
+                self.filter.tag_query = self.filter.tag_input.trim().to_lowercase();
+                self.filter.after_ms = if self.filter.start_date_input.is_empty() {
+                    None
+                } else {
+                    util::parse_date_input(&self.filter.start_date_input, false)
+                };
+                self.filter.before_ms = if self.filter.end_date_input.is_empty() {
+                    None
+                } else {
+                    util::parse_date_input(&self.filter.end_date_input, true)
+                };
+                self.filter.popup_open = false;
+                self.rebuild_visible();
+            }
+            KeyCode::Backspace => match self.filter.focus_index {
+                0 => {
+                    self.filter.tag_input.pop();
+                }
+                1 => {
+                    self.filter.start_date_input.pop();
+                }
+                2 => {
+                    self.filter.end_date_input.pop();
+                }
+                _ => {}
+            },
+            KeyCode::Char(c) => match self.filter.focus_index {
+                0 => self.filter.tag_input.push(c),
+                1 => self.filter.start_date_input.push(c),
+                2 => self.filter.end_date_input.push(c),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    /// Handle a key event in normal (non-popup) mode. The search box is
+    /// always-on, like `suv search`: any plain (non-Ctrl) key is query
+    /// text, never a shortcut, so Ctrl-modified keys are checked first and
+    /// Esc quits outright rather than clearing the query first.
+    fn handle_normal_key(&mut self, key: crossterm::event::KeyEvent) -> PickerAction {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('f') => {
+                    self.filter.popup_open = true;
+                    self.filter.focus_index = 0;
+                }
+                KeyCode::Char('x') => self.clear_filters(),
+                _ => {}
+            }
+            return PickerAction::Continue;
+        }
+        match key.code {
+            KeyCode::Esc => return PickerAction::Exit(None),
+            KeyCode::Enter => {
+                return PickerAction::Exit(self.selected_session_id().map(String::from));
+            }
+            KeyCode::Down => self.next(),
+            KeyCode::Up => self.prev(),
+            KeyCode::Backspace => {
+                self.filter.search.pop();
+                self.rebuild_visible();
+            }
+            KeyCode::Char(c) => {
+                self.filter.search.push(c);
+                self.rebuild_visible();
+            }
+            _ => {}
+        }
+        PickerAction::Continue
+    }
+}
+
+pub fn run_session_picker<B: Backend>(
+    terminal: &mut Terminal<B>,
+    sessions: Vec<SessionSummary>,
+) -> io::Result<Option<String>>
+where
+    io::Error: From<B::Error>,
+{
+    let mut app = PickerApp::new(sessions);
+
+    loop {
+        terminal.draw(|f| app.render_picker(f))?;
+
+        if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+
+            if app.filter.popup_open {
+                app.handle_filter_popup_key(key);
+            } else if let PickerAction::Exit(result) = app.handle_normal_key(key) {
+                return Ok(result);
+            }
+        }
+    }
+}
+
 // ── Tests ───────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -759,134 +888,5 @@ mod tests {
     fn selected_session_id_empty() {
         let app = PickerApp::new(vec![]);
         assert_eq!(app.selected_session_id(), None);
-    }
-}
-
-// ── Public entry point ──────────────────────────────────────
-
-impl PickerApp {
-    fn handle_filter_popup_key(&mut self, key: crossterm::event::KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
-                self.filter.popup_open = false;
-                // Discard pending edits -- restore from applied values
-                self.filter.tag_input = self.filter.tag_query.clone();
-                self.filter.start_date_input = self
-                    .filter
-                    .after_ms
-                    .map_or_else(String::new, |_| self.filter.start_date_input.clone());
-                self.filter.end_date_input = self
-                    .filter
-                    .before_ms
-                    .map_or_else(String::new, |_| self.filter.end_date_input.clone());
-            }
-            KeyCode::Tab => {
-                self.filter.focus_index = (self.filter.focus_index + 1) % NUM_FILTER_FIELDS;
-            }
-            KeyCode::BackTab => {
-                self.filter.focus_index = if self.filter.focus_index == 0 {
-                    NUM_FILTER_FIELDS - 1
-                } else {
-                    self.filter.focus_index - 1
-                };
-            }
-            KeyCode::Enter => {
-                // Apply filters
-                self.filter.tag_query = self.filter.tag_input.trim().to_lowercase();
-                self.filter.after_ms = if self.filter.start_date_input.is_empty() {
-                    None
-                } else {
-                    util::parse_date_input(&self.filter.start_date_input, false)
-                };
-                self.filter.before_ms = if self.filter.end_date_input.is_empty() {
-                    None
-                } else {
-                    util::parse_date_input(&self.filter.end_date_input, true)
-                };
-                self.filter.popup_open = false;
-                self.rebuild_visible();
-            }
-            KeyCode::Backspace => match self.filter.focus_index {
-                0 => {
-                    self.filter.tag_input.pop();
-                }
-                1 => {
-                    self.filter.start_date_input.pop();
-                }
-                2 => {
-                    self.filter.end_date_input.pop();
-                }
-                _ => {}
-            },
-            KeyCode::Char(c) => match self.filter.focus_index {
-                0 => self.filter.tag_input.push(c),
-                1 => self.filter.start_date_input.push(c),
-                2 => self.filter.end_date_input.push(c),
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-
-    /// Handle a key event in normal (non-popup) mode. The search box is
-    /// always-on, like `suv search`: any plain (non-Ctrl) key is query
-    /// text, never a shortcut, so Ctrl-modified keys are checked first and
-    /// Esc quits outright rather than clearing the query first.
-    fn handle_normal_key(&mut self, key: crossterm::event::KeyEvent) -> PickerAction {
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            match key.code {
-                KeyCode::Char('f') => {
-                    self.filter.popup_open = true;
-                    self.filter.focus_index = 0;
-                }
-                KeyCode::Char('x') => self.clear_filters(),
-                _ => {}
-            }
-            return PickerAction::Continue;
-        }
-        match key.code {
-            KeyCode::Esc => return PickerAction::Exit(None),
-            KeyCode::Enter => {
-                return PickerAction::Exit(self.selected_session_id().map(String::from));
-            }
-            KeyCode::Down => self.next(),
-            KeyCode::Up => self.prev(),
-            KeyCode::Backspace => {
-                self.filter.search.pop();
-                self.rebuild_visible();
-            }
-            KeyCode::Char(c) => {
-                self.filter.search.push(c);
-                self.rebuild_visible();
-            }
-            _ => {}
-        }
-        PickerAction::Continue
-    }
-}
-
-pub fn run_session_picker<B: Backend>(
-    terminal: &mut Terminal<B>,
-    sessions: Vec<SessionSummary>,
-) -> io::Result<Option<String>>
-where
-    io::Error: From<B::Error>,
-{
-    let mut app = PickerApp::new(sessions);
-
-    loop {
-        terminal.draw(|f| app.render_picker(f))?;
-
-        if let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
-
-            if app.filter.popup_open {
-                app.handle_filter_popup_key(key);
-            } else if let PickerAction::Exit(result) = app.handle_normal_key(key) {
-                return Ok(result);
-            }
-        }
     }
 }

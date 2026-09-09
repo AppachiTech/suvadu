@@ -348,6 +348,174 @@ impl FilterBuilder {
     }
 }
 
+/// RAII guard for a database transaction. Automatically rolls back on drop
+/// unless `commit()` is called, preventing dangling transactions on error or panic.
+pub struct TransactionGuard<'a> {
+    repo: &'a Repository,
+    committed: bool,
+}
+
+impl<'a> TransactionGuard<'a> {
+    fn new(repo: &'a Repository) -> DbResult<Self> {
+        repo.begin_transaction()?;
+        Ok(Self {
+            repo,
+            committed: false,
+        })
+    }
+
+    /// Commit the current transaction.
+    pub fn commit(mut self) -> DbResult<()> {
+        self.committed = true;
+        self.repo.commit()
+    }
+
+    /// Commit the current batch and start a new transaction.
+    /// Useful for batched imports where periodic commits bound WAL growth.
+    pub fn recommit(&self) -> DbResult<()> {
+        self.repo.commit()?;
+        self.repo.begin_transaction()?;
+        Ok(())
+    }
+}
+
+impl Drop for TransactionGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = self.repo.rollback();
+        }
+    }
+}
+
+/// Repository for managing history entries and sessions
+pub struct Repository {
+    conn: Connection,
+}
+
+impl Repository {
+    /// Create a new repository with the given connection
+    pub const fn new(conn: Connection) -> Self {
+        Self { conn }
+    }
+
+    /// Open the database and return a ready-to-use repository.
+    pub fn init() -> crate::db::DbResult<Self> {
+        let db_path = crate::db::get_db_path()?;
+        let conn = crate::db::init_db(&db_path)?;
+        Ok(Self::new(conn))
+    }
+
+    /// Open the database in **read-only** mode. No migrations are run.
+    /// Used by the MCP server to prevent accidental writes.
+    pub fn init_read_only() -> crate::db::DbResult<Self> {
+        let db_path = crate::db::get_db_path()?;
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(&db_path, flags)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        Ok(Self::new(conn))
+    }
+
+    /// Insert a new session
+    pub fn insert_session(&self, session: &Session) -> DbResult<()> {
+        self.conn.execute(
+            "INSERT INTO sessions (id, hostname, created_at, tag_id) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                session.id,
+                session.hostname,
+                session.created_at,
+                session.tag_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Insert a session row only if `id` is not already present.
+    /// Used by `suv import` to satisfy the entries → sessions FK when the export
+    /// did not include the source machine's session metadata.
+    pub fn insert_session_if_missing(
+        &self,
+        id: &str,
+        hostname: &str,
+        created_at: i64,
+    ) -> DbResult<bool> {
+        let changed = self.conn.execute(
+            "INSERT OR IGNORE INTO sessions (id, hostname, created_at, tag_id) VALUES (?1, ?2, ?3, NULL)",
+            params![id, hostname, created_at],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Get a session by ID
+    pub fn get_session(&self, id: &str) -> DbResult<Option<Session>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, hostname, created_at, tag_id FROM sessions WHERE id = ?1")?;
+
+        let mut rows = stmt.query(params![id])?;
+
+        if let Some(row) = rows.next()? {
+            Ok(Some(Session {
+                id: row.get(0)?,
+                hostname: row.get(1)?,
+                created_at: row.get(2)?,
+                tag_id: row.get(3)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Begin a transaction (for batch operations)
+    pub fn begin_transaction(&self) -> DbResult<()> {
+        self.conn.execute_batch("BEGIN")?;
+        Ok(())
+    }
+
+    /// Commit a transaction
+    pub fn commit(&self) -> DbResult<()> {
+        self.conn.execute_batch("COMMIT")?;
+        Ok(())
+    }
+
+    /// Roll back a transaction (undo all changes since `begin_transaction`)
+    pub fn rollback(&self) -> DbResult<()> {
+        self.conn.execute_batch("ROLLBACK")?;
+        Ok(())
+    }
+
+    /// Start a RAII-guarded transaction. The transaction is automatically rolled
+    /// back if the guard is dropped without calling `commit()` (e.g. on error or panic).
+    pub fn transaction(&self) -> DbResult<TransactionGuard<'_>> {
+        TransactionGuard::new(self)
+    }
+
+    /// Write a compact, consistent copy of the database to `dest` using
+    /// `VACUUM INTO`. `dest` must not already exist. On Unix the copy is
+    /// restricted to owner-only since it contains shell history.
+    pub fn backup_to(&self, dest: &std::path::Path) -> DbResult<()> {
+        // VACUUM INTO needs a string literal (no bind params); escape quotes.
+        let escaped = dest.to_string_lossy().replace('\'', "''");
+        self.conn
+            .execute_batch(&format!("VACUUM INTO '{escaped}'"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    }
+
+    /// Check if a (command, `started_at`) pair already exists in the database.
+    /// Used during import dedup — avoids loading the entire history into memory.
+    pub fn entry_exists(&self, command: &str, started_at: i64) -> DbResult<bool> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT 1 FROM entries WHERE command = ? AND started_at = ? LIMIT 1")?;
+        let exists = stmt.exists(params![command, started_at])?;
+        Ok(exists)
+    }
+}
+
 #[cfg(test)]
 mod filter_builder_tests {
     use super::FilterBuilder;
@@ -578,173 +746,5 @@ mod filter_builder_tests {
         assert!(where_clause.contains("s.created_at >= ?"));
         assert!(where_clause.contains("s.tag_id = ?"));
         assert_eq!(fb.params_refs().len(), 2);
-    }
-}
-
-/// RAII guard for a database transaction. Automatically rolls back on drop
-/// unless `commit()` is called, preventing dangling transactions on error or panic.
-pub struct TransactionGuard<'a> {
-    repo: &'a Repository,
-    committed: bool,
-}
-
-impl<'a> TransactionGuard<'a> {
-    fn new(repo: &'a Repository) -> DbResult<Self> {
-        repo.begin_transaction()?;
-        Ok(Self {
-            repo,
-            committed: false,
-        })
-    }
-
-    /// Commit the current transaction.
-    pub fn commit(mut self) -> DbResult<()> {
-        self.committed = true;
-        self.repo.commit()
-    }
-
-    /// Commit the current batch and start a new transaction.
-    /// Useful for batched imports where periodic commits bound WAL growth.
-    pub fn recommit(&self) -> DbResult<()> {
-        self.repo.commit()?;
-        self.repo.begin_transaction()?;
-        Ok(())
-    }
-}
-
-impl Drop for TransactionGuard<'_> {
-    fn drop(&mut self) {
-        if !self.committed {
-            let _ = self.repo.rollback();
-        }
-    }
-}
-
-/// Repository for managing history entries and sessions
-pub struct Repository {
-    conn: Connection,
-}
-
-impl Repository {
-    /// Create a new repository with the given connection
-    pub const fn new(conn: Connection) -> Self {
-        Self { conn }
-    }
-
-    /// Open the database and return a ready-to-use repository.
-    pub fn init() -> crate::db::DbResult<Self> {
-        let db_path = crate::db::get_db_path()?;
-        let conn = crate::db::init_db(&db_path)?;
-        Ok(Self::new(conn))
-    }
-
-    /// Open the database in **read-only** mode. No migrations are run.
-    /// Used by the MCP server to prevent accidental writes.
-    pub fn init_read_only() -> crate::db::DbResult<Self> {
-        let db_path = crate::db::get_db_path()?;
-        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let conn = Connection::open_with_flags(&db_path, flags)?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        Ok(Self::new(conn))
-    }
-
-    /// Insert a new session
-    pub fn insert_session(&self, session: &Session) -> DbResult<()> {
-        self.conn.execute(
-            "INSERT INTO sessions (id, hostname, created_at, tag_id) VALUES (?1, ?2, ?3, ?4)",
-            params![
-                session.id,
-                session.hostname,
-                session.created_at,
-                session.tag_id
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Insert a session row only if `id` is not already present.
-    /// Used by `suv import` to satisfy the entries → sessions FK when the export
-    /// did not include the source machine's session metadata.
-    pub fn insert_session_if_missing(
-        &self,
-        id: &str,
-        hostname: &str,
-        created_at: i64,
-    ) -> DbResult<bool> {
-        let changed = self.conn.execute(
-            "INSERT OR IGNORE INTO sessions (id, hostname, created_at, tag_id) VALUES (?1, ?2, ?3, NULL)",
-            params![id, hostname, created_at],
-        )?;
-        Ok(changed > 0)
-    }
-
-    /// Get a session by ID
-    pub fn get_session(&self, id: &str) -> DbResult<Option<Session>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, hostname, created_at, tag_id FROM sessions WHERE id = ?1")?;
-
-        let mut rows = stmt.query(params![id])?;
-
-        if let Some(row) = rows.next()? {
-            Ok(Some(Session {
-                id: row.get(0)?,
-                hostname: row.get(1)?,
-                created_at: row.get(2)?,
-                tag_id: row.get(3)?,
-            }))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Begin a transaction (for batch operations)
-    pub fn begin_transaction(&self) -> DbResult<()> {
-        self.conn.execute_batch("BEGIN")?;
-        Ok(())
-    }
-
-    /// Commit a transaction
-    pub fn commit(&self) -> DbResult<()> {
-        self.conn.execute_batch("COMMIT")?;
-        Ok(())
-    }
-
-    /// Roll back a transaction (undo all changes since `begin_transaction`)
-    pub fn rollback(&self) -> DbResult<()> {
-        self.conn.execute_batch("ROLLBACK")?;
-        Ok(())
-    }
-
-    /// Start a RAII-guarded transaction. The transaction is automatically rolled
-    /// back if the guard is dropped without calling `commit()` (e.g. on error or panic).
-    pub fn transaction(&self) -> DbResult<TransactionGuard<'_>> {
-        TransactionGuard::new(self)
-    }
-
-    /// Write a compact, consistent copy of the database to `dest` using
-    /// `VACUUM INTO`. `dest` must not already exist. On Unix the copy is
-    /// restricted to owner-only since it contains shell history.
-    pub fn backup_to(&self, dest: &std::path::Path) -> DbResult<()> {
-        // VACUUM INTO needs a string literal (no bind params); escape quotes.
-        let escaped = dest.to_string_lossy().replace('\'', "''");
-        self.conn
-            .execute_batch(&format!("VACUUM INTO '{escaped}'"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o600));
-        }
-        Ok(())
-    }
-
-    /// Check if a (command, `started_at`) pair already exists in the database.
-    /// Used during import dedup — avoids loading the entire history into memory.
-    pub fn entry_exists(&self, command: &str, started_at: i64) -> DbResult<bool> {
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT 1 FROM entries WHERE command = ? AND started_at = ? LIMIT 1")?;
-        let exists = stmt.exists(params![command, started_at])?;
-        Ok(exists)
     }
 }

@@ -210,8 +210,8 @@ mod tests {
         let result = format_datetime(1_700_000_000_000);
         // Should produce a valid date string (not the fallback)
         assert!(!result.contains("??"));
-        assert!(result.contains("-"));
-        assert!(result.contains(":"));
+        assert!(result.contains('-'));
+        assert!(result.contains(':'));
     }
 
     #[test]
@@ -225,8 +225,8 @@ mod tests {
     fn format_full_datetime_valid_ms() {
         let result = format_full_datetime(1_700_000_000_000);
         assert!(!result.contains("??"));
-        assert!(result.contains("-"));
-        assert!(result.contains(":"));
+        assert!(result.contains('-'));
+        assert!(result.contains(':'));
         // Should be in YYYY-MM-DD HH:MM:SS format
         assert_eq!(result.len(), 19);
     }

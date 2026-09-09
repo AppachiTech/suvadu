@@ -817,7 +817,7 @@ mod tests {
         assert_eq!(count_at_or_above(&s, cli::FailLevel::Low), 10);
     }
 
-    /// Helper: build an `Entry` with the given executor_type and executor,
+    /// Helper: build an `Entry` with the given `executor_type` and executor,
     /// using sensible defaults for everything else.
     fn make_entry(command: &str, executor_type: Option<&str>, executor: Option<&str>) -> Entry {
         let mut e = Entry::new(
@@ -851,9 +851,9 @@ mod tests {
     fn format_timestamp_time_microsecond_normalization() {
         // Timestamp > 1e15 is treated as microseconds and divided by 1000.
         // 1_700_000_000_000_000 µs == 1_700_000_000_000 ms (same instant).
-        let from_us = format_timestamp_time(1_700_000_000_000_000);
-        let from_ms = format_timestamp_time(1_700_000_000_000);
-        assert_eq!(from_us, from_ms);
+        let from_micros = format_timestamp_time(1_700_000_000_000_000);
+        let from_millis = format_timestamp_time(1_700_000_000_000);
+        assert_eq!(from_micros, from_millis);
     }
 
     #[test]
@@ -1036,7 +1036,7 @@ mod tests {
         // 3 succeed (exit 0), 1 fails (exit 1)
         assert_eq!(parsed["success_count"], 3);
         assert!(parsed["critical_risk_count"].as_u64().unwrap() > 0);
-        assert!(parsed["packages_installed"].as_array().unwrap().len() > 0);
+        assert!(!parsed["packages_installed"].as_array().unwrap().is_empty());
     }
 
     #[test]

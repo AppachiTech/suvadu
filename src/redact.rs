@@ -398,7 +398,7 @@ mod tests {
             auth_header_patterns(),
             connection_string_patterns(),
         ];
-        let total_defs: usize = expected_defs.iter().map(|v| v.len()).sum();
+        let total_defs: usize = expected_defs.iter().map(std::vec::Vec::len).sum();
         assert_eq!(
             pattern_count, total_defs,
             "Some patterns failed to compile: expected {total_defs}, got {pattern_count}"
@@ -719,7 +719,7 @@ mod tests {
         assert_eq!(redact_secrets_with_extra("git status", &[]), "git status");
     }
 
-    /// Consolidated corpus: each (input, must_be_absent) pair locks in a known
+    /// Consolidated corpus: each (input, `must_be_absent`) pair locks in a known
     /// false-positive (input unchanged) or known leak (secret redacted). Keeps
     /// the multi-regex redaction rules from regressing.
     #[test]
@@ -731,7 +731,7 @@ mod tests {
             ("psql postgresql://u:p@ss@host/db", "p@ss"),
             ("redis-cli -u redis://:onlypass@host", "onlypass"),
             (
-                r#"http POST api.com token:abcdefGHIJKLmnop12345678="#,
+                r"http POST api.com token:abcdefGHIJKLmnop12345678=",
                 "abcdefGHIJKLmnop12345678",
             ),
         ];

@@ -706,6 +706,39 @@ impl AgentStatsApp {
     }
 }
 
+pub fn run_agent_stats_ui<B: Backend>(
+    terminal: &mut Terminal<B>,
+    repo: &Repository,
+    days: usize,
+    executor: Option<&str>,
+) -> io::Result<()>
+where
+    io::Error: From<B::Error>,
+{
+    let mut app = AgentStatsApp::new(repo, days, executor);
+
+    loop {
+        terminal.draw(|f| app.render(f))?;
+
+        let timeout = if app.status_message.is_some() {
+            std::time::Duration::from_secs(2)
+        } else {
+            std::time::Duration::from_mins(1)
+        };
+        if !event::poll(timeout)? {
+            continue;
+        }
+        if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            if !app.handle_input(key, repo) {
+                return Ok(());
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -727,7 +760,7 @@ mod tests {
             .map(|i| HighRiskEntry {
                 command: format!("rm -rf /danger{i}"),
                 cwd: "/tmp".into(),
-                started_at: 1_000_000 + i as i64 * 1000,
+                started_at: 1_000_000 + i64::try_from(i).unwrap() * 1000,
                 exit_code: Some(0),
                 level: RiskLevel::High,
             })
@@ -816,38 +849,5 @@ mod tests {
         assert!(app.agents.is_empty());
         assert_eq!(app.selected, 0);
         assert_eq!(app.selected_high_risk_count(), 0);
-    }
-}
-
-pub fn run_agent_stats_ui<B: Backend>(
-    terminal: &mut Terminal<B>,
-    repo: &Repository,
-    days: usize,
-    executor: Option<&str>,
-) -> io::Result<()>
-where
-    io::Error: From<B::Error>,
-{
-    let mut app = AgentStatsApp::new(repo, days, executor);
-
-    loop {
-        terminal.draw(|f| app.render(f))?;
-
-        let timeout = if app.status_message.is_some() {
-            std::time::Duration::from_secs(2)
-        } else {
-            std::time::Duration::from_mins(1)
-        };
-        if !event::poll(timeout)? {
-            continue;
-        }
-        if let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
-            if !app.handle_input(key, repo) {
-                return Ok(());
-            }
-        }
     }
 }
