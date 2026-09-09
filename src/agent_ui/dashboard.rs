@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Table, TableState,
+    ScrollbarState, Table,
 };
 use ratatui::Terminal;
 
@@ -18,7 +18,8 @@ use crate::theme::theme;
 use crate::util::{dirs_home, shorten_path};
 
 use super::{
-    compute_agent_counts, format_datetime, format_full_datetime, load_entries, truncate, Period,
+    compute_agent_counts, format_datetime, format_full_datetime, load_entries, truncate,
+    PagedTable, Period,
 };
 
 const PAGE_SIZE: usize = 50;
@@ -47,12 +48,10 @@ struct AgentApp {
     cli_executor: Option<String>,
     cwd_filter: Option<String>,
 
-    // Pagination
-    page: usize, // 1-based
-    page_size: usize,
+    // Pagination + row selection
+    pager: PagedTable,
 
     // UI state
-    table_state: TableState,
     detail_open: bool,
 
     home: String,
@@ -92,15 +91,13 @@ impl AgentApp {
             risk_filter: false,
             cli_executor: executor.map(String::from),
             cwd_filter: cwd.map(String::from),
-            page: 1,
-            page_size: PAGE_SIZE,
-            table_state: TableState::default(),
+            pager: PagedTable::new(PAGE_SIZE),
             detail_open: true,
             home,
             status_message: None,
         };
         if !app.visible.is_empty() {
-            app.table_state.select(Some(0));
+            app.pager.state.select(Some(0));
         }
         app
     }
@@ -159,32 +156,22 @@ impl AgentApp {
             .collect();
 
         self.visible_high_risk_count = high_risk_count;
-        self.page = 1;
-        if self.visible.is_empty() {
-            self.table_state.select(None);
-        } else {
-            self.table_state.select(Some(0));
-        }
+        self.pager.reset(self.visible.len());
     }
 
     fn total_pages(&self) -> usize {
-        self.visible.len().div_ceil(self.page_size).max(1)
+        self.pager.total_pages(self.visible.len())
     }
 
     /// Indices into `visible` for the current page.
     fn page_slice(&self) -> &[usize] {
-        let start = (self.page - 1) * self.page_size;
-        let end = (start + self.page_size).min(self.visible.len());
-        if start >= self.visible.len() {
-            &[]
-        } else {
-            &self.visible[start..end]
-        }
+        let (start, end) = self.pager.bounds(self.visible.len());
+        &self.visible[start..end]
     }
 
     fn selected_entry(&self) -> Option<&Entry> {
-        let page_offset = (self.page - 1) * self.page_size;
-        self.table_state
+        let (page_offset, _) = self.pager.bounds(self.visible.len());
+        self.pager
             .selected()
             .and_then(|i| self.visible.get(page_offset + i))
             .map(|&idx| &self.entries[idx])
@@ -262,33 +249,20 @@ impl AgentApp {
                 }
             }
             // Page navigation
-            KeyCode::Left if self.page > 1 => {
-                self.page -= 1;
-                self.table_state.select(Some(0));
-            }
-            KeyCode::Right if self.page < self.total_pages() => {
-                self.page += 1;
-                self.table_state.select(Some(0));
-            }
+            KeyCode::Left => self.pager.prev_page(self.visible.len()),
+            KeyCode::Right => self.pager.next_page(self.visible.len()),
             // Row navigation
-            KeyCode::Up | KeyCode::Char('k') => {
-                if let Some(cur) = self.table_state.selected() {
-                    self.table_state.select(Some(cur.saturating_sub(1)));
-                }
-            }
+            KeyCode::Up | KeyCode::Char('k') => self.pager.move_up(),
             KeyCode::Down | KeyCode::Char('j') => {
-                let max = self.page_slice().len().saturating_sub(1);
-                if let Some(cur) = self.table_state.selected() {
-                    self.table_state
-                        .select(Some(cur.saturating_add(1).min(max)));
-                }
+                let len = self.page_slice().len();
+                self.pager.move_down(len);
             }
             KeyCode::Home if !self.page_slice().is_empty() => {
-                self.table_state.select(Some(0));
+                self.pager.state.select(Some(0));
             }
             KeyCode::End if !self.page_slice().is_empty() => {
-                self.table_state
-                    .select(Some(self.page_slice().len().saturating_sub(1)));
+                let len = self.page_slice().len();
+                self.pager.select_last(len);
             }
             _ => {}
         }
@@ -607,7 +581,7 @@ impl AgentApp {
                     .title(title),
             );
 
-        f.render_stateful_widget(table, table_area, &mut self.table_state);
+        f.render_stateful_widget(table, table_area, &mut self.pager.state);
 
         if self.visible.is_empty() {
             let hint = Paragraph::new(Line::from(Span::styled(
@@ -625,7 +599,7 @@ impl AgentApp {
 
         let total_pages = self.total_pages();
         let mut scrollbar_state =
-            ScrollbarState::new(total_pages).position(self.page.saturating_sub(1));
+            ScrollbarState::new(total_pages).position(self.pager.page.saturating_sub(1));
         f.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .thumb_style(Style::default().fg(t.primary_dim))
@@ -686,7 +660,7 @@ impl AgentApp {
         if self.visible.is_empty() {
             "Agent Commands (0/0)".to_string()
         } else {
-            let start = (self.page - 1) * self.page_size + 1;
+            let start = (self.pager.page - 1) * self.pager.page_size + 1;
             let end = start + page_items.len().saturating_sub(1);
             format!("Agent Commands ({start}-{end} / {})", self.visible.len())
         }
@@ -908,7 +882,7 @@ impl AgentApp {
         ];
 
         spans.push(Span::styled(
-            format!(" {}/{total_pages} ", self.page),
+            format!(" {}/{total_pages} ", self.pager.page),
             Style::default().fg(t.text_muted),
         ));
 
@@ -964,15 +938,13 @@ mod tests {
             risk_filter: false,
             cli_executor: None,
             cwd_filter: None,
-            page: 1,
-            page_size: PAGE_SIZE,
-            table_state: TableState::default(),
+            pager: PagedTable::new(PAGE_SIZE),
             detail_open: true,
             home: "/home/test".into(),
             status_message: None,
         };
         if !app.visible.is_empty() {
-            app.table_state.select(Some(0));
+            app.pager.state.select(Some(0));
         }
         app
     }
@@ -1112,10 +1084,10 @@ mod tests {
     fn rebuild_visible_resets_page_and_selection() {
         let entries = vec![make_entry("ls", Some("claude"), "/tmp")];
         let mut app = make_app(entries);
-        app.page = 3;
+        app.pager.page = 3;
         app.rebuild_visible();
-        assert_eq!(app.page, 1);
-        assert_eq!(app.table_state.selected(), Some(0));
+        assert_eq!(app.pager.page, 1);
+        assert_eq!(app.pager.state.selected(), Some(0));
     }
 
     #[test]
@@ -1127,7 +1099,7 @@ mod tests {
         app.agent_filter = Some(0);
         app.rebuild_visible();
         assert!(app.visible.is_empty());
-        assert!(app.table_state.selected().is_none());
+        assert!(app.pager.state.selected().is_none());
     }
 
     // ── handle_input (non-repo paths) ──

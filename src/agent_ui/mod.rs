@@ -1,8 +1,10 @@
 mod dashboard;
+mod paged_table;
 mod prompts;
 mod stats;
 
 pub use dashboard::run_agent_ui;
+pub use paged_table::PagedTable;
 pub use prompts::run_prompt_explorer;
 pub use stats::run_agent_stats_ui;
 

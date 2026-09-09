@@ -9,7 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Table, TableState,
+    ScrollbarState, Table,
 };
 use ratatui::Terminal;
 
@@ -20,7 +20,8 @@ use crate::theme::theme;
 use crate::util::{dirs_home, format_duration_ms, shorten_path};
 
 use super::{
-    compute_agent_counts, format_datetime, format_full_datetime, load_entries, truncate, Period,
+    compute_agent_counts, format_datetime, format_full_datetime, load_entries, truncate,
+    PagedTable, Period,
 };
 
 const PAGE_SIZE: usize = 50;
@@ -188,12 +189,10 @@ struct PromptExplorerApp {
     view: View,
 
     // List screen
-    list_table: TableState,
-    list_page: usize,
+    list_pager: PagedTable,
 
     // Detail screen
-    detail_table: TableState,
-    detail_page: usize,
+    detail_pager: PagedTable,
     detail_pane_open: bool,
 
     home: String,
@@ -216,18 +215,16 @@ impl PromptExplorerApp {
             .into_iter()
             .map(|(name, _)| name)
             .collect();
-        let mut list_table = TableState::default();
+        let mut list_pager = PagedTable::new(PAGE_SIZE);
         if !groups.is_empty() {
-            list_table.select(Some(0));
+            list_pager.state.select(Some(0));
         }
         Self {
             entries,
             groups,
             view: View::List,
-            list_table,
-            list_page: 1,
-            detail_table: TableState::default(),
-            detail_page: 1,
+            list_pager,
+            detail_pager: PagedTable::new(PAGE_SIZE),
             detail_pane_open: true,
             home: dirs_home(),
             status_message: None,
@@ -250,12 +247,7 @@ impl PromptExplorerApp {
             groups.retain(|g| g.prompt.to_lowercase().contains(&needle));
         }
         self.groups = groups;
-        self.list_page = 1;
-        self.list_table.select(if self.groups.is_empty() {
-            None
-        } else {
-            Some(0)
-        });
+        self.list_pager.reset(self.groups.len());
     }
 
     fn reload(&mut self, repo: &Repository) {
@@ -328,22 +320,17 @@ impl PromptExplorerApp {
     // ── Pagination helpers ──────────────────────────────────
 
     fn list_total_pages(&self) -> usize {
-        self.groups.len().div_ceil(PAGE_SIZE).max(1)
+        self.list_pager.total_pages(self.groups.len())
     }
 
     fn list_page_slice(&self) -> &[PromptGroup] {
-        let start = (self.list_page - 1) * PAGE_SIZE;
-        let end = (start + PAGE_SIZE).min(self.groups.len());
-        if start >= self.groups.len() {
-            &[]
-        } else {
-            &self.groups[start..end]
-        }
+        let (start, end) = self.list_pager.bounds(self.groups.len());
+        &self.groups[start..end]
     }
 
     fn selected_group(&self) -> Option<&PromptGroup> {
-        let offset = (self.list_page - 1) * PAGE_SIZE;
-        self.list_table
+        let (offset, _) = self.list_pager.bounds(self.groups.len());
+        self.list_pager
             .selected()
             .and_then(|i| self.groups.get(offset + i))
     }
@@ -359,23 +346,18 @@ impl PromptExplorerApp {
     }
 
     fn detail_total_pages(&self) -> usize {
-        self.detail_entries().len().div_ceil(PAGE_SIZE).max(1)
+        self.detail_pager.total_pages(self.detail_entries().len())
     }
 
     fn detail_page_slice(&self) -> &[usize] {
         let all = self.detail_entries();
-        let start = (self.detail_page - 1) * PAGE_SIZE;
-        let end = (start + PAGE_SIZE).min(all.len());
-        if start >= all.len() {
-            &[]
-        } else {
-            &all[start..end]
-        }
+        let (start, end) = self.detail_pager.bounds(all.len());
+        &all[start..end]
     }
 
     fn selected_detail_entry(&self) -> Option<&Entry> {
         let page_slice = self.detail_page_slice();
-        self.detail_table
+        self.detail_pager
             .selected()
             .and_then(|i| page_slice.get(i))
             .map(|&idx| &self.entries[idx])
@@ -417,43 +399,31 @@ impl PromptExplorerApp {
             // Executor filter
             KeyCode::Char('a') => self.cycle_executor(repo),
             // Row navigation
-            KeyCode::Up | KeyCode::Char('k') => {
-                if let Some(cur) = self.list_table.selected() {
-                    self.list_table.select(Some(cur.saturating_sub(1)));
-                }
-            }
+            KeyCode::Up | KeyCode::Char('k') => self.list_pager.move_up(),
             KeyCode::Down | KeyCode::Char('j') => {
-                let max = self.list_page_slice().len().saturating_sub(1);
-                if let Some(cur) = self.list_table.selected() {
-                    self.list_table.select(Some(cur.saturating_add(1).min(max)));
-                }
+                let len = self.list_page_slice().len();
+                self.list_pager.move_down(len);
             }
             KeyCode::Home if !self.list_page_slice().is_empty() => {
-                self.list_table.select(Some(0));
+                self.list_pager.state.select(Some(0));
             }
             KeyCode::End if !self.list_page_slice().is_empty() => {
-                self.list_table
-                    .select(Some(self.list_page_slice().len().saturating_sub(1)));
+                let len = self.list_page_slice().len();
+                self.list_pager.select_last(len);
             }
             // Page navigation
-            KeyCode::Left if self.list_page > 1 => {
-                self.list_page -= 1;
-                self.list_table.select(Some(0));
-            }
-            KeyCode::Right if self.list_page < self.list_total_pages() => {
-                self.list_page += 1;
-                self.list_table.select(Some(0));
-            }
+            KeyCode::Left => self.list_pager.prev_page(self.groups.len()),
+            KeyCode::Right => self.list_pager.next_page(self.groups.len()),
             // Drill into detail
             KeyCode::Enter => {
-                if let Some(sel) = self.list_table.selected() {
-                    let group_index = (self.list_page - 1) * PAGE_SIZE + sel;
+                if let Some(sel) = self.list_pager.selected() {
+                    let (offset, _) = self.list_pager.bounds(self.groups.len());
+                    let group_index = offset + sel;
                     if group_index < self.groups.len() {
                         self.view = View::Detail { group_index };
-                        self.detail_page = 1;
-                        self.detail_table = TableState::default();
+                        self.detail_pager = PagedTable::new(PAGE_SIZE);
                         if !self.groups[group_index].entry_indices.is_empty() {
-                            self.detail_table.select(Some(0));
+                            self.detail_pager.state.select(Some(0));
                         }
                     }
                 }
@@ -490,34 +460,21 @@ impl PromptExplorerApp {
                 }
             }
             // Row navigation
-            KeyCode::Up | KeyCode::Char('k') => {
-                if let Some(cur) = self.detail_table.selected() {
-                    self.detail_table.select(Some(cur.saturating_sub(1)));
-                }
-            }
+            KeyCode::Up | KeyCode::Char('k') => self.detail_pager.move_up(),
             KeyCode::Down | KeyCode::Char('j') => {
-                let max = self.detail_page_slice().len().saturating_sub(1);
-                if let Some(cur) = self.detail_table.selected() {
-                    self.detail_table
-                        .select(Some(cur.saturating_add(1).min(max)));
-                }
+                let len = self.detail_page_slice().len();
+                self.detail_pager.move_down(len);
             }
             KeyCode::Home if !self.detail_page_slice().is_empty() => {
-                self.detail_table.select(Some(0));
+                self.detail_pager.state.select(Some(0));
             }
             KeyCode::End if !self.detail_page_slice().is_empty() => {
-                self.detail_table
-                    .select(Some(self.detail_page_slice().len().saturating_sub(1)));
+                let len = self.detail_page_slice().len();
+                self.detail_pager.select_last(len);
             }
             // Page navigation
-            KeyCode::Left if self.detail_page > 1 => {
-                self.detail_page -= 1;
-                self.detail_table.select(Some(0));
-            }
-            KeyCode::Right if self.detail_page < self.detail_total_pages() => {
-                self.detail_page += 1;
-                self.detail_table.select(Some(0));
-            }
+            KeyCode::Left => self.detail_pager.prev_page(self.detail_entries().len()),
+            KeyCode::Right => self.detail_pager.next_page(self.detail_entries().len()),
             // Detail pane toggle
             KeyCode::Tab => {
                 self.detail_pane_open = !self.detail_pane_open;
@@ -584,8 +541,8 @@ impl PromptExplorerApp {
                 .split(chunks[2]);
             self.render_list_table(f, body_chunks[0], t);
             // Re-borrow after render_list_table (which takes &mut self)
-            let group = &self.groups
-                [(self.list_page - 1) * PAGE_SIZE + self.list_table.selected().unwrap_or(0)];
+            let (offset, _) = self.list_pager.bounds(self.groups.len());
+            let group = &self.groups[offset + self.list_pager.selected().unwrap_or(0)];
             Self::render_prompt_preview(f, body_chunks[1], t, group, &self.home);
         } else {
             self.render_list_table(f, chunks[2], t);
@@ -770,7 +727,7 @@ impl PromptExplorerApp {
                     )),
             );
 
-        f.render_stateful_widget(table, table_area, &mut self.list_table);
+        f.render_stateful_widget(table, table_area, &mut self.list_pager.state);
 
         if self.groups.is_empty() {
             let hint = Paragraph::new(Line::from(Span::styled(
@@ -788,7 +745,7 @@ impl PromptExplorerApp {
 
         let total_pages = self.list_total_pages();
         let mut scrollbar_state =
-            ScrollbarState::new(total_pages).position(self.list_page.saturating_sub(1));
+            ScrollbarState::new(total_pages).position(self.list_pager.page.saturating_sub(1));
         f.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .thumb_style(Style::default().fg(t.primary_dim))
@@ -944,7 +901,7 @@ impl PromptExplorerApp {
         };
 
         spans.push(Span::styled(
-            format!(" {}/{total_pages} ", self.list_page),
+            format!(" {}/{total_pages} ", self.list_pager.page),
             Style::default().fg(t.text_muted),
         ));
 
@@ -1172,11 +1129,11 @@ impl PromptExplorerApp {
                     )),
             );
 
-        f.render_stateful_widget(table, table_area, &mut self.detail_table);
+        f.render_stateful_widget(table, table_area, &mut self.detail_pager.state);
 
         let total_pages = self.detail_total_pages();
         let mut scrollbar_state =
-            ScrollbarState::new(total_pages).position(self.detail_page.saturating_sub(1));
+            ScrollbarState::new(total_pages).position(self.detail_pager.page.saturating_sub(1));
         f.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .thumb_style(Style::default().fg(t.primary_dim))
@@ -1310,7 +1267,7 @@ impl PromptExplorerApp {
         ];
 
         spans.push(Span::styled(
-            format!(" {}/{total_pages} ", self.detail_page),
+            format!(" {}/{total_pages} ", self.detail_pager.page),
             Style::default().fg(t.text_muted),
         ));
 
@@ -1619,7 +1576,7 @@ mod tests {
         let entries = vec![];
         let app = PromptExplorerApp::new(&entries);
         assert!(app.groups.is_empty());
-        assert!(app.list_table.selected().is_none());
+        assert!(app.list_pager.state.selected().is_none());
     }
 
     #[test]
@@ -1635,7 +1592,7 @@ mod tests {
         )];
         let app = PromptExplorerApp::new(&entries);
         assert_eq!(app.groups.len(), 1);
-        assert_eq!(app.list_table.selected(), Some(0));
+        assert_eq!(app.list_pager.state.selected(), Some(0));
     }
 
     #[test]
@@ -1756,24 +1713,24 @@ mod tests {
             make_entry_with_prompt("s3", "cmd3", "p3", "cc", Some(0), 3000, 10),
         ];
         let mut app = PromptExplorerApp::new(&entries);
-        assert_eq!(app.list_table.selected(), Some(0));
+        assert_eq!(app.list_pager.state.selected(), Some(0));
 
         // Move down
         let down = crossterm::event::KeyEvent::from(KeyCode::Down);
         app.handle_input(down, None);
-        assert_eq!(app.list_table.selected(), Some(1));
+        assert_eq!(app.list_pager.state.selected(), Some(1));
 
         app.handle_input(down, None);
-        assert_eq!(app.list_table.selected(), Some(2));
+        assert_eq!(app.list_pager.state.selected(), Some(2));
 
         // Can't go past last
         app.handle_input(down, None);
-        assert_eq!(app.list_table.selected(), Some(2));
+        assert_eq!(app.list_pager.state.selected(), Some(2));
 
         // Move up
         let up = crossterm::event::KeyEvent::from(KeyCode::Up);
         app.handle_input(up, None);
-        assert_eq!(app.list_table.selected(), Some(1));
+        assert_eq!(app.list_pager.state.selected(), Some(1));
     }
 
     #[test]
@@ -1879,7 +1836,7 @@ mod tests {
         app.search = "nonexistent needle".to_string();
         app.apply_filters();
         assert!(app.groups.is_empty());
-        assert!(app.list_table.selected().is_none());
+        assert!(app.list_pager.state.selected().is_none());
     }
 
     #[test]
