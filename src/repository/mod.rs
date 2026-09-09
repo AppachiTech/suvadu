@@ -182,20 +182,37 @@ impl FilterBuilder {
         prefix_match: bool,
         field: SearchField,
     ) -> Self {
-        if let Some(q) = query {
-            let column = match field {
-                SearchField::Cwd => "e.cwd",
-                SearchField::Session => "e.session_id",
-                SearchField::Executor => "COALESCE(e.executor_type || ' ' || e.executor, '')",
-                SearchField::Command => "e.command",
-            };
-            self.clauses.push(format!("{column} LIKE ? ESCAPE '\\'"));
-            let escaped = escape_like(q);
-            if prefix_match {
-                self.params.push(Box::new(format!("{escaped}%")));
-            } else {
-                self.params.push(Box::new(format!("%{escaped}%")));
-            }
+        let Some(q) = query else {
+            return self;
+        };
+        let escaped = escape_like(q);
+
+        // An anchored prefix search (`text%`) can already use idx_entries_command;
+        // only the leading-wildcard substring case below needs the FTS index.
+        if field == SearchField::Command && !prefix_match {
+            // `entries_fts` is a trigram-tokenized FTS5 index over `command`
+            // (see db::migrate_v7), kept in sync via triggers. A LIKE against
+            // it uses that index instead of scanning every row's command —
+            // its substring/case-insensitive-ASCII semantics match a plain
+            // `command LIKE '%x%'` exactly (see the tests below).
+            self.clauses.push(
+                "e.id IN (SELECT rowid FROM entries_fts WHERE command LIKE ? ESCAPE '\\')".into(),
+            );
+            self.params.push(Box::new(format!("%{escaped}%")));
+            return self;
+        }
+
+        let column = match field {
+            SearchField::Cwd => "e.cwd",
+            SearchField::Session => "e.session_id",
+            SearchField::Executor => "COALESCE(e.executor_type || ' ' || e.executor, '')",
+            SearchField::Command => "e.command",
+        };
+        self.clauses.push(format!("{column} LIKE ? ESCAPE '\\'"));
+        if prefix_match {
+            self.params.push(Box::new(format!("{escaped}%")));
+        } else {
+            self.params.push(Box::new(format!("%{escaped}%")));
         }
         self
     }
@@ -390,8 +407,13 @@ mod filter_builder_tests {
 
     #[test]
     fn with_query_contains_mode() {
+        // Non-prefix Command search routes through the entries_fts trigram
+        // index (see with_query_field) instead of a plain column LIKE.
         let fb = FilterBuilder::new().with_query(Some("git"), false);
-        assert_eq!(fb.build_where(), " WHERE e.command LIKE ? ESCAPE '\\'");
+        assert_eq!(
+            fb.build_where(),
+            " WHERE e.id IN (SELECT rowid FROM entries_fts WHERE command LIKE ? ESCAPE '\\')"
+        );
         assert_eq!(fb.params_refs().len(), 1);
     }
 
@@ -493,7 +515,7 @@ mod filter_builder_tests {
         assert!(where_clause.contains("e.started_at >= ?"));
         assert!(where_clause.contains("s.tag_id = ? OR e.tag_id = ?"));
         assert!(where_clause.contains("e.exit_code = ?"));
-        assert!(where_clause.contains("e.command LIKE ?"));
+        assert!(where_clause.contains("entries_fts WHERE command LIKE ?"));
         // 1 (date) + 2 (tag) + 1 (exit) + 1 (query) = 5
         assert_eq!(fb.params_refs().len(), 5);
     }

@@ -17,7 +17,7 @@ pub enum DbError {
 pub type DbResult<T> = Result<T, DbError>;
 
 /// Current schema version. Increment when adding new migrations.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// Get the path to the suvadu database file
 pub fn get_db_path() -> DbResult<PathBuf> {
@@ -305,6 +305,7 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
         (4, migrate_v4),
         (5, migrate_v5),
         (6, migrate_v6),
+        (7, migrate_v7),
     ];
 
     for &(target_version, migrate_fn) in migrations {
@@ -414,6 +415,49 @@ fn migrate_v6(conn: &Connection) -> DbResult<()> {
     conn.execute_batch(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_name_scope ON skills(name, scope);
          CREATE INDEX IF NOT EXISTS idx_skills_status ON skills(status);",
+    )?;
+    Ok(())
+}
+
+/// Migration v7: FTS5 trigram index over `entries.command`.
+///
+/// A plain `command LIKE '%text%'` scan can't use `idx_entries_command`
+/// (the leading wildcard defeats a B-tree index), so it's a full table
+/// scan on every keystroke of interactive search. The trigram tokenizer
+/// lets `LIKE` against `entries_fts` use its index instead, while
+/// preserving the exact same substring/case-insensitive semantics as the
+/// column scan it replaces (verified in `repository::mod::tests`).
+///
+/// `entries_fts` is an "external content" table — it stores only the
+/// trigram index, not a second copy of `command` — kept in sync with
+/// `entries` by the three triggers below (`SQLite`'s documented pattern for
+/// external-content FTS5 tables). The final `INSERT` backfills the index
+/// for rows that existed before this migration ran.
+fn migrate_v7(conn: &Connection) -> DbResult<()> {
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
+            command,
+            content='entries',
+            content_rowid='id',
+            tokenize='trigram'
+        )",
+        [],
+    )?;
+    conn.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS entries_fts_ai AFTER INSERT ON entries BEGIN
+            INSERT INTO entries_fts(rowid, command) VALUES (new.id, new.command);
+         END;
+         CREATE TRIGGER IF NOT EXISTS entries_fts_ad AFTER DELETE ON entries BEGIN
+            INSERT INTO entries_fts(entries_fts, rowid, command) VALUES ('delete', old.id, old.command);
+         END;
+         CREATE TRIGGER IF NOT EXISTS entries_fts_au AFTER UPDATE ON entries BEGIN
+            INSERT INTO entries_fts(entries_fts, rowid, command) VALUES ('delete', old.id, old.command);
+            INSERT INTO entries_fts(rowid, command) VALUES (new.id, new.command);
+         END;",
+    )?;
+    conn.execute(
+        "INSERT INTO entries_fts(rowid, command) SELECT id, command FROM entries",
+        [],
     )?;
     Ok(())
 }
@@ -546,6 +590,13 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 1);
+
+        // The FTS5 backfill (added in migrate_v7) should have indexed the
+        // pre-existing row, not just rows inserted after migration.
+        let fts_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entries_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(fts_count, 1);
     }
 
     #[test]
@@ -570,6 +621,52 @@ mod tests {
         assert!(tables.contains(&"notes".to_string()));
         assert!(tables.contains(&"skills".to_string()));
         assert!(tables.contains(&"schema_version".to_string()));
+        assert!(tables.contains(&"entries_fts".to_string()));
+    }
+
+    #[test]
+    fn test_fts_index_stays_in_sync_with_entries() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let conn = init_db(&db_path).unwrap();
+
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'host', 1000, NULL)", [])
+            .unwrap();
+        let insert_entry = |cmd: &str, id: i64| {
+            conn.execute(
+                "INSERT INTO entries VALUES (?1, 's1', ?2, '/tmp', 0, 1000, 1100, 100, NULL, NULL, NULL, NULL)",
+                params![id, cmd],
+            )
+            .unwrap();
+        };
+        insert_entry("git status", 1);
+        insert_entry("cargo build --release", 2);
+
+        // Trigger-driven insert sync: both rows are searchable immediately.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entries_fts WHERE command LIKE '%git%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Trigger-driven delete sync: removing the row removes it from the index.
+        conn.execute("DELETE FROM entries WHERE id = 1", [])
+            .unwrap();
+        let count_after_delete: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entries_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count_after_delete, 1);
+        let git_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entries_fts WHERE command LIKE '%git%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(git_count, 0);
     }
 
     #[test]
