@@ -102,6 +102,16 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
             commands::doctor::handle_doctor();
             Ok(())
         }
+        Commands::Guard {
+            command,
+            block_at,
+            verbose,
+        } => {
+            if commands::guard::handle_guard(&command, block_at, verbose) {
+                std::process::exit(2);
+            }
+            Ok(())
+        }
         Commands::History {
             after,
             before,

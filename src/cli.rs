@@ -47,7 +47,8 @@ pub enum ReportFormat {
     Json,
 }
 
-/// Minimum risk level that makes `suv agent report --fail-on` exit non-zero.
+/// Minimum risk level that trips a gate: `suv agent report --fail-on` and
+/// `suv guard --block-at` both exit non-zero once a command reaches this level.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum FailLevel {
     Low,
@@ -310,6 +311,28 @@ pub enum Commands {
 
     /// Diagnose installation health and configuration issues
     Doctor,
+
+    /// Assess a command's risk and exit non-zero if it's too dangerous to run
+    ///
+    /// A composable pre-execution check: exits 0 if the command is safe
+    /// enough to run, or 2 (printing why) if it meets or exceeds
+    /// --block-at. Wire it into anything that can act on an exit code —
+    /// a git pre-push hook, a CI script, or a zsh ZLE widget for real-time
+    /// interactive blocking (see the example below; `preexec` fires too
+    /// late to cancel a command, so this uses accept-line instead).
+    #[command(
+        after_help = "Examples:\n  suv guard \"rm -rf /\"\n  suv guard --block-at critical \"$CMD\"\n\nInteractive zsh blocking (add to ~/.zshrc):\n  suv-guard-accept-line() {\n    if [[ -n \"$BUFFER\" ]] && ! suv guard \"$BUFFER\"; then\n      zle -M \"Command blocked by suv guard\"\n      return 1\n    fi\n    zle .accept-line\n  }\n  zle -N accept-line suv-guard-accept-line"
+    )]
+    Guard {
+        /// The full command line to assess
+        command: String,
+        /// Minimum risk level that blocks the command (default: high)
+        #[arg(long, value_enum)]
+        block_at: Option<FailLevel>,
+        /// Print the assessment even when the command isn't blocked
+        #[arg(long)]
+        verbose: bool,
+    },
 
     /// Bulk delete commands matching a pattern
     #[command(

@@ -1,6 +1,7 @@
 pub mod alias;
 pub mod doctor;
 pub mod entry;
+pub mod guard;
 pub mod history;
 pub mod picker;
 pub mod replay;
