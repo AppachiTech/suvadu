@@ -29,16 +29,20 @@ const PAGE_SIZE: usize = 50;
 /// field (not a document editor) — plenty for any realistic prompt excerpt.
 const MAX_SEARCH_LEN: usize = 200;
 
-/// Strip common agent prefixes from session IDs and return the first 8 chars.
-/// e.g. "claude-264d95ad-a881-..." → "264d95ad", "opencode-ses_303f..." → "`ses_303f`"
-fn short_session_id(id: &str) -> String {
-    let stripped = id
-        .strip_prefix("claude-")
+/// Strip the suvadu-added agent prefix, returning the underlying agent
+/// session ID (e.g. Claude Code's own session UUID) unchanged.
+fn strip_session_prefix(id: &str) -> &str {
+    id.strip_prefix("claude-")
         .or_else(|| id.strip_prefix("opencode-"))
         .or_else(|| id.strip_prefix("cursor-"))
         .or_else(|| id.strip_prefix("codex-"))
-        .unwrap_or(id);
-    stripped.chars().take(8).collect()
+        .unwrap_or(id)
+}
+
+/// Strip common agent prefixes from session IDs and return the first 8 chars.
+/// e.g. "claude-264d95ad-a881-..." → "264d95ad", "opencode-ses_303f..." → "`ses_303f`"
+fn short_session_id(id: &str) -> String {
+    strip_session_prefix(id).chars().take(8).collect()
 }
 
 // ── Data ────────────────────────────────────────────────────
@@ -790,11 +794,12 @@ impl PromptExplorerApp {
             .fg(t.text_secondary)
             .add_modifier(Modifier::BOLD);
 
-        // Session ID
-        let session_short: String = short_session_id(&group.session_id);
+        // Session ID (full — this is the underlying agent's own session ID,
+        // e.g. Claude Code's, useful for `claude --resume <id>`)
+        let session_full = strip_session_prefix(&group.session_id).to_string();
         lines.push(Line::from(vec![
             Span::styled(" Session  ", label_style),
-            Span::styled(session_short, Style::default().fg(t.primary_dim)),
+            Span::styled(session_full, Style::default().fg(t.primary_dim)),
         ]));
 
         // Executor
@@ -953,12 +958,12 @@ impl PromptExplorerApp {
         let label_style = Style::default()
             .fg(t.text_secondary)
             .add_modifier(Modifier::BOLD);
-        let session_short = short_session_id(&group.session_id);
+        let session_full = strip_session_prefix(&group.session_id).to_string();
         let path_display = shorten_path(&group.cwd, home);
 
         let mut spans = vec![
             Span::styled(" Session  ", label_style),
-            Span::styled(session_short, Style::default().fg(t.primary_dim)),
+            Span::styled(session_full, Style::default().fg(t.primary_dim)),
             Span::styled("    Executor  ", label_style),
             Span::styled(
                 group.executor.clone(),
