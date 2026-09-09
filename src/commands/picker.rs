@@ -403,7 +403,8 @@ fn render_add_dialog(
     error: Option<&str>,
     t: &crate::theme::Theme,
 ) {
-    let area = centered_rect(f.area(), 60, 8);
+    // 2 (outer border) + 3 (Command field) + 3 (Label field) + 1 (error line).
+    let area = centered_rect(f.area(), 60, 9);
     f.render_widget(Clear, area);
 
     let outer = Block::default()
