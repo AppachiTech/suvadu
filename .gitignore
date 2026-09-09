@@ -26,3 +26,6 @@ bk/
 *.swp
 *.swo
 *~
+
+docs
+.agents
