@@ -60,7 +60,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Internal commands (Add, Get, hooks, etc.) don't render TUI,
     // so skip the config read + theme init on the hot path.
     if is_user_facing_command(&cli.command) {
-        let cfg = config::load_config().unwrap_or_default();
+        // Project-aware: a .suvadu.toml found by walking up from the cwd
+        // overrides the global config's matching fields (see config::
+        // load_config_for_cwd).
+        let cfg = config::load_config_for_cwd().unwrap_or_default();
         theme::init_theme(cfg.theme);
         // Apply user risk-ignore suppressions and extra flag patterns to all risk assessment.
         risk::set_ignore_patterns(&cfg.agent.risk_ignore_patterns);

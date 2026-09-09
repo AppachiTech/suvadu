@@ -92,8 +92,9 @@ pub fn handle_add_with_context(params: AddParams) -> Result<(), Box<dyn std::err
         return Ok(());
     }
 
-    // Load config (cached; re-reads only when file mtime changes)
-    let config = config::load_config_cached()?;
+    // Project-aware: a .suvadu.toml found by walking up from the command's
+    // own cwd overrides the global config's matching fields.
+    let config = config::load_config_for_dir(std::path::Path::new(&params.cwd))?;
 
     // Initialize database
     let repo = Repository::init()?;

@@ -402,6 +402,71 @@ fn invalidate_cache() {
     }
 }
 
+// ── Per-project config overlay ─────────────────────────────────
+
+/// Find the nearest `.suvadu.toml`, searching `start_dir` and its ancestors
+/// (the same walk-up-to-root discovery `.git` uses). Returns `None` if no
+/// project overlay exists anywhere above `start_dir`.
+pub fn find_project_overlay(start_dir: &std::path::Path) -> Option<PathBuf> {
+    start_dir
+        .ancestors()
+        .map(|dir| dir.join(".suvadu.toml"))
+        .find(|path| path.is_file())
+}
+
+/// Merge `overlay` onto `base` in place. A table merges key-by-key,
+/// recursing into nested tables; anything else (a scalar or an array) is
+/// replaced wholesale by the overlay's value when the overlay sets it.
+/// Arrays are not concatenated — a project's `exclusions = [...]` fully
+/// replaces the global list, matching how every other overridden field
+/// behaves (least surprise: one value per key, the more specific one wins).
+fn merge_toml_value(base: &mut toml::Value, overlay: toml::Value) {
+    match overlay {
+        toml::Value::Table(overlay_table) => {
+            if let toml::Value::Table(base_table) = base {
+                for (key, value) in overlay_table {
+                    match base_table.get_mut(&key) {
+                        Some(existing) => merge_toml_value(existing, value),
+                        None => {
+                            base_table.insert(key, value);
+                        }
+                    }
+                }
+            } else {
+                *base = toml::Value::Table(overlay_table);
+            }
+        }
+        other => *base = other,
+    }
+}
+
+/// Load the effective config for `dir`: the global config, with any
+/// `.suvadu.toml` found by walking up from `dir` merged on top. A field
+/// left out of the overlay keeps the global config's value; a table in the
+/// overlay only needs to name the fields it's actually changing.
+///
+/// Returns the global config unchanged if `dir` has no project overlay.
+pub fn load_config_for_dir(dir: &std::path::Path) -> ConfigResult<Config> {
+    let base = load_config()?;
+    let Some(overlay_path) = find_project_overlay(dir) else {
+        return Ok(base);
+    };
+
+    let overlay_contents = std::fs::read_to_string(&overlay_path)?;
+    let overlay_value: toml::Value = toml::from_str(&overlay_contents)?;
+    let mut merged_value = toml::Value::try_from(base)?;
+    merge_toml_value(&mut merged_value, overlay_value);
+    let merged: Config = merged_value.try_into()?;
+    validate_config(&merged)?;
+    Ok(merged)
+}
+
+/// `load_config_for_dir` for the current working directory. Falls back to
+/// the global config alone if the working directory can't be determined.
+pub fn load_config_for_cwd() -> ConfigResult<Config> {
+    std::env::current_dir().map_or_else(|_| load_config(), |cwd| load_config_for_dir(&cwd))
+}
+
 /// Validate config values after loading.
 fn validate_config(config: &Config) -> ConfigResult<()> {
     if config.search.page_limit == 0 {
@@ -523,6 +588,85 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert!(config.enabled);
+    }
+
+    // ── Project overlay ──────────────────────────────────────
+
+    #[test]
+    fn find_project_overlay_none_when_absent() {
+        let temp = TempDir::new().unwrap();
+        let nested = temp.path().join("a/b/c");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(find_project_overlay(&nested).is_none());
+    }
+
+    #[test]
+    fn find_project_overlay_finds_file_in_start_dir() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join(".suvadu.toml"), "enabled = false").unwrap();
+        let found = find_project_overlay(temp.path()).unwrap();
+        assert_eq!(found, temp.path().join(".suvadu.toml"));
+    }
+
+    #[test]
+    fn find_project_overlay_walks_up_from_a_child_directory() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join(".suvadu.toml"), "enabled = false").unwrap();
+        let nested = temp.path().join("a/b/c");
+        std::fs::create_dir_all(&nested).unwrap();
+        let found = find_project_overlay(&nested).unwrap();
+        assert_eq!(found, temp.path().join(".suvadu.toml"));
+    }
+
+    #[test]
+    fn find_project_overlay_prefers_nearest_ancestor() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join(".suvadu.toml"), "enabled = false").unwrap();
+        let nested = temp.path().join("project");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join(".suvadu.toml"), "enabled = true").unwrap();
+
+        let found = find_project_overlay(&nested).unwrap();
+        assert_eq!(found, nested.join(".suvadu.toml"));
+    }
+
+    #[test]
+    fn merge_toml_scalar_overrides_base() {
+        let mut base: toml::Value = toml::from_str("x = 1\ny = 2").unwrap();
+        let overlay: toml::Value = toml::from_str("x = 99").unwrap();
+        merge_toml_value(&mut base, overlay);
+        assert_eq!(base.get("x").unwrap().as_integer(), Some(99));
+        assert_eq!(base.get("y").unwrap().as_integer(), Some(2));
+    }
+
+    #[test]
+    fn merge_toml_nested_table_merges_key_by_key() {
+        let mut base: toml::Value = toml::from_str("[sub]\na = 1\nb = 2").unwrap();
+        let overlay: toml::Value = toml::from_str("[sub]\na = 42").unwrap();
+        merge_toml_value(&mut base, overlay);
+        let sub = base.get("sub").unwrap();
+        assert_eq!(sub.get("a").unwrap().as_integer(), Some(42));
+        assert_eq!(sub.get("b").unwrap().as_integer(), Some(2));
+    }
+
+    #[test]
+    fn merge_toml_array_is_replaced_wholesale_not_concatenated() {
+        let mut base: toml::Value = toml::from_str("list = [1, 2, 3]").unwrap();
+        let overlay: toml::Value = toml::from_str("list = [9]").unwrap();
+        merge_toml_value(&mut base, overlay);
+        let list = base.get("list").unwrap().as_array().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].as_integer(), Some(9));
+    }
+
+    #[test]
+    fn merge_toml_key_absent_from_overlay_is_untouched() {
+        let mut base: toml::Value = toml::from_str("x = 1\ny = 2").unwrap();
+        let overlay: toml::Value = toml::from_str("z = 3").unwrap();
+        merge_toml_value(&mut base, overlay);
+        assert_eq!(base.get("x").unwrap().as_integer(), Some(1));
+        assert_eq!(base.get("y").unwrap().as_integer(), Some(2));
+        assert_eq!(base.get("z").unwrap().as_integer(), Some(3));
     }
 
     #[test]
