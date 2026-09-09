@@ -2,7 +2,7 @@ use std::io;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::backend::Backend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
@@ -23,6 +23,9 @@ use super::{
 };
 
 const PAGE_SIZE: usize = 50;
+/// Cap on the in-memory search box, matching the scope of a filter field
+/// (not a document editor).
+const MAX_SEARCH_LEN: usize = 200;
 
 enum DashboardAction {
     Continue,
@@ -47,6 +50,8 @@ struct AgentApp {
     risk_filter: bool,
     cli_executor: Option<String>,
     cwd_filter: Option<String>,
+    /// Always-on live filter over `entries[i].command`, like `suv search`.
+    search: String,
 
     // Pagination + row selection
     pager: PagedTable,
@@ -91,6 +96,7 @@ impl AgentApp {
             risk_filter: false,
             cli_executor: executor.map(String::from),
             cwd_filter: cwd.map(String::from),
+            search: String::new(),
             pager: PagedTable::new(PAGE_SIZE),
             detail_open: true,
             home,
@@ -125,6 +131,7 @@ impl AgentApp {
         let agent_name = self
             .agent_filter
             .and_then(|i| self.agent_names.get(i).cloned());
+        let needle = self.search.trim().to_lowercase();
 
         let mut high_risk_count = 0usize;
 
@@ -137,6 +144,9 @@ impl AgentApp {
                     if entry_agent != name {
                         return false;
                     }
+                }
+                if !needle.is_empty() && !self.entries[i].command.to_lowercase().contains(&needle) {
+                    return false;
                 }
                 if self.risk_filter {
                     let rl = risk::risk_level(&self.entries[i].command);
@@ -192,6 +202,20 @@ impl AgentApp {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('p') => return DashboardAction::OpenPrompts,
+                // Period cycle. A single-key cycle (not 1-4 jump keys) because
+                // the search box below eats bare digits — they need to stay
+                // typable into the query. Ctrl+P is already "open Prompts" on
+                // this screen, so this uses Ctrl+F (mirrors suv search's own
+                // "^F Filter" mnemonic) instead of colliding with it.
+                KeyCode::Char('f') => {
+                    self.period = match self.period {
+                        Period::Today => Period::Days7,
+                        Period::Days7 => Period::Days30,
+                        Period::Days30 => Period::AllTime,
+                        Period::AllTime => Period::Today,
+                    };
+                    self.reload(repo);
+                }
                 // Agent filter
                 KeyCode::Char('a') => {
                     if self.agent_names.is_empty() {
@@ -232,24 +256,10 @@ impl AgentApp {
             return DashboardAction::Continue;
         }
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => return DashboardAction::Quit,
-            // Period (no text box on this screen, so bare digits are safe)
-            KeyCode::Char('1') => {
-                self.period = Period::Today;
-                self.reload(repo);
-            }
-            KeyCode::Char('2') => {
-                self.period = Period::Days7;
-                self.reload(repo);
-            }
-            KeyCode::Char('3') => {
-                self.period = Period::Days30;
-                self.reload(repo);
-            }
-            KeyCode::Char('4') => {
-                self.period = Period::AllTime;
-                self.reload(repo);
-            }
+            // Always-on search, like suv search: Esc quits outright rather
+            // than clearing the query first, since there's no separate
+            // "typing mode" to fall back out of.
+            KeyCode::Esc => return DashboardAction::Quit,
             // Detail pane
             KeyCode::Tab => {
                 self.detail_open = !self.detail_open;
@@ -258,8 +268,8 @@ impl AgentApp {
             KeyCode::Left => self.pager.prev_page(self.visible.len()),
             KeyCode::Right => self.pager.next_page(self.visible.len()),
             // Row navigation
-            KeyCode::Up | KeyCode::Char('k') => self.pager.move_up(),
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Up => self.pager.move_up(),
+            KeyCode::Down => {
                 let len = self.page_slice().len();
                 self.pager.move_down(len);
             }
@@ -269,6 +279,16 @@ impl AgentApp {
             KeyCode::End if !self.page_slice().is_empty() => {
                 let len = self.page_slice().len();
                 self.pager.select_last(len);
+            }
+            // Search box: any other typed character is query text, live-
+            // filtering the command list as you type.
+            KeyCode::Backspace => {
+                self.search.pop();
+                self.rebuild_visible();
+            }
+            KeyCode::Char(c) if self.search.len() + c.len_utf8() <= MAX_SEARCH_LEN => {
+                self.search.push(c);
+                self.rebuild_visible();
             }
             _ => {}
         }
@@ -285,69 +305,77 @@ impl AgentApp {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1), // header
+                Constraint::Length(3), // search box (always-on, like suv search)
+                Constraint::Length(1), // filters: period + agent
+                Constraint::Length(3), // summary: agents | risk boxes, side by side
                 Constraint::Min(8),    // body
                 Constraint::Length(1), // footer
             ])
             .split(size);
 
-        self.render_header(f, chunks[0], t);
+        Self::render_header(f, chunks[0], t);
+        self.render_search_box(f, chunks[1], t);
+        self.render_filter_line(f, chunks[2], t);
 
-        // Body: summary | table | detail (optional)
+        let summary = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .split(chunks[3]);
+        self.render_agents_box(f, summary[0], t);
+        self.render_risk_box(f, summary[1], t);
+
+        // Body: table | detail (optional)
         if self.detail_open {
             let body = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Length(24),     // summary
-                    Constraint::Percentage(70), // table
-                    Constraint::Percentage(30), // detail
-                ])
-                .split(chunks[1]);
-            self.render_summary(f, body[0], t);
-            self.render_table(f, body[1], t);
-            self.render_detail(f, body[2], t);
+                .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+                .split(chunks[4]);
+            self.render_table(f, body[0], t);
+            self.render_detail(f, body[1], t);
         } else {
-            let body = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(24), Constraint::Min(30)])
-                .split(chunks[1]);
-            self.render_summary(f, body[0], t);
-            self.render_table(f, body[1], t);
+            self.render_table(f, chunks[4], t);
         }
 
-        self.render_footer(f, chunks[2], t);
+        self.render_footer(f, chunks[5], t);
     }
 
-    fn render_header(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
-        let total = self.visible.len();
-        let risk_count = self.visible_high_risk_count;
+    fn render_header(f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
+        let header_line = Line::from(vec![Span::styled(
+            "SUVADU AGENT DASHBOARD",
+            Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+        )]);
+        f.render_widget(
+            Paragraph::new(header_line).alignment(Alignment::Center),
+            area,
+        );
+    }
 
-        let agent_label = self
-            .agent_filter
-            .and_then(|i| self.agent_names.get(i))
-            .map_or_else(|| "All agents".to_string(), Clone::clone);
+    fn render_search_box(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
+        let box_widget = Paragraph::new(self.search.as_str())
+            .style(Style::default().fg(t.text))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(t.border_focus))
+                    .title("Search (Typing)"),
+            );
+        f.render_widget(box_widget, area);
+    }
 
-        let mut spans = vec![
-            Span::styled(
-                " SUVADU AGENT MONITOR ",
-                Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ", Style::default()),
-        ];
+    fn render_filter_line(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
+        let label_style = Style::default()
+            .fg(t.text_secondary)
+            .add_modifier(Modifier::BOLD);
+        let mut spans = vec![Span::styled(" Period  ", label_style)];
 
-        for (i, p) in [
+        for p in [
             Period::Today,
             Period::Days7,
             Period::Days30,
             Period::AllTime,
-        ]
-        .iter()
-        .enumerate()
-        {
-            let is_active = *p == self.period;
-            spans.push(Span::styled(
-                format!("{}", i + 1),
-                Style::default().fg(t.text_muted),
-            ));
+        ] {
+            let is_active = p == self.period;
             if is_active {
                 spans.push(Span::styled(
                     format!(" {} ", p.label()),
@@ -365,135 +393,84 @@ impl AgentApp {
             spans.push(Span::raw(" "));
         }
 
-        spans.push(Span::styled("  ", Style::default()));
+        let agent_label = self
+            .agent_filter
+            .and_then(|i| self.agent_names.get(i))
+            .map_or_else(|| "All agents".to_string(), Clone::clone);
+        spans.push(Span::styled("   Agent  ", label_style));
         spans.push(Span::styled(
-            format!("{agent_label} · {total} cmds"),
-            Style::default().fg(t.text_secondary),
+            agent_label,
+            Style::default().fg(t.badge_executor),
         ));
-        if risk_count > 0 {
-            spans.push(Span::styled(
-                format!(" · ⚠ {risk_count}"),
-                Style::default().fg(t.warning),
-            ));
-        }
 
         f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
-    fn render_summary(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
+    fn render_agents_box(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
+        let mut spans = Vec::new();
+
+        if self.agent_counts.is_empty() {
+            spans.push(Span::styled("none", Style::default().fg(t.text_muted)));
+        } else {
+            for (i, (name, count)) in self.agent_counts.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::raw("   "));
+                }
+                let is_filtered = self
+                    .agent_filter
+                    .and_then(|idx| self.agent_names.get(idx))
+                    .is_some_and(|n| n == name);
+                let name_style = if is_filtered {
+                    Style::default().fg(t.primary).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(t.text)
+                };
+                spans.push(Span::styled(truncate(name, 16), name_style));
+                spans.push(Span::styled(
+                    format!(" {count}"),
+                    Style::default().fg(t.text_muted),
+                ));
+            }
+        }
+
         let block = Block::default()
-            .borders(Borders::RIGHT)
-            .border_style(Style::default().fg(t.border));
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(t.border))
+            .title(" Agents ");
+        f.render_widget(Paragraph::new(Line::from(spans)).block(block), area);
+    }
 
-        let inner = block.inner(area);
-        f.render_widget(block, area);
-
+    fn render_risk_box(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
         let label_style = Style::default()
             .fg(t.text_secondary)
             .add_modifier(Modifier::BOLD);
-        let value_style = Style::default().fg(t.text);
+        let mut spans = Vec::new();
 
-        let mut lines = Vec::new();
-        self.build_summary_agents(&mut lines, label_style, value_style, t);
-        lines.push(Line::from(""));
-        self.build_summary_risk(&mut lines, label_style, t);
-        lines.push(Line::from(""));
-        self.build_summary_stats(&mut lines, label_style, value_style, t);
-
-        if self.risk_filter {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                " [risk-only]",
-                Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
-            )));
-        }
-
-        f.render_widget(Paragraph::new(lines), inner);
-    }
-
-    fn build_summary_agents(
-        &self,
-        lines: &mut Vec<Line>,
-        label_style: Style,
-        value_style: Style,
-        t: &crate::theme::Theme,
-    ) {
-        lines.push(Line::from(Span::styled(" Agents", label_style)));
-        for (name, count) in &self.agent_counts {
-            let is_filtered = self
-                .agent_filter
-                .and_then(|i| self.agent_names.get(i))
-                .is_some_and(|n| n == name);
-            let dot = if is_filtered { "●" } else { " " };
-            let dot_style = if is_filtered {
-                Style::default().fg(t.primary)
-            } else {
-                Style::default().fg(t.text_muted)
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!(" {dot} "), dot_style),
-                Span::styled(
-                    truncate(name, 12),
-                    if is_filtered {
-                        Style::default().fg(t.primary).add_modifier(Modifier::BOLD)
-                    } else {
-                        value_style
-                    },
-                ),
-                Span::styled(format!("  {count}"), Style::default().fg(t.text_muted)),
-            ]));
-        }
-    }
-
-    fn build_summary_risk(
-        &self,
-        lines: &mut Vec<Line>,
-        label_style: Style,
-        t: &crate::theme::Theme,
-    ) {
-        lines.push(Line::from(Span::styled(" Risk", label_style)));
         if self.risk_summary.critical_count > 0 {
-            lines.push(Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(
-                    format!("⚠ {} critical", self.risk_summary.critical_count),
-                    Style::default().fg(t.risk_critical),
-                ),
-            ]));
+            spans.push(Span::styled(
+                format!("⚠ {} critical   ", self.risk_summary.critical_count),
+                Style::default().fg(t.risk_critical),
+            ));
         }
         if self.risk_summary.high_count > 0 {
-            lines.push(Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(
-                    format!("⚠ {} high", self.risk_summary.high_count),
-                    Style::default().fg(t.risk_high),
-                ),
-            ]));
+            spans.push(Span::styled(
+                format!("⚠ {} high   ", self.risk_summary.high_count),
+                Style::default().fg(t.risk_high),
+            ));
         }
         if self.risk_summary.medium_count > 0 {
-            lines.push(Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(
-                    format!("⚡ {} medium", self.risk_summary.medium_count),
-                    Style::default().fg(t.risk_medium),
-                ),
-            ]));
+            spans.push(Span::styled(
+                format!("⚡ {} medium   ", self.risk_summary.medium_count),
+                Style::default().fg(t.risk_medium),
+            ));
         }
         let safe = self.risk_summary.safe_count + self.risk_summary.low_count;
-        lines.push(Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled(format!("✔ {safe} safe"), Style::default().fg(t.success)),
-        ]));
-    }
+        spans.push(Span::styled(
+            format!("✔ {safe} safe"),
+            Style::default().fg(t.success),
+        ));
 
-    fn build_summary_stats(
-        &self,
-        lines: &mut Vec<Line>,
-        label_style: Style,
-        value_style: Style,
-        t: &crate::theme::Theme,
-    ) {
-        lines.push(Line::from(Span::styled(" Stats", label_style)));
         let total = self.entries.len();
         let success = self
             .entries
@@ -506,29 +483,34 @@ impl AgentApp {
         } else {
             0.0
         };
-        lines.push(Line::from(vec![
-            Span::styled("  Success: ", Style::default().fg(t.text_muted)),
-            Span::styled(format!("{rate:.1}%"), value_style),
-        ]));
-        if !self.risk_summary.packages_installed.is_empty() {
-            let pkg_count: usize = self
-                .risk_summary
-                .packages_installed
-                .iter()
-                .map(|p| p.packages.len())
-                .sum();
-            lines.push(Line::from(vec![
-                Span::styled("  Packages: ", Style::default().fg(t.text_muted)),
-                Span::styled(format!("{pkg_count}"), value_style),
-            ]));
-        }
+        spans.push(Span::styled("     Success  ", label_style));
+        spans.push(Span::styled(
+            format!("{rate:.1}%"),
+            Style::default().fg(t.text),
+        ));
+
         let failures = self.risk_summary.failed_commands.len();
         if failures > 0 {
-            lines.push(Line::from(vec![
-                Span::styled("  Failures: ", Style::default().fg(t.text_muted)),
-                Span::styled(format!("{failures}"), Style::default().fg(t.error)),
-            ]));
+            spans.push(Span::styled("   Failures  ", label_style));
+            spans.push(Span::styled(
+                format!("{failures}"),
+                Style::default().fg(t.error),
+            ));
         }
+
+        if self.risk_filter {
+            spans.push(Span::styled(
+                "   [risk-only]",
+                Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(t.border))
+            .title(" Risk ");
+        f.render_widget(Paragraph::new(Line::from(spans)).block(block), area);
     }
 
     fn render_table(&mut self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
@@ -853,21 +835,17 @@ impl AgentApp {
     }
 
     fn render_footer(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
-        let badge_key = Style::default()
-            .fg(t.bg_elevated)
-            .bg(t.text_secondary)
-            .add_modifier(Modifier::BOLD);
-        let badge_label = Style::default().fg(t.text_muted);
+        // Matches suv search's exact footer style/colors and Quit-first ordering.
+        let badge_key = Style::default().bg(t.badge_bg).fg(t.text);
+        let badge_label = Style::default().fg(t.text_secondary);
 
         let total_pages = self.total_pages();
 
         let mut spans = vec![
-            Span::styled(" 1-4 ", badge_key),
+            Span::styled(" Esc ", badge_key),
+            Span::styled(" Quit  ", badge_label),
+            Span::styled(" ^F ", badge_key),
             Span::styled(" Period  ", badge_label),
-            Span::styled(" ←→ ", badge_key),
-            Span::styled(" Page  ", badge_label),
-            Span::styled(" Tab ", badge_key),
-            Span::styled(" Detail  ", badge_label),
             Span::styled(" ^A ", badge_key),
             Span::styled(" Agent  ", badge_label),
             Span::styled(" ^R ", badge_key),
@@ -883,8 +861,10 @@ impl AgentApp {
             Span::styled(" Prompts  ", badge_label),
             Span::styled(" ^Y ", badge_key),
             Span::styled(" Copy  ", badge_label),
-            Span::styled(" q/Esc ", badge_key),
-            Span::styled(" Quit  ", badge_label),
+            Span::styled(" Tab ", badge_key),
+            Span::styled(" Detail  ", badge_label),
+            Span::styled(" ←→ ", badge_key),
+            Span::styled(" Page  ", badge_label),
         ];
 
         spans.push(Span::styled(
@@ -944,6 +924,7 @@ mod tests {
             risk_filter: false,
             cli_executor: None,
             cwd_filter: None,
+            search: String::new(),
             pager: PagedTable::new(PAGE_SIZE),
             detail_open: true,
             home: "/home/test".into(),
@@ -1108,19 +1089,28 @@ mod tests {
         assert!(app.pager.state.selected().is_none());
     }
 
-    // ── handle_input (non-repo paths) ──
+    // ── handle_input ───────────────────────────────────────────
 
     #[test]
-    fn handle_input_q_quits() {
-        // handle_input needs repo for reload, but q/esc don't touch it
-        // We test indirectly by checking the return value
+    fn esc_quits() {
+        let (_dir, repo) = crate::test_utils::test_repo();
         let entries = vec![make_entry("ls", Some("claude"), "/tmp")];
         let mut app = make_app(entries);
-        // We can't call handle_input without a repo for period changes,
-        // but we can test simple key responses by checking state changes
+        let esc = crossterm::event::KeyEvent::from(KeyCode::Esc);
+        assert!(matches!(
+            app.handle_input(esc, &repo),
+            DashboardAction::Quit
+        ));
+    }
+
+    #[test]
+    fn tab_toggles_detail_pane() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let entries = vec![make_entry("ls", Some("claude"), "/tmp")];
+        let mut app = make_app(entries);
         assert!(app.detail_open);
-        // Toggle detail directly (handle_input needs repo for period changes)
-        app.detail_open = !app.detail_open;
+        let tab = crossterm::event::KeyEvent::from(KeyCode::Tab);
+        app.handle_input(tab, &repo);
         assert!(!app.detail_open);
     }
 
@@ -1163,9 +1153,9 @@ mod tests {
     }
 
     #[test]
-    fn bare_a_and_r_no_longer_trigger_filters() {
-        // No text box on this screen, but the Ctrl+ convergence still moves
-        // these off bare letters for cross-screen consistency.
+    fn bare_a_and_r_type_into_search_instead_of_toggling_filters() {
+        // The search box is always-on, so bare letters are query text, not
+        // shortcuts — only Ctrl-modified keys are shortcuts on this screen.
         let (_dir, repo) = crate::test_utils::test_repo();
         let entries = vec![make_entry("ls", Some("claude"), "/tmp")];
         let mut app = make_app(entries);
@@ -1177,6 +1167,74 @@ mod tests {
         let r = crossterm::event::KeyEvent::from(KeyCode::Char('r'));
         app.handle_input(r, &repo);
         assert!(!app.risk_filter);
+        assert_eq!(app.search, "ar");
+    }
+
+    #[test]
+    fn typing_filters_command_list_live() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let entries = vec![
+            make_entry("git status", Some("claude"), "/tmp"),
+            make_entry("cargo build", Some("claude"), "/tmp"),
+        ];
+        let mut app = make_app(entries);
+        assert_eq!(app.visible.len(), 2);
+
+        for c in "cargo".chars() {
+            app.handle_input(crossterm::event::KeyEvent::from(KeyCode::Char(c)), &repo);
+        }
+        assert_eq!(app.search, "cargo");
+        assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.entries[app.visible[0]].command, "cargo build");
+    }
+
+    #[test]
+    fn backspace_removes_last_search_char_and_refilters() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let entries = vec![
+            make_entry("git status", Some("claude"), "/tmp"),
+            make_entry("cargo build", Some("claude"), "/tmp"),
+        ];
+        let mut app = make_app(entries);
+        app.search = "cargo".to_string();
+        app.rebuild_visible();
+        assert_eq!(app.visible.len(), 1);
+
+        let bs = crossterm::event::KeyEvent::from(KeyCode::Backspace);
+        app.handle_input(bs, &repo);
+        assert_eq!(app.search, "carg");
+        assert_eq!(app.visible.len(), 1); // still matches "cargo build"
+    }
+
+    #[test]
+    fn ctrl_f_cycles_period_and_reloads() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let entries = vec![make_entry("ls", Some("claude"), "/tmp")];
+        let mut app = make_app(entries);
+        app.period = Period::AllTime;
+
+        let ctrl_f = crossterm::event::KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL);
+        app.handle_input(ctrl_f, &repo);
+        assert_eq!(app.period, Period::Today);
+        app.handle_input(ctrl_f, &repo);
+        assert_eq!(app.period, Period::Days7);
+        app.handle_input(ctrl_f, &repo);
+        assert_eq!(app.period, Period::Days30);
+        app.handle_input(ctrl_f, &repo);
+        assert_eq!(app.period, Period::AllTime);
+    }
+
+    #[test]
+    fn bare_digit_types_into_search_instead_of_changing_period() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let entries = vec![make_entry("ls", Some("claude"), "/tmp")];
+        let mut app = make_app(entries);
+        let original_period = app.period;
+
+        let one = crossterm::event::KeyEvent::from(KeyCode::Char('1'));
+        app.handle_input(one, &repo);
+        assert_eq!(app.period, original_period);
+        assert_eq!(app.search, "1");
     }
 }
 

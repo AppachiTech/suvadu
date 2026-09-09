@@ -38,7 +38,7 @@ impl SearchApp {
 
             // Minimalist Header
             let branding = Line::from(vec![Span::styled(
-                "Suvadu",
+                "SUVADU SEARCH",
                 Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
             )]);
             f.render_widget(

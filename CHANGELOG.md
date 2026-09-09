@@ -10,12 +10,18 @@ All notable changes to this project will be documented in this file.
 - **`suv skills sync`** — materializes active skills into each agent's own native format (`~/.claude/skills/<name>/SKILL.md`, `.cursor/rules/<name>.mdc`, a managed block in `AGENTS.md` for Codex) for hosts that don't pull from MCP. Idempotent — only rewrites a file when its content actually changed, and never touches hand-written content around its managed section.
 - **`propose_skill` MCP tool** (off by default) — lets an agent propose a new skill, saved as `pending_review` only, never active. Enable with `mcp.allow_skill_proposals = true` in `config.toml`; a human approves or rejects proposals from the review queue in `suv skills` (`Ctrl+P`). Disabled by default since a skills store readable and writable by agents is a shared-memory poisoning target — the gate is checked before any database connection is opened.
 - **Risk assessment now catches obfuscated commands** — `eval`, decoding base64 into a shell, and command substitution wrapping a destructive/network command (e.g. `` echo $(curl ... | sh) ``) are now flagged, closing a gap where wrapping a dangerous command in indirection let it slip past risk assessment entirely. You can also flag your own org-specific risky commands with a new `agent.risk_extra_patterns` config list (regex + level + description).
-- **Prompt Explorer gets search and filters** — press `/` in `suv agent prompts` (or from the dashboard's `p` shortcut) to live-filter by prompt text, and use `1`-`4`/`a` to filter by time period and executor, mirroring the dashboard's existing controls.
+- **Prompt Explorer gets an always-on search box and filters** — `suv agent prompts` now live-filters by prompt text as you type, with `Ctrl+P`/`Ctrl+A` cycling time period/executor and `Ctrl+S` jumping to a prompt's session timeline, mirroring `suv search`'s conventions.
 - **`suv guard <command>`** — assess a command's risk before it runs and exit non-zero if it's too dangerous, for use in git hooks, CI, or a zsh widget (documented in `--help`) that blocks risky commands interactively before they execute.
 - **Per-project config overlay** — drop a `.suvadu.toml` in a project directory (or any ancestor, discovered the same way as `.git`) to override the global config just for that project, e.g. a stricter risk policy or a different exclusions list for one sensitive repo. Table fields merge key-by-key, so the overlay only needs to name what it's actually changing.
+- **`suv bookmarks`** (renamed from `suv bookmark`, old name kept as an alias) **opens a full interactive picker** — fuzzy-search and recall a bookmarked command, or add, edit, and delete bookmarks right from the TUI (`Ctrl+A`/`Ctrl+E`/`Ctrl+D`) instead of separate `add`/`rm` invocations for every change. Opens even with zero bookmarks saved yet.
 
 ### Changed
 - **Command search is faster** — `suv search`/`Ctrl+R` substring matching is now backed by a trigram full-text index instead of a full table scan, so search stays fast as your history grows. Same results, just quicker.
+- **`suv --help` groups commands by purpose** (Setup, Search & recall, Insights & safety, Organize, Data, AI integration, Other) instead of one flat list, and surfaces the `Ctrl+R`/arrow-key shortcuts up top.
+- **Visual consistency pass across `suv search`, `suv agent dashboard`, and `suv agent prompts`** — all three now share the same centered `SUVADU <SCREEN>` title, always-on live-filter search box, `Ctrl+<letter>` shortcuts, and footer badge styling. The dashboard's agent/risk summary and the prompt detail view's session info are now shown in their own boxed panels instead of dense single lines.
+
+### Fixed
+- **Closing a session timeline from `suv session` now returns to the session list** instead of exiting straight back to the shell — previously the only way out of a timeline was closing the picker entirely.
 
 ## [0.3.7] - 2026-09-07
 

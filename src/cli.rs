@@ -2,13 +2,80 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
 pub use crate::models::SearchField;
 
+/// Hand-grouped replacement for clap's flat, alphabetical-ish `suv --help`
+/// command list — 29 commands in one column got hard to scan. Only the
+/// top-level overview is overridden; `suv <command> --help` and `suv man`
+/// still render normally from each subcommand's own doc comment, so this
+/// is the one place a new/renamed/removed subcommand needs a matching
+/// manual edit here too.
+const TOP_LEVEL_HELP: &str = "\
+Total recall for your terminal. A high-performance, database-backed shell history.
+
+Usage: suv <COMMAND>
+
+Setup:
+  init         Set up shell hooks or AI tool integrations
+  settings     Configure Suvadu (interactive UI)
+  doctor       Diagnose installation health and configuration issues
+  status       Check current recording status
+  enable       Enable history recording globally (persistent)
+  disable      Disable history recording globally (persistent)
+  pause        Pause history recording for current shell session
+
+Search & recall:
+  search       Interactive search through history (Ctrl+R replacement)
+  history      Print command history (non-interactive, pipeable)
+  replay       Replay commands chronologically (session timeline or time range)
+  session      Interactive session timeline view
+
+Insights & safety:
+  stats        Show usage analytics and trends
+  agent        Monitor and audit AI agent command activity
+  guard        Assess a command's risk and exit non-zero if it's too dangerous to run
+
+Organize:
+  tag          Manage tags
+  bookmarks    Manage bookmarked commands
+  note         Annotate a history entry with a note
+  alias        Manage shell aliases
+
+Data:
+  backup       Back up the database to a file (consistent snapshot)
+  export       Export history to a file (JSON, JSONL, or CSV format)
+  import       Import history from a file (JSONL or Zsh history format)
+  delete       Bulk delete commands matching a pattern
+  gc           Remove orphaned data and compact the database
+
+AI integration:
+  skills       Manage the shared skills library — reusable instructions any MCP-capable AI agent can read, instead of each agent keeping its own copy
+  wrap         Execute a command and record it in Suvadu history (useful for AI agents and scripts that don't load shell hooks)
+
+Other:
+  version      Show version and build info
+  completions  Generate shell completions
+  man          Generate man page to stdout
+  update       Update to the latest version
+  uninstall    Uninstall Suvadu (remove binaries from system)
+  help         Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+
+Shortcuts (after `suv init <shell>`):
+  Ctrl+R       Interactive search, replaces your shell's reverse search (suv search)
+  Up/Down      Recall your history, most relevant command first
+
+Run `suv <command> --help` for a command's own flags and examples.\
+";
+
 #[derive(Parser)]
 #[command(
     name = "suvadu",
     version,
     about = "Total recall for your terminal. A high-performance, database-backed shell history.",
     long_about = None,
-    after_help = "Shortcuts (after `suv init <shell>`):\n  Ctrl+R    Interactive search, replaces your shell's reverse search (suv search)\n  Up/Down   Recall your history, most relevant command first\n\nRun `suv <command> --help` for a command's own flags and examples."
+    override_help = TOP_LEVEL_HELP
 )]
 pub struct Cli {
     #[command(subcommand)]

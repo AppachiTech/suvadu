@@ -4,12 +4,12 @@ use std::time::Instant;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::backend::Backend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Table,
+    ScrollbarState, Table, Wrap,
 };
 use ratatui::Terminal;
 
@@ -498,61 +498,87 @@ impl PromptExplorerApp {
             .constraints([
                 Constraint::Length(1), // header
                 Constraint::Length(3), // search box (always-on, like suv search)
+                Constraint::Length(1), // filters: period + agent
                 Constraint::Min(8),    // body
                 Constraint::Length(1), // footer
             ])
             .split(size);
 
-        self.render_header(f, chunks[0], t);
+        Self::render_header(f, chunks[0], t);
         self.render_search_box(f, chunks[1], t);
+        self.render_filter_line(f, chunks[2], t);
 
         // Body: table + prompt preview pane
         if self.selected_group().is_some() {
             let body_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
-                .split(chunks[2]);
+                .split(chunks[3]);
             self.render_list_table(f, body_chunks[0], t);
             // Re-borrow after render_list_table (which takes &mut self)
             let (offset, _) = self.list_pager.bounds(self.groups.len());
             let group = &self.groups[offset + self.list_pager.selected().unwrap_or(0)];
             Self::render_prompt_preview(f, body_chunks[1], t, group, &self.home);
         } else {
-            self.render_list_table(f, chunks[2], t);
+            self.render_list_table(f, chunks[3], t);
         }
 
         // Footer
-        self.render_list_footer(f, chunks[3], t);
+        self.render_list_footer(f, chunks[4], t);
     }
 
-    fn render_header(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
-        let total_cmds: usize = self.groups.iter().map(|g| g.cmd_count).sum();
+    fn render_header(f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
+        let header_line = Line::from(vec![Span::styled(
+            "SUVADU PROMPT EXPLORER",
+            Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+        )]);
+        f.render_widget(
+            Paragraph::new(header_line).alignment(Alignment::Center),
+            area,
+        );
+    }
+
+    fn render_filter_line(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
+        let label_style = Style::default()
+            .fg(t.text_secondary)
+            .add_modifier(Modifier::BOLD);
+        let mut spans = vec![Span::styled(" Period  ", label_style)];
+
+        for p in [
+            Period::Today,
+            Period::Days7,
+            Period::Days30,
+            Period::AllTime,
+        ] {
+            let is_active = p == self.period;
+            if is_active {
+                spans.push(Span::styled(
+                    format!(" {} ", p.label()),
+                    Style::default()
+                        .bg(t.primary)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    format!(" {} ", p.label()),
+                    Style::default().fg(t.text_muted),
+                ));
+            }
+            spans.push(Span::raw(" "));
+        }
+
         let executor_label = self
             .executor_filter
             .and_then(|i| self.executor_names.get(i))
             .map_or_else(|| "All agents".to_string(), Clone::clone);
+        spans.push(Span::styled("   Agent  ", label_style));
+        spans.push(Span::styled(
+            executor_label,
+            Style::default().fg(t.badge_executor),
+        ));
 
-        let header_line = Line::from(vec![
-            Span::styled(
-                " PROMPT EXPLORER ",
-                Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ", Style::default()),
-            Span::styled(
-                format!("{}", self.groups.len()),
-                Style::default().fg(t.info).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" prompts  ", Style::default().fg(t.text_secondary)),
-            Span::styled(
-                format!("{total_cmds}"),
-                Style::default().fg(t.info).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" commands   ", Style::default().fg(t.text_secondary)),
-            Span::styled(self.period.label(), Style::default().fg(t.badge_executor)),
-            Span::styled("   ", Style::default()),
-            Span::styled(executor_label, Style::default().fg(t.badge_executor)),
-        ]);
-        f.render_widget(Paragraph::new(header_line), area);
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     /// Always-on live-filter box, matching `suv search`'s query bar: no key
@@ -826,14 +852,13 @@ impl PromptExplorerApp {
     }
 
     fn render_list_footer(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
-        let badge_key = Style::default()
-            .fg(t.bg_elevated)
-            .bg(t.text_secondary)
-            .add_modifier(Modifier::BOLD);
-        let badge_label = Style::default().fg(t.text_muted);
+        let badge_key = Style::default().bg(t.badge_bg).fg(t.text);
+        let badge_label = Style::default().fg(t.text_secondary);
         let total_pages = self.list_total_pages();
 
         let mut spans = vec![
+            Span::styled(" Esc ", badge_key),
+            Span::styled(" Quit  ", badge_label),
             Span::styled(" ↑↓ ", badge_key),
             Span::styled(" Navigate  ", badge_label),
             Span::styled(" ←→ ", badge_key),
@@ -846,8 +871,6 @@ impl PromptExplorerApp {
             Span::styled(" Agent  ", badge_label),
             Span::styled(" ^S ", badge_key),
             Span::styled(" Session  ", badge_label),
-            Span::styled(" Esc ", badge_key),
-            Span::styled(" Quit  ", badge_label),
         ];
 
         spans.push(Span::styled(
@@ -875,7 +898,7 @@ impl PromptExplorerApp {
 
         let group = &self.groups[group_index];
 
-        // Compute prompt height: wrap prompt text to available width
+        // Compute prompt box height: wrap prompt text to available width
         let prompt_area_w = size.width.saturating_sub(4) as usize; // borders + padding
         let prompt_line_count = if prompt_area_w > 0 {
             let char_count = group.prompt.chars().count();
@@ -885,45 +908,107 @@ impl PromptExplorerApp {
         };
         let prompt_box_h = u16::try_from(prompt_line_count)
             .unwrap_or(u16::MAX)
-            .saturating_add(4); // +2 for borders, +2 for header/stats line
+            .saturating_add(2); // borders only — stats live in the Info box now
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(prompt_box_h), // prompt area
+                Constraint::Length(4),            // info box: session/executor/path/stats
+                Constraint::Length(prompt_box_h), // prompt-only box
                 Constraint::Min(6),               // command table + detail pane
                 Constraint::Length(1),            // footer
             ])
             .split(size);
 
-        // Prompt area (full prompt text + stats)
-        Self::render_prompt_header(f, chunks[0], t, group);
+        Self::render_info_box(f, chunks[0], t, group, &self.home);
+        Self::render_prompt_box(f, chunks[1], t, group);
 
         // Body
         if self.detail_pane_open {
             let body = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
-                .split(chunks[1]);
+                .split(chunks[2]);
             self.render_detail_table(f, body[0], t, group_index);
             self.render_entry_detail_pane(f, body[1], t);
         } else {
-            self.render_detail_table(f, chunks[1], t, group_index);
+            self.render_detail_table(f, chunks[2], t, group_index);
         }
 
         // Footer
-        self.render_detail_footer(f, chunks[2], t);
+        self.render_detail_footer(f, chunks[3], t);
     }
 
-    fn render_prompt_header(
+    /// Session/executor/path identity + cmd/success/fail/duration stats, all
+    /// on one row — wraps to a second row only if the terminal is too
+    /// narrow to fit everything, kept separate from the prompt text (below)
+    /// so long prompts don't crowd out these at-a-glance numbers.
+    fn render_info_box(
+        f: &mut ratatui::Frame,
+        area: Rect,
+        t: &crate::theme::Theme,
+        group: &PromptGroup,
+        home: &str,
+    ) {
+        let label_style = Style::default()
+            .fg(t.text_secondary)
+            .add_modifier(Modifier::BOLD);
+        let session_short = short_session_id(&group.session_id);
+        let path_display = shorten_path(&group.cwd, home);
+
+        let mut spans = vec![
+            Span::styled(" Session  ", label_style),
+            Span::styled(session_short, Style::default().fg(t.primary_dim)),
+            Span::styled("    Executor  ", label_style),
+            Span::styled(
+                group.executor.clone(),
+                Style::default().fg(t.badge_executor),
+            ),
+            Span::styled("    Path  ", label_style),
+            Span::styled(path_display, Style::default().fg(t.badge_path)),
+            Span::styled("    Cmds  ", label_style),
+            Span::styled(format!("{}", group.cmd_count), Style::default().fg(t.text)),
+            Span::styled("   ✔ ", Style::default().fg(t.success)),
+            Span::styled(
+                format!("{}", group.success_count),
+                Style::default().fg(t.success),
+            ),
+        ];
+        if group.fail_count > 0 {
+            spans.push(Span::styled("   ✘ ", Style::default().fg(t.error)));
+            spans.push(Span::styled(
+                format!("{}", group.fail_count),
+                Style::default().fg(t.error),
+            ));
+        }
+        spans.push(Span::styled("   Duration  ", label_style));
+        spans.push(Span::styled(
+            format_duration_ms(group.total_duration_ms),
+            Style::default().fg(t.text_muted),
+        ));
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(t.border))
+            .title(Span::styled(
+                " Info ",
+                Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        f.render_widget(
+            Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false }),
+            inner,
+        );
+    }
+
+    fn render_prompt_box(
         f: &mut ratatui::Frame,
         area: Rect,
         t: &crate::theme::Theme,
         group: &PromptGroup,
     ) {
-        let session_short: String = short_session_id(&group.session_id);
-        let fail_count = group.fail_count;
-
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
@@ -937,54 +1022,16 @@ impl PromptExplorerApp {
         f.render_widget(block, area);
 
         let max_w = inner.width.saturating_sub(1) as usize;
-        let mut lines = Vec::new();
-
-        // Stats line
-        let mut stats_spans = vec![
-            Span::styled(
-                format!("[{session_short}] "),
-                Style::default()
-                    .fg(t.primary_dim)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                group.executor.clone(),
-                Style::default().fg(t.badge_executor),
-            ),
-            Span::styled(
-                format!("  {} cmds", group.cmd_count),
-                Style::default().fg(t.text_secondary),
-            ),
-            Span::styled(
-                format!("  ✔ {}", group.success_count),
-                Style::default().fg(t.success),
-            ),
-        ];
-        if fail_count > 0 {
-            stats_spans.push(Span::styled(
-                format!("  ✘ {fail_count}"),
-                Style::default().fg(t.error),
-            ));
-        }
-        stats_spans.push(Span::styled(
-            format!("  {}", format_duration_ms(group.total_duration_ms)),
-            Style::default().fg(t.text_muted),
-        ));
-        lines.push(Line::from(stats_spans));
-
-        // Blank separator
-        lines.push(Line::from(""));
-
-        // Full prompt text (word-wrapped, up to available height)
+        let available_lines = inner.height as usize;
         let prompt_chars: Vec<char> = group.prompt.chars().collect();
-        let available_lines = inner.height.saturating_sub(2) as usize; // stats + blank
-        for chunk in prompt_chars.chunks(max_w.max(1)).take(available_lines) {
-            let chunk_str: String = chunk.iter().collect();
-            lines.push(Line::from(Span::styled(
-                chunk_str,
-                Style::default().fg(t.info),
-            )));
-        }
+        let lines: Vec<Line> = prompt_chars
+            .chunks(max_w.max(1))
+            .take(available_lines.max(1))
+            .map(|chunk| {
+                let chunk_str: String = chunk.iter().collect();
+                Line::from(Span::styled(chunk_str, Style::default().fg(t.info)))
+            })
+            .collect();
 
         f.render_widget(Paragraph::new(lines), inner);
     }
@@ -1196,14 +1243,13 @@ impl PromptExplorerApp {
     }
 
     fn render_detail_footer(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
-        let badge_key = Style::default()
-            .fg(t.bg_elevated)
-            .bg(t.text_secondary)
-            .add_modifier(Modifier::BOLD);
-        let badge_label = Style::default().fg(t.text_muted);
+        let badge_key = Style::default().bg(t.badge_bg).fg(t.text);
+        let badge_label = Style::default().fg(t.text_secondary);
         let total_pages = self.detail_total_pages();
 
         let mut spans = vec![
+            Span::styled(" Esc ", badge_key),
+            Span::styled(" Back  ", badge_label),
             Span::styled(" ↑↓ ", badge_key),
             Span::styled(" Navigate  ", badge_label),
             Span::styled(" ←→ ", badge_key),
@@ -1212,8 +1258,6 @@ impl PromptExplorerApp {
             Span::styled(" Copy  ", badge_label),
             Span::styled(" Tab ", badge_key),
             Span::styled(" Detail  ", badge_label),
-            Span::styled(" Esc ", badge_key),
-            Span::styled(" Back  ", badge_label),
         ];
 
         spans.push(Span::styled(
