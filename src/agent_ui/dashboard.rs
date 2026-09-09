@@ -189,10 +189,51 @@ impl AgentApp {
         key: crossterm::event::KeyEvent,
         repo: &Repository,
     ) -> DashboardAction {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('p') => return DashboardAction::OpenPrompts,
+                // Agent filter
+                KeyCode::Char('a') => {
+                    if self.agent_names.is_empty() {
+                        self.agent_filter = None;
+                    } else {
+                        self.agent_filter = match self.agent_filter {
+                            None => Some(0),
+                            Some(i) if i + 1 >= self.agent_names.len() => None,
+                            Some(i) => Some(i + 1),
+                        };
+                    }
+                    self.rebuild_visible();
+                }
+                // Risk filter
+                KeyCode::Char('r') => {
+                    self.risk_filter = !self.risk_filter;
+                    self.rebuild_visible();
+                }
+                // Copy
+                KeyCode::Char('y') => {
+                    if let Some(entry) = self.selected_entry() {
+                        match arboard::Clipboard::new()
+                            .and_then(|mut c| c.set_text(entry.command.clone()))
+                        {
+                            Ok(()) => {
+                                self.status_message =
+                                    Some(("Copied!".into(), std::time::Instant::now()));
+                            }
+                            Err(_) => {
+                                self.status_message =
+                                    Some(("Copy failed".into(), std::time::Instant::now()));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return DashboardAction::Continue;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => return DashboardAction::Quit,
-            KeyCode::Char('p') => return DashboardAction::OpenPrompts,
-            // Period
+            // Period (no text box on this screen, so bare digits are safe)
             KeyCode::Char('1') => {
                 self.period = Period::Today;
                 self.reload(repo);
@@ -209,44 +250,9 @@ impl AgentApp {
                 self.period = Period::AllTime;
                 self.reload(repo);
             }
-            // Agent filter
-            KeyCode::Char('a') => {
-                if self.agent_names.is_empty() {
-                    self.agent_filter = None;
-                } else {
-                    self.agent_filter = match self.agent_filter {
-                        None => Some(0),
-                        Some(i) if i + 1 >= self.agent_names.len() => None,
-                        Some(i) => Some(i + 1),
-                    };
-                }
-                self.rebuild_visible();
-            }
-            // Risk filter
-            KeyCode::Char('r') => {
-                self.risk_filter = !self.risk_filter;
-                self.rebuild_visible();
-            }
             // Detail pane
             KeyCode::Tab => {
                 self.detail_open = !self.detail_open;
-            }
-            // Copy
-            KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(entry) = self.selected_entry() {
-                    match arboard::Clipboard::new()
-                        .and_then(|mut c| c.set_text(entry.command.clone()))
-                    {
-                        Ok(()) => {
-                            self.status_message =
-                                Some(("Copied!".into(), std::time::Instant::now()));
-                        }
-                        Err(_) => {
-                            self.status_message =
-                                Some(("Copy failed".into(), std::time::Instant::now()));
-                        }
-                    }
-                }
             }
             // Page navigation
             KeyCode::Left => self.pager.prev_page(self.visible.len()),
@@ -862,9 +868,9 @@ impl AgentApp {
             Span::styled(" Page  ", badge_label),
             Span::styled(" Tab ", badge_key),
             Span::styled(" Detail  ", badge_label),
-            Span::styled(" a ", badge_key),
+            Span::styled(" ^A ", badge_key),
             Span::styled(" Agent  ", badge_label),
-            Span::styled(" r ", badge_key),
+            Span::styled(" ^R ", badge_key),
             Span::styled(
                 if self.risk_filter {
                     " All  "
@@ -873,7 +879,7 @@ impl AgentApp {
                 },
                 badge_label,
             ),
-            Span::styled(" p ", badge_key),
+            Span::styled(" ^P ", badge_key),
             Span::styled(" Prompts  ", badge_label),
             Span::styled(" ^Y ", badge_key),
             Span::styled(" Copy  ", badge_label),
@@ -1127,6 +1133,50 @@ mod tests {
         let app = make_app(entries);
         // The rm -rf should be counted as high risk
         assert!(app.visible_high_risk_count >= 1);
+    }
+
+    // ── Ctrl+<letter> filter shortcuts ───────────────────────
+
+    #[test]
+    fn ctrl_a_cycles_agent_filter_via_handle_input() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let entries = vec![
+            make_entry("ls", Some("claude"), "/tmp"),
+            make_entry("pwd", Some("cursor"), "/tmp"),
+        ];
+        let mut app = make_app(entries);
+        assert_eq!(app.agent_filter, None);
+        let ctrl_a = crossterm::event::KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        app.handle_input(ctrl_a, &repo);
+        assert_eq!(app.agent_filter, Some(0));
+    }
+
+    #[test]
+    fn ctrl_r_toggles_risk_filter_via_handle_input() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let entries = vec![make_entry("ls", Some("claude"), "/tmp")];
+        let mut app = make_app(entries);
+        assert!(!app.risk_filter);
+        let ctrl_r = crossterm::event::KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        app.handle_input(ctrl_r, &repo);
+        assert!(app.risk_filter);
+    }
+
+    #[test]
+    fn bare_a_and_r_no_longer_trigger_filters() {
+        // No text box on this screen, but the Ctrl+ convergence still moves
+        // these off bare letters for cross-screen consistency.
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let entries = vec![make_entry("ls", Some("claude"), "/tmp")];
+        let mut app = make_app(entries);
+
+        let a = crossterm::event::KeyEvent::from(KeyCode::Char('a'));
+        app.handle_input(a, &repo);
+        assert_eq!(app.agent_filter, None);
+
+        let r = crossterm::event::KeyEvent::from(KeyCode::Char('r'));
+        app.handle_input(r, &repo);
+        assert!(!app.risk_filter);
     }
 }
 

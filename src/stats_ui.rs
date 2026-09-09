@@ -203,8 +203,20 @@ impl StatsApp {
 
     /// Returns false to quit.
     fn handle_input(&mut self, key: KeyEvent, repo: &Repository) -> bool {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('e') => self.show_executor = !self.show_executor,
+                KeyCode::Char('h') => {
+                    self.human_only = !self.human_only;
+                    self.reload(repo);
+                }
+                _ => {}
+            }
+            return true;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => return false,
+            // Period (no text box on this screen, so bare digits are safe)
             KeyCode::Char('1') => {
                 self.period = Period::Days7;
                 self.reload(repo);
@@ -219,11 +231,6 @@ impl StatsApp {
             }
             KeyCode::Char('4') => {
                 self.period = Period::AllTime;
-                self.reload(repo);
-            }
-            KeyCode::Char('e') => self.show_executor = !self.show_executor,
-            KeyCode::Char('h') => {
-                self.human_only = !self.human_only;
                 self.reload(repo);
             }
             KeyCode::Tab => {
@@ -903,12 +910,21 @@ impl StatsApp {
             Span::styled(" All  ", badge_label),
             Span::styled(" Tab ", badge_key),
             Span::styled(" Focus  ", badge_label),
-            Span::styled(" e ", badge_key),
+            Span::styled(" ^E ", badge_key),
             Span::styled(
                 if self.show_executor {
                     " Summary  "
                 } else {
                     " Executors  "
+                },
+                badge_label,
+            ),
+            Span::styled(" ^H ", badge_key),
+            Span::styled(
+                if self.human_only {
+                    " All  "
+                } else {
+                    " Human only  "
                 },
                 badge_label,
             ),
@@ -1383,11 +1399,31 @@ mod tests {
 
         assert!(!app.show_executor);
 
-        app.handle_input(KeyEvent::from(KeyCode::Char('e')), &repo);
+        let ctrl_e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        app.handle_input(ctrl_e, &repo);
         assert!(app.show_executor);
 
+        app.handle_input(ctrl_e, &repo);
+        assert!(!app.show_executor);
+    }
+
+    #[test]
+    fn test_stats_app_bare_e_does_not_toggle_executor() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None, false);
         app.handle_input(KeyEvent::from(KeyCode::Char('e')), &repo);
         assert!(!app.show_executor);
+    }
+
+    #[test]
+    fn test_stats_app_ctrl_h_toggles_human_only_and_reloads() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None, false);
+        assert!(!app.human_only);
+
+        let ctrl_h = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL);
+        app.handle_input(ctrl_h, &repo);
+        assert!(app.human_only);
     }
 
     #[test]
