@@ -18,10 +18,11 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - **Command search is faster** — `suv search`/`Ctrl+R` substring matching is now backed by a trigram full-text index instead of a full table scan, so search stays fast as your history grows. Same results, just quicker.
 - **`suv --help` groups commands by purpose** (Setup, Search & recall, Insights & safety, Organize, Data, AI integration, Other) instead of one flat list, and surfaces the `Ctrl+R`/arrow-key shortcuts up top.
-- **Visual consistency pass across `suv search`, `suv agent dashboard`, and `suv agent prompts`** — all three now share the same centered `SUVADU <SCREEN>` title, always-on live-filter search box, `Ctrl+<letter>` shortcuts, and footer badge styling. The dashboard's agent/risk summary and the prompt detail view's session info are now shown in their own boxed panels instead of dense single lines.
+- **Visual consistency pass across `suv search`, `suv agent dashboard`, `suv agent prompts`, `suv agent stats`, `suv stats`, and `suv skills`** — all now share the same centered `SUVADU <SCREEN>` title and footer badge styling; the search-driven screens also share an always-on live-filter search box and `Ctrl+<letter>` shortcuts. The dashboard's agent/risk summary and the prompt detail view's session info are now shown in their own boxed panels instead of dense single lines, agent stats' cards use rounded borders, and its High Risk Commands table now fills the available width instead of truncating commands at a fixed 30 characters.
 
 ### Fixed
 - **Closing a session timeline from `suv session` now returns to the session list** instead of exiting straight back to the shell — previously the only way out of a timeline was closing the picker entirely.
+- **Pasting a multi-line skill into `suv skills`' Add/Edit form no longer misfires** — Enter used to submit the form (jumping straight to `$EDITOR` for the body) regardless of which field had focus, so a paste with an embedded line break could launch the editor before later fields were even filled in. Enter now advances fields like Tab, only submitting on the last one; the form is also bigger and each field caps at 200 characters.
 
 ## [0.3.7] - 2026-09-07
 

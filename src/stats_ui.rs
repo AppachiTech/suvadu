@@ -311,6 +311,7 @@ impl StatsApp {
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(1), // header
+                    Constraint::Length(1), // period filter line
                     Constraint::Length(3), // metrics
                     Constraint::Length(9), // heatmap
                     Constraint::Min(0),    // panels
@@ -322,6 +323,7 @@ impl StatsApp {
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(1),  // header
+                    Constraint::Length(1),  // period filter line
                     Constraint::Length(3),  // metrics
                     Constraint::Length(11), // heatmap
                     Constraint::Length(4),  // sparkline
@@ -331,40 +333,42 @@ impl StatsApp {
                 .split(size)
         };
 
-        self.render_header(f, chunks[0]);
-        self.render_metrics(f, chunks[1]);
-        self.render_heatmap(f, chunks[2]);
+        Self::render_header(f, chunks[0]);
+        self.render_period_line(f, chunks[1]);
+        self.render_metrics(f, chunks[2]);
+        self.render_heatmap(f, chunks[3]);
 
         if compact {
-            self.render_panels(f, chunks[3]);
-            self.render_footer(f, chunks[4]);
-        } else {
-            self.render_sparkline(f, chunks[3]);
             self.render_panels(f, chunks[4]);
             self.render_footer(f, chunks[5]);
+        } else {
+            self.render_sparkline(f, chunks[4]);
+            self.render_panels(f, chunks[5]);
+            self.render_footer(f, chunks[6]);
         }
     }
 
     // ── Header ───────────────────────────────────────────────
 
-    #[allow(clippy::cast_possible_truncation)]
-    fn render_header(&self, f: &mut ratatui::Frame, area: Rect) {
+    fn render_header(f: &mut ratatui::Frame, area: Rect) {
         let t = theme();
-
-        let mut title_spans: Vec<Span> = vec![Span::styled(
-            " Suvadu Stats ",
+        let header_line = Line::from(vec![Span::styled(
+            "SUVADU STATS",
             Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
-        )];
+        )]);
+        f.render_widget(
+            Paragraph::new(header_line).alignment(ratatui::layout::Alignment::Center),
+            area,
+        );
+    }
 
-        if let Some(ref tag) = self.tag_name {
-            title_spans.push(Span::styled(
-                format!(" tag:{tag} "),
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(t.warning)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
+    #[allow(clippy::cast_possible_truncation)]
+    fn render_period_line(&self, f: &mut ratatui::Frame, area: Rect) {
+        let t = theme();
+        let label_style = Style::default()
+            .fg(t.text_secondary)
+            .add_modifier(Modifier::BOLD);
+        let mut spans: Vec<Span> = vec![Span::styled(" Period  ", label_style)];
 
         let periods = [
             Period::Days7,
@@ -372,14 +376,13 @@ impl StatsApp {
             Period::Days90,
             Period::AllTime,
         ];
-        let mut period_spans: Vec<Span> = Vec::new();
         for (i, p) in periods.iter().enumerate() {
-            period_spans.push(Span::styled(
+            spans.push(Span::styled(
                 format!("{}", i + 1),
                 Style::default().fg(t.text_muted),
             ));
             if *p == self.period {
-                period_spans.push(Span::styled(
+                spans.push(Span::styled(
                     format!(" {} ", p.label()),
                     Style::default()
                         .bg(t.primary)
@@ -387,17 +390,24 @@ impl StatsApp {
                         .add_modifier(Modifier::BOLD),
                 ));
             } else {
-                period_spans.push(Span::styled(
+                spans.push(Span::styled(
                     format!(" {} ", p.label()),
                     Style::default().fg(t.text_muted),
                 ));
             }
-            period_spans.push(Span::raw(" "));
+            spans.push(Span::raw(" "));
         }
 
-        let mut spans = title_spans;
-        spans.push(Span::styled("  ", Style::default()));
-        spans.extend(period_spans);
+        if let Some(ref tag) = self.tag_name {
+            spans.push(Span::styled("   ", Style::default()));
+            spans.push(Span::styled(
+                format!(" tag:{tag} "),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(t.warning)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
 
         f.render_widget(Paragraph::new(Line::from(spans)), area);
     }

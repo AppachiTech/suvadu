@@ -3,7 +3,7 @@ use std::io;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::backend::Backend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table, Wrap};
@@ -252,13 +252,15 @@ impl AgentStatsApp {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1), // header
+                Constraint::Length(1), // period filter line
                 Constraint::Length(9), // agent cards
                 Constraint::Min(6),    // bottom: dirs + high risk
                 Constraint::Length(1), // footer
             ])
             .split(size);
 
-        self.render_header(f, chunks[0], t);
+        Self::render_header(f, chunks[0], t);
+        self.render_period_line(f, chunks[1], t);
 
         // Agent cards
         if self.agents.is_empty() {
@@ -267,10 +269,10 @@ impl AgentStatsApp {
                     "  No agent commands found for this period.",
                     Style::default().fg(t.text_muted),
                 )),
-                chunks[1],
+                chunks[2],
             );
         } else {
-            self.render_agent_cards(f, chunks[1], t);
+            self.render_agent_cards(f, chunks[2], t);
         }
 
         // Bottom: dirs (left) | high risk with detail (right)
@@ -279,23 +281,22 @@ impl AgentStatsApp {
             let bottom_cols = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-                .split(chunks[2]);
+                .split(chunks[3]);
 
             self.render_top_dirs(f, bottom_cols[0], t, agent, &home);
             self.render_high_risk_section(f, bottom_cols[1], t, agent, &home);
         }
 
         // Footer
-        let badge_key = Style::default()
-            .fg(t.bg_elevated)
-            .bg(t.text_secondary)
-            .add_modifier(Modifier::BOLD);
-        let badge_label = Style::default().fg(t.text_muted);
+        let badge_key = Style::default().bg(t.badge_bg).fg(t.text);
+        let badge_label = Style::default().fg(t.text_secondary);
         let focus_label = match self.focus {
             StatsFocus::Cards => " High Risk ",
             StatsFocus::HighRisk => " Cards ",
         };
         let mut footer = vec![
+            Span::styled(" q/Esc ", badge_key),
+            Span::styled(" Quit  ", badge_label),
             Span::styled(" 1-4 ", badge_key),
             Span::styled(" Period  ", badge_label),
             Span::styled(" Tab ", badge_key),
@@ -310,9 +311,7 @@ impl AgentStatsApp {
             ),
             Span::styled(" Navigate  ", badge_label),
             Span::styled(" ^Y ", badge_key),
-            Span::styled(" Copy  ", badge_label),
-            Span::styled(" q/Esc ", badge_key),
-            Span::styled(" Quit ", badge_label),
+            Span::styled(" Copy ", badge_label),
         ];
 
         if let Some((msg, time)) = &self.status_message {
@@ -324,17 +323,25 @@ impl AgentStatsApp {
             }
         }
 
-        f.render_widget(Paragraph::new(Line::from(footer)), chunks[3]);
+        f.render_widget(Paragraph::new(Line::from(footer)), chunks[4]);
     }
 
-    fn render_header(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
-        let mut spans = vec![
-            Span::styled(
-                " AGENT STATS ",
-                Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ", Style::default()),
-        ];
+    fn render_header(f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
+        let header_line = Line::from(vec![Span::styled(
+            "SUVADU AGENT STATS",
+            Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+        )]);
+        f.render_widget(
+            Paragraph::new(header_line).alignment(Alignment::Center),
+            area,
+        );
+    }
+
+    fn render_period_line(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
+        let label_style = Style::default()
+            .fg(t.text_secondary)
+            .add_modifier(Modifier::BOLD);
+        let mut spans = vec![Span::styled(" Period  ", label_style)];
         for (i, p) in [
             Period::Today,
             Period::Days7,
@@ -390,6 +397,7 @@ impl AgentStatsApp {
             };
             let block = Block::default()
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(border_style)
                 .title(format!(" {} ", agent.name))
                 .title_style(if i == self.selected {
@@ -530,7 +538,11 @@ impl AgentStatsApp {
             return;
         }
 
-        let risk_rows = self.build_high_risk_rows(agent, in_focus, t);
+        // Level(9) + Time(12) + Status(2) + 3 default column gaps = 26;
+        // whatever's left goes to Command so it fills the box instead of
+        // sitting fixed at 30 chars and leaving a wide blank gap.
+        let cmd_width = risk_inner.width.saturating_sub(26).max(10) as usize;
+        let risk_rows = self.build_high_risk_rows(agent, in_focus, t, cmd_width);
         let risk_widths = [
             Constraint::Length(9),
             Constraint::Min(15),
@@ -549,6 +561,7 @@ impl AgentStatsApp {
         agent: &AgentStat,
         in_focus: bool,
         t: &crate::theme::Theme,
+        cmd_width: usize,
     ) -> Vec<Row<'_>> {
         agent
             .high_risk_cmds
@@ -577,10 +590,10 @@ impl AgentStatsApp {
                 };
 
                 let cmd_cell = if is_sel {
-                    Cell::from(truncate(&hr.command, 30)).style(base)
+                    Cell::from(truncate(&hr.command, cmd_width)).style(base)
                 } else {
                     Cell::from(crate::util::highlight_command(
-                        &truncate(&hr.command, 30),
+                        &truncate(&hr.command, cmd_width),
                         0,
                     ))
                 };

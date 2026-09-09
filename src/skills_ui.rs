@@ -131,9 +131,9 @@ use crate::theme::theme;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout},
     style::{Modifier, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Terminal,
 };
@@ -143,6 +143,11 @@ pub enum StatusLevel {
     Info,
     Error,
 }
+
+/// Cap on the Add/Edit form's Name/Description/Triggers fields — plenty for
+/// any realistic value, and guards against a stray multi-KB paste (e.g. an
+/// entire skill body pasted into the wrong field) ballooning the string.
+const MAX_FIELD_LEN: usize = 200;
 
 // `Mode` lives in exactly one `SkillsApp` field (never in a collection), so
 // the size difference between variants is a few hundred bytes on one struct,
@@ -440,10 +445,6 @@ fn handle_form_key(
     };
     match key.code {
         KeyCode::Esc => { /* discard `form`, stay in Browse */ }
-        KeyCode::Tab => {
-            form.next_field();
-            app.mode = Mode::Form(form);
-        }
         KeyCode::Char(' ') if form.focus == FormField::Scope => {
             form.scope_is_global = !form.scope_is_global;
             app.mode = Mode::Form(form);
@@ -461,11 +462,24 @@ fn handle_form_key(
             if form.focus != FormField::Scope && !key.modifiers.contains(KeyModifiers::CONTROL) =>
         {
             if let Some(field) = form.focused_text_mut() {
-                field.push(c);
+                if field.len() + c.len_utf8() <= MAX_FIELD_LEN {
+                    field.push(c);
+                }
             }
             app.mode = Mode::Form(form);
         }
-        KeyCode::Enter => submit_form(app, form, repo, terminal)?,
+        // Tab always advances; Enter advances too except on the last field,
+        // where it submits (jumping to $EDITOR for the body). This also
+        // protects a multi-line paste into Name/Description/Triggers — an
+        // embedded newline just moves focus forward instead of launching
+        // the editor mid-paste.
+        KeyCode::Enter if form.focus == FormField::Scope => {
+            submit_form(app, form, repo, terminal)?;
+        }
+        KeyCode::Tab | KeyCode::Enter => {
+            form.next_field();
+            app.mode = Mode::Form(form);
+        }
         _ => app.mode = Mode::Form(form),
     }
     Ok(())
@@ -650,25 +664,55 @@ fn render(f: &mut ratatui::Frame, app: &mut SkillsApp) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Min(1),
-            Constraint::Length(1),
+            Constraint::Length(1), // header
+            Constraint::Length(3), // search box
+            Constraint::Min(1),    // body
+            Constraint::Length(1), // footer
         ])
         .split(f.area());
 
+    render_header(f, rows[0], t);
+
     if matches!(app.mode, Mode::Review) {
-        render_review(f, app, rows[1]);
-        let help = Paragraph::new(Line::from(
-            " a approve · r reject · s/↓ skip · ↑ back · q/Esc return ",
-        ))
-        .style(Style::default().fg(t.text_muted));
-        f.render_widget(help, rows[2]);
+        render_review(f, app, rows[2]);
+        render_review_footer(f, rows[3], t);
         return;
     }
 
-    render_browse(f, app, t, &rows);
+    render_browse(f, app, t, &rows[1..]);
     render_delete_dialog(f, app, t);
     render_form_dialog(f, app, t);
+}
+
+fn render_header(f: &mut ratatui::Frame, area: ratatui::layout::Rect, t: &crate::theme::Theme) {
+    let header_line = Line::from(vec![Span::styled(
+        "SUVADU SKILLS",
+        Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+    )]);
+    f.render_widget(
+        Paragraph::new(header_line).alignment(Alignment::Center),
+        area,
+    );
+}
+
+fn render_review_footer(
+    f: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    t: &crate::theme::Theme,
+) {
+    let badge_key = Style::default().bg(t.badge_bg).fg(t.text);
+    let badge_label = Style::default().fg(t.text_secondary);
+    let spans = vec![
+        Span::styled(" Esc ", badge_key),
+        Span::styled(" Back  ", badge_label),
+        Span::styled(" ↑↓ ", badge_key),
+        Span::styled(" Navigate  ", badge_label),
+        Span::styled(" a ", badge_key),
+        Span::styled(" Approve  ", badge_label),
+        Span::styled(" r ", badge_key),
+        Span::styled(" Reject ", badge_label),
+    ];
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_browse(
@@ -756,19 +800,53 @@ fn render_browse(
         );
     f.render_widget(preview, panes[1]);
 
-    let status_line = match &app.status_message {
+    render_browse_footer(f, app, rows[2], t);
+}
+
+fn render_browse_footer(
+    f: &mut ratatui::Frame,
+    app: &SkillsApp,
+    area: ratatui::layout::Rect,
+    t: &crate::theme::Theme,
+) {
+    let badge_key = Style::default().bg(t.badge_bg).fg(t.text);
+    let badge_label = Style::default().fg(t.text_secondary);
+    let mut spans = vec![
+        Span::styled(" Esc ", badge_key),
+        Span::styled(" Quit  ", badge_label),
+        Span::styled(" ↑↓ ", badge_key),
+        Span::styled(" Navigate  ", badge_label),
+        Span::styled(" Enter ", badge_key),
+        Span::styled(" Copy  ", badge_label),
+        Span::styled(" ^A ", badge_key),
+        Span::styled(" Add  ", badge_label),
+        Span::styled(" ^E ", badge_key),
+        Span::styled(" Edit  ", badge_label),
+        Span::styled(" ^D ", badge_key),
+        Span::styled(" Delete  ", badge_label),
+        Span::styled(" ^S ", badge_key),
+        Span::styled(" Sync  ", badge_label),
+        Span::styled(" ^P ", badge_key),
+        Span::styled(" Review ", badge_label),
+    ];
+
+    match &app.status_message {
         Some((StatusLevel::Error, msg)) => {
-            Line::from(msg.as_str()).style(Style::default().fg(t.error))
+            spans.push(Span::styled(
+                format!(" {msg} "),
+                Style::default().fg(t.error).add_modifier(Modifier::BOLD),
+            ));
         }
         Some((StatusLevel::Info, msg)) => {
-            Line::from(msg.as_str()).style(Style::default().fg(t.success))
+            spans.push(Span::styled(
+                format!(" {msg} "),
+                Style::default().fg(t.success).add_modifier(Modifier::BOLD),
+            ));
         }
-        None => Line::from(
-            " type to filter · ↑/↓ move · Ctrl+A add · Ctrl+E edit · Ctrl+D delete · Ctrl+S sync · Ctrl+P review · Enter copy · Esc quit ",
-        )
-        .style(Style::default().fg(t.text_muted)),
-    };
-    f.render_widget(Paragraph::new(status_line), rows[2]);
+        None => {}
+    }
+
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_delete_dialog(f: &mut ratatui::Frame, app: &SkillsApp, t: &crate::theme::Theme) {
@@ -791,7 +869,10 @@ fn render_form_dialog(f: &mut ratatui::Frame, app: &SkillsApp, t: &crate::theme:
     let Mode::Form(form) = &app.mode else {
         return;
     };
-    let area = centered_rect(60, 9, f.area());
+    // 80% of the terminal (capped at 90 cols) rather than a fixed 60 —
+    // roomier for pasted names/descriptions/trigger lists.
+    let width = (f.area().width * 80 / 100).clamp(60, 90);
+    let area = centered_rect(width, 13, f.area());
     f.render_widget(ratatui::widgets::Clear, area);
     let title = if form.editing.is_some() {
         " Edit skill "
@@ -805,6 +886,7 @@ fn render_form_dialog(f: &mut ratatui::Frame, app: &SkillsApp, t: &crate::theme:
     };
     let marker = |field: FormField| if form.focus == field { ">" } else { " " };
     let lines = vec![
+        Line::from(""),
         Line::from(format!(
             "{} Name:        {}",
             marker(FormField::Name),
@@ -828,7 +910,9 @@ fn render_form_dialog(f: &mut ratatui::Frame, app: &SkillsApp, t: &crate::theme:
             scope_text
         )),
         Line::from(""),
-        Line::from("Tab: next field · Enter: edit body in $EDITOR & save · Esc: cancel"),
+        Line::from("  Tab / Enter   Next field"),
+        Line::from("  Enter (Scope) Edit body in $EDITOR & save — paste works there too"),
+        Line::from("  Esc           Cancel"),
     ];
     let dialog = Paragraph::new(lines).block(
         Block::default()
