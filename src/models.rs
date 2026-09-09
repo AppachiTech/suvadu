@@ -192,7 +192,7 @@ pub struct Alias {
 }
 
 /// Summary of a session with aggregated stats (for session picker)
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SessionSummary {
     pub id: String,
     pub hostname: String,

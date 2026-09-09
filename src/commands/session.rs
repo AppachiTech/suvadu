@@ -33,19 +33,25 @@ pub fn handle_session(
         SessionResult::Empty | SessionResult::Listed => Ok(()),
         SessionResult::OpenSession(sid) => open_session_timeline(&repo, &sid),
         SessionResult::PickSession(sessions) => {
-            // Interactive picker → timeline
+            // Interactive picker → timeline, looping back to the picker after
+            // closing a timeline instead of exiting suv session entirely —
+            // Esc/q on the picker itself (no selection) is the only way out.
             // RAII guard ensures terminal is restored even on panic
             let _guard = util::TerminalGuardMouse::new()?;
             let backend = CrosstermBackend::new(io::stdout());
             let mut terminal = Terminal::new(backend)?;
 
-            let selected = session_ui::run_session_picker(&mut terminal, sessions);
-
-            // If a session was selected, open its timeline
-            let result = match selected {
-                Ok(Some(sid)) => open_session_timeline_tui(&mut terminal, &repo, &sid),
-                Ok(None) => Ok(()),
-                Err(e) => Err(e.into()),
+            let result = loop {
+                let selected = session_ui::run_session_picker(&mut terminal, sessions.clone());
+                match selected {
+                    Ok(Some(sid)) => {
+                        if let Err(e) = open_session_timeline_tui(&mut terminal, &repo, &sid) {
+                            break Err(e);
+                        }
+                    }
+                    Ok(None) => break Ok(()),
+                    Err(e) => break Err(e.into()),
+                }
             };
             terminal.show_cursor()?;
             // _guard drops here, restoring terminal
