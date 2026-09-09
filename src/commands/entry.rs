@@ -381,38 +381,37 @@ pub fn handle_backup(out: Option<&str>) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-pub fn handle_bookmark(
-    cmd: Option<crate::cli::BookmarkCommands>,
+pub fn handle_bookmarks(
+    cmd: Option<crate::cli::BookmarksCommands>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = Repository::init()?;
-    handle_bookmark_with_repo(&repo, cmd)
+    handle_bookmarks_with_repo(&repo, cmd)
 }
 
-fn handle_bookmark_with_repo(
+fn handle_bookmarks_with_repo(
     repo: &Repository,
-    cmd: Option<crate::cli::BookmarkCommands>,
+    cmd: Option<crate::cli::BookmarksCommands>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Some(cmd) = cmd else {
-        // Bare `suv bookmark`: always open the picker, even with zero
+        // Bare `suv bookmarks`: always open the picker, even with zero
         // bookmarks — it renders its own empty state, same as suv search.
-        let bookmarks = repo.list_bookmarks()?;
-        if let Some(cmd) = crate::commands::picker::pick_bookmark(&bookmarks)? {
+        if let Some(cmd) = crate::commands::picker::pick_bookmark(repo)? {
             // stdout carries the chosen command for the shell wrapper to inject.
             println!("{cmd}");
         }
         return Ok(());
     };
     match cmd {
-        crate::cli::BookmarkCommands::Add { command, label } => {
+        crate::cli::BookmarksCommands::Add { command, label } => {
             repo.add_bookmark(&command, label.as_deref())?;
             println!("Bookmarked: {command}");
         }
-        crate::cli::BookmarkCommands::List { json } => {
+        crate::cli::BookmarksCommands::List { json } => {
             let bookmarks = repo.list_bookmarks()?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&bookmarks)?);
             } else if bookmarks.is_empty() {
-                println!("No bookmarks yet. Use `suv bookmark add <command>` to save one.");
+                println!("No bookmarks yet. Use `suv bookmarks add <command>` to save one.");
             } else {
                 if util::color_enabled() {
                     println!("\x1b[1m{:<50} {:<20} Added\x1b[0m", "Command", "Label");
@@ -430,7 +429,7 @@ fn handle_bookmark_with_repo(
                 println!("\n{} bookmark(s)", bookmarks.len());
             }
         }
-        crate::cli::BookmarkCommands::Remove { command } => {
+        crate::cli::BookmarksCommands::Remove { command } => {
             if repo.remove_bookmark(&command)? {
                 println!("Removed bookmark: {command}");
             } else {
@@ -807,7 +806,7 @@ mod tests {
 
     // ── Test helpers ────────────────────────────────────────────
 
-    use crate::cli::BookmarkCommands;
+    use crate::cli::BookmarksCommands;
     use crate::test_utils::test_repo;
 
     /// Seed a session and a set of command entries, returning the entry IDs.
@@ -917,10 +916,10 @@ mod tests {
         assert_eq!(entries.len(), 2);
     }
 
-    // ── handle_bookmark tests ───────────────────────────────────
+    // ── handle_bookmarks tests ───────────────────────────────────
 
     #[test]
-    fn test_handle_bookmark_add_and_list() {
+    fn test_handle_bookmarks_add_and_list() {
         let (_dir, repo) = test_repo();
         repo.add_bookmark("git status", None).unwrap();
         let bookmarks = repo.list_bookmarks().unwrap();
@@ -929,7 +928,7 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_bookmark_remove() {
+    fn test_handle_bookmarks_remove() {
         let (_dir, repo) = test_repo();
         repo.add_bookmark("git status", None).unwrap();
         assert!(repo.remove_bookmark("git status").unwrap());
@@ -937,17 +936,17 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_bookmark_remove_nonexistent() {
+    fn test_handle_bookmarks_remove_nonexistent() {
         let (_dir, repo) = test_repo();
         assert!(!repo.remove_bookmark("nonexistent").unwrap());
     }
 
     #[test]
-    fn test_handle_bookmark_with_repo_add() {
+    fn test_handle_bookmarks_with_repo_add() {
         let (_dir, repo) = test_repo();
-        handle_bookmark_with_repo(
+        handle_bookmarks_with_repo(
             &repo,
-            Some(BookmarkCommands::Add {
+            Some(BookmarksCommands::Add {
                 command: "cargo test".to_string(),
                 label: Some("run tests".to_string()),
             }),
@@ -960,21 +959,21 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_bookmark_with_repo_list() {
+    fn test_handle_bookmarks_with_repo_list() {
         let (_dir, repo) = test_repo();
         repo.add_bookmark("git status", None).unwrap();
         // Should not error
-        handle_bookmark_with_repo(&repo, Some(BookmarkCommands::List { json: false })).unwrap();
-        handle_bookmark_with_repo(&repo, Some(BookmarkCommands::List { json: true })).unwrap();
+        handle_bookmarks_with_repo(&repo, Some(BookmarksCommands::List { json: false })).unwrap();
+        handle_bookmarks_with_repo(&repo, Some(BookmarksCommands::List { json: true })).unwrap();
     }
 
     #[test]
-    fn test_handle_bookmark_with_repo_remove() {
+    fn test_handle_bookmarks_with_repo_remove() {
         let (_dir, repo) = test_repo();
         repo.add_bookmark("git status", None).unwrap();
-        handle_bookmark_with_repo(
+        handle_bookmarks_with_repo(
             &repo,
-            Some(BookmarkCommands::Remove {
+            Some(BookmarksCommands::Remove {
                 command: "git status".to_string(),
             }),
         )
@@ -983,11 +982,11 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_bookmark_with_repo_remove_nonexistent_errors() {
+    fn test_handle_bookmarks_with_repo_remove_nonexistent_errors() {
         let (_dir, repo) = test_repo();
-        let result = handle_bookmark_with_repo(
+        let result = handle_bookmarks_with_repo(
             &repo,
-            Some(BookmarkCommands::Remove {
+            Some(BookmarksCommands::Remove {
                 command: "nonexistent".to_string(),
             }),
         );

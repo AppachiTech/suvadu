@@ -2,36 +2,59 @@
 //! so the chosen value can be printed to stdout for a shell wrapper (bookmarks).
 
 use crate::models::Bookmark;
+use crate::repository::Repository;
 use crate::theme::theme;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph},
     Terminal,
 };
 use std::io;
+use std::time::Instant;
 
 /// Cap on the in-memory bookmark search box, matching the scope of a filter
 /// field (not a document editor).
 const MAX_SEARCH_LEN: usize = 200;
 
-struct PickerApp<'a> {
-    bookmarks: &'a [Bookmark],
+/// Focus within the add-bookmark form.
+#[derive(PartialEq, Eq)]
+enum AddFocus {
+    Command,
+    Label,
+}
+
+enum Mode {
+    Browse,
+    Add {
+        command_input: String,
+        label_input: String,
+        focus: AddFocus,
+        error: Option<String>,
+    },
+}
+
+struct PickerApp {
+    bookmarks: Vec<Bookmark>,
     filtered: Vec<usize>,
     query: String,
     list_state: ListState,
+    mode: Mode,
+    status: Option<(String, Instant)>,
 }
 
-impl<'a> PickerApp<'a> {
-    fn new(bookmarks: &'a [Bookmark]) -> Self {
+impl PickerApp {
+    fn new(bookmarks: Vec<Bookmark>) -> Self {
         let mut app = Self {
-            bookmarks,
             filtered: (0..bookmarks.len()).collect(),
+            bookmarks,
             query: String::new(),
             list_state: ListState::default(),
+            mode: Mode::Browse,
+            status: None,
         };
         if !app.filtered.is_empty() {
             app.list_state.select(Some(0));
@@ -83,16 +106,51 @@ impl<'a> PickerApp<'a> {
             .and_then(|&idx| self.bookmarks.get(idx))
             .map(|b| b.command.clone())
     }
+
+    /// Reload bookmarks from the database and re-apply the current filter —
+    /// used after adding one, so a fresh in-memory duplicate never drifts
+    /// from what `list_bookmarks` (and its ON CONFLICT upsert) actually did.
+    fn reload(&mut self, repo: &Repository) -> Result<(), Box<dyn std::error::Error>> {
+        self.bookmarks = repo.list_bookmarks()?;
+        self.apply_filter();
+        Ok(())
+    }
+
+    fn submit_add(&mut self, repo: &Repository) -> Result<(), Box<dyn std::error::Error>> {
+        let Mode::Add {
+            command_input,
+            label_input,
+            error,
+            ..
+        } = &mut self.mode
+        else {
+            return Ok(());
+        };
+        let command = command_input.trim();
+        if command.is_empty() {
+            *error = Some("Command is required".to_string());
+            return Ok(());
+        }
+        let label = label_input.trim();
+        let label = if label.is_empty() { None } else { Some(label) };
+        repo.add_bookmark(command, label)?;
+        let added = command.to_string();
+        self.mode = Mode::Browse;
+        self.reload(repo)?;
+        self.status = Some((format!("Added: {added}"), Instant::now()));
+        Ok(())
+    }
 }
 
-/// Show a picker over `bookmarks` and return the selected command, or `None`
-/// if the user cancelled. Opens even when `bookmarks` is empty — it renders
-/// its own empty state, same as `suv search`.
-pub fn pick_bookmark(bookmarks: &[Bookmark]) -> Result<Option<String>, Box<dyn std::error::Error>> {
+/// Show a picker over the repository's bookmarks and return the selected
+/// command, or `None` if the user cancelled. Opens even with zero
+/// bookmarks — it renders its own empty state, same as `suv search`.
+pub fn pick_bookmark(repo: &Repository) -> Result<Option<String>, Box<dyn std::error::Error>> {
     let _guard = crate::util::TerminalGuardStderr::new()?;
     let backend = CrosstermBackend::new(io::stderr());
     let mut terminal = Terminal::new(backend)?;
 
+    let bookmarks = repo.list_bookmarks()?;
     let mut app = PickerApp::new(bookmarks);
 
     let result = loop {
@@ -105,29 +163,101 @@ pub fn pick_bookmark(bookmarks: &[Bookmark]) -> Result<Option<String>, Box<dyn s
             if key.kind != KeyEventKind::Press {
                 continue;
             }
-            match key.code {
-                // Always-on search, like suv search: Esc quits outright
-                // rather than clearing the query first, since there's no
-                // separate "typing mode" to fall back out of.
-                KeyCode::Esc => break None,
-                KeyCode::Up => app.move_up(),
-                KeyCode::Down => app.move_down(),
-                KeyCode::Enter => break app.selected_command(),
-                KeyCode::Backspace => {
-                    app.query.pop();
-                    app.apply_filter();
+            match &mut app.mode {
+                Mode::Add { .. } => handle_add_input(&mut app, repo, key)?,
+                Mode::Browse => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        if key.code == KeyCode::Char('a') {
+                            app.mode = Mode::Add {
+                                command_input: String::new(),
+                                label_input: String::new(),
+                                focus: AddFocus::Command,
+                                error: None,
+                            };
+                        }
+                        continue;
+                    }
+                    match key.code {
+                        // Always-on search, like suv search: Esc quits
+                        // outright rather than clearing the query first,
+                        // since there's no separate "typing mode" to fall
+                        // back out of.
+                        KeyCode::Esc => break None,
+                        KeyCode::Up => app.move_up(),
+                        KeyCode::Down => app.move_down(),
+                        KeyCode::Enter => break app.selected_command(),
+                        KeyCode::Backspace => {
+                            app.query.pop();
+                            app.apply_filter();
+                        }
+                        KeyCode::Char(c) if app.query.len() + c.len_utf8() <= MAX_SEARCH_LEN => {
+                            app.query.push(c);
+                            app.apply_filter();
+                        }
+                        _ => {}
+                    }
                 }
-                KeyCode::Char(c) if app.query.len() + c.len_utf8() <= MAX_SEARCH_LEN => {
-                    app.query.push(c);
-                    app.apply_filter();
-                }
-                _ => {}
             }
         }
     };
 
     terminal.show_cursor()?;
     Ok(result)
+}
+
+fn handle_add_input(
+    app: &mut PickerApp,
+    repo: &Repository,
+    key: crossterm::event::KeyEvent,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Mode::Add {
+        command_input,
+        label_input,
+        focus,
+        error,
+    } = &mut app.mode
+    else {
+        return Ok(());
+    };
+    match key.code {
+        KeyCode::Esc => app.mode = Mode::Browse,
+        KeyCode::Tab | KeyCode::Down | KeyCode::Up => {
+            *focus = match focus {
+                AddFocus::Command => AddFocus::Label,
+                AddFocus::Label => AddFocus::Command,
+            };
+        }
+        KeyCode::Enter => {
+            if *focus == AddFocus::Command {
+                *focus = AddFocus::Label;
+            } else {
+                app.submit_add(repo)?;
+            }
+        }
+        KeyCode::Backspace => {
+            *error = None;
+            match focus {
+                AddFocus::Command => {
+                    command_input.pop();
+                }
+                AddFocus::Label => {
+                    label_input.pop();
+                }
+            }
+        }
+        KeyCode::Char(c) => {
+            *error = None;
+            let field = match focus {
+                AddFocus::Command => &mut *command_input,
+                AddFocus::Label => &mut *label_input,
+            };
+            if field.len() + c.len_utf8() <= MAX_SEARCH_LEN {
+                field.push(c);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn render(f: &mut ratatui::Frame, app: &mut PickerApp) {
@@ -143,7 +273,17 @@ fn render(f: &mut ratatui::Frame, app: &mut PickerApp) {
 
     render_search_box(f, app, chunks[0], t);
     render_list(f, app, chunks[1], t);
-    render_footer(f, chunks[2], t);
+    render_footer(f, app, chunks[2], t);
+
+    if let Mode::Add {
+        command_input,
+        label_input,
+        focus,
+        error,
+    } = &app.mode
+    {
+        render_add_dialog(f, command_input, label_input, focus, error.as_deref(), t);
+    }
 }
 
 fn render_search_box(f: &mut ratatui::Frame, app: &PickerApp, area: Rect, t: &crate::theme::Theme) {
@@ -193,7 +333,7 @@ fn render_list(f: &mut ratatui::Frame, app: &mut PickerApp, area: Rect, t: &crat
 
     if app.bookmarks.is_empty() {
         let hint = Paragraph::new(Line::from(Span::styled(
-            "  No bookmarks yet. Use `suv bookmark add <command>` to save one.",
+            "  No bookmarks yet. Press Ctrl+A to add one.",
             Style::default().fg(t.text_muted),
         )));
         let hint_area = Rect {
@@ -218,18 +358,134 @@ fn render_list(f: &mut ratatui::Frame, app: &mut PickerApp, area: Rect, t: &crat
     }
 }
 
-fn render_footer(f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
+fn render_footer(f: &mut ratatui::Frame, app: &PickerApp, area: Rect, t: &crate::theme::Theme) {
     let badge_key = Style::default().bg(t.badge_bg).fg(t.text);
     let badge_label = Style::default().fg(t.text_secondary);
-    let help = Paragraph::new(Line::from(vec![
-        Span::styled(" ↑↓ ", badge_key),
-        Span::styled(" Navigate  ", badge_label),
-        Span::styled(" Enter ", badge_key),
-        Span::styled(" Recall  ", badge_label),
-        Span::styled(" Esc ", badge_key),
-        Span::styled(" Quit  ", badge_label),
-    ]));
-    f.render_widget(help, area);
+
+    let mut spans = match &app.mode {
+        Mode::Add { .. } => vec![
+            Span::styled(" Enter ", badge_key),
+            Span::styled(" Next/Confirm  ", badge_label),
+            Span::styled(" Tab ", badge_key),
+            Span::styled(" Switch field  ", badge_label),
+            Span::styled(" Esc ", badge_key),
+            Span::styled(" Cancel  ", badge_label),
+        ],
+        Mode::Browse => vec![
+            Span::styled(" ↑↓ ", badge_key),
+            Span::styled(" Navigate  ", badge_label),
+            Span::styled(" Enter ", badge_key),
+            Span::styled(" Recall  ", badge_label),
+            Span::styled(" ^A ", badge_key),
+            Span::styled(" Add  ", badge_label),
+            Span::styled(" Esc ", badge_key),
+            Span::styled(" Quit  ", badge_label),
+        ],
+    };
+
+    if let Some((msg, time)) = &app.status {
+        if time.elapsed() < std::time::Duration::from_secs(2) {
+            spans.push(Span::styled(
+                format!(" {msg} "),
+                Style::default().fg(t.success).add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
+
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn render_add_dialog(
+    f: &mut ratatui::Frame,
+    command_input: &str,
+    label_input: &str,
+    focus: &AddFocus,
+    error: Option<&str>,
+    t: &crate::theme::Theme,
+) {
+    let area = centered_rect(f.area(), 60, 8);
+    f.render_widget(Clear, area);
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(t.border_focus))
+        .title(Span::styled(
+            " Add Bookmark ",
+            Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+        ));
+    let inner = outer.inner(area);
+    f.render_widget(outer, area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    render_field(
+        f,
+        rows[0],
+        "Command",
+        command_input,
+        *focus == AddFocus::Command,
+        t,
+    );
+    render_field(
+        f,
+        rows[1],
+        "Label (optional)",
+        label_input,
+        *focus == AddFocus::Label,
+        t,
+    );
+
+    if let Some(msg) = error {
+        let err = Paragraph::new(Line::from(Span::styled(
+            msg,
+            Style::default().fg(t.error).add_modifier(Modifier::BOLD),
+        )));
+        f.render_widget(err, rows[2]);
+    }
+}
+
+fn render_field(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    label: &str,
+    value: &str,
+    focused: bool,
+    t: &crate::theme::Theme,
+) {
+    let title = if focused {
+        format!("{label} *")
+    } else {
+        label.to_string()
+    };
+    let border_color = if focused { t.border_focus } else { t.border };
+    let field = Paragraph::new(value).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(border_color))
+            .title(title),
+    );
+    f.render_widget(field, area);
+}
+
+/// A fixed-size rect centered within `area`.
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    }
 }
 
 #[cfg(test)]
@@ -247,27 +503,24 @@ mod tests {
 
     #[test]
     fn new_app_selects_first_when_nonempty() {
-        let bookmarks = vec![make_bookmark(1, "git status", None)];
-        let app = PickerApp::new(&bookmarks);
+        let app = PickerApp::new(vec![make_bookmark(1, "git status", None)]);
         assert_eq!(app.list_state.selected(), Some(0));
         assert_eq!(app.filtered, vec![0]);
     }
 
     #[test]
     fn new_app_selects_none_when_empty() {
-        let bookmarks: Vec<Bookmark> = vec![];
-        let app = PickerApp::new(&bookmarks);
+        let app = PickerApp::new(vec![]);
         assert_eq!(app.list_state.selected(), None);
         assert!(app.filtered.is_empty());
     }
 
     #[test]
     fn filter_matches_command_text_case_insensitively() {
-        let bookmarks = vec![
+        let mut app = PickerApp::new(vec![
             make_bookmark(1, "git status", None),
             make_bookmark(2, "cargo build", None),
-        ];
-        let mut app = PickerApp::new(&bookmarks);
+        ]);
         app.query = "GIT".to_string();
         app.apply_filter();
         assert_eq!(app.filtered, vec![0]);
@@ -275,11 +528,10 @@ mod tests {
 
     #[test]
     fn filter_matches_label_text() {
-        let bookmarks = vec![
+        let mut app = PickerApp::new(vec![
             make_bookmark(1, "git status", Some("check repo")),
             make_bookmark(2, "cargo build", None),
-        ];
-        let mut app = PickerApp::new(&bookmarks);
+        ]);
         app.query = "check".to_string();
         app.apply_filter();
         assert_eq!(app.filtered, vec![0]);
@@ -287,8 +539,7 @@ mod tests {
 
     #[test]
     fn filter_with_no_matches_clears_selection() {
-        let bookmarks = vec![make_bookmark(1, "git status", None)];
-        let mut app = PickerApp::new(&bookmarks);
+        let mut app = PickerApp::new(vec![make_bookmark(1, "git status", None)]);
         app.query = "nonexistent".to_string();
         app.apply_filter();
         assert!(app.filtered.is_empty());
@@ -297,11 +548,10 @@ mod tests {
 
     #[test]
     fn empty_query_shows_all_bookmarks() {
-        let bookmarks = vec![
+        let mut app = PickerApp::new(vec![
             make_bookmark(1, "git status", None),
             make_bookmark(2, "cargo build", None),
-        ];
-        let mut app = PickerApp::new(&bookmarks);
+        ]);
         app.query = "cargo".to_string();
         app.apply_filter();
         assert_eq!(app.filtered.len(), 1);
@@ -312,8 +562,10 @@ mod tests {
 
     #[test]
     fn move_down_clamps_at_last_filtered_item() {
-        let bookmarks = vec![make_bookmark(1, "a", None), make_bookmark(2, "b", None)];
-        let mut app = PickerApp::new(&bookmarks);
+        let mut app = PickerApp::new(vec![
+            make_bookmark(1, "a", None),
+            make_bookmark(2, "b", None),
+        ]);
         app.move_down();
         assert_eq!(app.list_state.selected(), Some(1));
         app.move_down();
@@ -322,19 +574,17 @@ mod tests {
 
     #[test]
     fn move_up_clamps_at_zero() {
-        let bookmarks = vec![make_bookmark(1, "a", None)];
-        let mut app = PickerApp::new(&bookmarks);
+        let mut app = PickerApp::new(vec![make_bookmark(1, "a", None)]);
         app.move_up();
         assert_eq!(app.list_state.selected(), Some(0));
     }
 
     #[test]
     fn selected_command_returns_filtered_entry() {
-        let bookmarks = vec![
+        let mut app = PickerApp::new(vec![
             make_bookmark(1, "git status", None),
             make_bookmark(2, "cargo build", None),
-        ];
-        let mut app = PickerApp::new(&bookmarks);
+        ]);
         app.query = "cargo".to_string();
         app.apply_filter();
         assert_eq!(app.selected_command(), Some("cargo build".to_string()));
@@ -342,8 +592,56 @@ mod tests {
 
     #[test]
     fn selected_command_none_when_list_empty() {
-        let bookmarks: Vec<Bookmark> = vec![];
-        let app = PickerApp::new(&bookmarks);
+        let app = PickerApp::new(vec![]);
         assert_eq!(app.selected_command(), None);
+    }
+
+    #[test]
+    fn submit_add_rejects_empty_command() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = PickerApp::new(vec![]);
+        app.mode = Mode::Add {
+            command_input: "   ".to_string(),
+            label_input: String::new(),
+            focus: AddFocus::Label,
+            error: None,
+        };
+        app.submit_add(&repo).unwrap();
+        // Still in Add mode with an error, nothing written.
+        assert!(matches!(app.mode, Mode::Add { .. }));
+        assert!(app.bookmarks.is_empty());
+    }
+
+    #[test]
+    fn submit_add_writes_bookmark_and_returns_to_browse() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = PickerApp::new(vec![]);
+        app.mode = Mode::Add {
+            command_input: "git status".to_string(),
+            label_input: "check repo".to_string(),
+            focus: AddFocus::Label,
+            error: None,
+        };
+        app.submit_add(&repo).unwrap();
+        assert!(matches!(app.mode, Mode::Browse));
+        assert_eq!(app.bookmarks.len(), 1);
+        assert_eq!(app.bookmarks[0].command, "git status");
+        assert_eq!(app.bookmarks[0].label.as_deref(), Some("check repo"));
+        assert_eq!(app.filtered.len(), 1);
+    }
+
+    #[test]
+    fn submit_add_trims_whitespace_and_empty_label_becomes_none() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = PickerApp::new(vec![]);
+        app.mode = Mode::Add {
+            command_input: "  cargo test  ".to_string(),
+            label_input: "   ".to_string(),
+            focus: AddFocus::Label,
+            error: None,
+        };
+        app.submit_add(&repo).unwrap();
+        assert_eq!(app.bookmarks[0].command, "cargo test");
+        assert_eq!(app.bookmarks[0].label, None);
     }
 }

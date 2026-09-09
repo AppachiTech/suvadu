@@ -167,16 +167,17 @@ __suvadu_ensure_bin() {{
     return 1
 }}
 
-# Shell function wrapper: intercepts `suv search` and bare `suv bookmark` so
-# the selected command is placed into the editing buffer (via print -z)
-# instead of being printed as dead text.  All other subcommands (including
-# `suv bookmark add/list/remove`) pass straight through.
+# Shell function wrapper: intercepts `suv search` and bare `suv bookmarks`
+# (or its `bookmark` alias) so the selected command is placed into the
+# editing buffer (via print -z) instead of being printed as dead text.
+# All other subcommands (including `suv bookmarks add/list/remove`) pass
+# straight through.
 suv() {{
     if ! __suvadu_ensure_bin; then
         print -u2 -- "[suvadu] suv binary not found (recorded path: $_SUVADU_BIN). Run 'exec zsh' or reinstall suvadu."
         return 127
     fi
-    if [[ "${{1:-}}" == "search" || ("${{1:-}}" == "bookmark" && -z "${{2:-}}") ]]; then
+    if [[ "${{1:-}}" == "search" || ("${{1:-}}" == "bookmarks" && -z "${{2:-}}") || ("${{1:-}}" == "bookmark" && -z "${{2:-}}") ]]; then
         local selected
         selected="$("$_SUVADU_BIN" "$@")"
         if [[ -n "$selected" ]]; then
@@ -448,16 +449,17 @@ __suvadu_ensure_bin() {{
     return 1
 }}
 
-# Shell function wrapper: intercepts `suv search` and bare `suv bookmark` so
-# the selected command is placed into readline history (press Up to recall)
-# instead of being printed as dead text.  All other subcommands (including
-# `suv bookmark add/list/remove`) pass straight through.
+# Shell function wrapper: intercepts `suv search` and bare `suv bookmarks`
+# (or its `bookmark` alias) so the selected command is placed into readline
+# history (press Up to recall) instead of being printed as dead text.  All
+# other subcommands (including `suv bookmarks add/list/remove`) pass
+# straight through.
 suv() {{
     if ! __suvadu_ensure_bin; then
         echo "[suvadu] suv binary not found (recorded path: $_SUVADU_BIN). Run 'exec bash' or reinstall suvadu." >&2
         return 127
     fi
-    if [[ "${{1:-}}" == "search" || ("${{1:-}}" == "bookmark" && -z "${{2:-}}") ]]; then
+    if [[ "${{1:-}}" == "search" || ("${{1:-}}" == "bookmarks" && -z "${{2:-}}") || ("${{1:-}}" == "bookmark" && -z "${{2:-}}") ]]; then
         local selected
         selected="$("$_SUVADU_BIN" "$@")"
         if [[ -n "$selected" ]]; then

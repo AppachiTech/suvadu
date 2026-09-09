@@ -122,7 +122,7 @@ See the [full integration guide](https://suvadu.sh/blog/track-ai-agent-commands-
 | **Prompt Explorer** | Trace commands back to the prompt that triggered them |
 | **Stats** | Heatmap, hourly distribution, top commands, executor breakdown; `--human` (or `h` in the TUI) excludes AI-agent activity |
 | **Doctor** | `suv doctor` checks shell, hooks, config, database, MCP, and agent hooks health |
-| **Organization** | Tags, bookmarks (`suv bookmark` opens an interactive picker that recalls one into your prompt), notes, alias suggestions |
+| **Organization** | Tags, bookmarks (`suv bookmarks` opens an interactive picker that recalls one into your prompt), notes, alias suggestions |
 | **Privacy & Safety** | Space-prefix exclusion, regex patterns, secret redaction (extend via `redaction.extra_patterns`), local-only. `suv backup` + an automatic snapshot before any `suv delete`. |
 | **Arrow Keys** | Recency-first Up/Down recall — your most recent commands surface first, with the current directory as a tiebreaker. Agent commands are hidden by default; reveal them with `Alt+A` (per shell) or `--include-agents`. |
 | **Vim Bindings** | Optional vim-style `j`/`k`/`Ctrl+U`/`Ctrl+D` navigation in search TUI |

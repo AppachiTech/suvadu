@@ -398,11 +398,12 @@ pub enum Commands {
 
     /// Manage bookmarked commands
     #[command(
-        after_help = "Examples:\n  suv bookmark                              # interactive picker\n  suv bookmark add \"git stash pop\"\n  suv bookmark add \"cargo test\" -l \"run tests\"\n  suv bookmark list\n  suv bookmark remove \"git stash pop\""
+        alias = "bookmark",
+        after_help = "Examples:\n  suv bookmarks                              # interactive picker\n  suv bookmarks add \"git stash pop\"\n  suv bookmarks add \"cargo test\" -l \"run tests\"\n  suv bookmarks list\n  suv bookmarks remove \"git stash pop\""
     )]
-    Bookmark {
+    Bookmarks {
         #[command(subcommand)]
-        command: Option<BookmarkCommands>,
+        command: Option<BookmarksCommands>,
     },
 
     /// Manage shell aliases
@@ -590,7 +591,7 @@ pub enum TagCommands {
 }
 
 #[derive(Subcommand, Debug)]
-pub enum BookmarkCommands {
+pub enum BookmarksCommands {
     /// Bookmark a command for quick recall
     Add {
         /// The command text to bookmark
@@ -995,24 +996,30 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_parses_bare_bookmark_as_none() {
-        let cli = Cli::try_parse_from(["suv", "bookmark"]).unwrap();
-        assert!(matches!(cli.command, Commands::Bookmark { command: None }));
+    fn test_cli_parses_bare_bookmarks_as_none() {
+        let cli = Cli::try_parse_from(["suv", "bookmarks"]).unwrap();
+        assert!(matches!(cli.command, Commands::Bookmarks { command: None }));
     }
 
     #[test]
-    fn test_cli_parses_bookmark_add_unchanged() {
-        let cli = Cli::try_parse_from(["suv", "bookmark", "add", "git status"]).unwrap();
+    fn test_cli_parses_bookmarks_add_unchanged() {
+        let cli = Cli::try_parse_from(["suv", "bookmarks", "add", "git status"]).unwrap();
         match cli.command {
-            Commands::Bookmark {
-                command: Some(BookmarkCommands::Add { command, .. }),
+            Commands::Bookmarks {
+                command: Some(BookmarksCommands::Add { command, .. }),
             } => assert_eq!(command, "git status"),
-            _ => panic!("Expected Bookmark{{ command: Some(Add) }}"),
+            _ => panic!("Expected Bookmarks{{ command: Some(Add) }}"),
         }
     }
 
     #[test]
+    fn test_cli_accepts_bookmark_singular_alias() {
+        let cli = Cli::try_parse_from(["suv", "bookmark"]).unwrap();
+        assert!(matches!(cli.command, Commands::Bookmarks { command: None }));
+    }
+
+    #[test]
     fn test_cli_rejects_removed_bookmark_pick_subcommand() {
-        assert!(Cli::try_parse_from(["suv", "bookmark", "pick"]).is_err());
+        assert!(Cli::try_parse_from(["suv", "bookmarks", "pick"]).is_err());
     }
 }
