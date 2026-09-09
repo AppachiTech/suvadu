@@ -677,12 +677,20 @@ fn render_browse(
     t: &crate::theme::Theme,
     rows: &[ratatui::layout::Rect],
 ) {
+    // Dims and drops the "(Typing)" suffix while a dialog has input focus,
+    // matching suv search's Search / "Search (Typing)" convention.
+    let in_dialog = !matches!(app.mode, Mode::Browse);
+    let (search_title, search_border) = if in_dialog {
+        ("Search", t.border)
+    } else {
+        ("Search (Typing)", t.border_focus)
+    };
     let input = Paragraph::new(Line::from(app.query.as_str())).block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(t.border))
-            .title(" Search skills "),
+            .border_style(Style::default().fg(search_border))
+            .title(search_title),
     );
     f.render_widget(input, rows[0]);
 
