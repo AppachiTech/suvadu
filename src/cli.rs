@@ -37,7 +37,7 @@ Organize:
   tag          Manage tags
   bookmarks    Manage bookmarked commands
   note         Annotate a history entry with a note
-  alias        Manage shell aliases
+  aliases      Manage shell aliases
 
 Data:
   backup       Back up the database to a file (consistent snapshot)
@@ -475,10 +475,13 @@ pub enum Commands {
 
     /// Manage shell aliases
     #[command(
-        subcommand,
-        after_help = "Examples:\n  suv alias add gst \"git status\"\n  suv alias list\n  suv alias apply --stdout\n  suv alias remove gst\n  suv alias add-suggested"
+        alias = "alias",
+        after_help = "Examples:\n  suv aliases                              # interactive manager\n  suv aliases add gst \"git status\"\n  suv aliases list\n  suv aliases apply --stdout\n  suv aliases remove gst\n  suv aliases add-suggested"
     )]
-    Alias(AliasCommands),
+    Aliases {
+        #[command(subcommand)]
+        command: Option<AliasesCommands>,
+    },
 
     /// Interactive session timeline view
     #[command(
@@ -683,7 +686,7 @@ pub enum BookmarksCommands {
 }
 
 #[derive(Subcommand, Debug)]
-pub enum AliasCommands {
+pub enum AliasesCommands {
     /// Register a shell alias
     Add {
         /// Alias name (alphanumeric, hyphens, underscores)
@@ -731,7 +734,7 @@ pub enum AliasCommands {
 
     /// Suggest aliases for frequently-typed long commands
     #[command(
-        after_help = "Examples:\n  suv alias suggest                    # Interactive TUI\n  suv alias suggest --text             # Plain text output\n  suv alias suggest --days 30 -c 5     # Last 30 days, min 5 uses"
+        after_help = "Examples:\n  suv aliases suggest                    # Interactive TUI\n  suv aliases suggest --text             # Plain text output\n  suv aliases suggest --days 30 -c 5     # Last 30 days, min 5 uses"
     )]
     Suggest {
         /// Minimum times a command must appear (default: 10)
@@ -1088,5 +1091,31 @@ mod tests {
     #[test]
     fn test_cli_rejects_removed_bookmark_pick_subcommand() {
         assert!(Cli::try_parse_from(["suv", "bookmarks", "pick"]).is_err());
+    }
+
+    #[test]
+    fn test_cli_parses_bare_aliases_as_none() {
+        let cli = Cli::try_parse_from(["suv", "aliases"]).unwrap();
+        assert!(matches!(cli.command, Commands::Aliases { command: None }));
+    }
+
+    #[test]
+    fn test_cli_parses_aliases_add_unchanged() {
+        let cli = Cli::try_parse_from(["suv", "aliases", "add", "gst", "git status"]).unwrap();
+        match cli.command {
+            Commands::Aliases {
+                command: Some(AliasesCommands::Add { name, command }),
+            } => {
+                assert_eq!(name, "gst");
+                assert_eq!(command, "git status");
+            }
+            _ => panic!("Expected Aliases{{ command: Some(Add) }}"),
+        }
+    }
+
+    #[test]
+    fn test_cli_accepts_alias_singular_alias() {
+        let cli = Cli::try_parse_from(["suv", "alias"]).unwrap();
+        assert!(matches!(cli.command, Commands::Aliases { command: None }));
     }
 }

@@ -1,4 +1,5 @@
 pub mod alias;
+pub mod alias_picker;
 pub mod doctor;
 pub mod entry;
 pub mod guard;

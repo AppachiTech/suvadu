@@ -138,7 +138,7 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
         ),
         Commands::Tag(cmd) => commands::tag::handle_tag(cmd),
         Commands::Bookmarks { command } => commands::entry::handle_bookmarks(command),
-        Commands::Alias(cmd) => commands::alias::handle_alias(cmd),
+        Commands::Aliases { command } => commands::alias::handle_aliases(command),
         Commands::Note {
             entry_id,
             content,

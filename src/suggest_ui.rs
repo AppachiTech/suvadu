@@ -3,7 +3,7 @@ use crate::theme::theme;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     backend::Backend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap},
@@ -169,19 +169,32 @@ fn ui(f: &mut ratatui::Frame, app: &mut AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1),              // header
             Constraint::Min(5),                 // suggestions list
             Constraint::Length(skipped_height), // skipped section
             Constraint::Length(2),              // footer
         ])
         .split(size);
 
-    render_suggestion_list(f, app, chunks[0], size.width, t);
+    render_header(f, chunks[0], t);
+    render_suggestion_list(f, app, chunks[1], size.width, t);
 
     if has_skipped {
-        render_skipped_section(f, app, chunks[1], t);
+        render_skipped_section(f, app, chunks[2], t);
     }
 
-    render_suggest_footer(f, app, chunks[2], t);
+    render_suggest_footer(f, app, chunks[3], t);
+}
+
+fn render_header(f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
+    let header_line = Line::from(vec![Span::styled(
+        "SUVADU ALIAS SUGGEST",
+        Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+    )]);
+    f.render_widget(
+        Paragraph::new(header_line).alignment(Alignment::Center),
+        area,
+    );
 }
 
 fn render_suggestion_list(
@@ -323,6 +336,8 @@ fn render_suggest_footer(
         ]
     } else {
         vec![
+            Span::styled(" q/Esc ", badge_key),
+            Span::styled(" Quit  ", badge_label),
             Span::styled(" \u{2191}\u{2193} ", badge_key),
             Span::styled(" Navigate  ", badge_label),
             Span::styled(" Space ", badge_key),
@@ -334,9 +349,7 @@ fn render_suggest_footer(
             Span::styled(" ^N ", badge_key),
             Span::styled(" None  ", badge_label),
             Span::styled(" Enter ", badge_key),
-            Span::styled(" Confirm  ", badge_label),
-            Span::styled(" q/Esc ", badge_key),
-            Span::styled(" Quit  ", badge_label),
+            Span::styled(" Confirm ", badge_label),
         ]
     };
 

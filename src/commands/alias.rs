@@ -1,22 +1,28 @@
 use std::fmt::Write;
 
-use crate::cli::AliasCommands;
+use crate::cli::AliasesCommands;
 use crate::repository::Repository;
 use crate::suggest;
 
-pub fn handle_alias(cmd: AliasCommands) -> Result<(), Box<dyn std::error::Error>> {
+pub fn handle_aliases(cmd: Option<AliasesCommands>) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(cmd) = cmd else {
+        // Bare `suv aliases`: open the interactive manager, even with zero
+        // aliases saved — it renders its own empty state, same as suv search.
+        let repo = Repository::init()?;
+        return crate::commands::alias_picker::run_alias_manager(&repo);
+    };
     match cmd {
-        AliasCommands::Add { name, command } => handle_add(&name, &command),
-        AliasCommands::Remove { name } => handle_remove(&name),
-        AliasCommands::List { json } => handle_list(json),
-        AliasCommands::Apply { stdout } => handle_apply(stdout),
-        AliasCommands::AddSuggested {
+        AliasesCommands::Add { name, command } => handle_add(&name, &command),
+        AliasesCommands::Remove { name } => handle_remove(&name),
+        AliasesCommands::List { json } => handle_list(json),
+        AliasesCommands::Apply { stdout } => handle_apply(stdout),
+        AliasesCommands::AddSuggested {
             min_count,
             min_length,
             days,
             top,
         } => handle_add_suggested(min_count, min_length, days, top),
-        AliasCommands::Suggest {
+        AliasesCommands::Suggest {
             min_count,
             min_length,
             days,
@@ -32,6 +38,21 @@ pub fn handle_alias(cmd: AliasCommands) -> Result<(), Box<dyn std::error::Error>
     }
 }
 
+/// Alias name validation shared by the CLI's `add` and the interactive
+/// manager's Add/Edit form: alphanumeric, hyphens, underscores only.
+pub fn validate_alias_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!(
+            "Invalid alias name: '{name}'. Use only alphanumeric characters, hyphens, and underscores."
+        ));
+    }
+    Ok(())
+}
+
 fn handle_add(name: &str, command: &str) -> Result<(), Box<dyn std::error::Error>> {
     let repo = Repository::init()?;
     add_alias_to(&repo, name, command)?;
@@ -45,15 +66,7 @@ fn add_alias_to(
     name: &str,
     command: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Validate alias name: alphanumeric, hyphens, underscores only
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err(format!("Invalid alias name: '{name}'. Use only alphanumeric characters, hyphens, and underscores.").into());
-    }
-
+    validate_alias_name(name)?;
     repo.add_alias(name, command)?;
     println!("✓ Alias '{name}' → '{command}'");
     Ok(())
@@ -87,7 +100,7 @@ fn list_aliases_from(repo: &Repository, json: bool) -> Result<(), Box<dyn std::e
     }
 
     if aliases.is_empty() {
-        println!("No managed aliases. Use 'suv alias add <name> <command>' to add one.");
+        println!("No managed aliases. Use 'suv aliases add <name> <command>' to add one.");
         return Ok(());
     }
 
@@ -121,7 +134,6 @@ fn handle_apply(to_stdout: bool) -> Result<(), Box<dyn std::error::Error>> {
     apply_aliases_from(&repo, to_stdout)
 }
 
-#[cfg(test)]
 fn build_apply_output(repo: &Repository) -> Result<Option<String>, Box<dyn std::error::Error>> {
     let aliases = repo.list_aliases()?;
 
@@ -144,45 +156,52 @@ fn build_apply_output(repo: &Repository) -> Result<Option<String>, Box<dyn std::
     Ok(Some(lines))
 }
 
-fn apply_aliases_from(
+/// Write `aliases.sh` with no stdout/println output — safe to call from the
+/// interactive manager (`alias_picker::sync_status`), which owns the
+/// terminal via raw mode; any print here would corrupt its display. Returns
+/// `None` (nothing written) when there are no aliases.
+pub fn write_aliases_file(
+    repo: &Repository,
+) -> Result<Option<std::path::PathBuf>, Box<dyn std::error::Error>> {
+    let Some(lines) = build_apply_output(repo)? else {
+        return Ok(None);
+    };
+    let dirs = crate::util::project_dirs().ok_or("Could not determine data directory")?;
+    let data_dir = dirs.data_dir();
+    if !data_dir.exists() {
+        std::fs::create_dir_all(data_dir)?;
+    }
+    let path = data_dir.join("aliases.sh");
+    crate::util::atomic_write_with_mode(&path, &lines, 0o600)?;
+    Ok(Some(path))
+}
+
+/// Regenerate the managed alias file and report the result on stdout —
+/// only for CLI call sites (`suv aliases apply`, `add`, `add-suggested`).
+/// The interactive manager uses `write_aliases_file` directly instead,
+/// since it must never print to stdout while it owns the terminal.
+pub fn apply_aliases_from(
     repo: &Repository,
     to_stdout: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let aliases = repo.list_aliases()?;
-
-    if aliases.is_empty() {
-        println!("No managed aliases to apply.");
+    if to_stdout {
+        match build_apply_output(repo)? {
+            None => println!("No managed aliases to apply."),
+            Some(lines) => print!("{lines}"),
+        }
         return Ok(());
     }
 
-    let mut lines = String::new();
-    lines.push_str("# Suvadu managed aliases\n");
-    lines.push_str("# Auto-generated by 'suv alias apply' — do not edit manually\n\n");
-    for a in &aliases {
-        let _ = writeln!(
-            lines,
-            "alias {}='{}'",
-            a.name,
-            suggest::shell_quote(&a.command)
-        );
-    }
-
-    if to_stdout {
-        print!("{lines}");
-    } else {
-        let dirs = crate::util::project_dirs().ok_or("Could not determine data directory")?;
-        let data_dir = dirs.data_dir();
-        if !data_dir.exists() {
-            std::fs::create_dir_all(data_dir)?;
+    match write_aliases_file(repo)? {
+        None => println!("No managed aliases to apply."),
+        Some(path) => {
+            let count = repo.list_aliases()?.len();
+            println!("✓ Wrote {count} aliases to {}", path.display());
+            println!(
+                "  Source it from your shell config:\n  source \"{}\"",
+                path.display()
+            );
         }
-        let path = data_dir.join("aliases.sh");
-        crate::util::atomic_write_with_mode(&path, &lines, 0o600)?;
-
-        println!("✓ Wrote {} aliases to {}", aliases.len(), path.display());
-        println!(
-            "  Source it from your shell config:\n  source \"{}\"",
-            path.display()
-        );
     }
 
     Ok(())
