@@ -398,10 +398,12 @@ pub enum Commands {
 
     /// Manage bookmarked commands
     #[command(
-        subcommand,
-        after_help = "Examples:\n  suv bookmark add \"git stash pop\"\n  suv bookmark add \"cargo test\" -l \"run tests\"\n  suv bookmark list\n  suv bookmark remove \"git stash pop\""
+        after_help = "Examples:\n  suv bookmark                              # interactive picker\n  suv bookmark add \"git stash pop\"\n  suv bookmark add \"cargo test\" -l \"run tests\"\n  suv bookmark list\n  suv bookmark remove \"git stash pop\""
     )]
-    Bookmark(BookmarkCommands),
+    Bookmark {
+        #[command(subcommand)]
+        command: Option<BookmarkCommands>,
+    },
 
     /// Manage shell aliases
     #[command(
@@ -610,9 +612,6 @@ pub enum BookmarkCommands {
         /// The command text to un-bookmark
         command: String,
     },
-
-    /// Pick a bookmark interactively and recall it into the prompt
-    Pick,
 }
 
 #[derive(Subcommand, Debug)]
@@ -993,5 +992,27 @@ mod tests {
     fn test_cli_rejects_removed_pick_and_review_subcommands() {
         assert!(Cli::try_parse_from(["suv", "skills", "pick"]).is_err());
         assert!(Cli::try_parse_from(["suv", "skills", "review"]).is_err());
+    }
+
+    #[test]
+    fn test_cli_parses_bare_bookmark_as_none() {
+        let cli = Cli::try_parse_from(["suv", "bookmark"]).unwrap();
+        assert!(matches!(cli.command, Commands::Bookmark { command: None }));
+    }
+
+    #[test]
+    fn test_cli_parses_bookmark_add_unchanged() {
+        let cli = Cli::try_parse_from(["suv", "bookmark", "add", "git status"]).unwrap();
+        match cli.command {
+            Commands::Bookmark {
+                command: Some(BookmarkCommands::Add { command, .. }),
+            } => assert_eq!(command, "git status"),
+            _ => panic!("Expected Bookmark{{ command: Some(Add) }}"),
+        }
+    }
+
+    #[test]
+    fn test_cli_rejects_removed_bookmark_pick_subcommand() {
+        assert!(Cli::try_parse_from(["suv", "bookmark", "pick"]).is_err());
     }
 }
