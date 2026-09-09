@@ -60,7 +60,7 @@ src/
   skills_sync.rs     # Materializes active skills into each agent's native file format
   suggest_ui.rs      # suv aliases suggest TUI
 
-  mcp/               # MCP server: JSON-RPC protocol, tool and resource definitions
+  mcp/               # MCP server: JSON-RPC protocol, tool/resource/prompt definitions
 ```
 
 ## Reporting Issues

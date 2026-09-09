@@ -15,13 +15,18 @@ pub fn handle_initialize(id: &Value) -> Value {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {
                 "tools": { "listChanged": false },
-                "resources": { "subscribe": false, "listChanged": false }
+                "resources": { "subscribe": false, "listChanged": false },
+                "prompts": { "listChanged": false }
             },
             "serverInfo": {
                 "name": "suvadu-mcp",
                 "version": env!("CARGO_PKG_VERSION")
             },
-            "instructions": "Suvadu shell history server. Query command history, browse AI agent prompts, check command exit codes, and get session summaries. All data is local."
+            "instructions": "Suvadu shell history server: local, structured shell history and AI-agent activity for this machine. \
+    Before starting work in an unfamiliar project, call `project_context` and `learn_from_failures` to avoid repeating known-bad approaches. \
+    Before running a command that looks destructive or unfamiliar, call `assess_risk` first. \
+    Check `list_skills`/`search_skills` for existing shared instructions before writing a new checklist from scratch. \
+    All data is local; nothing leaves this machine."
         }
     })
 }
@@ -96,6 +101,20 @@ mod tests {
         assert_eq!(resp["id"], 1);
         assert_eq!(resp["result"]["serverInfo"]["name"], "suvadu-mcp");
         assert!(resp["result"]["capabilities"]["tools"].is_object());
+        assert!(resp["result"]["capabilities"]["prompts"].is_object());
+    }
+
+    #[test]
+    fn test_initialize_instructions_are_directive_not_just_descriptive() {
+        // Guards against the instructions field regressing into a generic
+        // "here's what this server is" blurb — it should tell a connecting
+        // client *when* to proactively call the highest-value tools.
+        let resp = handle_initialize(&json!(1));
+        let instructions = resp["result"]["instructions"].as_str().unwrap();
+        assert!(instructions.contains("project_context"));
+        assert!(instructions.contains("learn_from_failures"));
+        assert!(instructions.contains("assess_risk"));
+        assert!(instructions.contains("list_skills") || instructions.contains("search_skills"));
     }
 
     #[test]

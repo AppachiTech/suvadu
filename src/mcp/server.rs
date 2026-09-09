@@ -2,6 +2,7 @@ use std::io::{self, BufRead, Write};
 
 use crate::repository::Repository;
 
+use super::prompts;
 use super::protocol;
 use super::resources;
 use super::tools;
@@ -79,6 +80,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             "resources/read" => {
                 let rid = id.as_ref().unwrap_or(&serde_json::Value::Null);
                 Some(handle_resource_read(&repo, rid, &request, mcp))
+            }
+            "prompts/list" => {
+                let rid = id.as_ref().unwrap_or(&serde_json::Value::Null);
+                Some(prompts::list_prompts(rid))
+            }
+            "prompts/get" => {
+                let rid = id.as_ref().unwrap_or(&serde_json::Value::Null);
+                Some(prompts::get_prompt(rid, &request))
             }
             "ping" => {
                 let rid = id.as_ref().unwrap_or(&serde_json::Value::Null);
