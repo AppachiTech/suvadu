@@ -1911,7 +1911,7 @@ dependencies = [
 
 [[package]]
 name = "suvadu"
-version = "0.3.7"
+version = "0.4.0"
 dependencies = [
  "arboard",
  "chrono",

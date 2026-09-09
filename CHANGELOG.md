@@ -2,13 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.4.0] - 2026-09-09
 
 ### Added
 - **Shared skills library** — `suv skills` keeps reusable instructions in one place instead of every AI tool maintaining its own copy. `suv skills add/list/show/edit/rm` manage skills scoped to `global` or a specific project directory; three new read-only MCP tools (`list_skills`, `get_skill`, `search_skills`) plus an auto-injected `suvadu://skills/index` resource let any MCP-capable agent discover and read them directly.
 - **`suv skills` is now a full interactive management app** — bare `suv skills` (no subcommand) launches a TUI to browse/filter skills with a live preview, add or edit one (body edited via `$EDITOR`), delete with confirmation, trigger a sync, and approve/reject pending agent-proposed skills. `add`/`list`/`show`/`edit`/`rm`/`sync` keep working exactly as before for scripting.
 - **`suv skills sync`** — materializes active skills into each agent's own native format (`~/.claude/skills/<name>/SKILL.md`, `.cursor/rules/<name>.mdc`, a managed block in `AGENTS.md` for Codex) for hosts that don't pull from MCP. Idempotent — only rewrites a file when its content actually changed, and never touches hand-written content around its managed section.
 - **`propose_skill` MCP tool** (off by default) — lets an agent propose a new skill, saved as `pending_review` only, never active. Enable with `mcp.allow_skill_proposals = true` in `config.toml`; a human approves or rejects proposals from the review queue in `suv skills` (`Ctrl+P`). Disabled by default since a skills store readable and writable by agents is a shared-memory poisoning target — the gate is checked before any database connection is opened.
+- **Risk assessment now catches obfuscated commands** — `eval`, decoding base64 into a shell, and command substitution wrapping a destructive/network command (e.g. `` echo $(curl ... | sh) ``) are now flagged, closing a gap where wrapping a dangerous command in indirection let it slip past risk assessment entirely. You can also flag your own org-specific risky commands with a new `agent.risk_extra_patterns` config list (regex + level + description).
+- **Prompt Explorer gets search and filters** — press `/` in `suv agent prompts` (or from the dashboard's `p` shortcut) to live-filter by prompt text, and use `1`-`4`/`a` to filter by time period and executor, mirroring the dashboard's existing controls.
+- **`suv guard <command>`** — assess a command's risk before it runs and exit non-zero if it's too dangerous, for use in git hooks, CI, or a zsh widget (documented in `--help`) that blocks risky commands interactively before they execute.
+- **Per-project config overlay** — drop a `.suvadu.toml` in a project directory (or any ancestor, discovered the same way as `.git`) to override the global config just for that project, e.g. a stricter risk policy or a different exclusions list for one sensitive repo. Table fields merge key-by-key, so the overlay only needs to name what it's actually changing.
+
+### Changed
+- **Command search is faster** — `suv search`/`Ctrl+R` substring matching is now backed by a trigram full-text index instead of a full table scan, so search stays fast as your history grows. Same results, just quicker.
 
 ## [0.3.7] - 2026-09-07
 
