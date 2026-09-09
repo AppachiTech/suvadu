@@ -34,7 +34,7 @@ pub fn handle_session(
         SessionResult::OpenSession(sid) => open_session_timeline(&repo, &sid),
         SessionResult::PickSession(sessions) => {
             // Interactive picker → timeline, looping back to the picker after
-            // closing a timeline instead of exiting suv session entirely —
+            // closing a timeline instead of exiting suv sessions entirely —
             // Esc/q on the picker itself (no selection) is the only way out.
             // RAII guard ensures terminal is restored even on panic
             let _guard = util::TerminalGuardMouse::new()?;

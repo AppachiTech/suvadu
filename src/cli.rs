@@ -26,7 +26,7 @@ Search & recall:
   search       Interactive search through history (Ctrl+R replacement)
   history      Print command history (non-interactive, pipeable)
   replay       Replay commands chronologically (session timeline or time range)
-  session      Interactive session timeline view
+  sessions     Interactive session timeline view
 
 Insights & safety:
   stats        Show usage analytics and trends
@@ -485,9 +485,10 @@ pub enum Commands {
 
     /// Interactive session timeline view
     #[command(
-        after_help = "Examples:\n  suv session                    # Pick from recent sessions\n  suv session abc123             # Open session by ID prefix\n  suv session --list             # List sessions without opening\n  suv session --after 2025-01-01 # Sessions after date\n  suv session --tag work         # Sessions with tag"
+        alias = "session",
+        after_help = "Examples:\n  suv sessions                    # Pick from recent sessions\n  suv sessions abc123             # Open session by ID prefix\n  suv sessions --list             # List sessions without opening\n  suv sessions --after 2025-01-01 # Sessions after date\n  suv sessions --tag work         # Sessions with tag"
     )]
-    Session {
+    Sessions {
         /// Session ID or prefix (omit for interactive picker)
         session_id: Option<String>,
         /// List sessions and exit (no TUI)
@@ -1117,5 +1118,36 @@ mod tests {
     fn test_cli_accepts_alias_singular_alias() {
         let cli = Cli::try_parse_from(["suv", "alias"]).unwrap();
         assert!(matches!(cli.command, Commands::Aliases { command: None }));
+    }
+
+    #[test]
+    fn test_cli_parses_bare_sessions() {
+        let cli = Cli::try_parse_from(["suv", "sessions"]).unwrap();
+        match cli.command {
+            Commands::Sessions {
+                session_id, list, ..
+            } => {
+                assert_eq!(session_id, None);
+                assert!(!list);
+            }
+            _ => panic!("Expected Sessions"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_sessions_with_id() {
+        let cli = Cli::try_parse_from(["suv", "sessions", "abc123"]).unwrap();
+        match cli.command {
+            Commands::Sessions { session_id, .. } => {
+                assert_eq!(session_id.as_deref(), Some("abc123"));
+            }
+            _ => panic!("Expected Sessions"),
+        }
+    }
+
+    #[test]
+    fn test_cli_accepts_session_singular_alias() {
+        let cli = Cli::try_parse_from(["suv", "session"]).unwrap();
+        assert!(matches!(cli.command, Commands::Sessions { .. }));
     }
 }

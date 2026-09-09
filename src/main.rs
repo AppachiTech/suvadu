@@ -219,7 +219,7 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         cmd @ Commands::Replay { .. } => run_replay(cmd),
-        Commands::Session {
+        Commands::Sessions {
             session_id,
             list,
             after,

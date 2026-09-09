@@ -235,21 +235,34 @@ impl PickerApp {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(1), // header
                 Constraint::Length(3), // search bar
                 Constraint::Min(5),    // table
                 Constraint::Length(1), // footer
             ])
             .split(size);
 
+        Self::render_header(f, chunks[0], t);
         let filter_count = self.active_filter_count();
-        self.render_search_bar(f, chunks[0], t, filter_count);
-        self.render_session_table(f, chunks[1], t, filter_count);
-        Self::render_footer(f, chunks[2], t, filter_count);
+        self.render_search_bar(f, chunks[1], t, filter_count);
+        self.render_session_table(f, chunks[2], t, filter_count);
+        Self::render_footer(f, chunks[3], t, filter_count);
 
         // Filter popup overlay
         if self.filter.popup_open {
             self.render_filter_popup(f, size);
         }
+    }
+
+    fn render_header(f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
+        let header_line = Line::from(vec![Span::styled(
+            "SUVADU SESSIONS",
+            Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+        )]);
+        f.render_widget(
+            Paragraph::new(header_line).alignment(Alignment::Center),
+            area,
+        );
     }
 
     fn render_search_bar(
@@ -378,13 +391,12 @@ impl PickerApp {
         t: &crate::theme::Theme,
         filter_count: usize,
     ) {
-        let badge_key = Style::default()
-            .fg(t.bg_elevated)
-            .bg(t.text_secondary)
-            .add_modifier(Modifier::BOLD);
-        let badge_label = Style::default().fg(t.text_muted);
+        let badge_key = Style::default().bg(t.badge_bg).fg(t.text);
+        let badge_label = Style::default().fg(t.text_secondary);
 
         let mut footer_spans = vec![
+            Span::styled(" Esc ", badge_key),
+            Span::styled(" Quit  ", badge_label),
             Span::styled(" \u{2191}\u{2193} ", badge_key),
             Span::styled(" Navigate  ", badge_label),
             Span::styled(" Enter ", badge_key),
@@ -394,10 +406,8 @@ impl PickerApp {
         ];
         if filter_count > 0 {
             footer_spans.push(Span::styled(" ^X ", badge_key));
-            footer_spans.push(Span::styled(" Clear  ", badge_label));
+            footer_spans.push(Span::styled(" Clear ", badge_label));
         }
-        footer_spans.push(Span::styled(" q/Esc ", badge_key));
-        footer_spans.push(Span::styled(" Quit  ", badge_label));
 
         f.render_widget(Paragraph::new(Line::from(footer_spans)), area);
     }
@@ -818,37 +828,29 @@ impl PickerApp {
         }
     }
 
-    /// Handle a key event in normal (non-popup) mode.
+    /// Handle a key event in normal (non-popup) mode. The search box is
+    /// always-on, like `suv search`: any plain (non-Ctrl) key is query
+    /// text, never a shortcut, so Ctrl-modified keys are checked first and
+    /// Esc quits outright rather than clearing the query first.
     fn handle_normal_key(&mut self, key: crossterm::event::KeyEvent) -> PickerAction {
-        match key.code {
-            KeyCode::Esc => {
-                if self.filter.search.is_empty() {
-                    return PickerAction::Exit(None);
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('f') => {
+                    self.filter.popup_open = true;
+                    self.filter.focus_index = 0;
                 }
-                self.filter.search.clear();
-                self.rebuild_visible();
+                KeyCode::Char('x') => self.clear_filters(),
+                _ => {}
             }
-            KeyCode::Char('q') if self.filter.search.is_empty() => {
-                return PickerAction::Exit(None);
-            }
+            return PickerAction::Continue;
+        }
+        match key.code {
+            KeyCode::Esc => return PickerAction::Exit(None),
             KeyCode::Enter => {
                 return PickerAction::Exit(self.selected_session_id().map(String::from));
             }
-            KeyCode::Down | KeyCode::Char('j') if self.filter.search.is_empty() => {
-                self.next();
-            }
-            KeyCode::Up | KeyCode::Char('k') if self.filter.search.is_empty() => {
-                self.prev();
-            }
             KeyCode::Down => self.next(),
             KeyCode::Up => self.prev(),
-            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.filter.popup_open = true;
-                self.filter.focus_index = 0;
-            }
-            KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.clear_filters();
-            }
             KeyCode::Backspace => {
                 self.filter.search.pop();
                 self.rebuild_visible();

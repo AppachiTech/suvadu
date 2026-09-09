@@ -3,12 +3,12 @@ use std::io;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::backend::Backend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Table, TableState,
+    ScrollbarState, Table, TableState, Wrap,
 };
 use ratatui::Terminal;
 
@@ -215,29 +215,45 @@ impl SessionApp {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2), // header
+                Constraint::Length(1), // header
+                Constraint::Length(4), // info box: session/host/tag/stats
                 Constraint::Min(6),    // body
                 Constraint::Length(1), // footer
             ])
             .split(f.area());
 
-        self.render_header(f, chunks[0], t);
+        Self::render_header(f, chunks[0], t);
+        self.render_info_box(f, chunks[1], t);
 
         if self.detail_open {
             let body = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
-                .split(chunks[1]);
+                .split(chunks[2]);
             self.render_table(f, body[0], t);
             self.render_detail(f, body[1], t);
         } else {
-            self.render_table(f, chunks[1], t);
+            self.render_table(f, chunks[2], t);
         }
 
-        self.render_footer(f, chunks[2], t);
+        self.render_footer(f, chunks[3], t);
     }
 
-    fn render_header(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
+    fn render_header(f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
+        let header_line = Line::from(vec![Span::styled(
+            "SUVADU SESSION TIMELINE",
+            Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+        )]);
+        f.render_widget(
+            Paragraph::new(header_line).alignment(Alignment::Center),
+            area,
+        );
+    }
+
+    /// Session identity + cmd/success/fail stats + first/last timestamps,
+    /// all on one row — wraps to a second row only if the terminal is too
+    /// narrow to fit everything, matching the Prompt Explorer's Info box.
+    fn render_info_box(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
         let fmt_ts = |ms: i64| -> String {
             Local
                 .timestamp_millis_opt(crate::util::normalize_display_ms(ms))
@@ -254,80 +270,82 @@ impl SessionApp {
             .iter()
             .filter(|e| e.exit_code == Some(0))
             .count();
-
+        let fail = total - success;
         let span_ms = self
             .entries
             .last()
             .map_or(0, |last| last.ended_at - self.entries[0].started_at);
 
-        let first_at = self.entries.first().map(|e| e.started_at);
-        let last_at = self.entries.last().map(|e| e.started_at);
+        let label_style = Style::default()
+            .fg(t.text_secondary)
+            .add_modifier(Modifier::BOLD);
 
-        // Line 1: title + session ID + hostname + tag + stats
-        let mut line1_spans = vec![
-            Span::styled(
-                " SESSION TIMELINE ",
-                Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ", Style::default()),
-            Span::styled(
-                format!("{}  ", self.session.id),
-                Style::default().fg(t.info).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{}  ", self.session.hostname),
-                Style::default().fg(t.text_secondary),
-            ),
+        let mut spans = vec![
+            Span::styled(" Session  ", label_style),
+            Span::styled(self.session.id.clone(), Style::default().fg(t.primary_dim)),
+            Span::styled("    Host  ", label_style),
+            Span::styled(self.session.hostname.clone(), Style::default().fg(t.text)),
         ];
-
         if let Some(ref tag) = self.tag_name {
-            line1_spans.push(Span::styled(
-                format!("{tag}  "),
-                Style::default().fg(t.primary),
+            spans.push(Span::styled("    Tag  ", label_style));
+            spans.push(Span::styled(
+                tag.clone(),
+                Style::default().fg(t.badge_executor),
             ));
         }
-
-        line1_spans.push(Span::styled(
-            format!("{total} cmds  {success}✓  {}✗", total - success),
-            Style::default().fg(t.text_secondary),
+        spans.push(Span::styled("    Cmds  ", label_style));
+        spans.push(Span::styled(
+            format!("{total}"),
+            Style::default().fg(t.text),
         ));
-
+        spans.push(Span::styled("   ✔ ", Style::default().fg(t.success)));
+        spans.push(Span::styled(
+            format!("{success}"),
+            Style::default().fg(t.success),
+        ));
+        if fail > 0 {
+            spans.push(Span::styled("   ✘ ", Style::default().fg(t.error)));
+            spans.push(Span::styled(
+                format!("{fail}"),
+                Style::default().fg(t.error),
+            ));
+        }
         if span_ms > 0 {
-            line1_spans.push(Span::styled(
-                format!("  {}", format_duration_ms(span_ms)),
+            spans.push(Span::styled("   Duration  ", label_style));
+            spans.push(Span::styled(
+                format_duration_ms(span_ms),
                 Style::default().fg(t.text_muted),
             ));
         }
-
-        // Line 2: first/last command timestamps
-        let mut line2_spans = vec![Span::styled("  ", Style::default())];
-        if let Some(first) = first_at {
-            line2_spans.push(Span::styled(
-                "First ",
-                Style::default()
-                    .fg(t.text_secondary)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            line2_spans.push(Span::styled(
-                format!("{}  ", fmt_ts(first)),
+        if let Some(first) = self.entries.first().map(|e| e.started_at) {
+            spans.push(Span::styled("    First  ", label_style));
+            spans.push(Span::styled(
+                fmt_ts(first),
                 Style::default().fg(t.text_muted),
             ));
         }
-        if let Some(last) = last_at {
-            line2_spans.push(Span::styled(
-                "Last ",
-                Style::default()
-                    .fg(t.text_secondary)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            line2_spans.push(Span::styled(
+        if let Some(last) = self.entries.last().map(|e| e.started_at) {
+            spans.push(Span::styled("    Last  ", label_style));
+            spans.push(Span::styled(
                 fmt_ts(last),
                 Style::default().fg(t.text_muted),
             ));
         }
 
-        let lines = vec![Line::from(line1_spans), Line::from(line2_spans)];
-        f.render_widget(Paragraph::new(lines), area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(t.border))
+            .title(Span::styled(
+                " Info ",
+                Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        f.render_widget(
+            Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false }),
+            inner,
+        );
     }
 
     fn render_table(&mut self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
@@ -569,13 +587,12 @@ impl SessionApp {
     }
 
     fn render_footer(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
-        let badge_key = Style::default()
-            .fg(t.bg_elevated)
-            .bg(t.text_secondary)
-            .add_modifier(Modifier::BOLD);
-        let badge_label = Style::default().fg(t.text_muted);
+        let badge_key = Style::default().bg(t.badge_bg).fg(t.text);
+        let badge_label = Style::default().fg(t.text_secondary);
 
         let mut spans = vec![
+            Span::styled(" q/Esc ", badge_key),
+            Span::styled(" Quit  ", badge_label),
             Span::styled(" ↑↓ ", badge_key),
             Span::styled(" Navigate  ", badge_label),
             Span::styled(" ←→ ", badge_key),
@@ -585,9 +602,7 @@ impl SessionApp {
             Span::styled(" g/G ", badge_key),
             Span::styled(" First/Last  ", badge_label),
             Span::styled(" ^Y ", badge_key),
-            Span::styled(" Copy  ", badge_label),
-            Span::styled(" q/Esc ", badge_key),
-            Span::styled(" Quit  ", badge_label),
+            Span::styled(" Copy ", badge_label),
         ];
 
         if let Some((msg, time)) = &self.status_message {
