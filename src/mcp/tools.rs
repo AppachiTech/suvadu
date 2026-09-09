@@ -1235,7 +1235,7 @@ fn handle_assess_risk(args: &Value) -> Result<String, String> {
             }
 
             if level >= risk::RiskLevel::Medium {
-                let reason = assessment.as_ref().map_or("", |a| a.description);
+                let reason = assessment.as_ref().map_or("", |a| a.description.as_ref());
                 let _ = writeln!(out, "  {label}: {cmd}");
                 if !reason.is_empty() {
                     let _ = writeln!(out, "    → {reason}");

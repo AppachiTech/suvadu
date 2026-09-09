@@ -62,8 +62,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if is_user_facing_command(&cli.command) {
         let cfg = config::load_config().unwrap_or_default();
         theme::init_theme(cfg.theme);
-        // Apply user risk-ignore suppressions to all risk assessment.
+        // Apply user risk-ignore suppressions and extra flag patterns to all risk assessment.
         risk::set_ignore_patterns(&cfg.agent.risk_ignore_patterns);
+        risk::set_extra_patterns(&cfg.agent.risk_extra_patterns);
     }
 
     run_command(cli.command)

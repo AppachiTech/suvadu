@@ -24,6 +24,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = crate::config::load_config().unwrap_or_default();
     // Apply user risk-ignore suppressions so the assess_risk tool honors them.
     crate::risk::set_ignore_patterns(&config.agent.risk_ignore_patterns);
+    crate::risk::set_extra_patterns(&config.agent.risk_extra_patterns);
     let mcp = &config.mcp;
     let stdin = io::stdin();
     let stdout = io::stdout();
