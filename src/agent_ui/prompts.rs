@@ -5,7 +5,7 @@ use std::time::Instant;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::backend::Backend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation,
@@ -204,7 +204,6 @@ struct PromptExplorerApp {
     executor_names: Vec<String>,
     cwd_filter: Option<String>,
     search: String,
-    search_active: bool,
 }
 
 impl PromptExplorerApp {
@@ -233,7 +232,6 @@ impl PromptExplorerApp {
             executor_names,
             cwd_filter: None,
             search: String::new(),
-            search_active: false,
         }
     }
 
@@ -282,8 +280,16 @@ impl PromptExplorerApp {
         }
     }
 
-    fn set_period(&mut self, period: Period, repo: Option<&Repository>) {
-        self.period = period;
+    /// Cycle Today -> 7d -> 30d -> All -> Today. A single-key cycle (rather
+    /// than 1-4 jump keys) because the search box below eats bare digits —
+    /// they need to be typable into the query.
+    fn cycle_period(&mut self, repo: Option<&Repository>) {
+        self.period = match self.period {
+            Period::Today => Period::Days7,
+            Period::Days7 => Period::Days30,
+            Period::Days30 => Period::AllTime,
+            Period::AllTime => Period::Today,
+        };
         self.reload_or_status(repo);
     }
 
@@ -298,23 +304,6 @@ impl PromptExplorerApp {
             };
         }
         self.reload_or_status(repo);
-    }
-
-    fn handle_search_input(&mut self, key: crossterm::event::KeyEvent) {
-        match key.code {
-            KeyCode::Esc | KeyCode::Enter => {
-                self.search_active = false;
-            }
-            KeyCode::Backspace => {
-                self.search.pop();
-                self.apply_filters();
-            }
-            KeyCode::Char(c) if self.search.len() + c.len_utf8() <= MAX_SEARCH_LEN => {
-                self.search.push(c);
-                self.apply_filters();
-            }
-            _ => {}
-        }
     }
 
     // ── Pagination helpers ──────────────────────────────────
@@ -381,26 +370,27 @@ impl PromptExplorerApp {
         key: crossterm::event::KeyEvent,
         repo: Option<&Repository>,
     ) -> PromptAction {
-        if self.search_active {
-            self.handle_search_input(key);
+        // Ctrl-modified shortcuts first, same as the search screen — this is
+        // what lets the search box below stay always-on: any plain
+        // (non-Ctrl) printable key is query text, never a shortcut.
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('p') => self.cycle_period(repo),
+                KeyCode::Char('a') => self.cycle_executor(repo),
+                KeyCode::Char('s') => {
+                    if let Some(group) = self.selected_group() {
+                        return PromptAction::OpenSession(group.session_id.clone());
+                    }
+                }
+                _ => {}
+            }
             return PromptAction::Continue;
         }
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => return PromptAction::Quit,
-            // Search
-            KeyCode::Char('/') => {
-                self.search_active = true;
-            }
-            // Period
-            KeyCode::Char('1') => self.set_period(Period::Today, repo),
-            KeyCode::Char('2') => self.set_period(Period::Days7, repo),
-            KeyCode::Char('3') => self.set_period(Period::Days30, repo),
-            KeyCode::Char('4') => self.set_period(Period::AllTime, repo),
-            // Executor filter
-            KeyCode::Char('a') => self.cycle_executor(repo),
+            KeyCode::Esc => return PromptAction::Quit,
             // Row navigation
-            KeyCode::Up | KeyCode::Char('k') => self.list_pager.move_up(),
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Up => self.list_pager.move_up(),
+            KeyCode::Down => {
                 let len = self.list_page_slice().len();
                 self.list_pager.move_down(len);
             }
@@ -428,11 +418,15 @@ impl PromptExplorerApp {
                     }
                 }
             }
-            // Jump to session timeline
-            KeyCode::Char('s') => {
-                if let Some(group) = self.selected_group() {
-                    return PromptAction::OpenSession(group.session_id.clone());
-                }
+            // Search box: always-on, like suv search — any other typed
+            // character is query text, live-filtering as you type.
+            KeyCode::Backspace => {
+                self.search.pop();
+                self.apply_filters();
+            }
+            KeyCode::Char(c) if self.search.len() + c.len_utf8() <= MAX_SEARCH_LEN => {
+                self.search.push(c);
+                self.apply_filters();
             }
             _ => {}
         }
@@ -503,35 +497,14 @@ impl PromptExplorerApp {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1), // header
-                Constraint::Length(1), // filter bar (period / executor / search)
+                Constraint::Length(3), // search box (always-on, like suv search)
                 Constraint::Min(8),    // body
                 Constraint::Length(1), // footer
             ])
             .split(size);
 
-        // Header
-        let total_cmds: usize = self.groups.iter().map(|g| g.cmd_count).sum();
-        let header_line = Line::from(vec![
-            Span::styled(
-                " PROMPT EXPLORER ",
-                Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ", Style::default()),
-            Span::styled(
-                format!("{}", self.groups.len()),
-                Style::default().fg(t.info).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" prompts  ", Style::default().fg(t.text_secondary)),
-            Span::styled(
-                format!("{total_cmds}"),
-                Style::default().fg(t.info).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" commands", Style::default().fg(t.text_secondary)),
-        ]);
-        f.render_widget(Paragraph::new(header_line), chunks[0]);
-
-        // Filter bar
-        self.render_filter_bar(f, chunks[1], t);
+        self.render_header(f, chunks[0], t);
+        self.render_search_box(f, chunks[1], t);
 
         // Body: table + prompt preview pane
         if self.selected_group().is_some() {
@@ -552,74 +525,49 @@ impl PromptExplorerApp {
         self.render_list_footer(f, chunks[3], t);
     }
 
-    fn render_filter_bar(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
-        let mut spans = Vec::new();
-
-        for (i, p) in [
-            Period::Today,
-            Period::Days7,
-            Period::Days30,
-            Period::AllTime,
-        ]
-        .iter()
-        .enumerate()
-        {
-            let is_active = *p == self.period;
-            spans.push(Span::styled(
-                format!("{}", i + 1),
-                Style::default().fg(t.text_muted),
-            ));
-            if is_active {
-                spans.push(Span::styled(
-                    format!(" {} ", p.label()),
-                    Style::default()
-                        .bg(t.primary)
-                        .fg(Color::Black)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            } else {
-                spans.push(Span::styled(
-                    format!(" {} ", p.label()),
-                    Style::default().fg(t.text_muted),
-                ));
-            }
-            spans.push(Span::raw(" "));
-        }
-
-        spans.push(Span::styled("  ", Style::default()));
+    fn render_header(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
+        let total_cmds: usize = self.groups.iter().map(|g| g.cmd_count).sum();
         let executor_label = self
             .executor_filter
             .and_then(|i| self.executor_names.get(i))
             .map_or_else(|| "All agents".to_string(), Clone::clone);
-        spans.push(Span::styled("a ", Style::default().fg(t.text_muted)));
-        spans.push(Span::styled(
-            executor_label,
-            Style::default().fg(t.badge_executor),
-        ));
 
-        spans.push(Span::styled("   / ", Style::default().fg(t.text_muted)));
-        if self.search_active {
-            spans.push(Span::styled(
-                self.search.clone(),
-                Style::default().fg(t.text),
-            ));
-            spans.push(Span::styled(
-                "_",
+        let header_line = Line::from(vec![
+            Span::styled(
+                " PROMPT EXPLORER ",
                 Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
-            ));
-        } else if self.search.is_empty() {
-            spans.push(Span::styled(
-                "(search prompts)",
-                Style::default().fg(t.text_muted),
-            ));
-        } else {
-            spans.push(Span::styled(
-                self.search.clone(),
-                Style::default().fg(t.text),
-            ));
-        }
+            ),
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                format!("{}", self.groups.len()),
+                Style::default().fg(t.info).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" prompts  ", Style::default().fg(t.text_secondary)),
+            Span::styled(
+                format!("{total_cmds}"),
+                Style::default().fg(t.info).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" commands   ", Style::default().fg(t.text_secondary)),
+            Span::styled(self.period.label(), Style::default().fg(t.badge_executor)),
+            Span::styled("   ", Style::default()),
+            Span::styled(executor_label, Style::default().fg(t.badge_executor)),
+        ]);
+        f.render_widget(Paragraph::new(header_line), area);
+    }
 
-        f.render_widget(Paragraph::new(Line::from(spans)), area);
+    /// Always-on live-filter box, matching `suv search`'s query bar: no key
+    /// is needed to "enter" search — any plain typed character lands here.
+    fn render_search_box(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
+        let box_widget = Paragraph::new(self.search.clone())
+            .style(Style::default().fg(t.text))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(t.border_focus))
+                    .title("Search (Typing)"),
+            );
+        f.render_widget(box_widget, area);
     }
 
     fn build_list_row<'b>(g: &PromptGroup, t: &crate::theme::Theme) -> Row<'b> {
@@ -667,6 +615,16 @@ impl PromptExplorerApp {
         ])
     }
 
+    /// Matches `suv search`'s "History (1-50 / 3351)" table-title convention.
+    fn build_table_title(&self) -> String {
+        let total = self.groups.len();
+        if total == 0 {
+            return " Prompts (0/0) ".to_string();
+        }
+        let (start, end) = self.list_pager.bounds(total);
+        format!(" Prompts ({}-{end} / {total}) ", start + 1)
+    }
+
     fn render_list_table(&mut self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
         let scrollbar_area = area;
         let table_area = Rect {
@@ -674,6 +632,7 @@ impl PromptExplorerApp {
             ..area
         };
 
+        let title = self.build_table_title();
         let page_items = self.list_page_slice();
 
         let rows: Vec<Row> = page_items
@@ -722,7 +681,7 @@ impl PromptExplorerApp {
                     .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(t.border))
                     .title(Span::styled(
-                        " Prompts ",
+                        title,
                         Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
                     )),
             );
@@ -874,31 +833,22 @@ impl PromptExplorerApp {
         let badge_label = Style::default().fg(t.text_muted);
         let total_pages = self.list_total_pages();
 
-        let mut spans = if self.search_active {
-            vec![
-                Span::styled(" Enter/Esc ", badge_key),
-                Span::styled(" Stop editing  ", badge_label),
-            ]
-        } else {
-            vec![
-                Span::styled(" ↑↓ ", badge_key),
-                Span::styled(" Navigate  ", badge_label),
-                Span::styled(" ←→ ", badge_key),
-                Span::styled(" Page  ", badge_label),
-                Span::styled(" Enter ", badge_key),
-                Span::styled(" View cmds  ", badge_label),
-                Span::styled(" / ", badge_key),
-                Span::styled(" Search  ", badge_label),
-                Span::styled(" 1-4 ", badge_key),
-                Span::styled(" Period  ", badge_label),
-                Span::styled(" a ", badge_key),
-                Span::styled(" Agent  ", badge_label),
-                Span::styled(" s ", badge_key),
-                Span::styled(" Session  ", badge_label),
-                Span::styled(" Esc ", badge_key),
-                Span::styled(" Back  ", badge_label),
-            ]
-        };
+        let mut spans = vec![
+            Span::styled(" ↑↓ ", badge_key),
+            Span::styled(" Navigate  ", badge_label),
+            Span::styled(" ←→ ", badge_key),
+            Span::styled(" Page  ", badge_label),
+            Span::styled(" Enter ", badge_key),
+            Span::styled(" View cmds  ", badge_label),
+            Span::styled(" ^P ", badge_key),
+            Span::styled(" Period  ", badge_label),
+            Span::styled(" ^A ", badge_key),
+            Span::styled(" Agent  ", badge_label),
+            Span::styled(" ^S ", badge_key),
+            Span::styled(" Session  ", badge_label),
+            Span::styled(" Esc ", badge_key),
+            Span::styled(" Quit  ", badge_label),
+        ];
 
         spans.push(Span::styled(
             format!(" {}/{total_pages} ", self.list_pager.page),
@@ -1651,11 +1601,23 @@ mod tests {
 
     #[test]
     fn app_quit_from_list() {
+        // The search box is always-on, so bare 'q' is query text, not quit
+        // (matching suv search's convention) — only Esc quits.
+        let entries = vec![];
+        let mut app = PromptExplorerApp::new(&entries);
+        let esc = crossterm::event::KeyEvent::from(KeyCode::Esc);
+        let action = app.handle_input(esc, None);
+        assert!(matches!(action, PromptAction::Quit));
+    }
+
+    #[test]
+    fn bare_q_types_into_search_instead_of_quitting() {
         let entries = vec![];
         let mut app = PromptExplorerApp::new(&entries);
         let q = crossterm::event::KeyEvent::from(KeyCode::Char('q'));
         let action = app.handle_input(q, None);
-        assert!(matches!(action, PromptAction::Quit));
+        assert!(matches!(action, PromptAction::Continue));
+        assert_eq!(app.search, "q");
     }
 
     #[test]
@@ -1745,7 +1707,7 @@ mod tests {
             10,
         )];
         let mut app = PromptExplorerApp::new(&entries);
-        let s = crossterm::event::KeyEvent::from(KeyCode::Char('s'));
+        let s = crossterm::event::KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
         let action = app.handle_input(s, None);
         match action {
             PromptAction::OpenSession(sid) => assert_eq!(sid, "sess-abc-123"),
@@ -1760,7 +1722,7 @@ mod tests {
     fn app_session_shortcut_on_empty_is_continue() {
         let entries = vec![];
         let mut app = PromptExplorerApp::new(&entries);
-        let s = crossterm::event::KeyEvent::from(KeyCode::Char('s'));
+        let s = crossterm::event::KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
         let action = app.handle_input(s, None);
         assert!(matches!(action, PromptAction::Continue));
     }
@@ -1840,16 +1802,13 @@ mod tests {
     }
 
     #[test]
-    fn slash_key_enters_search_mode_and_typing_filters_live() {
+    fn typing_filters_live_with_no_toggle_key_needed() {
+        // Always-on, like suv search — no key is needed to "enter" search.
         let entries = vec![
             make_entry_with_prompt("s1", "ls", "fix login bug", "cc", Some(0), 1000, 10),
             make_entry_with_prompt("s2", "pwd", "add dark mode", "cc", Some(0), 2000, 10),
         ];
         let mut app = PromptExplorerApp::new(&entries);
-
-        let slash = crossterm::event::KeyEvent::from(KeyCode::Char('/'));
-        app.handle_input(slash, None);
-        assert!(app.search_active);
 
         for c in "dark".chars() {
             app.handle_input(crossterm::event::KeyEvent::from(KeyCode::Char(c)), None);
@@ -1857,23 +1816,34 @@ mod tests {
         assert_eq!(app.search, "dark");
         assert_eq!(app.groups.len(), 1);
         assert_eq!(app.groups[0].prompt, "add dark mode");
-
-        // Esc stops editing but keeps the filter text and its results applied.
-        let esc = crossterm::event::KeyEvent::from(KeyCode::Esc);
-        app.handle_input(esc, None);
-        assert!(!app.search_active);
-        assert_eq!(app.search, "dark");
-        assert_eq!(app.groups.len(), 1);
     }
 
     #[test]
-    fn backspace_in_search_mode_removes_last_char_and_refilters() {
+    fn esc_quits_even_with_search_text_present() {
+        let entries = vec![make_entry_with_prompt(
+            "s1",
+            "ls",
+            "fix login bug",
+            "cc",
+            Some(0),
+            1000,
+            10,
+        )];
+        let mut app = PromptExplorerApp::new(&entries);
+        app.search = "dark".to_string();
+
+        let esc = crossterm::event::KeyEvent::from(KeyCode::Esc);
+        let action = app.handle_input(esc, None);
+        assert!(matches!(action, PromptAction::Quit));
+    }
+
+    #[test]
+    fn backspace_removes_last_char_and_refilters() {
         let entries = vec![
             make_entry_with_prompt("s1", "ls", "fix login bug", "cc", Some(0), 1000, 10),
             make_entry_with_prompt("s2", "pwd", "add dark mode", "cc", Some(0), 2000, 10),
         ];
         let mut app = PromptExplorerApp::new(&entries);
-        app.search_active = true;
         app.search = "dark".to_string();
         app.apply_filters();
         assert_eq!(app.groups.len(), 1);
@@ -1886,9 +1856,9 @@ mod tests {
     }
 
     #[test]
-    fn search_mode_swallows_navigation_keys() {
-        // While typing, letters like 'j'/'q' must go into the search text,
-        // not trigger list navigation or quit.
+    fn bare_letters_always_go_to_search_never_to_shortcuts() {
+        // 'j'/'k'/'q' etc. must land in the query, not trigger navigation or
+        // quit — only Ctrl-modified keys are shortcuts on this screen.
         let entries = vec![make_entry_with_prompt(
             "s1",
             "ls",
@@ -1899,7 +1869,6 @@ mod tests {
             10,
         )];
         let mut app = PromptExplorerApp::new(&entries);
-        app.search_active = true;
 
         let q = crossterm::event::KeyEvent::from(KeyCode::Char('q'));
         let action = app.handle_input(q, None);
@@ -1910,7 +1879,7 @@ mod tests {
     // ── Period / executor filters ───────────────────────────
 
     #[test]
-    fn period_and_executor_keys_without_repo_show_status_message() {
+    fn ctrl_p_cycles_period_without_repo_shows_status_message() {
         let entries = vec![make_entry_with_prompt(
             "s1",
             "ls",
@@ -1922,13 +1891,42 @@ mod tests {
         )];
         let mut app = PromptExplorerApp::new(&entries);
 
-        let one = crossterm::event::KeyEvent::from(KeyCode::Char('1'));
-        app.handle_input(one, None);
-        assert_eq!(app.period, Period::Today);
+        let ctrl_p = crossterm::event::KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        app.handle_input(ctrl_p, None);
+        assert_eq!(app.period, Period::Today); // default is AllTime, cycles to Today
         assert_eq!(
             app.status_message.as_ref().map(|(m, _)| m.as_str()),
             Some("Reload not available")
         );
+    }
+
+    #[test]
+    fn ctrl_p_cycles_through_all_periods_and_wraps() {
+        let entries: Vec<Entry> = vec![];
+        let mut app = PromptExplorerApp::new(&entries);
+        assert_eq!(app.period, Period::AllTime);
+
+        let ctrl_p = crossterm::event::KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        app.handle_input(ctrl_p, None);
+        assert_eq!(app.period, Period::Today);
+        app.handle_input(ctrl_p, None);
+        assert_eq!(app.period, Period::Days7);
+        app.handle_input(ctrl_p, None);
+        assert_eq!(app.period, Period::Days30);
+        app.handle_input(ctrl_p, None);
+        assert_eq!(app.period, Period::AllTime);
+    }
+
+    #[test]
+    fn digit_keys_type_into_search_instead_of_changing_period() {
+        let entries: Vec<Entry> = vec![];
+        let mut app = PromptExplorerApp::new(&entries);
+        let original_period = app.period;
+
+        let one = crossterm::event::KeyEvent::from(KeyCode::Char('1'));
+        app.handle_input(one, None);
+        assert_eq!(app.period, original_period);
+        assert_eq!(app.search, "1");
     }
 
     #[test]
@@ -1944,13 +1942,24 @@ mod tests {
         assert_eq!(app.executor_names.len(), 2);
         assert_eq!(app.executor_filter, None);
 
-        let a = crossterm::event::KeyEvent::from(KeyCode::Char('a'));
+        let a = crossterm::event::KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
         app.handle_input(a, None);
         assert_eq!(app.executor_filter, Some(0));
         app.handle_input(a, None);
         assert_eq!(app.executor_filter, Some(1));
         app.handle_input(a, None);
         assert_eq!(app.executor_filter, None);
+    }
+
+    #[test]
+    fn bare_a_types_into_search_instead_of_cycling_executor() {
+        let entries: Vec<Entry> = vec![];
+        let mut app = PromptExplorerApp::new(&entries);
+
+        let a = crossterm::event::KeyEvent::from(KeyCode::Char('a'));
+        app.handle_input(a, None);
+        assert_eq!(app.executor_filter, None);
+        assert_eq!(app.search, "a");
     }
 
     fn insert_test_session(repo: &Repository, id: &str, created_at: i64) {
@@ -1995,12 +2004,14 @@ mod tests {
         assert_eq!(app.groups.len(), 2);
 
         // Narrow to the last 7 days: the 40-day-old entry drops out.
-        app.set_period(Period::Days7, Some(&repo));
+        app.period = Period::Days7;
+        app.reload(&repo);
         assert_eq!(app.groups.len(), 1);
         assert_eq!(app.groups[0].prompt, "recent claude prompt");
 
         // Widen back to all time, then filter down to just "cursor".
-        app.set_period(Period::AllTime, Some(&repo));
+        app.period = Period::AllTime;
+        app.reload(&repo);
         assert_eq!(app.groups.len(), 2);
         let cursor_idx = app
             .executor_names
