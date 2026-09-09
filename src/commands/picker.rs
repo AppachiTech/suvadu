@@ -8,7 +8,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Modifier, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
     Terminal,
 };
@@ -91,7 +91,15 @@ fn render(f: &mut ratatui::Frame, bookmarks: &[Bookmark], state: &mut ListState)
         .highlight_symbol(" > ");
     f.render_stateful_widget(list, chunks[0], state);
 
-    let help = Paragraph::new(Line::from(" ↑/↓ or j/k move · Enter recall · Esc cancel "))
-        .style(Style::default().fg(t.text_muted));
+    let badge_key = Style::default().bg(t.badge_bg).fg(t.text);
+    let badge_label = Style::default().fg(t.text_secondary);
+    let help = Paragraph::new(Line::from(vec![
+        Span::styled(" ↑↓ ", badge_key),
+        Span::styled(" Navigate  ", badge_label),
+        Span::styled(" Enter ", badge_key),
+        Span::styled(" Recall  ", badge_label),
+        Span::styled(" q/Esc ", badge_key),
+        Span::styled(" Quit  ", badge_label),
+    ]));
     f.render_widget(help, chunks[1]);
 }

@@ -1,6 +1,6 @@
 use crate::config::{save_config, Config, CustomAgent};
 use crate::theme::theme;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     backend::Backend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -319,7 +319,7 @@ impl AppState {
                     return false;
                 }
             }
-            KeyCode::Char('s') => {
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Err(e) = save_config(&self.config) {
                     self.save_status = Some(format!("Error saving: {e}"));
                 } else {
@@ -331,17 +331,26 @@ impl AppState {
             KeyCode::BackTab => self.prev_tab(),
             KeyCode::Down | KeyCode::Char('j') => self.next_item(),
             KeyCode::Up | KeyCode::Char('k') => self.prev_item(),
-            KeyCode::Char('a') if self.current_tab == SettingsTab::Exclusions => {
+            KeyCode::Char('a')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.current_tab == SettingsTab::Exclusions =>
+            {
                 self.input_mode = InputMode::Editing;
                 self.input_buffer.clear();
             }
-            KeyCode::Char('a') if self.current_tab == SettingsTab::AutoTags => {
+            KeyCode::Char('a')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.current_tab == SettingsTab::AutoTags =>
+            {
                 self.input_mode = InputMode::Editing;
                 self.auto_tag_path_input.clear();
                 self.auto_tag_name_input.clear();
                 self.auto_tag_focus = 0;
             }
-            KeyCode::Char('a') if self.current_tab == SettingsTab::Mcp => {
+            KeyCode::Char('a')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.current_tab == SettingsTab::Mcp =>
+            {
                 // Add only works for exclude_dirs
                 let dirs_start = 2 + MCP_TOOLS.len() + MCP_RESOURCES.len();
                 if self.selected_item >= dirs_start || self.config.mcp.exclude_dirs.is_empty() {
@@ -349,7 +358,10 @@ impl AppState {
                     self.input_buffer.clear();
                 }
             }
-            KeyCode::Char('d') if self.current_tab == SettingsTab::Mcp => {
+            KeyCode::Char('d')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.current_tab == SettingsTab::Mcp =>
+            {
                 let dirs_start = 2 + MCP_TOOLS.len() + MCP_RESOURCES.len();
                 if self.selected_item >= dirs_start && !self.config.mcp.exclude_dirs.is_empty() {
                     let idx = self.selected_item - dirs_start;
@@ -365,7 +377,10 @@ impl AppState {
                     }
                 }
             }
-            KeyCode::Char('a') if self.current_tab == SettingsTab::Agents => {
+            KeyCode::Char('a')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.current_tab == SettingsTab::Agents =>
+            {
                 self.input_mode = InputMode::Editing;
                 self.agent_name_input.clear();
                 self.agent_env_var_input.clear();
@@ -373,7 +388,8 @@ impl AppState {
                 self.agent_focus = 0;
             }
             KeyCode::Char('d')
-                if self.current_tab == SettingsTab::Exclusions
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.current_tab == SettingsTab::Exclusions
                     && !self.config.exclusions.is_empty() =>
             {
                 self.config.exclusions.remove(self.selected_item);
@@ -393,7 +409,8 @@ impl AppState {
                     });
             }
             KeyCode::Char('d')
-                if self.current_tab == SettingsTab::AutoTags
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.current_tab == SettingsTab::AutoTags
                     && !self.config.auto_tags.is_empty() =>
             {
                 self.dirty = true;
@@ -418,7 +435,9 @@ impl AppState {
                     });
             }
             KeyCode::Char('d')
-                if self.current_tab == SettingsTab::Agents && !self.config.agents.is_empty() =>
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.current_tab == SettingsTab::Agents
+                    && !self.config.agents.is_empty() =>
             {
                 self.dirty = true;
                 let mut agent_keys: Vec<_> = self.config.agents.keys().cloned().collect();
@@ -814,7 +833,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut AppState) {
         InputMode::Normal => vec![
             Span::styled(" q/Esc ", badge_key),
             Span::styled(" Quit  ", badge_label),
-            Span::styled(" s ", badge_key),
+            Span::styled(" ^S ", badge_key),
             Span::styled(" Save  ", badge_label),
             Span::styled(" ↑/↓ ", badge_key),
             Span::styled(" Navigate  ", badge_label),
@@ -845,9 +864,9 @@ fn ui(f: &mut ratatui::Frame, app: &mut AppState) {
             SettingsTab::Exclusions | SettingsTab::AutoTags | SettingsTab::Agents
         )
     {
-        help_badges.push(Span::styled(" a ", badge_key));
+        help_badges.push(Span::styled(" ^A ", badge_key));
         help_badges.push(Span::styled(" Add  ", badge_label));
-        help_badges.push(Span::styled(" d ", badge_key));
+        help_badges.push(Span::styled(" ^D ", badge_key));
         help_badges.push(Span::styled(" Delete  ", badge_label));
     } else if app.input_mode == InputMode::Normal {
         help_badges.push(Span::styled(" Space ", badge_key));
@@ -1952,8 +1971,8 @@ mod tests {
         app.selected_item = 0;
         assert!(app.config.exclusions.is_empty());
 
-        // Press 'a' to enter edit mode for adding an exclusion
-        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        // Press Ctrl+A to enter edit mode for adding an exclusion
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert_eq!(app.input_mode, InputMode::Editing);
         assert!(app.input_buffer.is_empty());
 
@@ -1982,13 +2001,14 @@ mod tests {
         app.selected_item = 0;
 
         // Delete first exclusion
-        app.handle_input(KeyEvent::from(KeyCode::Char('d')));
+        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        app.handle_input(ctrl_d);
         assert_eq!(app.config.exclusions, vec!["password"]);
         assert!(app.dirty);
         assert_eq!(app.selected_item, 0);
 
         // Delete last remaining exclusion
-        app.handle_input(KeyEvent::from(KeyCode::Char('d')));
+        app.handle_input(ctrl_d);
         assert!(app.config.exclusions.is_empty());
         assert_eq!(app.selected_item, 0);
     }
@@ -2101,7 +2121,7 @@ mod tests {
 
         // Enter edit mode for exclusion
         app.current_tab = SettingsTab::Exclusions;
-        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert_eq!(app.input_mode, InputMode::Editing);
 
         // Type and backspace
@@ -2127,8 +2147,8 @@ mod tests {
         app.current_tab = SettingsTab::AutoTags;
         app.selected_item = 0;
 
-        // Press 'a' to start adding an auto-tag
-        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        // Press Ctrl+A to start adding an auto-tag
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert_eq!(app.input_mode, InputMode::Editing);
         assert_eq!(app.auto_tag_focus, 0);
         assert!(app.auto_tag_path_input.is_empty());
@@ -2178,14 +2198,15 @@ mod tests {
 
         assert_eq!(app.config.auto_tags.len(), 2);
 
-        // Press 'd' to delete the selected auto-tag
-        app.handle_input(KeyEvent::from(KeyCode::Char('d')));
+        // Press Ctrl+D to delete the selected auto-tag
+        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        app.handle_input(ctrl_d);
         assert_eq!(app.config.auto_tags.len(), 1);
         assert!(app.dirty);
 
         // Delete the remaining one
         app.selected_item = 0;
-        app.handle_input(KeyEvent::from(KeyCode::Char('d')));
+        app.handle_input(ctrl_d);
         assert!(app.config.auto_tags.is_empty());
         assert_eq!(app.selected_item, 0);
         assert_eq!(app.auto_tag_list_state.selected(), None);
@@ -2198,7 +2219,7 @@ mod tests {
         let mut app = AppState::new(config);
 
         app.current_tab = SettingsTab::AutoTags;
-        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert_eq!(app.input_mode, InputMode::Editing);
         assert_eq!(app.auto_tag_focus, 0);
 
@@ -2218,7 +2239,7 @@ mod tests {
         let mut app = AppState::new(config);
 
         app.current_tab = SettingsTab::AutoTags;
-        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert_eq!(app.input_mode, InputMode::Editing);
 
         // Move to tag field with empty path
@@ -2271,7 +2292,7 @@ mod tests {
         app.selected_item = 0;
         app.exclusion_list_state.select(Some(0));
 
-        app.handle_input(KeyEvent::from(KeyCode::Char('d')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert!(app.config.exclusions.is_empty());
         assert_eq!(app.selected_item, 0);
         assert_eq!(app.exclusion_list_state.selected(), None);
@@ -2289,7 +2310,7 @@ mod tests {
         app.selected_item = 2; // Select last item ("gamma")
         app.exclusion_list_state.select(Some(2));
 
-        app.handle_input(KeyEvent::from(KeyCode::Char('d')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert_eq!(app.config.exclusions, vec!["alpha", "beta"]);
         assert_eq!(app.selected_item, 1); // Adjusted to last valid index
         assert_eq!(app.exclusion_list_state.selected(), Some(1));
@@ -2323,7 +2344,7 @@ mod tests {
         let mut app = AppState::new(Config::default());
         app.dirty = true;
 
-        app.handle_input(KeyEvent::from(KeyCode::Char('s')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
         // save_config will either succeed or fail; in either case save_status is set
         assert!(app.save_status.is_some());
         let status = app.save_status.as_ref().unwrap();
@@ -2344,7 +2365,7 @@ mod tests {
 
         // Enter editing mode for exclusion
         app.current_tab = SettingsTab::Exclusions;
-        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert_eq!(app.input_mode, InputMode::Editing);
 
         // Push 501 characters
@@ -2361,7 +2382,7 @@ mod tests {
         let mut app = AppState::new(config);
 
         app.current_tab = SettingsTab::AutoTags;
-        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert_eq!(app.auto_tag_focus, 0);
 
         // Type "abc" into path
@@ -2384,7 +2405,7 @@ mod tests {
         let mut app = AppState::new(config);
 
         app.current_tab = SettingsTab::AutoTags;
-        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         // Switch to tag field
         app.auto_tag_focus = 1;
 
@@ -2478,7 +2499,7 @@ mod tests {
         app.current_tab = SettingsTab::Exclusions;
 
         // Add "pattern1"
-        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         for c in "pattern1".chars() {
             app.handle_input(KeyEvent::from(KeyCode::Char(c)));
         }
@@ -2488,7 +2509,7 @@ mod tests {
         assert_eq!(app.selected_item, 0);
 
         // Add "pattern2"
-        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         for c in "pattern2".chars() {
             app.handle_input(KeyEvent::from(KeyCode::Char(c)));
         }
@@ -2506,7 +2527,7 @@ mod tests {
         app.current_tab = SettingsTab::Exclusions;
 
         // Enter edit mode for adding exclusion
-        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert_eq!(app.input_mode, InputMode::Editing);
 
         // Type some characters
@@ -2529,7 +2550,7 @@ mod tests {
         let mut app = AppState::new(config);
 
         app.current_tab = SettingsTab::AutoTags;
-        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert_eq!(app.input_mode, InputMode::Editing);
 
         // Type path and tag
@@ -2559,7 +2580,7 @@ mod tests {
         app.selected_item = 1; // Select "beta" (middle)
         app.exclusion_list_state.select(Some(1));
 
-        app.handle_input(KeyEvent::from(KeyCode::Char('d')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert_eq!(app.config.exclusions, vec!["alpha", "gamma"]);
         assert_eq!(app.selected_item, 1); // Still at index 1 (now "gamma")
         assert!(app.dirty);
@@ -2600,7 +2621,7 @@ mod tests {
         app.current_tab = SettingsTab::Agents;
 
         // Press 'a' to start adding
-        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert_eq!(app.input_mode, InputMode::Editing);
         assert_eq!(app.agent_focus, 0);
 
@@ -2657,13 +2678,13 @@ mod tests {
         app.selected_item = 0;
 
         // Delete first (sorted: tool-a)
-        app.handle_input(KeyEvent::from(KeyCode::Char('d')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert!(app.dirty);
         assert_eq!(app.config.agents.len(), 1);
         assert!(app.config.agents.contains_key("tool-b"));
 
         // Delete remaining
-        app.handle_input(KeyEvent::from(KeyCode::Char('d')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert!(app.config.agents.is_empty());
         assert_eq!(app.selected_item, 0);
     }
@@ -2674,7 +2695,7 @@ mod tests {
         let mut app = AppState::new(config);
         app.current_tab = SettingsTab::Agents;
 
-        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert_eq!(app.agent_focus, 0);
 
         app.handle_input(KeyEvent::from(KeyCode::Tab));
@@ -2693,7 +2714,7 @@ mod tests {
         let mut app = AppState::new(config);
         app.current_tab = SettingsTab::Agents;
 
-        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
 
         // Skip name, move to env_var, move to type, submit
         app.handle_input(KeyEvent::from(KeyCode::Enter)); // focus 1
@@ -2712,7 +2733,7 @@ mod tests {
         let mut app = AppState::new(config);
         app.current_tab = SettingsTab::Agents;
 
-        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
 
         // Type invalid name with spaces
         for c in "bad name".chars() {
@@ -2736,7 +2757,7 @@ mod tests {
         let mut app = AppState::new(config);
         app.current_tab = SettingsTab::Agents;
 
-        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         // Move to executor type field
         app.agent_focus = 2;
 
@@ -2758,7 +2779,7 @@ mod tests {
         let mut app = AppState::new(config);
         app.current_tab = SettingsTab::Agents;
 
-        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         for c in "test".chars() {
             app.handle_input(KeyEvent::from(KeyCode::Char(c)));
         }
@@ -2775,10 +2796,10 @@ mod tests {
         let mut app = AppState::new(config);
         app.current_tab = SettingsTab::Agents;
 
-        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
 
         // Type and backspace in name field
-        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         app.handle_input(KeyEvent::from(KeyCode::Char('b')));
         assert_eq!(app.agent_name_input, "ab");
         app.handle_input(KeyEvent::from(KeyCode::Backspace));

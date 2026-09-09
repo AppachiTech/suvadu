@@ -1,6 +1,6 @@
 use crate::models::AliasSuggestion;
 use crate::theme::theme;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     backend::Backend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -83,12 +83,7 @@ impl AppState {
     /// Returns Some(selected suggestions) on confirm, None on quit.
     fn handle_input(&mut self, key: event::KeyEvent) -> Option<bool> {
         match self.input_mode {
-            InputMode::Normal => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => return Some(false),
-                KeyCode::Enter => return Some(true),
-                KeyCode::Down | KeyCode::Char('j') => self.next(),
-                KeyCode::Up | KeyCode::Char('k') => self.prev(),
-                KeyCode::Char(' ') => self.toggle_selected(),
+            InputMode::Normal if key.modifiers.contains(KeyModifiers::CONTROL) => match key.code {
                 KeyCode::Char('a') => self.select_all(),
                 KeyCode::Char('n') => self.deselect_all(),
                 KeyCode::Char('e') => {
@@ -97,6 +92,14 @@ impl AppState {
                         self.input_mode = InputMode::EditingName;
                     }
                 }
+                _ => {}
+            },
+            InputMode::Normal => match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => return Some(false),
+                KeyCode::Enter => return Some(true),
+                KeyCode::Down | KeyCode::Char('j') => self.next(),
+                KeyCode::Up | KeyCode::Char('k') => self.prev(),
+                KeyCode::Char(' ') => self.toggle_selected(),
                 _ => {}
             },
             InputMode::EditingName => match key.code {
@@ -308,31 +311,32 @@ fn render_suggest_footer(
     area: Rect,
     t: &crate::theme::Theme,
 ) {
+    let badge_key = Style::default().bg(t.badge_bg).fg(t.text);
+    let badge_label = Style::default().fg(t.text_secondary);
+
     let footer_spans = if app.input_mode == InputMode::EditingName {
         vec![
-            Span::styled(" Type ", Style::default().fg(t.text_muted)),
-            Span::styled("alias name", Style::default().fg(t.info)),
-            Span::styled("  Enter ", Style::default().fg(t.text_muted)),
-            Span::styled("Save", Style::default().fg(t.text)),
-            Span::styled("  Esc ", Style::default().fg(t.text_muted)),
-            Span::styled("Cancel", Style::default().fg(t.text)),
+            Span::styled(" Enter ", badge_key),
+            Span::styled(" Save  ", badge_label),
+            Span::styled(" Esc ", badge_key),
+            Span::styled(" Cancel  ", badge_label),
         ]
     } else {
         vec![
-            Span::styled(" \u{2191}\u{2193}", Style::default().fg(t.info)),
-            Span::styled(" Navigate  ", Style::default().fg(t.text_muted)),
-            Span::styled("Space", Style::default().fg(t.info)),
-            Span::styled(" Toggle  ", Style::default().fg(t.text_muted)),
-            Span::styled("e", Style::default().fg(t.info)),
-            Span::styled(" Edit name  ", Style::default().fg(t.text_muted)),
-            Span::styled("a", Style::default().fg(t.info)),
-            Span::styled("/", Style::default().fg(t.text_muted)),
-            Span::styled("n", Style::default().fg(t.info)),
-            Span::styled(" All/None  ", Style::default().fg(t.text_muted)),
-            Span::styled("Enter", Style::default().fg(t.success)),
-            Span::styled(" Confirm  ", Style::default().fg(t.text_muted)),
-            Span::styled(" q/Esc ", Style::default().bg(t.badge_bg).fg(t.text)),
-            Span::styled(" Quit", Style::default().fg(t.text_secondary)),
+            Span::styled(" \u{2191}\u{2193} ", badge_key),
+            Span::styled(" Navigate  ", badge_label),
+            Span::styled(" Space ", badge_key),
+            Span::styled(" Toggle  ", badge_label),
+            Span::styled(" ^E ", badge_key),
+            Span::styled(" Edit name  ", badge_label),
+            Span::styled(" ^A ", badge_key),
+            Span::styled(" All  ", badge_label),
+            Span::styled(" ^N ", badge_key),
+            Span::styled(" None  ", badge_label),
+            Span::styled(" Enter ", badge_key),
+            Span::styled(" Confirm  ", badge_label),
+            Span::styled(" q/Esc ", badge_key),
+            Span::styled(" Quit  ", badge_label),
         ]
     };
 
@@ -475,7 +479,7 @@ mod tests {
     #[test]
     fn handle_input_a_selects_all() {
         let mut app = AppState::new(make_suggestions(3), vec![]);
-        app.handle_input(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert!(app.suggestions.iter().all(|s| s.selected));
     }
 
@@ -483,14 +487,14 @@ mod tests {
     fn handle_input_n_deselects_all() {
         let mut app = AppState::new(make_suggestions(3), vec![]);
         app.select_all();
-        app.handle_input(KeyEvent::from(KeyCode::Char('n')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
         assert!(app.suggestions.iter().all(|s| !s.selected));
     }
 
     #[test]
     fn handle_input_e_enters_edit_mode() {
         let mut app = AppState::new(make_suggestions(1), vec![]);
-        app.handle_input(KeyEvent::from(KeyCode::Char('e')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
         assert_eq!(app.input_mode, InputMode::EditingName);
         assert_eq!(app.edit_buffer, "alias0");
     }
@@ -498,7 +502,7 @@ mod tests {
     #[test]
     fn edit_mode_typing_and_confirm() {
         let mut app = AppState::new(make_suggestions(1), vec![]);
-        app.handle_input(KeyEvent::from(KeyCode::Char('e')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
         // Clear and type new name
         app.edit_buffer.clear();
         app.handle_input(KeyEvent::from(KeyCode::Char('g')));
@@ -514,7 +518,7 @@ mod tests {
     #[test]
     fn edit_mode_backspace() {
         let mut app = AppState::new(make_suggestions(1), vec![]);
-        app.handle_input(KeyEvent::from(KeyCode::Char('e')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
         app.handle_input(KeyEvent::from(KeyCode::Backspace));
         assert_eq!(app.edit_buffer, "alias"); // removed trailing '0'
     }
@@ -522,7 +526,7 @@ mod tests {
     #[test]
     fn edit_mode_esc_cancels() {
         let mut app = AppState::new(make_suggestions(1), vec![]);
-        app.handle_input(KeyEvent::from(KeyCode::Char('e')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
         app.edit_buffer = "changed".to_string();
         app.handle_input(KeyEvent::from(KeyCode::Esc));
         assert_eq!(app.input_mode, InputMode::Normal);
@@ -533,7 +537,7 @@ mod tests {
     #[test]
     fn edit_mode_rejects_invalid_chars() {
         let mut app = AppState::new(make_suggestions(1), vec![]);
-        app.handle_input(KeyEvent::from(KeyCode::Char('e')));
+        app.handle_input(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
         let before = app.edit_buffer.clone();
         app.handle_input(KeyEvent::from(KeyCode::Char('!')));
         app.handle_input(KeyEvent::from(KeyCode::Char(' ')));
