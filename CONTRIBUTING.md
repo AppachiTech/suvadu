@@ -29,26 +29,38 @@ make lint
 
 ```
 src/
-  main.rs          # CLI entry point, core command handlers (add, search, delete, etc.)
-  cli.rs           # Clap command definitions
-  config.rs        # TOML configuration management
-  db.rs            # SQLite initialization, schema, migrations
-  models.rs        # Data types: Entry, Session, Tag, Bookmark, Note, AliasSuggestion
-  repository.rs    # Database queries (CRUD, filtering, pagination, stats)
-  util.rs          # Date parsing, exclusion matching, path formatting, shared utilities
-  hooks.rs         # Shell hook generation (Zsh, Bash)
-  integrations.rs  # Claude Code, Cursor, Antigravity IDE integrations
-  import_export.rs # History import (JSONL, Zsh history) and export (JSONL, CSV)
-  update.rs        # Self-update mechanism
-  suggest.rs       # Alias suggestion logic and handlers
-  agent.rs         # Agent activity report handlers and formatting
-  search.rs        # Interactive search TUI (ratatui + crossterm)
-  settings_ui.rs   # Settings TUI
-  stats_ui.rs      # Stats/analytics TUI
-  suggest_ui.rs    # Alias suggestion TUI
-  agent_ui.rs      # Agent monitoring TUI (dashboard + agent stats)
-  risk.rs          # Command risk assessment (levels, categories, session risk)
-  theme.rs         # Shared TUI theme colors
+  main.rs            # CLI entry point, dispatches to command handlers
+  cli.rs             # Clap command definitions (suv <command> ...)
+  lib.rs             # Library facade exposing db/models/repository/theme/util to integration tests
+  config.rs          # TOML configuration, including per-project .suvadu.toml overlays
+  db.rs              # SQLite initialization, schema, migrations
+  models.rs          # Data types: Entry, Session, Tag, Bookmark, Alias, Note, Skill, ...
+  repository/        # Database queries (CRUD, filtering, pagination, stats) — one file per domain
+  util/              # Date/path/exclusion helpers, terminal guards, syntax highlighting
+  hooks.rs           # Shell hook generation (Zsh, Bash)
+  integrations.rs    # Claude Code, Cursor, OpenCode, Antigravity, pi.dev integrations
+  integrations/      # Codex-specific hooks and the agent-integration registry
+  import_export.rs   # History import (JSONL, Zsh history) and export (JSON/JSONL/CSV)
+  redact.rs          # Secret detection and redaction applied before a command is recorded
+  risk.rs            # Command risk assessment (levels, categories, obfuscation detection)
+  update.rs          # Self-update mechanism
+  suggest.rs         # Alias suggestion logic and handlers
+  agent.rs           # Agent activity report handlers and formatting
+  theme.rs           # Shared TUI theme colors
+
+  commands/          # Non-interactive CLI command handlers, plus the bookmark/alias
+                     # interactive managers (picker.rs, alias_picker.rs) — one file per command
+  search/            # Interactive search TUI (suv search / Ctrl+R) — the reference screen
+                     # every other TUI screen's look and feel is converged onto
+  agent_ui/          # Agent dashboard, Prompt Explorer, and agent stats TUIs
+  session_ui/        # Session picker and session timeline TUIs
+  stats_ui.rs        # suv stats TUI
+  settings_ui.rs     # suv settings TUI
+  skills_ui.rs       # suv skills TUI (browse, add, edit, delete, sync, review)
+  skills_sync.rs     # Materializes active skills into each agent's native file format
+  suggest_ui.rs      # suv aliases suggest TUI
+
+  mcp/               # MCP server: JSON-RPC protocol, tool and resource definitions
 ```
 
 ## Reporting Issues
