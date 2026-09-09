@@ -26,6 +26,8 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 - **Closing a session timeline from `suv sessions` now returns to the session list** instead of exiting straight back to the shell — previously the only way out of a timeline was closing the picker entirely.
 - **Pasting a multi-line skill into `suv skills`' Add/Edit form no longer misfires** — Enter used to submit the form (jumping straight to `$EDITOR` for the body) regardless of which field had focus, so a paste with an embedded line break could launch the editor before later fields were even filled in. Enter now advances fields like Tab, only submitting on the last one; the form is also bigger and each field caps at 200 characters.
+- **`suv stats`'s content boxes now use rounded borders, and `suv settings`' title matches every other screen** — the earlier visual-consistency pass fixed both screens' title/footer styling but missed `suv stats`' border style and never touched `suv settings`' title casing.
+- **Prompt Explorer's Session field now shows the full session ID** instead of truncating to 8 characters — for agent-run entries that ID is the underlying agent's own session ID (e.g. Claude Code's), and the truncated form wasn't enough to do anything useful with it, like `claude --resume <id>`.
 
 ## [0.3.7] - 2026-09-07
 
