@@ -8,8 +8,8 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline,
-    Table, TableState,
+    Block, BorderType, Borders, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Sparkline, Table, TableState,
 };
 use ratatui::Terminal;
 
@@ -478,6 +478,7 @@ impl StatsApp {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(t.border));
 
         let paragraph = Paragraph::new(content).block(block);
@@ -495,6 +496,7 @@ impl StatsApp {
                 Style::default().fg(t.text_secondary),
             ))
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(t.border));
 
         let inner = block.inner(area);
@@ -608,6 +610,7 @@ impl StatsApp {
                 Style::default().fg(t.text_secondary),
             ))
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(t.border));
 
         let sparkline = Sparkline::default()
@@ -683,6 +686,7 @@ impl StatsApp {
                 Style::default().fg(if focused { t.primary } else { t.text_secondary }),
             ))
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border_color));
 
         let inner = block.inner(area);
@@ -752,6 +756,7 @@ impl StatsApp {
                 Style::default().fg(if focused { t.primary } else { t.text_secondary }),
             ))
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border_color));
 
         let inner = block.inner(area);
@@ -806,6 +811,7 @@ impl StatsApp {
                 Style::default().fg(if focused { t.primary } else { t.text_secondary }),
             ))
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border_color));
 
         let inner = block.inner(area);
@@ -861,6 +867,7 @@ impl StatsApp {
                 Style::default().fg(if focused { t.primary } else { t.text_secondary }),
             ))
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border_color));
 
         let inner = block.inner(area);

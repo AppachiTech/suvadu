@@ -801,7 +801,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut AppState) {
 
     // Minimalist Header
     let branding = Line::from(vec![Span::styled(
-        "Suvadu Settings",
+        "SUVADU SETTINGS",
         Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
     )]);
 
