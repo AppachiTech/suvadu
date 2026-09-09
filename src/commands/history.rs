@@ -47,6 +47,7 @@ pub fn handle_history(
             cwd_prefix: false,
             failed_only: false,
             bookmarked_only: false,
+            exclude_dirs: &[],
         },
     )?;
 

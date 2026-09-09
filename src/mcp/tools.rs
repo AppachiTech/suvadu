@@ -65,17 +65,17 @@ pub fn call_tool(
     match name {
         "search_commands" => handle_search_commands(repo, args, mcp),
         "recent_commands" => handle_recent_commands(repo, args, mcp),
-        "command_status" => handle_command_status(repo, args),
-        "get_prompts" => handle_get_prompts(repo, args),
-        "session_history" => handle_session_history(repo, args),
+        "command_status" => handle_command_status(repo, args, mcp),
+        "get_prompts" => handle_get_prompts(repo, args, mcp),
+        "session_history" => handle_session_history(repo, args, mcp),
         "get_stats" => handle_get_stats(repo, args, mcp),
         "list_sessions" => handle_list_sessions(repo, args),
-        "what_changed" => handle_what_changed(repo, args),
+        "what_changed" => handle_what_changed(repo, args, mcp),
         "what_failed" => handle_what_failed(repo, args, mcp),
-        "suggest_next" => handle_suggest_next(repo, args),
+        "suggest_next" => handle_suggest_next(repo, args, mcp),
         "assess_risk" => handle_assess_risk(args),
-        "find_agent_session" => handle_find_agent_session(repo, args),
-        "replay_agent_session" => handle_replay_agent_session(repo, args),
+        "find_agent_session" => handle_find_agent_session(repo, args, mcp),
+        "replay_agent_session" => handle_replay_agent_session(repo, args, mcp),
         "learn_from_failures" => handle_learn_from_failures(repo, args, mcp),
         "project_context" => handle_project_context(repo, args, mcp),
         "list_skills" => handle_list_skills(repo, args),
@@ -462,6 +462,7 @@ fn handle_search_commands(
         cwd_prefix: false,
         failed_only: false,
         bookmarked_only: false,
+        exclude_dirs: &mcp.exclude_dirs,
     };
 
     let entries = repo
@@ -512,11 +513,16 @@ fn handle_recent_commands(
             cwd_prefix: false,
             failed_only: false,
             bookmarked_only: false,
+            exclude_dirs: &mcp.exclude_dirs,
         };
         repo.get_entries_filtered(limit, 0, &qf)
             .map_err(|e| format!("query failed: {e}"))?
     } else {
-        repo.get_recent_entries(limit, 0, None, false, directory, true)
+        let filter = QueryFilter {
+            exclude_dirs: &mcp.exclude_dirs,
+            ..QueryFilter::default()
+        };
+        repo.get_recent_entries(limit, 0, &filter, directory)
             .map_err(|e| format!("query failed: {e}"))?
     };
 
@@ -534,7 +540,11 @@ fn handle_recent_commands(
     Ok(out)
 }
 
-fn handle_command_status(repo: &Repository, args: &Value) -> Result<String, String> {
+fn handle_command_status(
+    repo: &Repository,
+    args: &Value,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
     let command = get_str(args, "command").unwrap_or("");
     let limit = usize::try_from(get_int(args, "limit", 5)).unwrap_or(5);
     let directory = get_str(args, "directory");
@@ -543,8 +553,14 @@ fn handle_command_status(repo: &Repository, args: &Value) -> Result<String, Stri
         return Err("command parameter is required".to_string());
     }
 
+    let filter = QueryFilter {
+        query: Some(command),
+        prefix_match: true,
+        exclude_dirs: &mcp.exclude_dirs,
+        ..QueryFilter::default()
+    };
     let entries = repo
-        .get_recent_entries(limit, 0, Some(command), true, directory, true)
+        .get_recent_entries(limit, 0, &filter, directory)
         .map_err(|e| format!("query failed: {e}"))?;
 
     if entries.is_empty() {
@@ -568,7 +584,11 @@ fn handle_command_status(repo: &Repository, args: &Value) -> Result<String, Stri
     Ok(out)
 }
 
-fn handle_get_prompts(repo: &Repository, args: &Value) -> Result<String, String> {
+fn handle_get_prompts(
+    repo: &Repository,
+    args: &Value,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
     let limit = usize::try_from(get_int(args, "limit", 10)).unwrap_or(10);
     let after = get_str(args, "after").and_then(|s| util::parse_date_input(s, false));
     let executor = get_str(args, "executor");
@@ -582,6 +602,7 @@ fn handle_get_prompts(repo: &Repository, args: &Value) -> Result<String, String>
                 after,
                 executor,
                 limit: Some(MAX_PROMPT_ENTRIES),
+                exclude_dirs: &mcp.exclude_dirs,
                 ..Default::default()
             },
         )
@@ -656,7 +677,11 @@ fn handle_get_prompts(repo: &Repository, args: &Value) -> Result<String, String>
     Ok(out)
 }
 
-fn handle_session_history(repo: &Repository, args: &Value) -> Result<String, String> {
+fn handle_session_history(
+    repo: &Repository,
+    args: &Value,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
     let session_id = get_str(args, "session_id");
     let limit = usize::try_from(get_int(args, "limit", 50)).unwrap_or(50);
 
@@ -665,6 +690,7 @@ fn handle_session_history(repo: &Repository, args: &Value) -> Result<String, Str
             session_id,
             &crate::repository::ReplayFilter {
                 limit: Some(limit),
+                exclude_dirs: &mcp.exclude_dirs,
                 ..Default::default()
             },
         )
@@ -712,6 +738,7 @@ fn handle_get_stats(
         cwd_prefix: true,
         failed_only: false,
         bookmarked_only: false,
+        exclude_dirs: &mcp.exclude_dirs,
     };
 
     let total = repo
@@ -877,7 +904,11 @@ fn classify_command(cmd: &str) -> Option<&'static str> {
     None
 }
 
-fn handle_what_changed(repo: &Repository, args: &Value) -> Result<String, String> {
+fn handle_what_changed(
+    repo: &Repository,
+    args: &Value,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
     let hours = get_int(args, "hours", 4);
     let directory = get_str(args, "directory");
     let executor = get_str(args, "executor");
@@ -900,6 +931,7 @@ fn handle_what_changed(repo: &Repository, args: &Value) -> Result<String, String
         cwd_prefix: true,
         failed_only: false,
         bookmarked_only: false,
+        exclude_dirs: &mcp.exclude_dirs,
     };
 
     let entries = repo
@@ -995,6 +1027,7 @@ fn handle_what_failed(
         cwd_prefix: false,
         failed_only: false,
         bookmarked_only: false,
+        exclude_dirs: &mcp.exclude_dirs,
     };
 
     let entries = repo
@@ -1090,7 +1123,11 @@ fn handle_what_failed(
     Ok(out)
 }
 
-fn handle_suggest_next(repo: &Repository, args: &Value) -> Result<String, String> {
+fn handle_suggest_next(
+    repo: &Repository,
+    args: &Value,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
     let limit = usize::try_from(get_int(args, "limit", 10)).unwrap_or(10);
     let directory = get_str(args, "directory");
 
@@ -1112,6 +1149,7 @@ fn handle_suggest_next(repo: &Repository, args: &Value) -> Result<String, String
         cwd_prefix: false,
         failed_only: false,
         bookmarked_only: false,
+        exclude_dirs: &mcp.exclude_dirs,
     };
 
     let entries = repo
@@ -1409,7 +1447,11 @@ fn format_relative_time(ms: i64) -> String {
     }
 }
 
-fn handle_find_agent_session(repo: &Repository, args: &Value) -> Result<String, String> {
+fn handle_find_agent_session(
+    repo: &Repository,
+    args: &Value,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
     let limit = usize::try_from(get_int(args, "limit", 10)).unwrap_or(10);
     let directory = get_str(args, "directory");
     let executor = get_str(args, "executor");
@@ -1432,6 +1474,7 @@ fn handle_find_agent_session(repo: &Repository, args: &Value) -> Result<String, 
         cwd_prefix: true,
         failed_only: false,
         bookmarked_only: false,
+        exclude_dirs: &mcp.exclude_dirs,
     };
 
     let entries = repo
@@ -1490,7 +1533,11 @@ fn handle_find_agent_session(repo: &Repository, args: &Value) -> Result<String, 
 }
 
 #[allow(clippy::too_many_lines)]
-fn handle_replay_agent_session(repo: &Repository, args: &Value) -> Result<String, String> {
+fn handle_replay_agent_session(
+    repo: &Repository,
+    args: &Value,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
     let raw_id = get_str(args, "session_id").ok_or("session_id is required")?;
     let limit = usize::try_from(get_int(args, "limit", 100)).unwrap_or(100);
 
@@ -1498,6 +1545,7 @@ fn handle_replay_agent_session(repo: &Repository, args: &Value) -> Result<String
     let session_id = {
         let filter = crate::repository::ReplayFilter {
             limit: Some(1),
+            exclude_dirs: &mcp.exclude_dirs,
             ..Default::default()
         };
         let try_ids = [
@@ -1523,6 +1571,7 @@ fn handle_replay_agent_session(repo: &Repository, args: &Value) -> Result<String
             Some(&session_id),
             &crate::repository::ReplayFilter {
                 limit: Some(limit),
+                exclude_dirs: &mcp.exclude_dirs,
                 ..Default::default()
             },
         )
@@ -1668,6 +1717,7 @@ fn handle_learn_from_failures(
         cwd_prefix: true,
         failed_only: false,
         bookmarked_only: false,
+        exclude_dirs: &mcp.exclude_dirs,
         ..QueryFilter::default()
     };
 
@@ -1814,6 +1864,7 @@ fn handle_project_context(
         cwd_prefix: true,
         failed_only: false,
         bookmarked_only: false,
+        exclude_dirs: &mcp.exclude_dirs,
         ..QueryFilter::default()
     };
 
@@ -3215,5 +3266,166 @@ mod tests {
         let resp = list_tools(&json!(1), &mcp);
         let tools = resp["result"]["tools"].as_array().unwrap();
         assert!(tools.iter().any(|t| t["name"] == "propose_skill"));
+    }
+
+    // ── mcp.exclude_dirs enforcement ───────────────────────────
+    // exclude_dirs was documented ("Directories to exclude from MCP
+    // queries") and configurable via `suv settings`, but never actually
+    // enforced by any MCP handler — every one of these would have failed
+    // before the fix. Covers each of the three underlying query paths
+    // (QueryFilter entries, QueryFilter aggregate counts, get_recent_entries,
+    // ReplayFilter) so a regression in any of them is caught here.
+
+    fn seed_two_dirs(repo: &Repository) {
+        // Recent (rather than fixed historical) timestamps so this also works
+        // through date-windowed handlers like get_stats (last N days).
+        let now = chrono::Utc::now().timestamp_millis();
+        let session = crate::models::Session {
+            id: "sess-excl".to_string(),
+            hostname: "test".to_string(),
+            created_at: now - 2000,
+            tag_id: None,
+        };
+        repo.insert_session(&session).unwrap();
+
+        repo.insert_entry(&crate::models::Entry::new(
+            "sess-excl".to_string(),
+            "cat id_rsa".to_string(),
+            "/Users/test/.ssh".to_string(),
+            Some(0),
+            now - 2000,
+            now - 1000,
+        ))
+        .unwrap();
+        repo.insert_entry(&crate::models::Entry::new(
+            "sess-excl".to_string(),
+            "cargo build".to_string(),
+            "/Users/test/project".to_string(),
+            Some(0),
+            now - 500,
+            now,
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn test_search_commands_respects_exclude_dirs() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_two_dirs(&repo);
+        let mut mcp = default_mcp();
+        mcp.exclude_dirs = vec!["/Users/test/.ssh".to_string()];
+
+        let text = call_tool(&repo, "search_commands", &json!({"query": ""}), &mcp).unwrap();
+        assert!(text.contains("cargo build"));
+        assert!(!text.contains("id_rsa"), "excluded dir leaked: {text}");
+    }
+
+    #[test]
+    fn test_recent_commands_respects_exclude_dirs() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_two_dirs(&repo);
+        let mut mcp = default_mcp();
+        mcp.exclude_dirs = vec!["/Users/test/.ssh".to_string()];
+
+        // No executor/after args, so this exercises the get_recent_entries path.
+        let text = call_tool(&repo, "recent_commands", &json!({}), &mcp).unwrap();
+        assert!(text.contains("cargo build"));
+        assert!(!text.contains("id_rsa"), "excluded dir leaked: {text}");
+    }
+
+    #[test]
+    fn test_command_status_respects_exclude_dirs() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_two_dirs(&repo);
+        let mut mcp = default_mcp();
+        mcp.exclude_dirs = vec!["/Users/test/.ssh".to_string()];
+
+        let result = call_tool(
+            &repo,
+            "command_status",
+            &json!({"command": "cat id_rsa"}),
+            &mcp,
+        )
+        .unwrap();
+        assert!(
+            result.contains("No previous runs"),
+            "excluded dir's command should be invisible: {result}"
+        );
+    }
+
+    #[test]
+    fn test_session_history_respects_exclude_dirs() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_two_dirs(&repo);
+        let mut mcp = default_mcp();
+        mcp.exclude_dirs = vec!["/Users/test/.ssh".to_string()];
+
+        // ReplayFilter path (get_replay_entries), scoped to the seeded session.
+        let text = call_tool(
+            &repo,
+            "session_history",
+            &json!({"session_id": "sess-excl"}),
+            &mcp,
+        )
+        .unwrap();
+        assert!(text.contains("cargo build"));
+        assert!(!text.contains("id_rsa"), "excluded dir leaked: {text}");
+    }
+
+    #[test]
+    fn test_get_stats_excludes_dirs_from_aggregate_counts() {
+        // Proves exclusion happens at the SQL level, not just in Rust after
+        // fetching — get_stats's `total`/`success` come from count_filtered(),
+        // which never materializes entries to post-filter in the first place.
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_two_dirs(&repo);
+
+        let without_exclusion = call_tool(&repo, "get_stats", &json!({}), &default_mcp()).unwrap();
+        assert!(without_exclusion.contains("Total commands: 2"));
+
+        let mut mcp = default_mcp();
+        mcp.exclude_dirs = vec!["/Users/test/.ssh".to_string()];
+        let with_exclusion = call_tool(&repo, "get_stats", &json!({}), &mcp).unwrap();
+        assert!(
+            with_exclusion.contains("Total commands: 1"),
+            "excluded dir's entry should not count: {with_exclusion}"
+        );
+    }
+
+    #[test]
+    fn test_exclude_dirs_matches_subtree_and_expands_tilde() {
+        // Uses the real $HOME rather than overriding it: HOME is process-global
+        // and cargo test runs tests in parallel threads within one process, so
+        // mutating it here could race with any other test that reads it.
+        let Some(home) = std::env::var_os("HOME") else {
+            return; // nothing to assert without a HOME to expand against
+        };
+        let home = home.to_string_lossy().into_owned();
+
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let session = crate::models::Session {
+            id: "sess-subtree".to_string(),
+            hostname: "test".to_string(),
+            created_at: 1_700_000_000_000,
+            tag_id: None,
+        };
+        repo.insert_session(&session).unwrap();
+        repo.insert_entry(&crate::models::Entry::new(
+            "sess-subtree".to_string(),
+            "ls -la".to_string(),
+            format!("{home}/.suvadu-test-ssh/keys"), // subtree of ~/.suvadu-test-ssh
+            Some(0),
+            1_700_000_000_000,
+            1_700_000_001_000,
+        ))
+        .unwrap();
+
+        let mut mcp = default_mcp();
+        mcp.exclude_dirs = vec!["~/.suvadu-test-ssh".to_string()];
+        let text = call_tool(&repo, "search_commands", &json!({"query": ""}), &mcp).unwrap();
+        assert!(
+            !text.contains("ls -la"),
+            "~-prefixed exclude_dirs should match its subtree: {text}"
+        );
     }
 }

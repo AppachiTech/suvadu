@@ -29,6 +29,9 @@ All notable changes to this project will be documented in this file.
 - **`suv stats`'s content boxes now use rounded borders, and `suv settings`' title matches every other screen** — the earlier visual-consistency pass fixed both screens' title/footer styling but missed `suv stats`' border style and never touched `suv settings`' title casing.
 - **Prompt Explorer's Session field now shows the full session ID** instead of truncating to 8 characters — for agent-run entries that ID is the underlying agent's own session ID (e.g. Claude Code's), and the truncated form wasn't enough to do anything useful with it, like `claude --resume <id>`.
 
+### Security
+- **`mcp.exclude_dirs` is now actually enforced** — this config option was documented and settable via `suv settings`, but no MCP tool or resource handler ever checked it, so directories you'd excluded were still fully readable by any MCP-connected agent. Every tool and resource that reads command history now filters them out at the query level (so it also correctly reduces aggregate counts, not just listed commands), and `~`-prefixed entries (e.g. `~/.ssh`) are expanded and matched against their whole subtree.
+
 ## [0.3.7] - 2026-09-07
 
 ### Added

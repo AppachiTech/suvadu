@@ -88,6 +88,10 @@ pub struct QueryFilter<'a> {
     /// exists in the `bookmarks` table). Powers the Ctrl+O "only bookmarks"
     /// filter in the search TUI. Defaults to `false`.
     pub bookmarked_only: bool,
+    /// Directories (and their subtrees) to exclude from results, i.e.
+    /// `mcp.exclude_dirs`. Empty for every non-MCP caller — only MCP tool/
+    /// resource handlers populate this, from `McpConfig`.
+    pub exclude_dirs: &'a [String],
 }
 
 impl QueryFilter<'_> {
@@ -104,6 +108,7 @@ impl QueryFilter<'_> {
             .with_exclude_agents(self.exclude_agents && self.executor.is_none())
             .with_failed_only(self.failed_only)
             .with_bookmarked_only(self.bookmarked_only)
+            .with_excluded_dirs(self.exclude_dirs)
     }
 }
 
@@ -120,6 +125,9 @@ pub struct ReplayFilter<'a> {
     pub cwd: Option<&'a str>,
     /// Maximum number of entries to return (None = unlimited).
     pub limit: Option<usize>,
+    /// Directories (and their subtrees) to exclude from results, i.e.
+    /// `mcp.exclude_dirs`. Empty for every non-MCP caller.
+    pub exclude_dirs: &'a [String],
 }
 
 /// Escape SQL LIKE wildcards (`%`, `_`) and the escape character (`\`) in user input.
@@ -127,6 +135,23 @@ fn escape_like(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")
+}
+
+/// Expand a leading `~` to `$HOME`, matching how `mcp.exclude_dirs` entries
+/// like `"~/.ssh"` are meant to be written in `config.toml` — recorded
+/// `cwd` values are always absolute, so this must run before comparing.
+fn expand_tilde(dir: &str) -> String {
+    let Some(home) = std::env::var_os("HOME") else {
+        return dir.to_string();
+    };
+    let home = home.to_string_lossy();
+    if dir == "~" {
+        home.into_owned()
+    } else if let Some(rest) = dir.strip_prefix("~/") {
+        format!("{home}/{rest}")
+    } else {
+        dir.to_string()
+    }
 }
 
 /// Builds WHERE clauses and collects parameters for filtered queries.
@@ -172,6 +197,7 @@ impl FilterBuilder {
         self
     }
 
+    #[cfg(test)]
     pub fn with_query(self, query: Option<&str>, prefix_match: bool) -> Self {
         self.with_query_field(query, prefix_match, SearchField::Command)
     }
@@ -243,6 +269,27 @@ impl FilterBuilder {
         self.params.push(Box::new(trimmed.to_string()));
         self.params
             .push(Box::new(format!("{}/%", escape_like(trimmed))));
+        self
+    }
+
+    /// Exclude `dir` and everything beneath it (`dir` or `dir/...`) from
+    /// results — the negation of `with_cwd_subtree`, one clause per
+    /// directory, all `AND`ed together with the rest of the query. Powers
+    /// `mcp.exclude_dirs`: directories an MCP-connected agent must never
+    /// see entries from, regardless of which tool/resource is asking.
+    pub fn with_excluded_dirs(mut self, dirs: &[String]) -> Self {
+        for dir in dirs {
+            let expanded = expand_tilde(dir);
+            let trimmed = expanded.trim().trim_end_matches('/');
+            if trimmed.is_empty() {
+                continue;
+            }
+            self.clauses
+                .push("NOT (e.cwd = ? OR e.cwd LIKE ? ESCAPE '\\')".into());
+            self.params.push(Box::new(trimmed.to_string()));
+            self.params
+                .push(Box::new(format!("{}/%", escape_like(trimmed))));
+        }
         self
     }
 
@@ -518,7 +565,7 @@ impl Repository {
 
 #[cfg(test)]
 mod filter_builder_tests {
-    use super::FilterBuilder;
+    use super::{expand_tilde, FilterBuilder};
     use crate::models::SearchField;
 
     #[test]
@@ -663,6 +710,48 @@ mod filter_builder_tests {
         // None → no clause regardless of prefix
         let none = FilterBuilder::new().with_cwd_mode(None, true);
         assert_eq!(none.build_where(), " WHERE 1=1");
+    }
+
+    #[test]
+    fn with_excluded_dirs_negates_subtree_match_per_dir() {
+        let dirs = vec!["/secrets".to_string(), "/home/x/.ssh".to_string()];
+        let fb = FilterBuilder::new().with_excluded_dirs(&dirs);
+        let where_clause = fb.build_where();
+        assert_eq!(where_clause.matches("NOT (e.cwd = ?").count(), 2);
+        // 2 params (exact + subtree) per excluded dir.
+        assert_eq!(fb.params_refs().len(), 4);
+    }
+
+    #[test]
+    fn with_excluded_dirs_empty_list_is_a_noop() {
+        let fb = FilterBuilder::new().with_excluded_dirs(&[]);
+        assert_eq!(fb.build_where(), " WHERE 1=1");
+        assert!(fb.params_refs().is_empty());
+    }
+
+    #[test]
+    fn with_excluded_dirs_skips_blank_entries() {
+        // A blank/whitespace-only entry must never turn into an unconditional
+        // `NOT (e.cwd = '' OR ...)` clause that (harmlessly, but pointlessly)
+        // touches every row - it should just be ignored.
+        let dirs = vec![String::new(), "  ".to_string()];
+        let fb = FilterBuilder::new().with_excluded_dirs(&dirs);
+        assert_eq!(fb.build_where(), " WHERE 1=1");
+        assert!(fb.params_refs().is_empty());
+    }
+
+    #[test]
+    fn expand_tilde_prefixes_with_home() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let home = home.to_string_lossy().into_owned();
+        assert_eq!(expand_tilde("~/.ssh"), format!("{home}/.ssh"));
+        assert_eq!(expand_tilde("~"), home);
+        // No leading `~` - left untouched.
+        assert_eq!(expand_tilde("/secrets"), "/secrets");
+        // `~` not followed by `/` isn't a home reference (e.g. a username).
+        assert_eq!(expand_tilde("~other"), "~other");
     }
 
     #[test]

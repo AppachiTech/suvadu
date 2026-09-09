@@ -71,16 +71,16 @@ pub fn read_resource(
     }
     let content = match uri {
         "suvadu://history/recent" => read_recent_history(repo, mcp)?,
-        "suvadu://failures/recent" => read_recent_failures(repo)?,
-        "suvadu://stats/today" => read_today_stats(repo)?,
-        "suvadu://risk/summary" => read_risk_summary(repo)?,
-        "suvadu://agents/activity" => read_agent_activity(repo)?,
-        "suvadu://agents/sessions" => read_agent_sessions(repo)?,
-        "suvadu://context/project" => read_project_context(repo)?,
+        "suvadu://failures/recent" => read_recent_failures(repo, mcp)?,
+        "suvadu://stats/today" => read_today_stats(repo, mcp)?,
+        "suvadu://risk/summary" => read_risk_summary(repo, mcp)?,
+        "suvadu://agents/activity" => read_agent_activity(repo, mcp)?,
+        "suvadu://agents/sessions" => read_agent_sessions(repo, mcp)?,
+        "suvadu://context/project" => read_project_context(repo, mcp)?,
         "suvadu://skills/index" => read_skills_index(repo)?,
         _ if uri.starts_with("suvadu://history/session/") => {
             let session_id = uri.strip_prefix("suvadu://history/session/").unwrap_or("");
-            read_session_history(repo, session_id)?
+            read_session_history(repo, session_id, mcp)?
         }
         _ => return Err(format!("Unknown resource: {uri}")),
     };
@@ -112,8 +112,12 @@ fn read_recent_history(
     mcp: &crate::config::McpConfig,
 ) -> Result<String, String> {
     let limit = usize::try_from(mcp.default_limit).unwrap_or(20);
+    let filter = QueryFilter {
+        exclude_dirs: &mcp.exclude_dirs,
+        ..QueryFilter::default()
+    };
     let entries = repo
-        .get_recent_entries(limit, 0, None, false, None, true)
+        .get_recent_entries(limit, 0, &filter, None)
         .map_err(|e| format!("query failed: {e}"))?;
 
     if entries.is_empty() {
@@ -142,7 +146,10 @@ fn read_recent_history(
     Ok(out)
 }
 
-fn read_recent_failures(repo: &Repository) -> Result<String, String> {
+fn read_recent_failures(
+    repo: &Repository,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
     let now = chrono::Utc::now().timestamp_millis();
     let day_ago = now - 24 * 60 * 60 * 1000;
 
@@ -160,6 +167,7 @@ fn read_recent_failures(repo: &Repository) -> Result<String, String> {
         cwd_prefix: false,
         failed_only: false,
         bookmarked_only: false,
+        exclude_dirs: &mcp.exclude_dirs,
     };
 
     let entries = repo
@@ -201,7 +209,7 @@ fn read_recent_failures(repo: &Repository) -> Result<String, String> {
     Ok(out)
 }
 
-fn read_today_stats(repo: &Repository) -> Result<String, String> {
+fn read_today_stats(repo: &Repository, mcp: &crate::config::McpConfig) -> Result<String, String> {
     let now = chrono::Utc::now().timestamp_millis();
     let today_start = now - (now % (24 * 60 * 60 * 1000));
 
@@ -219,6 +227,7 @@ fn read_today_stats(repo: &Repository) -> Result<String, String> {
         cwd_prefix: false,
         failed_only: false,
         bookmarked_only: false,
+        exclude_dirs: &mcp.exclude_dirs,
     };
 
     let total = repo
@@ -281,7 +290,7 @@ fn read_today_stats(repo: &Repository) -> Result<String, String> {
     Ok(out)
 }
 
-fn read_risk_summary(repo: &Repository) -> Result<String, String> {
+fn read_risk_summary(repo: &Repository, mcp: &crate::config::McpConfig) -> Result<String, String> {
     use crate::risk;
 
     let now = chrono::Utc::now().timestamp_millis();
@@ -301,6 +310,7 @@ fn read_risk_summary(repo: &Repository) -> Result<String, String> {
         cwd_prefix: false,
         failed_only: false,
         bookmarked_only: false,
+        exclude_dirs: &mcp.exclude_dirs,
     };
 
     let entries = repo
@@ -344,7 +354,10 @@ fn read_risk_summary(repo: &Repository) -> Result<String, String> {
     Ok(out)
 }
 
-fn read_agent_activity(repo: &Repository) -> Result<String, String> {
+fn read_agent_activity(
+    repo: &Repository,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
     let executors = repo
         .get_distinct_executors()
         .map_err(|e| format!("query failed: {e}"))?;
@@ -381,6 +394,7 @@ fn read_agent_activity(repo: &Repository) -> Result<String, String> {
             cwd_prefix: false,
             failed_only: false,
             bookmarked_only: false,
+            exclude_dirs: &mcp.exclude_dirs,
         };
 
         let total = repo.count_filtered(&qf).unwrap_or(0);
@@ -414,7 +428,10 @@ fn relative_time(now: i64, ms: i64) -> String {
     }
 }
 
-fn read_agent_sessions(repo: &Repository) -> Result<String, String> {
+fn read_agent_sessions(
+    repo: &Repository,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
     let now = chrono::Utc::now().timestamp_millis();
     let week_ago = now - 7 * 24 * 60 * 60 * 1000;
 
@@ -432,6 +449,7 @@ fn read_agent_sessions(repo: &Repository) -> Result<String, String> {
         cwd_prefix: false,
         failed_only: false,
         bookmarked_only: false,
+        exclude_dirs: &mcp.exclude_dirs,
     };
 
     let entries = repo
@@ -551,7 +569,10 @@ fn format_high_fail_rate(entries: &[crate::models::Entry], after: i64, out: &mut
     }
 }
 
-fn read_project_context(repo: &Repository) -> Result<String, String> {
+fn read_project_context(
+    repo: &Repository,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
     let now = chrono::Utc::now().timestamp_millis();
     let week_ago = now - 7 * 24 * 60 * 60 * 1000;
     let day_ago = now - 24 * 60 * 60 * 1000;
@@ -559,6 +580,7 @@ fn read_project_context(repo: &Repository) -> Result<String, String> {
     // Get recent entries for this project (last 7 days)
     let qf = QueryFilter {
         after: Some(week_ago),
+        exclude_dirs: &mcp.exclude_dirs,
         ..QueryFilter::default()
     };
     let entries = repo
@@ -688,7 +710,11 @@ fn read_skills_index(repo: &Repository) -> Result<String, String> {
     Ok(out)
 }
 
-fn read_session_history(repo: &Repository, session_id: &str) -> Result<String, String> {
+fn read_session_history(
+    repo: &Repository,
+    session_id: &str,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
     if session_id.is_empty() {
         return Err("session_id is required".to_string());
     }
@@ -698,6 +724,7 @@ fn read_session_history(repo: &Repository, session_id: &str) -> Result<String, S
             Some(session_id),
             &crate::repository::ReplayFilter {
                 limit: Some(100),
+                exclude_dirs: &mcp.exclude_dirs,
                 ..Default::default()
             },
         )
@@ -1095,5 +1122,50 @@ mod tests {
             "should contain command: {text}"
         );
         assert!(text.contains("/project"), "should contain dir: {text}");
+    }
+
+    #[test]
+    fn test_read_resource_respects_exclude_dirs() {
+        // mcp.exclude_dirs was documented and configurable but never enforced
+        // by any resource handler before this test existed.
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let session = crate::models::Session {
+            id: "s-excl".to_string(),
+            hostname: "test".to_string(),
+            created_at: chrono::Utc::now().timestamp_millis(),
+            tag_id: None,
+        };
+        repo.insert_session(&session).unwrap();
+        repo.insert_entry(&crate::models::Entry::new(
+            "s-excl".to_string(),
+            "cat id_rsa".to_string(),
+            "/Users/test/.ssh".to_string(),
+            Some(0),
+            chrono::Utc::now().timestamp_millis() - 1000,
+            chrono::Utc::now().timestamp_millis(),
+        ))
+        .unwrap();
+        repo.insert_entry(&crate::models::Entry::new(
+            "s-excl".to_string(),
+            "cargo build".to_string(),
+            "/Users/test/project".to_string(),
+            Some(0),
+            chrono::Utc::now().timestamp_millis() - 500,
+            chrono::Utc::now().timestamp_millis(),
+        ))
+        .unwrap();
+
+        let mcp = crate::config::McpConfig {
+            exclude_dirs: vec!["/Users/test/.ssh".to_string()],
+            ..Default::default()
+        };
+
+        let result = read_resource(&repo, "suvadu://history/recent", &mcp);
+        let text = result.unwrap()["contents"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(text.contains("cargo build"));
+        assert!(!text.contains("id_rsa"), "excluded dir leaked: {text}");
     }
 }

@@ -314,6 +314,7 @@ fn check_database() -> CheckResult {
             cwd_prefix: false,
             failed_only: false,
             bookmarked_only: false,
+            exclude_dirs: &[],
         })
         .unwrap_or(0);
 

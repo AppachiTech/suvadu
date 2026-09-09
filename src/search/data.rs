@@ -91,6 +91,7 @@ impl SearchApp {
             cwd_prefix: false,
             failed_only: self.filters.failed_only,
             bookmarked_only: self.filters.bookmarks_only,
+            exclude_dirs: &[],
         }
     }
 

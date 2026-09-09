@@ -69,6 +69,7 @@ pub fn handle_status() -> Result<(), Box<dyn std::error::Error>> {
                     cwd_prefix: false,
                     failed_only: false,
                     bookmarked_only: false,
+                    exclude_dirs: &[],
                 })
                 .unwrap_or(0);
             println!("  Commands: {total} recorded");

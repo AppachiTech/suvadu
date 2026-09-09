@@ -78,7 +78,7 @@ fn test_backup_to_creates_consistent_copy() {
     // The copy must be a valid DB with the same entries.
     let copy = Repository::new(crate::db::init_db(&dest).unwrap());
     let entries = copy
-        .get_recent_entries(100, 0, None, false, None, true)
+        .get_recent_entries(100, 0, &QueryFilter::default(), None)
         .unwrap();
     assert_eq!(entries.len(), 3);
 }
@@ -700,7 +700,7 @@ fn test_recent_entries_shows_failed_commands() {
 
     // get_recent_entries should return BOTH invocations (no dedup)
     let results = repo
-        .get_recent_entries(10, 0, None, false, None, true)
+        .get_recent_entries(10, 0, &QueryFilter::default(), None)
         .unwrap();
     assert_eq!(results.len(), 2);
     // Most recent first
@@ -745,7 +745,7 @@ fn test_recent_entries_recency_beats_cwd_boost() {
     // Even with boost_cwd=/project, the newer /other command must come first —
     // it must NOT be buried beneath every same-directory command.
     let results = repo
-        .get_recent_entries(10, 0, None, false, Some("/project"), true)
+        .get_recent_entries(10, 0, &QueryFilter::default(), Some("/project"))
         .unwrap();
     assert_eq!(results.len(), 2);
     assert_eq!(
@@ -782,7 +782,7 @@ fn test_recent_entries_cwd_boost_breaks_ties() {
     .unwrap();
 
     let results = repo
-        .get_recent_entries(10, 0, None, false, Some("/project"), true)
+        .get_recent_entries(10, 0, &QueryFilter::default(), Some("/project"))
         .unwrap();
     assert_eq!(results.len(), 2);
     assert_eq!(
@@ -834,7 +834,15 @@ fn test_recent_entries_hides_agent_commands_by_default() {
 
     // Default (include_agents=false): agent command is hidden, human + ide show.
     let hidden = repo
-        .get_recent_entries(10, 0, None, false, None, false)
+        .get_recent_entries(
+            10,
+            0,
+            &QueryFilter {
+                exclude_agents: true,
+                ..QueryFilter::default()
+            },
+            None,
+        )
         .unwrap();
     let cmds: Vec<&str> = hidden.iter().map(|e| e.command.as_str()).collect();
     assert!(
@@ -846,7 +854,7 @@ fn test_recent_entries_hides_agent_commands_by_default() {
 
     // include_agents=true: everything shows, most recent (agent) first.
     let shown = repo
-        .get_recent_entries(10, 0, None, false, None, true)
+        .get_recent_entries(10, 0, &QueryFilter::default(), None)
         .unwrap();
     assert_eq!(shown.len(), 3);
     assert_eq!(shown[0].command, "grep -rn foo");
@@ -880,7 +888,16 @@ fn test_recent_entries_prefix_match() {
 
     // Prefix match for "git" should only return "git status"
     let results = repo
-        .get_recent_entries(10, 0, Some("git"), true, None, true)
+        .get_recent_entries(
+            10,
+            0,
+            &QueryFilter {
+                query: Some("git"),
+                prefix_match: true,
+                ..QueryFilter::default()
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].command, "git status");

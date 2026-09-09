@@ -488,6 +488,7 @@ pub fn run_search(
         cwd_prefix: false,
         failed_only: args.failed_only,
         bookmarked_only: false,
+        exclude_dirs: &[],
     };
 
     let (entries, total_count, unique_counts) =

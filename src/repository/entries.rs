@@ -130,7 +130,8 @@ impl Repository {
             .with_tag(filter.tag_id)
             .with_exit_code(filter.exit_code)
             .with_executor(filter.executor)
-            .with_cwd(filter.cwd);
+            .with_cwd(filter.cwd)
+            .with_excluded_dirs(filter.exclude_dirs);
 
         let limit_clause = if filter.limit.is_some() {
             " LIMIT ?"
@@ -219,14 +220,10 @@ impl Repository {
         &self,
         limit: usize,
         offset: usize,
-        query: Option<&str>,
-        prefix_match: bool,
+        filter: &super::QueryFilter,
         boost_cwd: Option<&str>,
-        include_agents: bool,
     ) -> DbResult<Vec<Entry>> {
-        let mut fb = FilterBuilder::new()
-            .with_query(query, prefix_match)
-            .with_exclude_agents(!include_agents);
+        let mut fb = filter.to_filter_builder();
 
         // Recency is the PRIMARY sort key so the just-typed command is always at
         // offset 0 regardless of which directory it ran in (a `cd` away must not

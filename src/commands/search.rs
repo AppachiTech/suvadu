@@ -126,8 +126,13 @@ fn get_from_repo(
     include_agents: bool,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
     let query_opt = if query.is_empty() { None } else { Some(query) };
-    let results =
-        repo.get_recent_entries(1, offset, query_opt, prefix, boost_cwd, include_agents)?;
+    let filter = crate::repository::QueryFilter {
+        query: query_opt,
+        prefix_match: prefix,
+        exclude_agents: !include_agents,
+        ..Default::default()
+    };
+    let results = repo.get_recent_entries(1, offset, &filter, boost_cwd)?;
     Ok(results.into_iter().next().map(|e| e.command))
 }
 
