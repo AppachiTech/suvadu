@@ -16,24 +16,30 @@ use ratatui::{
 use std::io;
 use std::time::Instant;
 
-/// Cap on the in-memory bookmark search box, matching the scope of a filter
-/// field (not a document editor).
-const MAX_SEARCH_LEN: usize = 200;
+/// Cap on the in-memory bookmark search/form fields, matching the scope of
+/// a filter field (not a document editor).
+const MAX_FIELD_LEN: usize = 200;
 
-/// Focus within the add-bookmark form.
+/// Focus within the add/edit form.
 #[derive(PartialEq, Eq)]
-enum AddFocus {
+enum FormFocus {
     Command,
     Label,
 }
 
 enum Mode {
     Browse,
-    Add {
+    /// Add when `editing` is `None`; Edit (pre-filled, tracking the
+    /// original command so a rename can remove the old row) otherwise.
+    Form {
+        editing: Option<String>,
         command_input: String,
         label_input: String,
-        focus: AddFocus,
+        focus: FormFocus,
         error: Option<String>,
+    },
+    ConfirmDelete {
+        command: String,
     },
 }
 
@@ -99,25 +105,59 @@ impl PickerApp {
         }
     }
 
-    fn selected_command(&self) -> Option<String> {
+    fn selected_bookmark(&self) -> Option<&Bookmark> {
         self.list_state
             .selected()
             .and_then(|i| self.filtered.get(i))
             .and_then(|&idx| self.bookmarks.get(idx))
-            .map(|b| b.command.clone())
+    }
+
+    fn selected_command(&self) -> Option<String> {
+        self.selected_bookmark().map(|b| b.command.clone())
+    }
+
+    fn start_add(&mut self) {
+        self.mode = Mode::Form {
+            editing: None,
+            command_input: String::new(),
+            label_input: String::new(),
+            focus: FormFocus::Command,
+            error: None,
+        };
+    }
+
+    fn start_edit(&mut self) {
+        if let Some(b) = self.selected_bookmark() {
+            self.mode = Mode::Form {
+                editing: Some(b.command.clone()),
+                command_input: b.command.clone(),
+                label_input: b.label.clone().unwrap_or_default(),
+                focus: FormFocus::Command,
+                error: None,
+            };
+        }
+    }
+
+    fn start_delete(&mut self) {
+        if let Some(b) = self.selected_bookmark() {
+            self.mode = Mode::ConfirmDelete {
+                command: b.command.clone(),
+            };
+        }
     }
 
     /// Reload bookmarks from the database and re-apply the current filter —
-    /// used after adding one, so a fresh in-memory duplicate never drifts
-    /// from what `list_bookmarks` (and its ON CONFLICT upsert) actually did.
+    /// used after any write, so the in-memory list never drifts from what
+    /// the database (and its ON CONFLICT upsert) actually did.
     fn reload(&mut self, repo: &Repository) -> Result<(), Box<dyn std::error::Error>> {
         self.bookmarks = repo.list_bookmarks()?;
         self.apply_filter();
         Ok(())
     }
 
-    fn submit_add(&mut self, repo: &Repository) -> Result<(), Box<dyn std::error::Error>> {
-        let Mode::Add {
+    fn submit_form(&mut self, repo: &Repository) -> Result<(), Box<dyn std::error::Error>> {
+        let Mode::Form {
+            editing,
             command_input,
             label_input,
             error,
@@ -126,18 +166,49 @@ impl PickerApp {
         else {
             return Ok(());
         };
-        let command = command_input.trim();
+        let command = command_input.trim().to_string();
         if command.is_empty() {
             *error = Some("Command is required".to_string());
             return Ok(());
         }
         let label = label_input.trim();
-        let label = if label.is_empty() { None } else { Some(label) };
-        repo.add_bookmark(command, label)?;
-        let added = command.to_string();
+        let label = if label.is_empty() {
+            None
+        } else {
+            Some(label.to_string())
+        };
+        let editing = editing.clone();
+
+        // Bookmarks are keyed by command text (UNIQUE), so renaming one
+        // means removing the old row rather than letting add_bookmark's
+        // upsert leave a stale duplicate behind under the old command.
+        if let Some(original) = &editing {
+            if original != &command {
+                repo.remove_bookmark(original)?;
+            }
+        }
+        repo.add_bookmark(&command, label.as_deref())?;
+
+        let verb = if editing.is_some() {
+            "Updated"
+        } else {
+            "Added"
+        };
         self.mode = Mode::Browse;
         self.reload(repo)?;
-        self.status = Some((format!("Added: {added}"), Instant::now()));
+        self.status = Some((format!("{verb}: {command}"), Instant::now()));
+        Ok(())
+    }
+
+    fn confirm_delete(&mut self, repo: &Repository) -> Result<(), Box<dyn std::error::Error>> {
+        let Mode::ConfirmDelete { command } = &self.mode else {
+            return Ok(());
+        };
+        let command = command.clone();
+        repo.remove_bookmark(&command)?;
+        self.mode = Mode::Browse;
+        self.reload(repo)?;
+        self.status = Some((format!("Removed: {command}"), Instant::now()));
         Ok(())
     }
 }
@@ -163,17 +234,16 @@ pub fn pick_bookmark(repo: &Repository) -> Result<Option<String>, Box<dyn std::e
             if key.kind != KeyEventKind::Press {
                 continue;
             }
-            match &mut app.mode {
-                Mode::Add { .. } => handle_add_input(&mut app, repo, key)?,
+            match &app.mode {
+                Mode::Form { .. } => handle_form_input(&mut app, repo, key)?,
+                Mode::ConfirmDelete { .. } => handle_confirm_delete_input(&mut app, repo, key)?,
                 Mode::Browse => {
                     if key.modifiers.contains(KeyModifiers::CONTROL) {
-                        if key.code == KeyCode::Char('a') {
-                            app.mode = Mode::Add {
-                                command_input: String::new(),
-                                label_input: String::new(),
-                                focus: AddFocus::Command,
-                                error: None,
-                            };
+                        match key.code {
+                            KeyCode::Char('a') => app.start_add(),
+                            KeyCode::Char('e') => app.start_edit(),
+                            KeyCode::Char('d') => app.start_delete(),
+                            _ => {}
                         }
                         continue;
                     }
@@ -190,7 +260,7 @@ pub fn pick_bookmark(repo: &Repository) -> Result<Option<String>, Box<dyn std::e
                             app.query.pop();
                             app.apply_filter();
                         }
-                        KeyCode::Char(c) if app.query.len() + c.len_utf8() <= MAX_SEARCH_LEN => {
+                        KeyCode::Char(c) if app.query.len() + c.len_utf8() <= MAX_FIELD_LEN => {
                             app.query.push(c);
                             app.apply_filter();
                         }
@@ -205,16 +275,17 @@ pub fn pick_bookmark(repo: &Repository) -> Result<Option<String>, Box<dyn std::e
     Ok(result)
 }
 
-fn handle_add_input(
+fn handle_form_input(
     app: &mut PickerApp,
     repo: &Repository,
     key: crossterm::event::KeyEvent,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let Mode::Add {
+    let Mode::Form {
         command_input,
         label_input,
         focus,
         error,
+        ..
     } = &mut app.mode
     else {
         return Ok(());
@@ -223,24 +294,24 @@ fn handle_add_input(
         KeyCode::Esc => app.mode = Mode::Browse,
         KeyCode::Tab | KeyCode::Down | KeyCode::Up => {
             *focus = match focus {
-                AddFocus::Command => AddFocus::Label,
-                AddFocus::Label => AddFocus::Command,
+                FormFocus::Command => FormFocus::Label,
+                FormFocus::Label => FormFocus::Command,
             };
         }
         KeyCode::Enter => {
-            if *focus == AddFocus::Command {
-                *focus = AddFocus::Label;
+            if *focus == FormFocus::Command {
+                *focus = FormFocus::Label;
             } else {
-                app.submit_add(repo)?;
+                app.submit_form(repo)?;
             }
         }
         KeyCode::Backspace => {
             *error = None;
             match focus {
-                AddFocus::Command => {
+                FormFocus::Command => {
                     command_input.pop();
                 }
-                AddFocus::Label => {
+                FormFocus::Label => {
                     label_input.pop();
                 }
             }
@@ -248,13 +319,26 @@ fn handle_add_input(
         KeyCode::Char(c) => {
             *error = None;
             let field = match focus {
-                AddFocus::Command => &mut *command_input,
-                AddFocus::Label => &mut *label_input,
+                FormFocus::Command => &mut *command_input,
+                FormFocus::Label => &mut *label_input,
             };
-            if field.len() + c.len_utf8() <= MAX_SEARCH_LEN {
+            if field.len() + c.len_utf8() <= MAX_FIELD_LEN {
                 field.push(c);
             }
         }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_confirm_delete_input(
+    app: &mut PickerApp,
+    repo: &Repository,
+    key: crossterm::event::KeyEvent,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match key.code {
+        KeyCode::Char('y' | 'Y') => app.confirm_delete(repo)?,
+        KeyCode::Char('n' | 'N') | KeyCode::Esc => app.mode = Mode::Browse,
         _ => {}
     }
     Ok(())
@@ -275,14 +359,24 @@ fn render(f: &mut ratatui::Frame, app: &mut PickerApp) {
     render_list(f, app, chunks[1], t);
     render_footer(f, app, chunks[2], t);
 
-    if let Mode::Add {
-        command_input,
-        label_input,
-        focus,
-        error,
-    } = &app.mode
-    {
-        render_add_dialog(f, command_input, label_input, focus, error.as_deref(), t);
+    match &app.mode {
+        Mode::Form {
+            editing,
+            command_input,
+            label_input,
+            focus,
+            error,
+        } => render_form_dialog(
+            f,
+            editing.is_some(),
+            command_input,
+            label_input,
+            focus,
+            error.as_deref(),
+            t,
+        ),
+        Mode::ConfirmDelete { command } => render_confirm_delete_dialog(f, command, t),
+        Mode::Browse => {}
     }
 }
 
@@ -363,12 +457,18 @@ fn render_footer(f: &mut ratatui::Frame, app: &PickerApp, area: Rect, t: &crate:
     let badge_label = Style::default().fg(t.text_secondary);
 
     let mut spans = match &app.mode {
-        Mode::Add { .. } => vec![
+        Mode::Form { .. } => vec![
             Span::styled(" Enter ", badge_key),
             Span::styled(" Next/Confirm  ", badge_label),
             Span::styled(" Tab ", badge_key),
             Span::styled(" Switch field  ", badge_label),
             Span::styled(" Esc ", badge_key),
+            Span::styled(" Cancel  ", badge_label),
+        ],
+        Mode::ConfirmDelete { .. } => vec![
+            Span::styled(" y ", badge_key),
+            Span::styled(" Confirm  ", badge_label),
+            Span::styled(" n/Esc ", badge_key),
             Span::styled(" Cancel  ", badge_label),
         ],
         Mode::Browse => vec![
@@ -378,6 +478,10 @@ fn render_footer(f: &mut ratatui::Frame, app: &PickerApp, area: Rect, t: &crate:
             Span::styled(" Recall  ", badge_label),
             Span::styled(" ^A ", badge_key),
             Span::styled(" Add  ", badge_label),
+            Span::styled(" ^E ", badge_key),
+            Span::styled(" Edit  ", badge_label),
+            Span::styled(" ^D ", badge_key),
+            Span::styled(" Delete  ", badge_label),
             Span::styled(" Esc ", badge_key),
             Span::styled(" Quit  ", badge_label),
         ],
@@ -395,11 +499,12 @@ fn render_footer(f: &mut ratatui::Frame, app: &PickerApp, area: Rect, t: &crate:
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn render_add_dialog(
+fn render_form_dialog(
     f: &mut ratatui::Frame,
+    editing: bool,
     command_input: &str,
     label_input: &str,
-    focus: &AddFocus,
+    focus: &FormFocus,
     error: Option<&str>,
     t: &crate::theme::Theme,
 ) {
@@ -407,12 +512,17 @@ fn render_add_dialog(
     let area = centered_rect(f.area(), 60, 9);
     f.render_widget(Clear, area);
 
+    let title = if editing {
+        " Edit Bookmark "
+    } else {
+        " Add Bookmark "
+    };
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(t.border_focus))
         .title(Span::styled(
-            " Add Bookmark ",
+            title,
             Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
         ));
     let inner = outer.inner(area);
@@ -432,7 +542,7 @@ fn render_add_dialog(
         rows[0],
         "Command",
         command_input,
-        *focus == AddFocus::Command,
+        *focus == FormFocus::Command,
         t,
     );
     render_field(
@@ -440,7 +550,7 @@ fn render_add_dialog(
         rows[1],
         "Label (optional)",
         label_input,
-        *focus == AddFocus::Label,
+        *focus == FormFocus::Label,
         t,
     );
 
@@ -475,6 +585,33 @@ fn render_field(
             .title(title),
     );
     f.render_widget(field, area);
+}
+
+fn render_confirm_delete_dialog(f: &mut ratatui::Frame, command: &str, t: &crate::theme::Theme) {
+    let area = centered_rect(f.area(), 60, 3);
+    f.render_widget(Clear, area);
+
+    let display = crate::util::truncate_str(command, 48, "…");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(t.warning))
+        .title(Span::styled(
+            " Confirm delete ",
+            Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let text = Paragraph::new(Line::from(vec![
+        Span::styled("Delete bookmark ", Style::default().fg(t.text)),
+        Span::styled(
+            format!("'{display}'"),
+            Style::default().fg(t.text).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("? [y/N]", Style::default().fg(t.text)),
+    ]));
+    f.render_widget(text, inner);
 }
 
 /// A fixed-size rect centered within `area`.
@@ -598,51 +735,157 @@ mod tests {
     }
 
     #[test]
-    fn submit_add_rejects_empty_command() {
+    fn submit_form_rejects_empty_command() {
         let (_dir, repo) = crate::test_utils::test_repo();
         let mut app = PickerApp::new(vec![]);
-        app.mode = Mode::Add {
+        app.mode = Mode::Form {
+            editing: None,
             command_input: "   ".to_string(),
             label_input: String::new(),
-            focus: AddFocus::Label,
+            focus: FormFocus::Label,
             error: None,
         };
-        app.submit_add(&repo).unwrap();
-        // Still in Add mode with an error, nothing written.
-        assert!(matches!(app.mode, Mode::Add { .. }));
+        app.submit_form(&repo).unwrap();
+        // Still in Form mode with an error, nothing written.
+        assert!(matches!(app.mode, Mode::Form { .. }));
         assert!(app.bookmarks.is_empty());
     }
 
     #[test]
-    fn submit_add_writes_bookmark_and_returns_to_browse() {
+    fn submit_form_adds_bookmark_and_returns_to_browse() {
         let (_dir, repo) = crate::test_utils::test_repo();
         let mut app = PickerApp::new(vec![]);
-        app.mode = Mode::Add {
+        app.mode = Mode::Form {
+            editing: None,
             command_input: "git status".to_string(),
             label_input: "check repo".to_string(),
-            focus: AddFocus::Label,
+            focus: FormFocus::Label,
             error: None,
         };
-        app.submit_add(&repo).unwrap();
+        app.submit_form(&repo).unwrap();
         assert!(matches!(app.mode, Mode::Browse));
         assert_eq!(app.bookmarks.len(), 1);
         assert_eq!(app.bookmarks[0].command, "git status");
         assert_eq!(app.bookmarks[0].label.as_deref(), Some("check repo"));
         assert_eq!(app.filtered.len(), 1);
+        assert_eq!(
+            app.status.as_ref().map(|(m, _)| m.as_str()),
+            Some("Added: git status")
+        );
     }
 
     #[test]
-    fn submit_add_trims_whitespace_and_empty_label_becomes_none() {
+    fn submit_form_trims_whitespace_and_empty_label_becomes_none() {
         let (_dir, repo) = crate::test_utils::test_repo();
         let mut app = PickerApp::new(vec![]);
-        app.mode = Mode::Add {
+        app.mode = Mode::Form {
+            editing: None,
             command_input: "  cargo test  ".to_string(),
             label_input: "   ".to_string(),
-            focus: AddFocus::Label,
+            focus: FormFocus::Label,
             error: None,
         };
-        app.submit_add(&repo).unwrap();
+        app.submit_form(&repo).unwrap();
         assert_eq!(app.bookmarks[0].command, "cargo test");
         assert_eq!(app.bookmarks[0].label, None);
+    }
+
+    #[test]
+    fn start_edit_prefills_form_from_selected_bookmark() {
+        let mut app = PickerApp::new(vec![make_bookmark(1, "git status", Some("check repo"))]);
+        app.start_edit();
+        match app.mode {
+            Mode::Form {
+                editing,
+                command_input,
+                label_input,
+                ..
+            } => {
+                assert_eq!(editing.as_deref(), Some("git status"));
+                assert_eq!(command_input, "git status");
+                assert_eq!(label_input, "check repo");
+            }
+            _ => panic!("expected Form mode"),
+        }
+    }
+
+    #[test]
+    fn start_edit_on_empty_list_is_noop() {
+        let mut app = PickerApp::new(vec![]);
+        app.start_edit();
+        assert!(matches!(app.mode, Mode::Browse));
+    }
+
+    #[test]
+    fn submit_form_editing_same_command_updates_label_in_place() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        repo.add_bookmark("git status", Some("old label")).unwrap();
+        let mut app = PickerApp::new(repo.list_bookmarks().unwrap());
+        app.mode = Mode::Form {
+            editing: Some("git status".to_string()),
+            command_input: "git status".to_string(),
+            label_input: "new label".to_string(),
+            focus: FormFocus::Label,
+            error: None,
+        };
+        app.submit_form(&repo).unwrap();
+        assert_eq!(app.bookmarks.len(), 1);
+        assert_eq!(app.bookmarks[0].label.as_deref(), Some("new label"));
+        assert_eq!(
+            app.status.as_ref().map(|(m, _)| m.as_str()),
+            Some("Updated: git status")
+        );
+    }
+
+    #[test]
+    fn submit_form_editing_renamed_command_removes_old_row() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        repo.add_bookmark("git status", None).unwrap();
+        let mut app = PickerApp::new(repo.list_bookmarks().unwrap());
+        app.mode = Mode::Form {
+            editing: Some("git status".to_string()),
+            command_input: "git status -sb".to_string(),
+            label_input: String::new(),
+            focus: FormFocus::Label,
+            error: None,
+        };
+        app.submit_form(&repo).unwrap();
+        // Only the renamed bookmark remains — no leftover "git status" row.
+        assert_eq!(app.bookmarks.len(), 1);
+        assert_eq!(app.bookmarks[0].command, "git status -sb");
+    }
+
+    #[test]
+    fn start_delete_opens_confirm_dialog_with_selected_command() {
+        let mut app = PickerApp::new(vec![make_bookmark(1, "git status", None)]);
+        app.start_delete();
+        match app.mode {
+            Mode::ConfirmDelete { command } => assert_eq!(command, "git status"),
+            _ => panic!("expected ConfirmDelete mode"),
+        }
+    }
+
+    #[test]
+    fn start_delete_on_empty_list_is_noop() {
+        let mut app = PickerApp::new(vec![]);
+        app.start_delete();
+        assert!(matches!(app.mode, Mode::Browse));
+    }
+
+    #[test]
+    fn confirm_delete_removes_bookmark_and_returns_to_browse() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        repo.add_bookmark("git status", None).unwrap();
+        let mut app = PickerApp::new(repo.list_bookmarks().unwrap());
+        app.mode = Mode::ConfirmDelete {
+            command: "git status".to_string(),
+        };
+        app.confirm_delete(&repo).unwrap();
+        assert!(matches!(app.mode, Mode::Browse));
+        assert!(app.bookmarks.is_empty());
+        assert_eq!(
+            app.status.as_ref().map(|(m, _)| m.as_str()),
+            Some("Removed: git status")
+        );
     }
 }
