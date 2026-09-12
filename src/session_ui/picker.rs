@@ -27,6 +27,25 @@ enum PickerAction {
 // ── Filter state ────────────────────────────────────────────
 
 const NUM_FILTER_FIELDS: usize = 3;
+const PAGE_SIZE: usize = 50;
+
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum KindFilter {
+    #[default]
+    All,
+    Human,
+    Ai,
+}
+
+impl KindFilter {
+    const fn next(self) -> Self {
+        match self {
+            Self::All => Self::Human,
+            Self::Human => Self::Ai,
+            Self::Ai => Self::All,
+        }
+    }
+}
 
 #[derive(Default)]
 struct PickerFilter {
@@ -44,6 +63,7 @@ struct PickerFilter {
     tag_query: String,
     after_ms: Option<i64>,
     before_ms: Option<i64>,
+    kind: KindFilter,
 }
 
 // ── App ─────────────────────────────────────────────────────
@@ -52,7 +72,40 @@ struct PickerApp {
     sessions: Vec<SessionSummary>,
     visible: Vec<usize>,
     table_state: TableState,
+    /// One-based page within the filtered session list.
+    page: usize,
     filter: PickerFilter,
+}
+
+fn compact_model(summary: &SessionSummary) -> String {
+    let Some(model) = summary.model.as_deref() else {
+        return "—".into();
+    };
+    let earlier = summary.models.len().saturating_sub(1);
+    if earlier == 0 {
+        model.into()
+    } else {
+        format!("{model} +{earlier}")
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn format_tokens(summary: &SessionSummary) -> String {
+    let Some(tokens) = summary.total_tokens else {
+        return "—".into();
+    };
+    let value = if tokens >= 1_000_000 {
+        format!("{:.1}m", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
+    };
+    if summary.usage_complete {
+        value
+    } else {
+        format!("~{value}")
+    }
 }
 
 impl PickerApp {
@@ -66,6 +119,7 @@ impl PickerApp {
             sessions,
             visible,
             table_state,
+            page: 1,
             filter: PickerFilter::default(),
         }
     }
@@ -86,7 +140,17 @@ impl PickerApp {
                     || s.id.to_lowercase().contains(&search)
                     || s.tag_name
                         .as_deref()
-                        .is_some_and(|t| t.to_lowercase().contains(&search));
+                        .is_some_and(|t| t.to_lowercase().contains(&search))
+                    || s.agent
+                        .as_deref()
+                        .is_some_and(|value| value.to_lowercase().contains(&search))
+                    || s.models
+                        .iter()
+                        .any(|value| value.to_lowercase().contains(&search))
+                    || s.hostname.to_lowercase().contains(&search)
+                    || s.cwd
+                        .as_deref()
+                        .is_some_and(|value| value.to_lowercase().contains(&search));
 
                 // Tag filter (from popup)
                 let tag_ok = tq.is_empty()
@@ -95,23 +159,27 @@ impl PickerApp {
                         .is_some_and(|t| t.to_lowercase().contains(tq));
 
                 // Date range: session has any command in the range
-                // (first_cmd_at..=last_cmd_at overlaps with after..=before)
-                let after_ok = after.is_none_or(|ms| s.last_cmd_at >= ms);
-                let before_ok = before.is_none_or(|ms| s.first_cmd_at <= ms);
+                // The session activity range overlaps the selected date range.
+                let after_ok = after.is_none_or(|ms| s.last_activity_at >= ms);
+                let before_ok = before.is_none_or(|ms| s.first_activity_at <= ms);
 
-                search_ok && tag_ok && after_ok && before_ok
+                let kind_ok = match self.filter.kind {
+                    KindFilter::All => true,
+                    KindFilter::Human => s.kind == crate::models::SessionKind::Human,
+                    KindFilter::Ai => s.kind == crate::models::SessionKind::Ai,
+                };
+
+                search_ok && tag_ok && after_ok && before_ok && kind_ok
             })
             .map(|(i, _)| i)
             .collect();
 
-        if self.visible.is_empty() {
-            self.table_state.select(None);
-        } else {
-            self.table_state.select(Some(0));
-        }
+        self.page = 1;
+        self.table_state
+            .select((!self.visible.is_empty()).then_some(0));
     }
 
-    const fn active_filter_count(&self) -> usize {
+    fn active_filter_count(&self) -> usize {
         let mut n = 0;
         if !self.filter.tag_query.is_empty() {
             n += 1;
@@ -120,6 +188,9 @@ impl PickerApp {
             n += 1;
         }
         if self.filter.before_ms.is_some() {
+            n += 1;
+        }
+        if self.filter.kind != KindFilter::All {
             n += 1;
         }
         n
@@ -132,6 +203,12 @@ impl PickerApp {
         self.filter.tag_query.clear();
         self.filter.after_ms = None;
         self.filter.before_ms = None;
+        self.filter.kind = KindFilter::All;
+        self.rebuild_visible();
+    }
+
+    fn cycle_kind_filter(&mut self) {
+        self.filter.kind = self.filter.kind.next();
         self.rebuild_visible();
     }
 
@@ -139,31 +216,70 @@ impl PickerApp {
         if self.visible.is_empty() {
             return;
         }
-        let i = self
-            .table_state
-            .selected()
-            .map_or(0, |i| (i + 1) % self.visible.len());
-        self.table_state.select(Some(i));
+        let page_len = self.page_len();
+        let selected = self.table_state.selected().unwrap_or_default();
+        if selected + 1 < page_len {
+            self.table_state.select(Some(selected + 1));
+        } else if self.page < self.total_pages() {
+            self.page += 1;
+            self.table_state.select(Some(0));
+        } else {
+            self.page = 1;
+            self.table_state.select(Some(0));
+        }
     }
 
     fn prev(&mut self) {
         if self.visible.is_empty() {
             return;
         }
-        let i = self.table_state.selected().map_or(0, |i| {
-            if i > 0 {
-                i - 1
-            } else {
-                self.visible.len() - 1
-            }
-        });
-        self.table_state.select(Some(i));
+        let selected = self.table_state.selected().unwrap_or_default();
+        if selected > 0 {
+            self.table_state.select(Some(selected - 1));
+        } else if self.page > 1 {
+            self.page -= 1;
+            self.table_state
+                .select(Some(self.page_len().saturating_sub(1)));
+        } else {
+            self.page = self.total_pages();
+            self.table_state
+                .select(Some(self.page_len().saturating_sub(1)));
+        }
+    }
+
+    fn total_pages(&self) -> usize {
+        self.visible.len().div_ceil(PAGE_SIZE).max(1)
+    }
+
+    fn page_bounds(&self) -> (usize, usize) {
+        let start = (self.page - 1) * PAGE_SIZE;
+        (start, (start + PAGE_SIZE).min(self.visible.len()))
+    }
+
+    fn page_len(&self) -> usize {
+        let (start, end) = self.page_bounds();
+        end.saturating_sub(start)
+    }
+
+    fn next_page(&mut self) {
+        if self.page < self.total_pages() {
+            self.page += 1;
+            self.table_state.select(Some(0));
+        }
+    }
+
+    const fn prev_page(&mut self) {
+        if self.page > 1 {
+            self.page -= 1;
+            self.table_state.select(Some(0));
+        }
     }
 
     fn selected_session_id(&self) -> Option<&str> {
+        let (start, _) = self.page_bounds();
         self.table_state
             .selected()
-            .and_then(|i| self.visible.get(i))
+            .and_then(|i| self.visible.get(start + i))
             .map(|&idx| self.sessions[idx].id.as_str())
     }
 }
@@ -183,29 +299,15 @@ impl PickerApp {
                 )
         };
 
-        let first_cmd = fmt_ts(s.first_cmd_at);
-        let last_cmd = fmt_ts(s.last_cmd_at);
+        let last_cmd = fmt_ts(s.last_activity_at);
 
         let tag_str = s
             .tag_name
             .as_deref()
             .map_or_else(|| "—".to_string(), std::string::ToString::to_string);
 
-        let rate = if s.cmd_count > 0 {
-            s.success_count as f64 / s.cmd_count as f64 * 100.0
-        } else {
-            0.0
-        };
-        let rate_style = if rate >= 90.0 {
-            Style::default().fg(t.success)
-        } else if rate >= 70.0 {
-            Style::default().fg(t.warning)
-        } else {
-            Style::default().fg(t.error)
-        };
-
-        let duration = if s.last_cmd_at > s.first_cmd_at {
-            format_duration_ms(s.last_cmd_at - s.first_cmd_at)
+        let duration = if s.last_activity_at > s.first_activity_at {
+            format_duration_ms(s.last_activity_at - s.first_activity_at)
         } else {
             "—".into()
         };
@@ -220,10 +322,13 @@ impl PickerApp {
         Row::new(vec![
             Cell::from(id_display).style(Style::default().fg(t.info).add_modifier(Modifier::BOLD)),
             Cell::from(tag_str).style(Style::default().fg(t.primary)),
-            Cell::from(first_cmd).style(Style::default().fg(t.text_muted)),
+            Cell::from(s.kind.to_string()).style(Style::default().fg(t.text_secondary)),
             Cell::from(last_cmd).style(Style::default().fg(t.text_muted)),
+            Cell::from(s.agent.as_deref().unwrap_or(&s.hostname).to_owned())
+                .style(Style::default().fg(t.text_secondary)),
+            Cell::from(compact_model(s)).style(Style::default().fg(t.badge_executor)),
+            Cell::from(format_tokens(s)).style(Style::default().fg(t.info)),
             Cell::from(format!("{}", s.cmd_count)).style(Style::default().fg(t.text_secondary)),
-            Cell::from(format!("{rate:.0}%")).style(rate_style),
             Cell::from(duration).style(Style::default().fg(t.text_muted)),
         ])
     }
@@ -246,7 +351,7 @@ impl PickerApp {
         let filter_count = self.active_filter_count();
         self.render_search_bar(f, chunks[1], t, filter_count);
         self.render_session_table(f, chunks[2], t, filter_count);
-        Self::render_footer(f, chunks[3], t, filter_count);
+        self.render_footer(f, chunks[3], t, filter_count);
 
         // Filter popup overlay
         if self.filter.popup_open {
@@ -310,19 +415,28 @@ impl PickerApp {
     ) {
         let showing = self.visible.len();
         let total = self.sessions.len();
-        let title = if self.filter.search.is_empty() && filter_count == 0 {
-            format!(" Sessions ({total}) ")
+        let (start, end) = self.page_bounds();
+        let range = if showing == 0 {
+            "0".into()
         } else {
-            format!(" Sessions ({showing}/{total}) ")
+            format!("{}–{end}", start + 1)
+        };
+        let page = format!("Page {}/{}", self.page, self.total_pages());
+        let title = if self.filter.search.is_empty() && filter_count == 0 {
+            format!(" Sessions ({range} of {total})  •  {page} ")
+        } else {
+            format!(" Sessions ({range} of {showing} matches, {total} total)  •  {page} ")
         };
 
         let table_header = Row::new(vec![
             Cell::from("Session"),
             Cell::from("Tag"),
-            Cell::from("First Cmd"),
-            Cell::from("Last Cmd"),
+            Cell::from("Type"),
+            Cell::from("Last Active"),
+            Cell::from("Agent / Host"),
+            Cell::from("Model"),
+            Cell::from("Tokens"),
             Cell::from("Cmds"),
-            Cell::from("Rate"),
             Cell::from("Duration"),
         ])
         .style(
@@ -334,17 +448,21 @@ impl PickerApp {
 
         let rows: Vec<Row> = self
             .visible
+            .get(start..end)
+            .unwrap_or_default()
             .iter()
             .map(|&idx| Self::build_session_row(&self.sessions[idx], t))
             .collect();
 
         let widths = [
-            Constraint::Percentage(40),
+            Constraint::Percentage(25),
             Constraint::Length(10),
-            Constraint::Length(12),
-            Constraint::Length(12),
             Constraint::Length(6),
-            Constraint::Length(5),
+            Constraint::Length(12),
+            Constraint::Percentage(15),
+            Constraint::Percentage(15),
+            Constraint::Length(8),
+            Constraint::Length(6),
             Constraint::Min(7),
         ];
 
@@ -386,6 +504,7 @@ impl PickerApp {
     }
 
     fn render_footer(
+        &self,
         f: &mut ratatui::Frame,
         area: Rect,
         t: &crate::theme::Theme,
@@ -401,8 +520,25 @@ impl PickerApp {
             Span::styled(" Navigate  ", badge_label),
             Span::styled(" Enter ", badge_key),
             Span::styled(" Open  ", badge_label),
+            Span::styled(" ←→ ", badge_key),
+            Span::styled(
+                format!(" Page {}/{}  ", self.page, self.total_pages()),
+                badge_label,
+            ),
             Span::styled(" ^F ", badge_key),
             Span::styled(" Filter  ", badge_label),
+            Span::styled(" ^T ", badge_key),
+            Span::styled(
+                format!(
+                    " Type:{}  ",
+                    match self.filter.kind {
+                        KindFilter::All => "All",
+                        KindFilter::Human => "Human",
+                        KindFilter::Ai => "AI",
+                    }
+                ),
+                badge_label,
+            ),
         ];
         if filter_count > 0 {
             footer_spans.push(Span::styled(" ^X ", badge_key));
@@ -606,6 +742,7 @@ impl PickerApp {
                     self.filter.focus_index = 0;
                 }
                 KeyCode::Char('x') => self.clear_filters(),
+                KeyCode::Char('t') => self.cycle_kind_filter(),
                 _ => {}
             }
             return PickerAction::Continue;
@@ -617,6 +754,8 @@ impl PickerApp {
             }
             KeyCode::Down => self.next(),
             KeyCode::Up => self.prev(),
+            KeyCode::Right | KeyCode::PageDown => self.next_page(),
+            KeyCode::Left | KeyCode::PageUp => self.prev_page(),
             KeyCode::Backspace => {
                 self.filter.search.pop();
                 self.rebuild_visible();
@@ -666,13 +805,21 @@ mod tests {
     fn make_summary(id: &str, cmd_count: i64) -> SessionSummary {
         SessionSummary {
             id: id.to_string(),
+            kind: crate::models::SessionKind::Human,
             hostname: "test-host".to_string(),
+            cwd: Some("/tmp".into()),
+            agent: None,
+            model: None,
+            models: Vec::new(),
+            total_tokens: None,
+            usage_complete: false,
+            event_count: 0,
             created_at: 1_700_000_000_000,
             tag_name: None,
             cmd_count,
             success_count: cmd_count,
-            first_cmd_at: 1_700_000_000_000,
-            last_cmd_at: 1_700_000_060_000,
+            first_activity_at: 1_700_000_000_000,
+            last_activity_at: 1_700_000_060_000,
         }
     }
 
@@ -737,6 +884,20 @@ mod tests {
     }
 
     #[test]
+    fn right_and_left_arrows_move_between_fifty_session_pages() {
+        let sessions = (0..51)
+            .map(|index| make_summary(&format!("s{index:02}"), 1))
+            .collect();
+        let mut app = PickerApp::new(sessions);
+
+        app.handle_normal_key(crossterm::event::KeyEvent::from(KeyCode::Right));
+        assert_eq!(app.selected_session_id(), Some("s50"));
+
+        app.handle_normal_key(crossterm::event::KeyEvent::from(KeyCode::Left));
+        assert_eq!(app.selected_session_id(), Some("s00"));
+    }
+
+    #[test]
     fn prev_single_element_stays() {
         let mut app = PickerApp::new(vec![make_summary("s1", 5)]);
         app.prev();
@@ -766,6 +927,50 @@ mod tests {
         app.filter.search = "work".to_string();
         app.rebuild_visible();
         assert_eq!(app.visible.len(), 1);
+    }
+
+    #[test]
+    fn search_matches_agent_model_host_and_working_directory() {
+        let mut ai = make_summary("codex-session", 1);
+        ai.kind = crate::models::SessionKind::Ai;
+        ai.agent = Some("openai-codex".into());
+        ai.model = Some("gpt-5.6-sol".into());
+        ai.models = vec!["gpt-5.6-sol".into()];
+        ai.hostname = "devbox".into();
+        ai.cwd = Some("/work/suvadu".into());
+        for query in ["openai", "5.6", "devbox", "suvadu"] {
+            let mut app = PickerApp::new(vec![ai.clone(), make_summary("human", 2)]);
+            app.filter.search = query.into();
+            app.rebuild_visible();
+            assert_eq!(app.visible, vec![0], "query: {query}");
+        }
+    }
+
+    #[test]
+    fn kind_filter_cycles_all_human_ai() {
+        let human = make_summary("human", 2);
+        let mut ai = make_summary("ai", 0);
+        ai.kind = crate::models::SessionKind::Ai;
+        let mut app = PickerApp::new(vec![human, ai]);
+
+        app.cycle_kind_filter();
+        assert_eq!(app.visible, vec![0]);
+        app.cycle_kind_filter();
+        assert_eq!(app.visible, vec![1]);
+        app.cycle_kind_filter();
+        assert_eq!(app.visible, vec![0, 1]);
+    }
+
+    #[test]
+    fn compact_ai_metadata_uses_latest_model_and_reported_tokens() {
+        let mut ai = make_summary("ai", 0);
+        ai.models = vec!["model-a".into(), "model-b".into()];
+        ai.model = Some("model-b".into());
+        ai.total_tokens = Some(44_291);
+        ai.usage_complete = true;
+
+        assert_eq!(compact_model(&ai), "model-b +1");
+        assert_eq!(format_tokens(&ai), "44.3k");
     }
 
     #[test]

@@ -4,6 +4,14 @@ use crate::{agent_ui, cli, repository, risk, util};
 
 pub fn handle_agent(cmd: cli::AgentCommands) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
+        cli::AgentCommands::ImportSession { path } => crate::commands::agent_session::import(&path),
+        cli::AgentCommands::Sessions { limit, offset } => {
+            crate::commands::agent_session::list(limit as usize, offset)
+        }
+        cli::AgentCommands::Session { id, limit, offset } => {
+            crate::commands::agent_session::get(&id, limit as usize, offset)
+        }
+        cli::AgentCommands::DeleteSession { id } => crate::commands::agent_session::delete(&id),
         cli::AgentCommands::Report {
             after,
             before,

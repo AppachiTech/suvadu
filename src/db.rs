@@ -17,7 +17,7 @@ pub enum DbError {
 pub type DbResult<T> = Result<T, DbError>;
 
 /// Current schema version. Increment when adding new migrations.
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 /// Get the path to the suvadu database file
 pub fn get_db_path() -> DbResult<PathBuf> {
@@ -116,6 +116,12 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
         |row| row.get::<_, i64>(0),
     )
     .is_ok_and(|count| count > 0)
+}
+
+/// Independent AI sessions also retain turns that execute no shell commands.
+fn migrate_v8(conn: &Connection) -> DbResult<()> {
+    conn.execute_batch(include_str!("ai_sessions/schema.sql"))?;
+    Ok(())
 }
 
 /// Migration v1: full schema as of initial release.
@@ -306,6 +312,7 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
         (5, migrate_v5),
         (6, migrate_v6),
         (7, migrate_v7),
+        (8, migrate_v8),
     ];
 
     for &(target_version, migrate_fn) in migrations {

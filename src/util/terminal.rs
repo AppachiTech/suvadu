@@ -85,31 +85,3 @@ impl Drop for TerminalGuardStderr {
         );
     }
 }
-
-/// RAII guard for stdout-based TUI with mouse capture (used by session picker/timeline).
-/// Restores terminal + disables mouse capture on drop.
-pub struct TerminalGuardMouse;
-
-impl TerminalGuardMouse {
-    /// Enter raw mode + alternate screen + mouse capture on stdout.
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        crossterm::terminal::enable_raw_mode()?;
-        crossterm::execute!(
-            std::io::stdout(),
-            crossterm::terminal::EnterAlternateScreen,
-            crossterm::event::EnableMouseCapture
-        )?;
-        Ok(Self)
-    }
-}
-
-impl Drop for TerminalGuardMouse {
-    fn drop(&mut self) {
-        let _ = crossterm::terminal::disable_raw_mode();
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::terminal::LeaveAlternateScreen,
-            crossterm::event::DisableMouseCapture
-        );
-    }
-}

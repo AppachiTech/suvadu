@@ -18,8 +18,21 @@ use std::sync::LazyLock;
 
 // ── Cached project directories ──────────────────────────────
 
+#[cfg(not(test))]
 static PROJECT_DIRS: LazyLock<Option<directories::ProjectDirs>> =
     LazyLock::new(|| directories::ProjectDirs::from("tech", "appachi", "suvadu"));
+
+// Unit tests must never read or write a developer's real app data/config.
+#[cfg(test)]
+static TEST_ROOT: LazyLock<tempfile::TempDir> = LazyLock::new(|| {
+    tempfile::Builder::new()
+        .prefix("suvadu-tests-")
+        .tempdir()
+        .expect("test app directory")
+});
+#[cfg(test)]
+static PROJECT_DIRS: LazyLock<Option<directories::ProjectDirs>> =
+    LazyLock::new(|| directories::ProjectDirs::from_path(TEST_ROOT.path().to_path_buf()));
 
 /// Cached project directory lookup. Avoids re-computing paths on every call.
 /// Called from config, db, hooks, integrations, and alias modules.

@@ -5,7 +5,7 @@ mod stats;
 
 pub use dashboard::run_agent_ui;
 pub use paged_table::PagedTable;
-pub use prompts::run_prompt_explorer;
+pub use prompts::{run_prompt_detail, run_prompt_explorer};
 pub use stats::run_agent_stats_ui;
 
 use std::collections::HashMap;

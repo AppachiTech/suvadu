@@ -1,11 +1,43 @@
 use std::io;
 
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use crate::repository;
 use crate::session_ui;
 use crate::util;
+
+const DEFAULT_LIST_LIMIT: usize = 50;
+
+fn unified_summary(
+    repo: &repository::Repository,
+    session_id: &str,
+) -> Result<crate::models::SessionSummary, Box<dyn std::error::Error>> {
+    repo.list_unified_sessions(None, None, usize::MAX)?
+        .into_iter()
+        .find(|session| session.id == session_id)
+        .ok_or_else(|| format!("Session {session_id} not found").into())
+}
+
+fn load_ai_session_data(
+    repo: &repository::Repository,
+    summary: crate::models::SessionSummary,
+) -> Result<session_ui::AiSessionData, Box<dyn std::error::Error>> {
+    let mut events = Vec::new();
+    let mut offset = 0;
+    loop {
+        let page = repo.get_ai_session(&summary.id, 100, offset, &[])?;
+        for event in page["events"].as_array().into_iter().flatten() {
+            events.push(serde_json::from_value(event.clone())?);
+        }
+        let Some(next) = page["next_offset"].as_u64() else {
+            break;
+        };
+        offset = usize::try_from(next)?;
+    }
+    let entries =
+        repo.get_replay_entries(Some(&summary.id), &repository::ReplayFilter::default())?;
+    Ok(session_ui::build_ai_session_data(summary, events, entries))
+}
 
 /// Result of the non-TUI session logic, used to decide what the caller should do.
 #[derive(Debug)]
@@ -25,7 +57,7 @@ pub fn handle_session(
     list: bool,
     after: Option<&str>,
     tag: Option<&str>,
-    limit: usize,
+    limit: Option<u32>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = repository::Repository::init()?;
 
@@ -37,15 +69,13 @@ pub fn handle_session(
             // closing a timeline instead of exiting suv sessions entirely —
             // Esc/q on the picker itself (no selection) is the only way out.
             // RAII guard ensures terminal is restored even on panic
-            let _guard = util::TerminalGuardMouse::new()?;
-            let backend = CrosstermBackend::new(io::stdout());
-            let mut terminal = Terminal::new(backend)?;
+            let mut guard = util::TerminalGuard::new()?;
 
             let result = loop {
-                let selected = session_ui::run_session_picker(&mut terminal, sessions.clone());
+                let selected = session_ui::run_session_picker(guard.terminal(), sessions.clone());
                 match selected {
                     Ok(Some(sid)) => {
-                        if let Err(e) = open_session_timeline_tui(&mut terminal, &repo, &sid) {
+                        if let Err(e) = open_session_timeline_tui(guard.terminal(), &repo, &sid) {
                             break Err(e);
                         }
                     }
@@ -53,8 +83,7 @@ pub fn handle_session(
                     Err(e) => break Err(e.into()),
                 }
             };
-            terminal.show_cursor()?;
-            // _guard drops here, restoring terminal
+            guard.terminal().show_cursor()?;
             result
         }
     }
@@ -66,7 +95,7 @@ fn handle_session_with_repo(
     list: bool,
     after: Option<&str>,
     tag: Option<&str>,
-    limit: usize,
+    limit: Option<u32>,
 ) -> Result<SessionResult, Box<dyn std::error::Error>> {
     let tag_id = tag
         .map(|t| repo.get_tag_id_by_name(t))
@@ -77,7 +106,7 @@ fn handle_session_with_repo(
 
     // If a session ID was given directly, resolve by prefix
     if let Some(prefix) = session_id {
-        let matches = repo.find_sessions_by_prefix(prefix)?;
+        let matches = repo.find_unified_sessions_by_prefix(prefix)?;
         return match matches.len() {
             0 => Err(format!("No session found matching '{prefix}'").into()),
             1 => Ok(SessionResult::OpenSession(
@@ -95,7 +124,17 @@ fn handle_session_with_repo(
         };
     }
 
-    let sessions = repo.list_sessions(after_ms, tag_id, limit)?;
+    let effective_limit = limit.map_or_else(
+        || {
+            if list {
+                DEFAULT_LIST_LIMIT
+            } else {
+                usize::MAX
+            }
+        },
+        |value| usize::try_from(value).unwrap_or(usize::MAX),
+    );
+    let sessions = repo.list_unified_sessions(after_ms, tag_id, effective_limit)?;
 
     if sessions.is_empty() {
         println!("No sessions found.");
@@ -116,38 +155,35 @@ fn print_session_list(sessions: &[crate::models::SessionSummary]) {
     use chrono::{Local, TimeZone};
 
     println!(
-        "\n  {:<18} {:<10} {:<12} {:<10} {:>6} {:>6} {:>8}",
-        "Date", "ID", "Host", "Tag", "Cmds", "Pass%", "Duration"
+        "\n  {:<18} {:<10} {:<6} {:<12} {:<16} {:<18} {:>9} {:>6} {:>8}",
+        "Last active", "ID", "Type", "Tag", "Agent / Host", "Model", "Tokens", "Cmds", "Duration"
     );
-    println!("  {}", "─".repeat(74));
+    println!("  {}", "─".repeat(116));
 
     for s in sessions {
         let time = Local
-            .timestamp_millis_opt(util::normalize_display_ms(s.created_at))
+            .timestamp_millis_opt(util::normalize_display_ms(s.last_activity_at))
             .single()
             .map_or_else(
                 || "????-??-?? ??:??".into(),
                 |dt| dt.format("%Y-%m-%d %H:%M").to_string(),
             );
         let id_short: String = s.id.chars().take(8).collect();
-        let tag_str = s.tag_name.as_deref().unwrap_or("—");
-
-        #[allow(clippy::cast_precision_loss)]
-        let rate = if s.cmd_count > 0 {
-            s.success_count as f64 / s.cmd_count as f64 * 100.0
-        } else {
-            0.0
-        };
-
-        let duration = if s.last_cmd_at > s.first_cmd_at {
-            format_duration_ms(s.last_cmd_at - s.first_cmd_at)
+        let duration = if s.last_activity_at > s.first_activity_at {
+            format_duration_ms(s.last_activity_at - s.first_activity_at)
         } else {
             "—".into()
         };
 
+        let actor = s.agent.as_deref().unwrap_or(&s.hostname);
+        let tag = s.tag_name.as_deref().unwrap_or("—");
+        let model = s.model.as_deref().unwrap_or("—");
+        let tokens = s
+            .total_tokens
+            .map_or_else(|| "—".into(), |value| value.to_string());
         println!(
-            "  {time:<18} {id_short:<10} {:<12} {tag_str:<10} {:>6} {:>5.0}% {:>8}",
-            s.hostname, s.cmd_count, rate, duration
+            "  {time:<18} {id_short:<10} {:<6} {tag:<12.12} {actor:<16.16} {model:<18.18} {tokens:>9} {:>6} {duration:>8}",
+            s.kind, s.cmd_count
         );
     }
     println!();
@@ -157,6 +193,14 @@ fn open_session_timeline(
     repo: &repository::Repository,
     session_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let summary = unified_summary(repo, session_id)?;
+    if repo.has_native_ai_session(session_id)? {
+        let data = load_ai_session_data(repo, summary)?;
+        let mut guard = util::TerminalGuard::new()?;
+        let result = session_ui::run_ai_session_timeline(guard.terminal(), data);
+        guard.terminal().show_cursor()?;
+        return result.map_err(Into::into);
+    }
     let session = repo
         .get_session(session_id)?
         .ok_or_else(|| format!("Session {session_id} not found"))?;
@@ -174,14 +218,11 @@ fn open_session_timeline(
     }
 
     // RAII guard ensures terminal is restored even on panic
-    let _guard = util::TerminalGuardMouse::new()?;
-    let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::new(backend)?;
+    let mut guard = util::TerminalGuard::new()?;
 
     let result =
-        session_ui::run_session_timeline(&mut terminal, session, tag_name, entries, noted_ids);
-    terminal.show_cursor()?;
-    // _guard drops here, restoring terminal
+        session_ui::run_session_timeline(guard.terminal(), session, tag_name, entries, noted_ids);
+    guard.terminal().show_cursor()?;
 
     result.map_err(Into::into)
 }
@@ -194,6 +235,12 @@ fn open_session_timeline_tui<B: ratatui::backend::Backend>(
 where
     io::Error: From<B::Error>,
 {
+    let summary = unified_summary(repo, session_id)?;
+    if repo.has_native_ai_session(session_id)? {
+        let data = load_ai_session_data(repo, summary)?;
+        session_ui::run_ai_session_timeline(terminal, data)?;
+        return Ok(());
+    }
     let session = repo
         .get_session(session_id)?
         .ok_or_else(|| format!("Session {session_id} not found"))?;
@@ -244,7 +291,7 @@ mod tests {
     #[test]
     fn test_session_list_empty() {
         let (_dir, repo) = test_repo();
-        let result = handle_session_with_repo(&repo, None, true, None, None, 10);
+        let result = handle_session_with_repo(&repo, None, true, None, None, Some(10));
         assert!(result.is_ok());
         assert!(matches!(result.unwrap(), SessionResult::Empty));
     }
@@ -253,7 +300,7 @@ mod tests {
     fn test_session_list_with_entries() {
         let (_dir, repo) = test_repo();
         seed_session_with_entries(&repo, "sess-1", 5);
-        let result = handle_session_with_repo(&repo, None, true, None, None, 10).unwrap();
+        let result = handle_session_with_repo(&repo, None, true, None, None, Some(10)).unwrap();
         assert!(matches!(result, SessionResult::Listed));
     }
 
@@ -262,7 +309,8 @@ mod tests {
         let (_dir, repo) = test_repo();
         seed_session_with_entries(&repo, "abc-unique-session", 3);
         let result =
-            handle_session_with_repo(&repo, Some("abc-unique"), false, None, None, 10).unwrap();
+            handle_session_with_repo(&repo, Some("abc-unique"), false, None, None, Some(10))
+                .unwrap();
         assert!(matches!(result, SessionResult::OpenSession(_)));
     }
 
@@ -270,7 +318,7 @@ mod tests {
     fn test_session_prefix_no_match() {
         let (_dir, repo) = test_repo();
         seed_session_with_entries(&repo, "abc-session", 3);
-        let result = handle_session_with_repo(&repo, Some("xyz"), false, None, None, 10);
+        let result = handle_session_with_repo(&repo, Some("xyz"), false, None, None, Some(10));
         assert!(result.is_err());
     }
 
@@ -279,7 +327,7 @@ mod tests {
         let (_dir, repo) = test_repo();
         seed_session_with_entries(&repo, "abc-session-1", 2);
         seed_session_with_entries(&repo, "abc-session-2", 2);
-        let result = handle_session_with_repo(&repo, Some("abc"), false, None, None, 10);
+        let result = handle_session_with_repo(&repo, Some("abc"), false, None, None, Some(10));
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -315,7 +363,38 @@ mod tests {
         // Untagged session
         seed_session_with_entries(&repo, "untagged-sess", 3);
 
-        let result = handle_session_with_repo(&repo, None, true, None, Some("work"), 10).unwrap();
+        let result =
+            handle_session_with_repo(&repo, None, true, None, Some("work"), Some(10)).unwrap();
         assert!(matches!(result, SessionResult::Listed));
+    }
+
+    #[test]
+    fn interactive_picker_loads_more_than_the_list_default() {
+        let (_dir, repo) = test_repo();
+        for index in 0..51 {
+            seed_session_with_entries(&repo, &format!("sess-{index:02}"), 1);
+        }
+
+        let result = handle_session_with_repo(&repo, None, false, None, None, None).unwrap();
+
+        let SessionResult::PickSession(sessions) = result else {
+            panic!("Expected interactive session picker");
+        };
+        assert_eq!(sessions.len(), 51);
+    }
+
+    #[test]
+    fn interactive_picker_respects_an_explicit_limit() {
+        let (_dir, repo) = test_repo();
+        for index in 0..51 {
+            seed_session_with_entries(&repo, &format!("sess-{index:02}"), 1);
+        }
+
+        let result = handle_session_with_repo(&repo, None, false, None, None, Some(20)).unwrap();
+
+        let SessionResult::PickSession(sessions) = result else {
+            panic!("Expected interactive session picker");
+        };
+        assert_eq!(sessions.len(), 20);
     }
 }

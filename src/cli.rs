@@ -483,10 +483,10 @@ pub enum Commands {
         command: Option<AliasesCommands>,
     },
 
-    /// Interactive session timeline view
+    /// Browse shell and AI sessions in one timeline view
     #[command(
         alias = "session",
-        after_help = "Examples:\n  suv sessions                    # Pick from recent sessions\n  suv sessions abc123             # Open session by ID prefix\n  suv sessions --list             # List sessions without opening\n  suv sessions --after 2025-01-01 # Sessions after date\n  suv sessions --tag work         # Sessions with tag"
+        after_help = "Examples:\n  suv sessions                    # Pick from recent shell and AI sessions\n  suv sessions abc123             # Open session by ID prefix\n  suv sessions --list             # List sessions without opening\n  suv sessions --after 2025-01-01 # Sessions active after date\n  suv sessions --tag work         # Sessions with tag"
     )]
     Sessions {
         /// Session ID or prefix (omit for interactive picker)
@@ -500,9 +500,9 @@ pub enum Commands {
         /// Filter by tag name
         #[arg(long)]
         tag: Option<String>,
-        /// Max sessions to show (default: 50)
-        #[arg(short = 'n', long, default_value_t = 50)]
-        limit: usize,
+        /// Max sessions to load (interactive default: all; --list default: 50)
+        #[arg(short = 'n', long, value_parser = clap::value_parser!(u32).range(1..))]
+        limit: Option<u32>,
     },
 
     /// Uninstall Suvadu (remove binaries from system)
@@ -758,6 +758,25 @@ pub enum AliasesCommands {
 
 #[derive(Subcommand, Debug)]
 pub enum AgentCommands {
+    /// Import a native Codex JSONL transcript incrementally (JSON result)
+    ImportSession { path: std::path::PathBuf },
+    /// List captured AI sessions (JSON)
+    Sessions {
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
+        limit: u32,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+    },
+    /// Read session events, commands, tokens, and saved summaries (JSON)
+    Session {
+        id: String,
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=100))]
+        limit: u32,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+    },
+    /// Delete imported session data, summaries, and its recorded shell commands
+    DeleteSession { id: String },
     /// Generate a risk-assessed activity report for AI agent commands
     #[command(
         after_help = "Examples:\n  suv agent report\n  suv agent report --executor claude-code\n  suv agent report --format markdown\n  suv agent report --after \"3 days ago\" --here"
@@ -976,6 +995,35 @@ mod tests {
     }
 
     #[test]
+    fn agent_session_commands_parse_pagination_and_paths() {
+        for arguments in [
+            vec!["suv", "agent", "import-session", "/tmp/session.jsonl"],
+            vec![
+                "suv", "agent", "sessions", "--limit", "20", "--offset", "40",
+            ],
+            vec![
+                "suv",
+                "agent",
+                "session",
+                "codex-test",
+                "--limit",
+                "10",
+                "--offset",
+                "2",
+            ],
+            vec!["suv", "agent", "delete-session", "codex-test"],
+        ] {
+            assert!(Cli::try_parse_from(&arguments).is_ok(), "{arguments:?}");
+        }
+        assert!(Cli::try_parse_from(["suv", "agent", "sessions", "--limit", "0"]).is_err());
+        assert!(Cli::try_parse_from(["suv", "agent", "sessions", "--limit", "201"]).is_err());
+        assert!(
+            Cli::try_parse_from(["suv", "agent", "session", "codex-test", "--offset", "-1"])
+                .is_err()
+        );
+    }
+
+    #[test]
     fn test_cli_parses_stats_defaults() {
         let cli = Cli::try_parse_from(["suv", "stats"]).unwrap();
         match cli.command {
@@ -1125,11 +1173,24 @@ mod tests {
         let cli = Cli::try_parse_from(["suv", "sessions"]).unwrap();
         match cli.command {
             Commands::Sessions {
-                session_id, list, ..
+                session_id,
+                list,
+                limit,
+                ..
             } => {
                 assert_eq!(session_id, None);
                 assert!(!list);
+                assert_eq!(limit, None);
             }
+            _ => panic!("Expected Sessions"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_explicit_sessions_limit() {
+        let cli = Cli::try_parse_from(["suv", "sessions", "--limit", "125"]).unwrap();
+        match cli.command {
+            Commands::Sessions { limit, .. } => assert_eq!(limit, Some(125)),
             _ => panic!("Expected Sessions"),
         }
     }

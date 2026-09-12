@@ -1,3 +1,4 @@
+mod ai_sessions;
 mod prompts;
 mod protocol;
 mod resources;

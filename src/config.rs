@@ -258,6 +258,8 @@ pub struct McpConfig {
     /// require an explicit opt-in even though they only ever land as
     /// pending, never active.
     pub allow_skill_proposals: bool,
+    /// Allow caller-generated session summaries to be stored over MCP. Off by default.
+    pub allow_session_summaries: bool,
 }
 
 impl Default for McpConfig {
@@ -269,6 +271,7 @@ impl Default for McpConfig {
             default_limit: 20,
             exclude_dirs: Vec::new(),
             allow_skill_proposals: false,
+            allow_session_summaries: false,
         }
     }
 }
@@ -807,6 +810,14 @@ enabled = true
         assert!(config.mcp.disabled_tools.is_empty());
         assert!(config.mcp.disabled_resources.is_empty());
         assert!(config.mcp.exclude_dirs.is_empty());
+        assert!(!config.mcp.allow_skill_proposals);
+        assert!(!config.mcp.allow_session_summaries);
+    }
+
+    #[test]
+    fn test_mcp_allow_session_summaries_deserialization() {
+        let config: Config = toml::from_str("[mcp]\nallow_session_summaries = true\n").unwrap();
+        assert!(config.mcp.allow_session_summaries);
         assert!(!config.mcp.allow_skill_proposals);
     }
 

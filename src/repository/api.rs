@@ -76,6 +76,14 @@ pub trait RepositoryApi {
         limit: usize,
     ) -> DbResult<Vec<crate::models::SessionSummary>>;
     fn find_sessions_by_prefix(&self, prefix: &str) -> DbResult<Vec<String>>;
+    fn list_unified_sessions(
+        &self,
+        after: Option<i64>,
+        tag_id: Option<i64>,
+        limit: usize,
+    ) -> DbResult<Vec<crate::models::SessionSummary>>;
+    fn find_unified_sessions_by_prefix(&self, prefix: &str) -> DbResult<Vec<String>>;
+    fn has_native_ai_session(&self, id: &str) -> DbResult<bool>;
     fn vacuum(&self) -> DbResult<()>;
 
     // ── tags.rs ─────────────────────────────────────────────────────────
@@ -258,6 +266,23 @@ impl RepositoryApi for Repository {
 
     fn find_sessions_by_prefix(&self, prefix: &str) -> DbResult<Vec<String>> {
         Self::find_sessions_by_prefix(self, prefix)
+    }
+
+    fn list_unified_sessions(
+        &self,
+        after: Option<i64>,
+        tag_id: Option<i64>,
+        limit: usize,
+    ) -> DbResult<Vec<crate::models::SessionSummary>> {
+        Self::list_unified_sessions(self, after, tag_id, limit)
+    }
+
+    fn find_unified_sessions_by_prefix(&self, prefix: &str) -> DbResult<Vec<String>> {
+        Self::find_unified_sessions_by_prefix(self, prefix)
+    }
+
+    fn has_native_ai_session(&self, id: &str) -> DbResult<bool> {
+        Self::has_native_ai_session(self, id)
     }
 
     fn vacuum(&self) -> DbResult<()> {

@@ -3,6 +3,7 @@ use std::process;
 
 mod agent;
 mod agent_ui;
+mod ai_sessions;
 mod cli;
 mod commands;
 mod config;
@@ -27,6 +28,7 @@ mod suggest_ui;
 mod test_utils;
 mod theme;
 mod update;
+mod upgrade_notice;
 mod util;
 
 use cli::{Cli, Commands};
@@ -60,6 +62,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Internal commands (Add, Get, hooks, etc.) don't render TUI,
     // so skip the config read + theme init on the hot path.
     if is_user_facing_command(&cli.command) {
+        upgrade_notice::print_if_needed();
         // Project-aware: a .suvadu.toml found by walking up from the cwd
         // overrides the global config's matching fields (see config::
         // load_config_for_cwd).

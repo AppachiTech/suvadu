@@ -491,7 +491,7 @@ fn is_suvadu_hook_command(cmd: &str) -> bool {
 
 /// Shell-escape a string for embedding inside single quotes.
 /// Replaces `'` with `'\''` (end quote, literal quote, restart quote).
-fn shell_escape(s: &str) -> String {
+pub fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 

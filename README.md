@@ -74,9 +74,11 @@ suv history                 # Print last 25 commands (pipeable)
 suv history --json -n 100   # Last 100 commands as JSONL
 suv stats                   # Stats dashboard with heatmap
 suv replay --after today    # Timeline of today's commands
+suv sessions                # Browse shell and AI sessions together
 suv doctor                  # Check installation health
 suv agent dashboard         # Monitor AI agent activity
 suv agent prompts           # Browse prompts and their commands
+suv agent sessions          # List captured Codex sessions and reported tokens
 suv skills                  # Interactive skills management (browse, add, edit, sync, review)
 suv skills add my-skill     # Add a skill any MCP-capable agent can read
 suv skills sync             # Materialize skills into Claude Code/Cursor/Codex
@@ -117,9 +119,10 @@ See the [full integration guide](https://suvadu.sh/blog/track-ai-agent-commands-
 | **Search** | Substring search TUI (your own commands by default; `Ctrl+A` shows agents, `Ctrl+E` shows failures only) with filters, Smart mode, detail pane, bookmarks |
 | **History** | Non-interactive `suv history` with filters, `--json`, pipeable to other tools |
 | **Agent Dashboard** | Timeline, risk assessment, per-agent analytics, exportable reports; `suv agent report --fail-on <low\|medium\|high\|critical>` for local CI / git-hook gating |
-| **MCP Server** | 18 tools + 8 resources + 3 prompts — agent session replay, project context, failure learning, configurable |
+| **MCP Server** | 20 tools + 8 resources + 4 prompts — agent session replay and cross-agent summaries, project context, failure learning, configurable |
 | **Skills Library** | `suv skills` — interactive TUI to browse, add, edit, delete, sync, and review shared skills any MCP-capable agent can read instead of each tool keeping its own copy; `add/list/show/edit/rm/sync` also work as scriptable subcommands |
 | **Prompt Explorer** | Trace commands back to the prompt that triggered them |
+| **Unified Sessions** | `suv sessions` browses human and AI sessions together; native Codex sessions show prompts, final responses, commands, every observed model, and provider-reported token totals |
 | **Stats** | Heatmap, hourly distribution, top commands, executor breakdown; `--human` (or `Ctrl+H` in the TUI) excludes AI-agent activity |
 | **Doctor** | `suv doctor` checks shell, hooks, config, database, MCP, and agent hooks health |
 | **Organization** | Tags, bookmarks (`suv bookmarks` opens an interactive picker that recalls one into your prompt), notes, and `suv aliases` — an interactive manager (add/edit/delete) for shell aliases, plus suggestions for your frequently-typed long commands |

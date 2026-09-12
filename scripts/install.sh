@@ -129,3 +129,11 @@ if ! grep -q 'eval "$(suv init' "$HOME/.zshrc" 2>/dev/null && \
     echo "  # For bash:"
     echo "  echo 'eval \"\$(suv init bash)\"' >> ~/.bashrc && source ~/.bashrc"
 fi
+
+# Agent hook definitions are not refreshed by replacing the binary.
+echo ""
+echo 'After updating agent integrations:'
+echo '  Codex: run suv init codex, then review/trust Suvadu hooks with /hooks in the Codex terminal CLI.'
+echo '  Relaunch Codex; for its VS Code extension, fully quit and reopen VS Code.'
+echo '  Claude Code: after suv init claude-code, relaunch Claude Code (or its VS Code host).'
+echo '  Native session/token capture currently supports Codex; Claude capture is planned.'

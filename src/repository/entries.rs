@@ -463,7 +463,10 @@ impl Repository {
             "SELECT s.id, s.hostname, s.created_at, COALESCE(t.name, '') as tag_name,
                     COUNT(e.id) as cmd_count,
                     SUM(CASE WHEN e.exit_code = 0 THEN 1 ELSE 0 END) as success_count,
-                    MIN(e.started_at) as first_cmd, MAX(e.ended_at) as last_cmd
+                    MIN(e.started_at) as first_cmd, MAX(e.ended_at) as last_cmd,
+                    MIN(e.cwd) as cwd,
+                    MAX(CASE WHEN e.executor_type IS NOT NULL AND e.executor_type NOT IN ('human','unknown') THEN 1 ELSE 0 END) as has_agent,
+                    MAX(CASE WHEN e.executor_type IS NOT NULL AND e.executor_type NOT IN ('human','unknown') THEN e.executor END) as agent
              FROM sessions s
              LEFT JOIN entries e ON e.session_id = s.id
              LEFT JOIN tags t ON s.tag_id = t.id
@@ -481,13 +484,25 @@ impl Repository {
             let tag: String = row.get(3)?;
             Ok(SessionSummary {
                 id: row.get(0)?,
+                kind: if row.get::<_, i64>(9)? > 0 {
+                    crate::models::SessionKind::Ai
+                } else {
+                    crate::models::SessionKind::Human
+                },
                 hostname: row.get(1)?,
+                cwd: row.get(8)?,
+                agent: row.get(10)?,
+                model: None,
+                models: Vec::new(),
+                total_tokens: None,
+                usage_complete: false,
+                event_count: 0,
                 created_at: row.get(2)?,
                 tag_name: if tag.is_empty() { None } else { Some(tag) },
                 cmd_count: row.get(4)?,
                 success_count: row.get(5)?,
-                first_cmd_at: row.get(6)?,
-                last_cmd_at: row.get(7)?,
+                first_activity_at: row.get(6)?,
+                last_activity_at: row.get(7)?,
             })
         })?;
 

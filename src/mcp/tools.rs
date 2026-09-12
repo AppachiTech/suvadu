@@ -12,6 +12,8 @@ const MAX_PROMPT_ENTRIES: usize = 5000;
 /// Return the `tools/list` response, filtering out disabled tools.
 pub fn list_tools(id: &Value, mcp: &crate::config::McpConfig) -> Value {
     let all_tools = vec![
+        super::ai_sessions::list_definition(),
+        super::ai_sessions::get_definition(),
         search_commands_def(),
         recent_commands_def(),
         command_status_def(),
@@ -38,6 +40,9 @@ pub fn list_tools(id: &Value, mcp: &crate::config::McpConfig) -> Value {
     if mcp.allow_skill_proposals {
         all_tools.push(propose_skill_def());
     }
+    if mcp.allow_session_summaries {
+        all_tools.push(super::ai_sessions::save_definition());
+    }
     let tools: Vec<Value> = all_tools
         .into_iter()
         .filter(|t| {
@@ -63,6 +68,9 @@ pub fn call_tool(
         return Err(format!("Tool '{name}' is disabled via MCP configuration"));
     }
     match name {
+        "list_agent_sessions" => super::ai_sessions::list(repo, args, mcp),
+        "get_agent_session" => super::ai_sessions::get(repo, args, mcp),
+        "save_session_summary" => super::ai_sessions::save(repo, args, mcp),
         "search_commands" => handle_search_commands(repo, args, mcp),
         "recent_commands" => handle_recent_commands(repo, args, mcp),
         "command_status" => handle_command_status(repo, args, mcp),
@@ -818,8 +826,8 @@ fn handle_list_sessions(repo: &Repository, args: &Value) -> Result<String, Strin
             .tag_name
             .as_deref()
             .map_or_else(String::new, |t| format!(" [{t}]"));
-        let first = format_time(s.first_cmd_at);
-        let last = format_time(s.last_cmd_at);
+        let first = format_time(s.first_activity_at);
+        let last = format_time(s.last_activity_at);
         let _ = write!(
             out,
             "{}. {}{}\n   {} cmds | {} ok | {} — {}\n\n",
@@ -2097,7 +2105,7 @@ mod tests {
         mcp.disabled_tools = vec!["assess_risk".to_string(), "suggest_next".to_string()];
         let resp = list_tools(&json!(1), &mcp);
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 16);
+        assert_eq!(tools.len(), 18);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(!names.contains(&"assess_risk"));
         assert!(!names.contains(&"suggest_next"));
@@ -2118,7 +2126,7 @@ mod tests {
     fn test_list_tools_count() {
         let resp = list_tools(&json!(1), &default_mcp());
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 18);
+        assert_eq!(tools.len(), 20);
 
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"search_commands"));

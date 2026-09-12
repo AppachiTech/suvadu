@@ -9,13 +9,16 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Table, Wrap,
+    ScrollbarState, Table,
 };
 use ratatui::Terminal;
 
 use crate::models::Entry;
 use crate::repository::Repository;
 use crate::session_ui;
+use crate::session_ui::timeline::{
+    align_info_groups, command_summary_line, session_activity_text, session_info_height,
+};
 use crate::theme::theme;
 use crate::util::{dirs_home, format_duration_ms, shorten_path};
 
@@ -51,6 +54,7 @@ fn short_session_id(id: &str) -> String {
 #[allow(dead_code)]
 struct PromptGroup {
     session_id: String,
+    turn_id: Option<String>,
     prompt: String,
     executor: String,
     /// Most common working directory across entries in this group.
@@ -68,6 +72,7 @@ struct PromptGroup {
 /// Per-group accumulator for single-pass aggregation.
 struct PromptGroupBuilder {
     session_id: String,
+    turn_id: Option<String>,
     prompt: String,
     executor: String,
     cwd_counts: HashMap<String, usize>,
@@ -81,9 +86,16 @@ struct PromptGroupBuilder {
 }
 
 impl PromptGroupBuilder {
-    fn new(session_id: String, prompt: String, executor: String, started_at: i64) -> Self {
+    fn new(
+        session_id: String,
+        turn_id: Option<String>,
+        prompt: String,
+        executor: String,
+        started_at: i64,
+    ) -> Self {
         Self {
             session_id,
+            turn_id,
             prompt,
             executor,
             cwd_counts: HashMap::new(),
@@ -123,6 +135,7 @@ impl PromptGroupBuilder {
             .map_or_else(String::new, |(path, _)| path);
         PromptGroup {
             session_id: self.session_id,
+            turn_id: self.turn_id,
             prompt: self.prompt,
             executor: self.executor,
             cwd,
@@ -137,26 +150,51 @@ impl PromptGroupBuilder {
     }
 }
 
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+enum PromptIdentity {
+    Turn(String),
+    Text(String),
+}
+
+fn entry_prompt(entry: &Entry) -> Option<&str> {
+    entry
+        .context
+        .as_ref()
+        .and_then(|context| context.get("agent_prompt"))
+        .map(String::as_str)
+        .filter(|prompt| !prompt.is_empty())
+}
+
+fn entry_turn_id(entry: &Entry) -> Option<&str> {
+    entry
+        .context
+        .as_ref()
+        .and_then(|context| context.get("codex_turn_id"))
+        .map(String::as_str)
+}
+
+fn prompt_identity(entry: &Entry, prompt: &str) -> PromptIdentity {
+    entry_turn_id(entry).map_or_else(
+        || PromptIdentity::Text(prompt.to_owned()),
+        |turn| PromptIdentity::Turn(turn.to_owned()),
+    )
+}
+
 fn build_prompt_groups(entries: &[Entry]) -> Vec<PromptGroup> {
-    let mut map: HashMap<(String, String), PromptGroupBuilder> = HashMap::new();
+    let mut map: HashMap<(String, PromptIdentity), PromptGroupBuilder> = HashMap::new();
 
     for (idx, entry) in entries.iter().enumerate() {
-        let prompt = entry
-            .context
-            .as_ref()
-            .and_then(|ctx| ctx.get("agent_prompt"))
-            .cloned()
-            .unwrap_or_default();
-
-        if prompt.is_empty() {
+        let Some(prompt) = entry_prompt(entry) else {
             continue;
-        }
+        };
 
-        let key = (entry.session_id.clone(), prompt.clone());
+        let turn_id = entry_turn_id(entry).map(str::to_owned);
+        let key = (entry.session_id.clone(), prompt_identity(entry, prompt));
         let builder = map.entry(key).or_insert_with(|| {
             PromptGroupBuilder::new(
                 entry.session_id.clone(),
-                prompt,
+                turn_id,
+                prompt.to_owned(),
                 entry.executor.as_deref().unwrap_or("unknown").to_string(),
                 entry.started_at,
             )
@@ -168,6 +206,32 @@ fn build_prompt_groups(entries: &[Entry]) -> Vec<PromptGroup> {
     // Most recent first
     groups.sort_by_key(|b| std::cmp::Reverse(b.last_at));
     groups
+}
+
+fn prompt_info_text(group: &PromptGroup, home: &str, width: u16) -> [String; 3] {
+    let commands = format!(
+        "{} {}",
+        group.cmd_count,
+        if group.cmd_count == 1 {
+            "command"
+        } else {
+            "commands"
+        }
+    );
+    let identity = align_info_groups(
+        &format!(" {}  •  {}", group.executor, shorten_path(&group.cwd, home)),
+        &format!(
+            "{commands}  •  {} ",
+            format_duration_ms(group.total_duration_ms)
+        ),
+        width,
+    );
+    let metrics = format!(
+        " Commands   {} total  │  {} success  │  {} failed",
+        group.cmd_count, group.success_count, group.fail_count
+    );
+    let activity = session_activity_text(group.first_at, group.last_at, &group.session_id, width);
+    [identity, metrics, activity]
 }
 
 // ── View state ──────────────────────────────────────────────
@@ -186,11 +250,18 @@ enum PromptAction {
     OpenSession(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetailBack {
+    PromptList,
+    Caller,
+}
+
 struct PromptExplorerApp {
     entries: Vec<Entry>,
     groups: Vec<PromptGroup>,
 
     view: View,
+    detail_back: DetailBack,
 
     // List screen
     list_pager: PagedTable,
@@ -226,6 +297,7 @@ impl PromptExplorerApp {
             entries,
             groups,
             view: View::List,
+            detail_back: DetailBack::PromptList,
             list_pager,
             detail_pager: PagedTable::new(PAGE_SIZE),
             detail_pane_open: true,
@@ -236,6 +308,34 @@ impl PromptExplorerApp {
             executor_names,
             cwd_filter: None,
             search: String::new(),
+        }
+    }
+
+    fn for_entry(entries: &[Entry], selected: &Entry) -> Option<Self> {
+        let prompt = entry_prompt(selected)?;
+        let identity = prompt_identity(selected, prompt);
+        let mut app = Self::new(entries);
+        let group_index = app.groups.iter().position(|group| {
+            group.session_id == selected.session_id
+                && match (&group.turn_id, &identity) {
+                    (Some(group_turn), PromptIdentity::Turn(turn)) => group_turn == turn,
+                    (None, PromptIdentity::Text(text)) => group.prompt == *text,
+                    _ => false,
+                }
+        })?;
+        app.view = View::Detail { group_index };
+        app.detail_back = DetailBack::Caller;
+        app.detail_pager = PagedTable::new(PAGE_SIZE);
+        if !app.groups[group_index].entry_indices.is_empty() {
+            app.detail_pager.state.select(Some(0));
+        }
+        Some(app)
+    }
+
+    const fn detail_back_label(&self) -> &'static str {
+        match self.detail_back {
+            DetailBack::PromptList => "Prompts",
+            DetailBack::Caller => "Session",
         }
     }
 
@@ -440,6 +540,9 @@ impl PromptExplorerApp {
     fn handle_detail_input(&mut self, key: crossterm::event::KeyEvent) -> PromptAction {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Backspace => {
+                if self.detail_back == DetailBack::Caller {
+                    return PromptAction::Quit;
+                }
                 self.view = View::List;
             }
             // Copy command
@@ -918,7 +1021,7 @@ impl PromptExplorerApp {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(4),            // info box: session/executor/path/stats
+                Constraint::Length(session_info_height(size.height)),
                 Constraint::Length(prompt_box_h), // prompt-only box
                 Constraint::Min(6),               // command table + detail pane
                 Constraint::Length(1),            // footer
@@ -955,57 +1058,45 @@ impl PromptExplorerApp {
         group: &PromptGroup,
         home: &str,
     ) {
-        let label_style = Style::default()
-            .fg(t.text_secondary)
-            .add_modifier(Modifier::BOLD);
-        let session_full = strip_session_prefix(&group.session_id).to_string();
-        let path_display = shorten_path(&group.cwd, home);
-
-        let mut spans = vec![
-            Span::styled(" Session  ", label_style),
-            Span::styled(session_full, Style::default().fg(t.primary_dim)),
-            Span::styled("    Executor  ", label_style),
-            Span::styled(
-                group.executor.clone(),
-                Style::default().fg(t.badge_executor),
-            ),
-            Span::styled("    Path  ", label_style),
-            Span::styled(path_display, Style::default().fg(t.badge_path)),
-            Span::styled("    Cmds  ", label_style),
-            Span::styled(format!("{}", group.cmd_count), Style::default().fg(t.text)),
-            Span::styled("   ✔ ", Style::default().fg(t.success)),
-            Span::styled(
-                format!("{}", group.success_count),
-                Style::default().fg(t.success),
-            ),
-        ];
-        if group.fail_count > 0 {
-            spans.push(Span::styled("   ✘ ", Style::default().fg(t.error)));
-            spans.push(Span::styled(
-                format!("{}", group.fail_count),
-                Style::default().fg(t.error),
-            ));
-        }
-        spans.push(Span::styled("   Duration  ", label_style));
-        spans.push(Span::styled(
-            format_duration_ms(group.total_duration_ms),
-            Style::default().fg(t.text_muted),
-        ));
-
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(t.border))
             .title(Span::styled(
-                " Info ",
+                " Prompt Summary ",
                 Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
             ));
         let inner = block.inner(area);
+        let lines = prompt_info_text(group, home, inner.width);
+        let content = if area.height >= 7 {
+            vec![
+                Line::styled(lines[0].clone(), Style::default().fg(t.text)),
+                Line::default(),
+                command_summary_line(
+                    "Commands",
+                    group.cmd_count,
+                    group.success_count,
+                    group.fail_count,
+                    t,
+                ),
+                Line::default(),
+                Line::styled(lines[2].clone(), Style::default().fg(t.text_muted)),
+            ]
+        } else {
+            vec![
+                Line::styled(lines[0].clone(), Style::default().fg(t.text)),
+                command_summary_line(
+                    "Commands",
+                    group.cmd_count,
+                    group.success_count,
+                    group.fail_count,
+                    t,
+                ),
+                Line::styled(lines[2].clone(), Style::default().fg(t.text_muted)),
+            ]
+        };
         f.render_widget(block, area);
-        f.render_widget(
-            Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false }),
-            inner,
-        );
+        f.render_widget(Paragraph::new(content), inner);
     }
 
     fn render_prompt_box(
@@ -1254,7 +1345,7 @@ impl PromptExplorerApp {
 
         let mut spans = vec![
             Span::styled(" Esc ", badge_key),
-            Span::styled(" Back  ", badge_label),
+            Span::styled(format!(" {}  ", self.detail_back_label()), badge_label),
             Span::styled(" ↑↓ ", badge_key),
             Span::styled(" Navigate  ", badge_label),
             Span::styled(" ←→ ", badge_key),
@@ -1303,6 +1394,31 @@ where
         app.executor_filter = app.executor_names.iter().position(|n| n == name);
     }
 
+    run_prompt_app(terminal, app, repo)
+}
+
+pub fn run_prompt_detail<B: Backend>(
+    terminal: &mut Terminal<B>,
+    entries: &[Entry],
+    selected: &Entry,
+) -> io::Result<()>
+where
+    io::Error: From<B::Error>,
+{
+    let Some(app) = PromptExplorerApp::for_entry(entries, selected) else {
+        return Ok(());
+    };
+    run_prompt_app(terminal, app, None)
+}
+
+fn run_prompt_app<B: Backend>(
+    terminal: &mut Terminal<B>,
+    mut app: PromptExplorerApp,
+    repo: Option<&Repository>,
+) -> io::Result<()>
+where
+    io::Error: From<B::Error>,
+{
     loop {
         terminal.draw(|f| app.render(f))?;
 
@@ -1418,6 +1534,14 @@ mod tests {
         }
     }
 
+    fn with_turn(mut entry: Entry, turn_id: &str) -> Entry {
+        entry
+            .context
+            .get_or_insert_with(HashMap::new)
+            .insert("codex_turn_id".into(), turn_id.into());
+        entry
+    }
+
     // ── Grouping logic tests ────────────────────────────────
 
     #[test]
@@ -1500,6 +1624,22 @@ mod tests {
             ),
         ];
         let groups = build_prompt_groups(&entries);
+        assert_eq!(groups.len(), 2);
+    }
+
+    #[test]
+    fn build_prompt_groups_keeps_repeated_text_separate_by_turn() {
+        let first = with_turn(
+            make_entry_with_prompt("s1", "cmd1", "run tests", "codex", Some(0), 1000, 10),
+            "turn-1",
+        );
+        let second = with_turn(
+            make_entry_with_prompt("s1", "cmd2", "run tests", "codex", Some(0), 2000, 10),
+            "turn-2",
+        );
+
+        let groups = build_prompt_groups(&[first, second]);
+
         assert_eq!(groups.len(), 2);
     }
 
@@ -1646,6 +1786,39 @@ mod tests {
         let esc = crossterm::event::KeyEvent::from(KeyCode::Esc);
         app.handle_input(esc, None);
         assert!(matches!(app.view, View::List));
+    }
+
+    #[test]
+    fn caller_detail_returns_to_its_session_instead_of_prompt_list() {
+        let entry =
+            make_entry_with_prompt("s1", "cargo test", "run tests", "codex", Some(0), 1000, 10);
+        let mut app = PromptExplorerApp::for_entry(std::slice::from_ref(&entry), &entry).unwrap();
+
+        assert!(matches!(app.view, View::Detail { .. }));
+        assert_eq!(app.detail_back_label(), "Session");
+        let action = app.handle_input(crossterm::event::KeyEvent::from(KeyCode::Esc), None);
+        assert!(matches!(action, PromptAction::Quit));
+    }
+
+    #[test]
+    fn prompt_detail_summary_uses_the_shared_three_row_layout() {
+        let entries = vec![make_entry_with_prompt(
+            "codex-session-1",
+            "cargo test",
+            "run tests",
+            "openai-codex",
+            Some(0),
+            1_000,
+            50,
+        )];
+        let group = &build_prompt_groups(&entries)[0];
+
+        let lines = prompt_info_text(group, "/Users/test", 160);
+
+        assert!(lines[0].contains("openai-codex"));
+        assert!(lines[0].contains("1 command"));
+        assert!(lines[1].contains("Commands"));
+        assert!(lines[2].contains("ID  codex-session-1"));
     }
 
     #[test]

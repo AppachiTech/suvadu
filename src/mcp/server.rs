@@ -8,7 +8,8 @@ use super::resources;
 use super::tools;
 
 /// Run the MCP server: read JSON-RPC from stdin, write responses to stdout.
-/// All logging goes to stderr. The database is opened read-only.
+/// All logging goes to stderr. Reads use a read-only database connection;
+/// explicitly enabled summary writes use a short-lived writable connection.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // `Repository::init_read_only()` below deliberately skips migrations (see
     // its doc comment) so the long-lived server session never writes. But
@@ -123,9 +124,34 @@ fn handle_tool_call(
     let empty = serde_json::Value::Object(serde_json::Map::new());
     let args = request["params"].get("arguments").unwrap_or(&empty);
 
-    match tools::call_tool(repo, name, args, mcp) {
-        Ok(text) => protocol::tool_result(id, &text),
+    let result = if name == "save_session_summary" {
+        // Validate authorization and input before opening any writable connection.
+        super::ai_sessions::summary_input(args, mcp).and_then(|_| {
+            let writer = Repository::init().map_err(|e| e.to_string())?;
+            tools::call_tool(&writer, name, args, mcp)
+        })
+    } else {
+        tools::call_tool(repo, name, args, mcp)
+    };
+    match result {
+        Ok(text) => tool_response(id, name, &text),
         Err(msg) => protocol::tool_error(id, &msg),
+    }
+}
+
+/// Session tools already paginate records. Byte truncation would corrupt JSON
+/// and discard pagination cursors or summary evidence.
+fn tool_response(id: &serde_json::Value, name: &str, text: &str) -> serde_json::Value {
+    if matches!(
+        name,
+        "list_agent_sessions" | "get_agent_session" | "save_session_summary"
+    ) {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": id,
+            "result": {"content": [{"type": "text", "text": text}], "isError": false}
+        })
+    } else {
+        protocol::tool_result(id, text)
     }
 }
 
@@ -195,5 +221,39 @@ mod tests {
         assert_eq!(resp["error"]["code"], -32700);
         assert_eq!(resp["error"]["message"], "Parse error");
         assert!(resp["id"].is_null());
+    }
+    #[test]
+    fn session_json_keeps_pagination_after_large_payload() {
+        let text = json!({"events": [{"text": "x".repeat(60_000)}], "next_offset": 20}).to_string();
+        let response = tool_response(&json!(1), "get_agent_session", &text);
+        let decoded: serde_json::Value =
+            serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(decoded["next_offset"], 20);
+    }
+
+    #[test]
+    fn summary_server_rejects_disabled_write_before_opening_database() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        for mcp in [
+            crate::config::McpConfig::default(),
+            crate::config::McpConfig {
+                allow_session_summaries: true,
+                disabled_tools: vec!["save_session_summary".into()],
+                ..crate::config::McpConfig::default()
+            },
+        ] {
+            let response = handle_tool_call(
+                &repo,
+                &json!(1),
+                &json!({"params": {"name": "save_session_summary", "arguments": {}}}),
+                &mcp,
+            );
+            assert_eq!(response["result"]["isError"], true);
+            assert!(response["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("disabled"));
+        }
     }
 }

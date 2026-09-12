@@ -21,6 +21,14 @@ pub fn handle_hook() -> Result<()> {
         return Err("Codex hook input exceeds 1 MB".into());
     }
     let event: Value = serde_json::from_str(&input)?;
+    if terminal_hook(
+        &event,
+        |path, id| crate::commands::agent_session::import_native(path, Some(id)),
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    )? {
+        return Ok(());
+    }
     let Some(session) = event["session_id"].as_str().filter(|id| valid_id(id)) else {
         return Ok(());
     };
@@ -62,6 +70,32 @@ pub fn handle_hook() -> Result<()> {
 fn valid_id(id: &str) -> bool {
     // Also bounds each on-disk filename and the prefixed database session ID.
     id.len() <= 128 && util::is_valid_session_id(id)
+}
+
+fn terminal_hook(
+    event: &Value,
+    mut import: impl FnMut(&Path, &str) -> Result<Value>,
+    output: &mut impl std::io::Write,
+    errors: &mut impl std::io::Write,
+) -> Result<bool> {
+    let name = event["hook_event_name"].as_str().unwrap_or("");
+    if !matches!(name, "Stop" | "SessionEnd") {
+        return Ok(false);
+    }
+    if let (Some(id), Some(path)) = (
+        event["session_id"].as_str().filter(|id| valid_id(id)),
+        event["transcript_path"].as_str().filter(|p| !p.is_empty()),
+    ) {
+        match import(Path::new(path), id) {
+            Err(error) => writeln!(errors, "suvadu: session capture: {error}")?,
+            Ok(result) if result["has_more"] == true => writeln!(errors, "suvadu: more transcript data remains; a later hook or suv agent import-session will continue")?,
+            Ok(_) => (),
+        }
+    }
+    if name == "Stop" {
+        writeln!(output, "{{}}")?;
+    }
+    Ok(true)
 }
 
 fn record_command(
@@ -136,35 +170,84 @@ pub fn handle_init() -> Result<()> {
     std::fs::create_dir_all(&hooks_dir)?;
     std::fs::create_dir_all(&codex_home)?;
     let updated = format!("{}\n", serde_json::to_string_pretty(&settings)?);
+    let mut backup_path = None;
     if before.as_deref() != Some(&updated) {
         if let Some(before) = before {
             // Retain each replaced version, without overwriting an earlier backup.
             let backup =
                 codex_home.join(format!("hooks.json.suvadu-backup-{}", uuid::Uuid::new_v4()));
             util::atomic_write_with_mode(&backup, &before, 0o600)?;
-            println!("Previous hooks saved to {}", backup.display());
+            backup_path = Some(backup);
         }
     }
     util::atomic_write_with_mode(&script_path, &script, 0o700)?;
     util::atomic_write_with_mode(&path, &updated, 0o600)?;
-    println!(
-        "Codex prompt and shell-command hooks configured in {}",
-        path.display()
-    );
-    println!(
-        "Restart Codex, then review and trust the Suvadu hooks when prompted (or use /hooks)."
-    );
-    println!("Prompts are cached locally per turn; recorded commands link to their turn's prompt.");
-    println!("View commands: suv history --executor openai-codex");
-    println!("View prompts with commands: suv agent prompts --executor openai-codex");
     let mcp_configured = try_configure_codex_mcp(&codex_home, &binary.to_string_lossy());
-    if matches!(mcp_configured, Ok(true)) {
-        println!(
-            "MCP server auto-configured in {}",
-            codex_home.join("config.toml").display()
-        );
-    }
+    let mcp_path = matches!(mcp_configured, Ok(true)).then(|| codex_home.join("config.toml"));
+    print!(
+        "{}",
+        init_message(
+            &path,
+            backup_path.as_deref(),
+            mcp_path.as_deref(),
+            crate::util::color_enabled(),
+        )
+    );
     Ok(())
+}
+
+fn init_message(
+    hooks_path: &Path,
+    backup_path: Option<&Path>,
+    mcp_path: Option<&Path>,
+    color: bool,
+) -> String {
+    let (bold, reset) = if color {
+        ("\x1b[1m", "\x1b[0m")
+    } else {
+        ("", "")
+    };
+    let green = if color { "\x1b[32m" } else { "" };
+    let cyan = if color { "\x1b[36m" } else { "" };
+    let mut lines = vec![
+        format!("{bold}Suvadu — Codex Integration{reset}"),
+        String::new(),
+        format!(
+            "{green}✓{reset} Hooks auto-configured: {}",
+            hooks_path.display()
+        ),
+        "  Captures prompts, shell commands, responses, models, and reported token usage.".into(),
+    ];
+    if let Some(backup) = backup_path {
+        lines.push(format!("  Previous hooks backed up: {}", backup.display()));
+    }
+    if let Some(mcp) = mcp_path {
+        lines.extend([
+            String::new(),
+            format!(
+                "{green}✓{reset} MCP server auto-configured: {}",
+                mcp.display()
+            ),
+            "  Codex can now query your Suvadu history via MCP.".into(),
+        ]);
+    }
+    lines.extend([
+        String::new(),
+        "Activate in Codex:".into(),
+        "  1. In the Codex terminal CLI, open /hooks.".into(),
+        "  2. Review and trust the Suvadu hooks, including Stop and SessionEnd.".into(),
+        "  3. Relaunch Codex.".into(),
+        "     VS Code: fully quit and reopen VS Code after trusting the hooks.".into(),
+        String::new(),
+        "After one fresh Codex turn, try:".into(),
+        format!("  {cyan}suv agent sessions{reset}                              — browse captured AI sessions"),
+        format!("  {cyan}suv agent prompts --executor openai-codex{reset}     — see prompts and their commands"),
+        format!("  {cyan}suv history --executor openai-codex{reset}           — see commands executed by Codex"),
+        String::new(),
+        "Your AI agent can also query Suvadu through MCP — try asking it:".into(),
+        format!("  {cyan}\"Summarize my latest Codex session.\"{reset}"),
+    ]);
+    format!("{}\n", lines.join("\n"))
 }
 
 /// Sets `table[key]`, preserving the existing value's comment/formatting decor
@@ -231,7 +314,7 @@ fn merge_hooks(settings: &mut Value, script: &Path, hooks_dir: &Path) -> Result<
         .as_object_mut()
         .ok_or("Codex hooks must be an object")?;
     let command = super::shell_escape(&script.to_string_lossy());
-    for event in ["PostToolUse", "UserPromptSubmit"] {
+    for event in ["PostToolUse", "UserPromptSubmit", "Stop", "SessionEnd"] {
         let mut group = json!({"hooks":[{"type":"command", "command":command, "timeout":10}]});
         if event == "PostToolUse" {
             group["matcher"] = "Bash".into();
@@ -261,7 +344,13 @@ fn remove_managed_hooks(settings: &mut Value, hooks_dir: &Path) -> Result<()> {
         "claude-code-post-tool-failure.sh",
         "claude-code-prompt.sh",
     ];
-    for event in ["PostToolUse", "PostToolUseFailure", "UserPromptSubmit"] {
+    for event in [
+        "PostToolUse",
+        "PostToolUseFailure",
+        "UserPromptSubmit",
+        "Stop",
+        "SessionEnd",
+    ] {
         let Some(groups) = hooks.get_mut(event) else {
             continue;
         };
@@ -326,6 +415,135 @@ fn cleanup_file(path: &Path, hooks_dir: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn init_message_groups_configuration_activation_and_next_steps() {
+        let message = init_message(
+            Path::new("/home/test/.codex/hooks.json"),
+            Some(Path::new("/home/test/.codex/hooks.json.suvadu-backup-test")),
+            Some(Path::new("/home/test/.codex/config.toml")),
+            false,
+        );
+
+        assert!(message.starts_with("Suvadu — Codex Integration\n\n"));
+        assert!(message.contains("✓ Hooks auto-configured: /home/test/.codex/hooks.json"));
+        assert!(message.contains("Captures prompts, shell commands, responses, models"));
+        assert!(message.contains("Previous hooks backed up:"));
+        assert!(message.contains("✓ MCP server auto-configured: /home/test/.codex/config.toml"));
+        assert!(message.contains("Activate in Codex:"));
+        assert!(message.contains("1. In the Codex terminal CLI, open /hooks."));
+        assert!(message.contains("fully quit and reopen VS Code"));
+        assert!(message.contains("After one fresh Codex turn, try:"));
+        assert!(message.contains("suv agent sessions"));
+        assert!(message.contains("suv agent prompts --executor openai-codex"));
+        assert!(message.contains("Summarize my latest Codex session."));
+    }
+
+    #[test]
+    fn init_message_omits_optional_configuration_lines_when_absent() {
+        let message = init_message(Path::new("/home/test/.codex/hooks.json"), None, None, false);
+
+        assert!(!message.contains("Previous hooks backed up:"));
+        assert!(!message.contains("MCP server auto-configured:"));
+    }
+
+    #[test]
+    fn terminal_hooks_are_installed_idempotently_and_removed_without_other_handlers() {
+        let hooks_dir = Path::new("/tmp/synthetic hooks");
+        let script = hooks_dir.join("codex.sh");
+        let mut settings = json!({"hooks":{
+            "Stop":[{"hooks":[{"type":"command","command":"/team/stop.sh"}]}],
+            "SessionEnd":[{"hooks":[{"type":"command","command":"/team/end.sh"}]}]
+        }});
+        merge_hooks(&mut settings, &script, hooks_dir).unwrap();
+        let once = settings.clone();
+        merge_hooks(&mut settings, &script, hooks_dir).unwrap();
+        assert_eq!(settings, once);
+        for event in ["Stop", "SessionEnd"] {
+            assert_eq!(settings["hooks"][event].as_array().unwrap().len(), 2);
+            assert_eq!(
+                settings["hooks"][event][1]["hooks"][0]["command"],
+                super::super::shell_escape(&script.to_string_lossy())
+            );
+        }
+        remove_managed_hooks(&mut settings, hooks_dir).unwrap();
+        assert_eq!(
+            settings["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "/team/stop.sh"
+        );
+        assert_eq!(
+            settings["hooks"]["SessionEnd"][0]["hooks"][0]["command"],
+            "/team/end.sh"
+        );
+        assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        assert_eq!(settings["hooks"]["SessionEnd"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn stop_imports_once_and_returns_empty_protocol_object_on_failure() {
+        let event = json!({"hook_event_name":"Stop","session_id":"test-session","transcript_path":"/tmp/synthetic-session.jsonl"});
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        let mut imports = Vec::new();
+        assert!(terminal_hook(
+            &event,
+            |path, id| {
+                imports.push((path.to_path_buf(), id.to_string()));
+                Err("synthetic import failure".into())
+            },
+            &mut output,
+            &mut errors
+        )
+        .unwrap());
+        assert_eq!(
+            imports,
+            vec![(
+                PathBuf::from("/tmp/synthetic-session.jsonl"),
+                "test-session".to_string()
+            )]
+        );
+        assert_eq!(output, b"{}\n");
+        assert!(String::from_utf8(errors)
+            .unwrap()
+            .contains("synthetic import failure"));
+    }
+
+    #[test]
+    fn session_end_import_is_bounded_even_when_more_records_remain() {
+        let event = json!({"hook_event_name":"SessionEnd","session_id":"test-session","transcript_path":"/tmp/synthetic-session.jsonl"});
+        let mut calls = 0;
+        let mut output = Vec::new();
+        assert!(terminal_hook(
+            &event,
+            |_, _| {
+                calls += 1;
+                Ok(json!({"has_more":true}))
+            },
+            &mut output,
+            &mut Vec::new()
+        )
+        .unwrap());
+        assert_eq!(calls, 1);
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn stop_without_transcript_or_with_invalid_identity_does_not_import() {
+        for event in [
+            json!({"hook_event_name":"Stop","session_id":"test-session","transcript_path":null}),
+            json!({"hook_event_name":"Stop","session_id":"../bad","transcript_path":"/tmp/x"}),
+        ] {
+            let mut output = Vec::new();
+            assert!(terminal_hook(
+                &event,
+                |_, _| panic!("must not import"),
+                &mut output,
+                &mut Vec::new()
+            )
+            .unwrap());
+            assert_eq!(output, b"{}\n");
+        }
+    }
 
     #[test]
     fn uninstall_preserves_other_hooks_and_backs_up_original() {

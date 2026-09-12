@@ -1,3 +1,4 @@
+pub mod agent_session;
 pub mod alias;
 pub mod alias_picker;
 pub mod doctor;

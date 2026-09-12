@@ -191,17 +191,41 @@ pub struct Alias {
     pub created_at: i64,
 }
 
-/// Summary of a session with aggregated stats (for session picker)
+/// Origin of a session shown in the unified session browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionKind {
+    Human,
+    Ai,
+}
+
+impl std::fmt::Display for SessionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Human => "Human",
+            Self::Ai => "AI",
+        })
+    }
+}
+
+/// Summary of a shell or AI session for the unified session browser.
 #[derive(Debug, Clone)]
 pub struct SessionSummary {
     pub id: String,
+    pub kind: SessionKind,
     pub hostname: String,
+    pub cwd: Option<String>,
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub models: Vec<String>,
+    pub total_tokens: Option<u64>,
+    pub usage_complete: bool,
+    pub event_count: i64,
     pub created_at: i64,
     pub tag_name: Option<String>,
     pub cmd_count: i64,
     pub success_count: i64,
-    pub first_cmd_at: i64,
-    pub last_cmd_at: i64,
+    pub first_activity_at: i64,
+    pub last_activity_at: i64,
 }
 
 /// Aggregated usage statistics

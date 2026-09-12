@@ -139,6 +139,7 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
     if installed {
         let new_version = latest_version.as_deref().unwrap_or("latest");
         show_success_banner(current_version, new_version);
+        println!("{}", crate::upgrade_notice::AGENT_UPGRADE);
     }
 
     Ok(())

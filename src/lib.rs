@@ -31,8 +31,10 @@
     clippy::implicit_hasher
 )]
 
+pub mod ai_sessions;
 pub mod db;
 pub mod models;
+pub mod redact;
 pub mod repository;
 pub mod theme;
 pub mod util;

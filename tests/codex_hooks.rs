@@ -46,10 +46,14 @@ impl Sandbox {
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
-        assert!(
-            result.stdout.is_empty(),
-            "Logging must not inject prompt context"
-        );
+        if value["hook_event_name"] == "Stop" {
+            assert_eq!(result.stdout, b"{}\n");
+        } else {
+            assert!(
+                result.stdout.is_empty(),
+                "Logging must not inject prompt context"
+            );
+        }
     }
     fn history(&self) -> Vec<serde_json::Value> {
         let output = self.run(&["history", "--json", "-n", "100"]);
@@ -223,7 +227,8 @@ fn codex_init_migrates_only_suvadu_handlers_and_is_idempotent() {
     let first = std::fs::read_to_string(s.hooks_path()).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&first).unwrap();
     assert_eq!(parsed["description"], "Keep this");
-    assert_eq!(parsed["hooks"]["Stop"], config["hooks"]["Stop"]);
+    assert_eq!(parsed["hooks"]["Stop"][0], config["hooks"]["Stop"][0]);
+    assert_eq!(parsed["hooks"]["Stop"].as_array().unwrap().len(), 2);
     let handlers: Vec<_> = parsed["hooks"]["PostToolUse"]
         .as_array()
         .unwrap()
@@ -319,4 +324,60 @@ fn doctor_reports_a_stale_agent_hook_instead_of_counting_it_as_healthy() {
         line.contains("suv init"),
         "Missing actionable repair: {line}"
     );
+}
+
+#[test]
+fn codex_session_hook_and_cli_correlate_native_events_usage_and_commands() {
+    use serde_json::json;
+    let s = Sandbox::new();
+    let transcript = s.home.path().join("synthetic.jsonl");
+    let rows = [
+        json!({"type":"session_meta","payload":{"id":"session-123","cwd":s.home.path()}}),
+        json!({"type":"turn_context","payload":{"turn_id":"turn-one","cwd":s.home.path(),"model":"fixture-model"}}),
+        json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Check the synthetic project"}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["user.text"]}}}),
+        json!({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":70,"output_tokens":30,"total_tokens":100}}}}),
+        json!({"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"The synthetic project is clean."}]}}),
+    ];
+    let mut file = std::fs::File::create(&transcript).unwrap();
+    for mut row in rows {
+        row["timestamp"] = json!("2026-09-12T12:00:00Z");
+        writeln!(file, "{row}").unwrap();
+    }
+    s.event(&prompt("turn-one", "Check the synthetic project"));
+    s.event(&tool("turn-one", "git status", &json!({"exit_code":0})));
+    let stop =
+        json!({"hook_event_name":"Stop","session_id":"session-123","transcript_path":transcript});
+    s.event(&stop);
+    s.event(&stop);
+    let output = s.run(&["agent", "session", "codex-session-123"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let session: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(session["events"].as_array().unwrap().len(), 4);
+    assert_eq!(session["session"]["usage"]["total_tokens"], 100);
+    assert_eq!(session["session"]["model"], "fixture-model");
+    assert_eq!(session["session"]["models"], json!(["fixture-model"]));
+    assert_eq!(session["commands"].as_array().unwrap().len(), 1);
+    assert_eq!(session["commands"][0]["turn_id"], "turn-one");
+    assert_eq!(
+        session["events"][1]["data"]["text"],
+        "Check the synthetic project"
+    );
+    let list = s.run(&["sessions", "--list"]);
+    assert!(list.status.success());
+    let list = String::from_utf8(list.stdout).unwrap();
+    assert!(list.contains("AI"));
+    assert!(list.contains("fixture-model"));
+    assert!(list.contains("100"));
+    assert!(s
+        .run(&["agent", "delete-session", "codex-session-123"])
+        .status
+        .success());
+    let output = s.run(&["agent", "sessions"]);
+    let sessions: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(sessions["sessions"], json!([]));
+    assert!(s.history().is_empty());
 }

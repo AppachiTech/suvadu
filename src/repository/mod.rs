@@ -1,3 +1,4 @@
+mod ai_sessions;
 mod aliases;
 mod api;
 mod bookmarks;
