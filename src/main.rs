@@ -98,6 +98,9 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
         Commands::HookCursor => integrations::handle_hook_cursor(),
         Commands::HookCursorPrompt => integrations::handle_hook_cursor_prompt(),
         Commands::HookClaudePrompt => integrations::handle_hook_claude_prompt(),
+        Commands::HookOpencodePrompt { session_id } => {
+            integrations::handle_hook_opencode_prompt(&session_id)
+        }
         Commands::McpServe => mcp::run(),
         cmd @ Commands::Search { .. } => run_search(cmd),
         Commands::Get {
@@ -392,6 +395,7 @@ const fn is_user_facing_command(cmd: &Commands) -> bool {
             | Commands::HookClaudeCodeFailure
             | Commands::HookClaudeSession
             | Commands::HookOpencodeSession { .. }
+            | Commands::HookOpencodePrompt { .. }
             | Commands::HookCursor
             | Commands::HookCursorPrompt
             | Commands::McpServe
@@ -482,6 +486,9 @@ mod tests {
         assert!(!is_user_facing_command(&Commands::HookCursorPrompt));
         assert!(!is_user_facing_command(&Commands::McpServe));
         assert!(!is_user_facing_command(&Commands::HookClaudePrompt));
+        assert!(!is_user_facing_command(&Commands::HookOpencodePrompt {
+            session_id: "abc".to_string(),
+        }));
         assert!(!is_user_facing_command(&Commands::Man));
         assert!(!is_user_facing_command(&Commands::Completions {
             shell: clap_complete::Shell::Zsh,

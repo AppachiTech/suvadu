@@ -35,11 +35,11 @@ pub fn get_definition() -> Value {
 pub fn resolve_definition() -> Value {
     json!({
         "name": "resolve_current_agent_session",
-        "description": "Resolve 'this/current session' conservatively to a captured Suvadu session. Uses an explicit ID first, then agent-provided native session environment, then an unambiguous recent session in the current directory. Returns candidates instead of guessing when ambiguous. The in-progress turn may not be captured until Stop/SessionEnd.",
+        "description": "Resolve 'this/current session' conservatively to a captured Suvadu session. Uses an explicit ID first, then agent-provided native session environment (Codex and Claude Code only; OpenCode has no such environment variable, so it falls straight through to the cwd fallback), then an unambiguous recent session in the current directory. Returns candidates instead of guessing when ambiguous. The in-progress turn may not be captured until Stop/SessionEnd.",
         "inputSchema": {"type": "object", "properties": {
             "session_id": {"type": "string", "description": "Optional explicit Suvadu session ID"},
             "native_id": {"type": "string", "description": "Optional native agent session ID"},
-            "agent": {"type": "string", "description": "Optional agent: openai-codex/codex or claude-code/claude"},
+            "agent": {"type": "string", "description": "Optional agent: openai-codex/codex, claude-code/claude, or opencode"},
             "cwd": {"type": "string", "description": "Optional working directory hint"}
         }}
     })
@@ -122,7 +122,8 @@ fn prefixed_session_id(native_id: &str, agent: &str) -> Result<String, String> {
     match agent {
         "openai-codex" | "codex" => Ok(format!("codex-{native_id}")),
         "claude-code" | "claude" => Ok(format!("claude-{native_id}")),
-        _ => Err("agent must be openai-codex/codex or claude-code/claude".to_string()),
+        "opencode" => Ok(format!("opencode-{native_id}")),
+        _ => Err("agent must be openai-codex/codex, claude-code/claude, or opencode".to_string()),
     }
 }
 
@@ -191,6 +192,7 @@ pub fn resolve(repo: &Repository, args: &Value, mcp: &McpConfig) -> Result<Strin
                 && agent.is_none_or(|agent| match agent {
                     "codex" | "openai-codex" => session["agent"] == "openai-codex",
                     "claude" | "claude-code" => session["agent"] == "claude-code",
+                    "opencode" => session["agent"] == "opencode",
                     _ => false,
                 })
         })
@@ -471,6 +473,60 @@ mod tests {
         assert_eq!(resolved["resolved"], true);
         assert_eq!(resolved["session"]["id"], "codex-native-123");
         assert!(resolved["capture_lag_note"].is_string());
+    }
+
+    fn insert_opencode_session(repo: &Repository, native_id: &str, cwd: &str) {
+        let messages = json!([{
+            "info": {"id": format!("msg-{native_id}"), "sessionID": native_id, "role": "user", "time": {"created": 1000}},
+            "parts": [{"type": "text", "text": "Fix the bug"}]
+        }]);
+        repo.import_opencode_session(native_id, cwd, &messages.to_string(), |_| {
+            Ok(crate::ai_sessions::CapturePolicy::default())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn current_session_resolver_uses_an_explicit_native_id_for_opencode() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        insert_opencode_session(&repo, "ses-abc", "/work/project");
+        let resolved = call_json(
+            &repo,
+            "resolve_current_agent_session",
+            &json!({"native_id": "ses-abc", "agent": "opencode"}),
+            &McpConfig::default(),
+        );
+        assert_eq!(resolved["resolved"], true);
+        assert_eq!(resolved["session"]["id"], "opencode-ses-abc");
+    }
+
+    #[test]
+    fn current_session_resolver_filters_ambiguous_cwd_candidates_by_opencode_agent() {
+        // A Codex session and an OpenCode session sharing a directory: cwd
+        // alone is ambiguous, and an explicit agent hint must narrow it.
+        let (_dir, repo) = captured_session();
+        insert_opencode_session(&repo, "ses-xyz", "/work/project");
+
+        let ambiguous = call_json(
+            &repo,
+            "resolve_current_agent_session",
+            &json!({"cwd": "/work/project"}),
+            &McpConfig::default(),
+        );
+        assert_eq!(ambiguous["resolved"], false);
+        assert_eq!(ambiguous["candidates"].as_array().unwrap().len(), 2);
+
+        // Before the fix, "opencode" fell through to the filter's `_ =>
+        // false` arm and silently zeroed every candidate instead of
+        // narrowing down to the opencode session.
+        let resolved = call_json(
+            &repo,
+            "resolve_current_agent_session",
+            &json!({"cwd": "/work/project", "agent": "opencode"}),
+            &McpConfig::default(),
+        );
+        assert_eq!(resolved["resolved"], true);
+        assert_eq!(resolved["session"]["id"], "opencode-ses-xyz");
     }
 
     #[test]

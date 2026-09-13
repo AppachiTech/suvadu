@@ -221,6 +221,14 @@ pub enum Commands {
     #[command(name = "hook-claude-prompt", hide = true)]
     HookClaudePrompt,
 
+    /// Cache an `OpenCode` prompt (session ID via flag, raw prompt text on stdin),
+    /// redacted and truncated the same way as every other agent's prompt cache
+    #[command(name = "hook-opencode-prompt", hide = true)]
+    HookOpencodePrompt {
+        #[arg(long)]
+        session_id: String,
+    },
+
     #[command(hide = true)]
     Get {
         /// Query string
@@ -1244,6 +1252,17 @@ mod tests {
                 assert_eq!(directory.as_deref(), Some("/work"));
             }
             _ => panic!("Expected HookOpencodeSession"),
+        }
+    }
+
+    #[test]
+    fn hook_opencode_prompt_parses_session_id() {
+        let cli = Cli::parse_from(["suv", "hook-opencode-prompt", "--session-id", "ses_abc123"]);
+        match cli.command {
+            Commands::HookOpencodePrompt { session_id } => {
+                assert_eq!(session_id, "ses_abc123");
+            }
+            _ => panic!("Expected HookOpencodePrompt"),
         }
     }
 }
