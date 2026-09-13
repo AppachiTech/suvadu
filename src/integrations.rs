@@ -1097,16 +1097,14 @@ async function importSession(client, sessionID, directory) {
   }
 }
 
-export default {
-  id: "suvadu",
-  setup: async (input) => {
-    // Tracks the most recently active session so `dispose()` (which fires on
-    // plugin unload/process exit with no event of its own) has something to
-    // flush. Updated from both hooks below, so a session that never reaches
-    // session.idle before exit is still captured on a best-effort basis.
-    let lastSessionID = null;
+export default async (input) => {
+  // Tracks the most recently active session so `dispose()` (which fires on
+  // plugin unload/process exit with no event of its own) has something to
+  // flush. Updated from both hooks below, so a session that never reaches
+  // session.idle before exit is still captured on a best-effort basis.
+  let lastSessionID = null;
 
-    return {
+  return {
     event: async (eventInput) => {
       const evt = eventInput?.event;
       if (!evt) return;
@@ -1175,8 +1173,7 @@ export default {
         await importSession(input.client, lastSessionID, input.directory);
       }
     },
-    };
-  },
+  };
 };
 "#;
 
@@ -2103,15 +2100,29 @@ mod tests {
     }
 
     #[test]
-    fn opencode_plugin_exports_the_id_and_setup_shape_the_installed_cli_requires() {
-        // Confirmed empirically against a real local `opencode` v2.0.1 install:
-        // a bare `export default async (input) => Hooks` factory function is
-        // rejected at load time ("Plugin must export a default definition with
-        // an id and an effect or setup function"), even though that's the shape
-        // the published @opencode-ai/plugin@1.18.30 npm types describe. The
-        // CLI's actual runtime contract requires `{ id, setup }`.
-        assert!(OPENCODE_PLUGIN_SCRIPT.contains(r#"id: "suvadu""#));
-        assert!(OPENCODE_PLUGIN_SCRIPT.contains("setup: async (input) =>"));
-        assert!(!OPENCODE_PLUGIN_SCRIPT.contains("export default async (input) =>"));
+    fn opencode_plugin_exports_the_bare_factory_shape_the_published_sdk_requires() {
+        // The plain `export default async (input) => Hooks` factory function
+        // is the documented, correct shape for the actual current stable CLI
+        // (confirmed empirically end-to-end against a real local `opencode`
+        // v1.18.30 install, matching the published @opencode-ai/plugin@1.18.30
+        // npm types exactly: module load, `tool.execute.after` firing on a
+        // real bash call, `suv add` succeeding, `session.idle` firing, and
+        // `hook-opencode-session` importing the session's messages).
+        //
+        // Earlier in development this was mistakenly changed to an
+        // `{ id, effect: async (input) => Hooks }` object shape, based on
+        // empirical testing against a newer, mismatched pre-release CLI build
+        // (self-reported version v2.0.1/v2.0.3) that had drifted ahead of the
+        // published SDK and used an undocumented alternate contract (where,
+        // confusingly, `{ id, setup }` also loads without a shape error but
+        // silently never invokes any of its returned hooks — the hooks-return
+        // entry point on that build is `effect`, not `setup`). That contract
+        // is specific to that mismatched build and must not be reintroduced
+        // here; the plain factory function is correct for the CLI version
+        // suvadu actually targets.
+        assert!(OPENCODE_PLUGIN_SCRIPT.contains("export default async (input) =>"));
+        assert!(!OPENCODE_PLUGIN_SCRIPT.contains("id: \"suvadu\""));
+        assert!(!OPENCODE_PLUGIN_SCRIPT.contains("effect: async (input) =>"));
+        assert!(!OPENCODE_PLUGIN_SCRIPT.contains("setup: async (input) =>"));
     }
 }
