@@ -1,11 +1,13 @@
 use crate::ai_sessions::AiEvent;
-use crate::models::{Entry, SessionSummary};
+use crate::models::{AiSummaryRecord, Entry, SessionSummary};
 
 #[derive(Debug, Clone)]
 pub struct AiSessionData {
     pub summary: SessionSummary,
     pub usage: Option<AiSessionUsage>,
     pub items: Vec<AiTimelineItem>,
+    /// Saved AI-generated summaries for this session, newest first.
+    pub summaries: Vec<AiSummaryRecord>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -133,6 +135,7 @@ pub fn build_ai_session_data(
     summary: SessionSummary,
     events: Vec<AiEvent>,
     entries: Vec<Entry>,
+    summaries: Vec<AiSummaryRecord>,
 ) -> AiSessionData {
     let usage = events
         .iter()
@@ -197,5 +200,6 @@ pub fn build_ai_session_data(
         summary,
         usage,
         items,
+        summaries,
     }
 }

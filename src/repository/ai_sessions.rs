@@ -2,7 +2,7 @@
 use super::Repository;
 use crate::ai_sessions::{claude, codex, AiEvent, CapturePolicy, SummaryInput};
 use crate::db::{DbError, DbResult};
-use crate::models::{SessionKind, SessionSummary};
+use crate::models::{AiSummaryRecord, SessionKind, SessionSummary};
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -905,6 +905,36 @@ impl Repository {
         )
     }
 
+    /// Saved summaries for a session, newest first, for the TUI summary
+    /// panel. Unlike [`Self::get_ai_session`]'s `summaries` field, this
+    /// doesn't compute checkpoint-resume eligibility -- it's just what a
+    /// human viewer needs: the text, who/what wrote it, when, and whether
+    /// it's still current.
+    pub fn ai_summaries_for_session(&self, session_id: &str) -> DbResult<Vec<AiSummaryRecord>> {
+        let current_revision = self.ai_session_header(session_id, &[])?["revision"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let mut statement = self.conn.prepare(
+            "SELECT id,text,agent,model,source_revision,created_at FROM ai_summaries \
+             WHERE session_id=?1 ORDER BY created_at DESC,rowid DESC",
+        )?;
+        let records = statement
+            .query_map([session_id], |r| {
+                let source_revision: String = r.get(4)?;
+                Ok(AiSummaryRecord {
+                    id: r.get(0)?,
+                    text: r.get(1)?,
+                    agent: r.get(2)?,
+                    model: r.get(3)?,
+                    current: source_revision == current_revision,
+                    created_at: r.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(records)
+    }
+
     /// Explicit deletion includes shell evidence and checkpoints, preventing retained summaries.
     pub fn delete_ai_session(&self, id: &str) -> DbResult<usize> {
         let tx = self.conn.unchecked_transaction()?;
@@ -1511,5 +1541,53 @@ mod tests {
         let (_dir, repo) = crate::test_utils::test_repo();
         let result = repo.list_ai_sessions(20, 0, &[]).unwrap();
         assert_eq!(result["sessions"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn ai_summaries_for_session_orders_newest_first_and_flags_only_current_as_current() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("fixture.jsonl");
+        std::fs::write(&path, records()).unwrap();
+        import(&repo, &path);
+
+        assert_eq!(repo.ai_summaries_for_session("codex-fixture").unwrap(), []);
+
+        let page = repo.get_ai_session("codex-fixture", 20, 0, &[]).unwrap();
+        let first = SummaryInput {
+            session_id: "codex-fixture".into(),
+            source_revision: page["session"]["revision"].as_str().unwrap().into(),
+            text: "First summary".into(),
+            agent: "claude".into(),
+            model: "fixture-writer".into(),
+            source_ids: vec![page["events"][0]["id"].as_str().unwrap().into()],
+            base_summary_id: None,
+        };
+        repo.save_ai_summary(&first, &[]).unwrap();
+
+        append(&path, &prompt("a follow-up request"));
+        import(&repo, &path);
+        let appended = repo.get_ai_session("codex-fixture", 20, 0, &[]).unwrap();
+        let second = SummaryInput {
+            session_id: "codex-fixture".into(),
+            source_revision: appended["session"]["revision"].as_str().unwrap().into(),
+            text: "Second summary".into(),
+            agent: "codex".into(),
+            model: "fixture-writer-2".into(),
+            source_ids: vec![appended["events"].as_array().unwrap().last().unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .into()],
+            base_summary_id: None,
+        };
+        repo.save_ai_summary(&second, &[]).unwrap();
+
+        let records = repo.ai_summaries_for_session("codex-fixture").unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].text, "Second summary");
+        assert_eq!(records[0].agent, "codex");
+        assert_eq!(records[0].model, "fixture-writer-2");
+        assert!(records[0].current);
+        assert_eq!(records[1].text, "First summary");
+        assert!(!records[1].current);
     }
 }

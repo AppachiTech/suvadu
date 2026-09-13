@@ -228,6 +228,20 @@ pub struct SessionSummary {
     pub last_activity_at: i64,
 }
 
+/// A saved AI-session summary (generated interpretation, not captured
+/// evidence). `current` is true only when its `source_revision` matches the
+/// session's revision at query time; a saved summary's revision never
+/// changes, so only the newest can ever be current.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiSummaryRecord {
+    pub id: String,
+    pub text: String,
+    pub agent: String,
+    pub model: String,
+    pub created_at: i64,
+    pub current: bool,
+}
+
 /// Aggregated usage statistics
 #[derive(Debug, Clone, Serialize)]
 pub struct Stats {

@@ -5,9 +5,9 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::backend::Backend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation,
+    Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation,
     ScrollbarState, Table, TableState, Wrap,
 };
 use ratatui::Terminal;
@@ -439,6 +439,12 @@ impl SessionApp {
                 self.page = self.total_pages();
                 let last = self.page_slice().len().saturating_sub(1);
                 self.table_state.select(Some(last));
+            }
+            KeyCode::Char('s') => {
+                self.status_message = Some((
+                    "Summaries are only available for AI sessions".into(),
+                    std::time::Instant::now(),
+                ));
             }
             _ => {}
         }
@@ -962,6 +968,17 @@ fn render_entry_row(
     ])
 }
 
+/// Navigation state for the summary panel (opened with `s`). `index` steps
+/// through `AiSessionData::summaries` (0 = newest); the panel owns no data
+/// of its own so history stays in sync if the underlying data ever reloads.
+struct SummaryPanelState {
+    index: usize,
+    scroll: u16,
+    /// `false` (default) renders headers/bullets/bold; `true` shows the
+    /// original markdown source, e.g. to copy it elsewhere unmodified.
+    raw_view: bool,
+}
+
 struct AiSessionApp {
     data: AiSessionData,
     table_state: TableState,
@@ -970,6 +987,7 @@ struct AiSessionApp {
     detail_open: bool,
     home: String,
     status_message: Option<(String, std::time::Instant)>,
+    summary_panel: Option<SummaryPanelState>,
 }
 
 impl AiSessionApp {
@@ -986,6 +1004,7 @@ impl AiSessionApp {
             detail_open: true,
             home: dirs_home(),
             status_message: None,
+            summary_panel: None,
         }
     }
 
@@ -1032,10 +1051,88 @@ impl AiSessionApp {
             .collect()
     }
 
+    fn open_summary_panel(&mut self) {
+        if self.data.summaries.is_empty() {
+            self.status_message = Some((
+                "No summary yet — ask your connected AI agent to summarize this session".into(),
+                std::time::Instant::now(),
+            ));
+        } else {
+            self.summary_panel = Some(SummaryPanelState {
+                index: 0,
+                scroll: 0,
+                raw_view: false,
+            });
+        }
+    }
+
+    /// Key handling while the summary panel is open. `[`/`]` step to
+    /// older/newer saved summaries; everything else scrolls, copies, or closes.
+    fn handle_summary_panel_input(&mut self, key: crossterm::event::KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.summary_panel = None,
+            KeyCode::Tab => {
+                if let Some(panel) = &mut self.summary_panel {
+                    panel.raw_view = !panel.raw_view;
+                    panel.scroll = 0;
+                }
+            }
+            KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let text = self
+                    .summary_panel
+                    .as_ref()
+                    .and_then(|panel| self.data.summaries.get(panel.index))
+                    .map(|record| record.text.clone());
+                if let Some(text) = text {
+                    let copied = arboard::Clipboard::new()
+                        .and_then(|mut clipboard| clipboard.set_text(text))
+                        .is_ok();
+                    self.status_message = Some((
+                        if copied { "Copied!" } else { "Copy failed" }.into(),
+                        std::time::Instant::now(),
+                    ));
+                }
+            }
+            KeyCode::Char('[') => {
+                let len = self.data.summaries.len();
+                if let Some(panel) = &mut self.summary_panel {
+                    if panel.index + 1 < len {
+                        panel.index += 1;
+                        panel.scroll = 0;
+                    }
+                }
+            }
+            KeyCode::Char(']') => {
+                if let Some(panel) = &mut self.summary_panel {
+                    if panel.index > 0 {
+                        panel.index -= 1;
+                        panel.scroll = 0;
+                    }
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(panel) = &mut self.summary_panel {
+                    panel.scroll = panel.scroll.saturating_sub(1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(panel) = &mut self.summary_panel {
+                    panel.scroll = panel.scroll.saturating_add(1);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn handle_input(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        if self.summary_panel.is_some() {
+            self.handle_summary_panel_input(key);
+            return true;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => return false,
             KeyCode::Tab => self.detail_open = !self.detail_open,
+            KeyCode::Char('s') => self.open_summary_panel(),
             KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(text) = self.selected_item().map(AiTimelineItem::copy_text) {
                     let copied = arboard::Clipboard::new()
@@ -1114,6 +1211,9 @@ impl AiSessionApp {
             self.render_table(f, chunks[2], t);
         }
         self.render_footer(f, chunks[3], t);
+        if let Some(panel) = &mut self.summary_panel {
+            render_summary_panel(f, f.area(), t, &self.data.summaries, panel);
+        }
     }
 
     fn render_info(&self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
@@ -1336,7 +1436,9 @@ impl AiSessionApp {
             Span::styled(" Tab ", key),
             Span::styled(" Detail  ", label),
             Span::styled(" ^Y ", key),
-            Span::styled(" Copy ", label),
+            Span::styled(" Copy  ", label),
+            Span::styled(" s ", key),
+            Span::styled(" Summary ", label),
         ];
         if self.selected_linked_command().is_some() {
             spans.push(Span::styled(" Enter ", key));
@@ -1352,6 +1454,211 @@ impl AiSessionApp {
         }
         f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
+}
+
+/// Approximate how many terminal rows `text` occupies once word-wrapped to
+/// `width` columns (mirrors `Wrap { trim: false }`'s greedy wrapping closely
+/// enough for scroll clamping -- exactness isn't required here).
+fn wrapped_line_count(text: &str, width: u16) -> u16 {
+    if width == 0 {
+        return u16::try_from(text.lines().count())
+            .unwrap_or(u16::MAX)
+            .max(1);
+    }
+    text.lines()
+        .map(|line| {
+            let cols = unicode_width::UnicodeWidthStr::width(line).max(1);
+            u16::try_from(cols.div_ceil(width as usize)).unwrap_or(u16::MAX)
+        })
+        .fold(0u16, u16::saturating_add)
+        .max(1)
+}
+
+/// Cap `scroll` so the last visible line of wrapped `text` never scrolls
+/// past the bottom of a `height`-row viewport, leaving trailing blank space.
+fn clamp_scroll(text: &str, width: u16, height: u16, scroll: u16) -> u16 {
+    if width == 0 || height == 0 {
+        return 0;
+    }
+    scroll.min(wrapped_line_count(text, width).saturating_sub(height))
+}
+
+/// Split `line` on `**...**` emphasis markers, alternating plain/bold spans
+/// and dropping the marker characters themselves.
+fn parse_inline_bold(line: &str, base: Style, bold: Style) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut rest = line;
+    let mut is_bold = false;
+    while let Some(idx) = rest.find("**") {
+        let (before, after) = rest.split_at(idx);
+        if !before.is_empty() {
+            spans.push(Span::styled(
+                before.to_string(),
+                if is_bold { bold } else { base },
+            ));
+        }
+        rest = &after[2..];
+        is_bold = !is_bold;
+    }
+    if !rest.is_empty() {
+        spans.push(Span::styled(
+            rest.to_string(),
+            if is_bold { bold } else { base },
+        ));
+    }
+    spans
+}
+
+/// Lightweight markdown rendering for saved summaries: `#`/`##`/`###`
+/// headers and `-`/`*` bullets get stripped and styled, `**bold**` spans
+/// get emphasized. Anything else (tables, nested lists, code fences) is
+/// left as plain text -- summaries don't produce those.
+#[allow(clippy::option_if_let_else)] // three-way branch reads worse as nested map_or_else
+fn render_markdown_lite(text: &str, t: &crate::theme::Theme) -> Vec<Line<'static>> {
+    let base = Style::default().fg(t.text);
+    let bold = Style::default().fg(t.text).add_modifier(Modifier::BOLD);
+    let header_style = Style::default().fg(t.primary).add_modifier(Modifier::BOLD);
+    let bullet_style = Style::default().fg(t.primary);
+
+    text.lines()
+        .map(|line| {
+            if let Some(rest) = line
+                .strip_prefix("### ")
+                .or_else(|| line.strip_prefix("## "))
+                .or_else(|| line.strip_prefix("# "))
+            {
+                Line::from(Span::styled(rest.to_string(), header_style))
+            } else if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+                let mut spans = vec![Span::styled("• ".to_string(), bullet_style)];
+                spans.extend(parse_inline_bold(rest, base, bold));
+                Line::from(spans)
+            } else {
+                Line::from(parse_inline_bold(line, base, bold))
+            }
+        })
+        .collect()
+}
+
+fn format_summary_timestamp(ms: i64) -> String {
+    chrono::Local
+        .timestamp_millis_opt(crate::util::normalize_display_ms(ms))
+        .single()
+        .map_or_else(
+            || "??-?? ??:??".into(),
+            |dt| dt.format("%m-%d %H:%M").to_string(),
+        )
+}
+
+/// Overlay showing one saved AI-session summary at a time. Kept separate
+/// from the chronological timeline since a summary is generated
+/// interpretation, not captured session evidence.
+fn render_summary_panel(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    t: &crate::theme::Theme,
+    summaries: &[crate::models::AiSummaryRecord],
+    panel: &mut SummaryPanelState,
+) {
+    let Some(record) = summaries.get(panel.index) else {
+        return;
+    };
+    let popup_area = crate::util::centered_rect(70, 70, area);
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(" SUVADU SUMMARY ")
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(t.primary))
+        .style(Style::default().bg(t.bg_elevated));
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let status_style = if record.current {
+        Style::default().fg(t.success).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(t.warning).add_modifier(Modifier::BOLD)
+    };
+    let status_text = if record.current { "CURRENT" } else { "STALE" };
+    let mode_text = if panel.raw_view { "Raw" } else { "Rendered" };
+    let header = Line::from(vec![
+        Span::styled(format!(" {status_text} "), status_style),
+        Span::styled(
+            format!("  v{} of {}  ", panel.index + 1, summaries.len()),
+            Style::default().fg(t.text_secondary),
+        ),
+        Span::styled(format!("· {mode_text} "), Style::default().fg(t.text_muted)),
+    ]);
+    f.render_widget(Paragraph::new(header), layout[0]);
+
+    let meta = Line::from(Span::styled(
+        format!(
+            " {} · {} · {}",
+            record.agent,
+            record.model,
+            format_summary_timestamp(record.created_at)
+        ),
+        Style::default().fg(t.text_muted),
+    ));
+    f.render_widget(Paragraph::new(meta), layout[1]);
+
+    let body_text: Text<'static> = if panel.raw_view {
+        Text::from(record.text.clone())
+    } else {
+        Text::from(render_markdown_lite(&record.text, t))
+    };
+    // Clamp against the content actually being displayed -- rendered mode
+    // strips markup, so it usually wraps into fewer rows than the raw text.
+    let plain_for_clamp = body_text
+        .lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    panel.scroll = clamp_scroll(
+        &plain_for_clamp,
+        layout[2].width,
+        layout[2].height,
+        panel.scroll,
+    );
+    let body = Paragraph::new(body_text)
+        .wrap(Wrap { trim: false })
+        .scroll((panel.scroll, 0));
+    f.render_widget(body, layout[2]);
+
+    let key = Style::default().bg(t.badge_bg).fg(t.text);
+    let label = Style::default().fg(t.text_secondary);
+    let mut footer = vec![
+        Span::styled(" q/Esc ", key),
+        Span::styled(" Close  ", label),
+        Span::styled(" ↑↓ ", key),
+        Span::styled(" Scroll  ", label),
+        Span::styled(" Tab ", key),
+        Span::styled(" Raw/Rendered  ", label),
+        Span::styled(" ^Y ", key),
+        Span::styled(" Copy  ", label),
+    ];
+    if summaries.len() > 1 {
+        footer.push(Span::styled(" [/] ", key));
+        footer.push(Span::styled(" Older/Newer ", label));
+    }
+    f.render_widget(Paragraph::new(Line::from(footer)), layout[3]);
 }
 
 pub fn run_ai_session_timeline<B: Backend>(
@@ -1482,6 +1789,7 @@ mod tests {
                 turn_id: Some("turn-1".into()),
                 model: Some("gpt-test".into()),
             }],
+            summaries: vec![],
         }
     }
 
@@ -1789,6 +2097,199 @@ mod tests {
         let mut app = SessionApp::new(make_session(), None, entries, HashSet::new());
         let key = crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         assert!(!app.handle_input(key));
+    }
+
+    fn summary_record(id: &str, text: &str, current: bool) -> crate::models::AiSummaryRecord {
+        crate::models::AiSummaryRecord {
+            id: id.into(),
+            text: text.into(),
+            agent: "claude".into(),
+            model: "sonnet".into(),
+            created_at: 1_000,
+            current,
+        }
+    }
+
+    #[test]
+    fn s_with_no_summaries_shows_status_message_and_no_panel() {
+        let mut app = AiSessionApp::new(make_ai_data());
+        let key = crossterm::event::KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(app.handle_input(key));
+        assert!(app.summary_panel.is_none());
+        assert_eq!(
+            app.status_message.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("No summary yet — ask your connected AI agent to summarize this session")
+        );
+    }
+
+    #[test]
+    fn s_with_summaries_opens_panel_on_newest() {
+        let mut data = make_ai_data();
+        data.summaries = vec![
+            summary_record("s2", "Newest", true),
+            summary_record("s1", "Oldest", false),
+        ];
+        let mut app = AiSessionApp::new(data);
+        let key = crossterm::event::KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(app.handle_input(key));
+        assert_eq!(app.summary_panel.as_ref().map(|p| p.index), Some(0));
+        assert!(app.status_message.is_none());
+    }
+
+    #[test]
+    fn bracket_keys_navigate_summary_panel_history_and_stop_at_the_ends() {
+        let mut data = make_ai_data();
+        data.summaries = vec![
+            summary_record("s2", "Newest", true),
+            summary_record("s1", "Oldest", false),
+        ];
+        let mut app = AiSessionApp::new(data);
+        app.handle_input(crossterm::event::KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::NONE,
+        ));
+
+        app.handle_input(crossterm::event::KeyEvent::new(
+            KeyCode::Char('['),
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.summary_panel.as_ref().unwrap().index, 1);
+
+        // Already at the oldest entry; stays put.
+        app.handle_input(crossterm::event::KeyEvent::new(
+            KeyCode::Char('['),
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.summary_panel.as_ref().unwrap().index, 1);
+
+        app.handle_input(crossterm::event::KeyEvent::new(
+            KeyCode::Char(']'),
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.summary_panel.as_ref().unwrap().index, 0);
+    }
+
+    #[test]
+    fn q_closes_summary_panel_without_closing_the_app() {
+        let mut data = make_ai_data();
+        data.summaries = vec![summary_record("s1", "Text", true)];
+        let mut app = AiSessionApp::new(data);
+        app.handle_input(crossterm::event::KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::NONE,
+        ));
+        assert!(app.summary_panel.is_some());
+
+        let still_running = app.handle_input(crossterm::event::KeyEvent::new(
+            KeyCode::Char('q'),
+            KeyModifiers::NONE,
+        ));
+        assert!(still_running);
+        assert!(app.summary_panel.is_none());
+    }
+
+    #[test]
+    fn ctrl_y_in_summary_panel_reports_a_copy_status() {
+        let mut data = make_ai_data();
+        data.summaries = vec![summary_record("s1", "Text to copy", true)];
+        let mut app = AiSessionApp::new(data);
+        app.handle_input(crossterm::event::KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::NONE,
+        ));
+        assert!(app.status_message.is_none());
+
+        app.handle_input(crossterm::event::KeyEvent::new(
+            KeyCode::Char('y'),
+            KeyModifiers::CONTROL,
+        ));
+
+        // Clipboard access is environment-dependent (e.g. headless CI), so
+        // only assert that an attempt was reported, not which outcome.
+        assert!(app.status_message.is_some());
+        // The panel must still be open -- copying isn't also a close action.
+        assert!(app.summary_panel.is_some());
+    }
+
+    #[test]
+    fn clamp_scroll_stops_at_the_last_full_screen_of_content() {
+        let text = "line\n".repeat(20); // 20 wrapped lines at any reasonable width
+        let height = 5;
+
+        // Way past the end saturates to the last screenful, not beyond it.
+        assert_eq!(clamp_scroll(&text, 40, height, 1_000), 15);
+        // Already within range is left untouched.
+        assert_eq!(clamp_scroll(&text, 40, height, 3), 3);
+        // Content shorter than the viewport never scrolls.
+        assert_eq!(clamp_scroll("short", 40, height, 50), 0);
+    }
+
+    #[test]
+    fn tab_toggles_raw_view_in_summary_panel() {
+        let mut data = make_ai_data();
+        data.summaries = vec![summary_record("s1", "## Header", true)];
+        let mut app = AiSessionApp::new(data);
+        app.handle_input(crossterm::event::KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::NONE,
+        ));
+        assert!(!app.summary_panel.as_ref().unwrap().raw_view);
+
+        app.handle_input(crossterm::event::KeyEvent::new(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+        ));
+        assert!(app.summary_panel.as_ref().unwrap().raw_view);
+
+        app.handle_input(crossterm::event::KeyEvent::new(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+        ));
+        assert!(!app.summary_panel.as_ref().unwrap().raw_view);
+    }
+
+    #[test]
+    fn markdown_lite_strips_header_hashes_and_bolds_them() {
+        let lines = render_markdown_lite("## Objective", theme());
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].spans.len(), 1);
+        assert_eq!(lines[0].spans[0].content.to_string(), "Objective");
+        assert!(lines[0].spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn markdown_lite_turns_bullet_dash_into_a_styled_marker() {
+        let lines = render_markdown_lite("- did a thing", theme());
+        assert_eq!(lines[0].spans[0].content.to_string(), "• ");
+        assert_eq!(lines[0].spans[1].content.to_string(), "did a thing");
+    }
+
+    #[test]
+    fn markdown_lite_bolds_double_asterisk_spans_and_strips_the_markers() {
+        let lines = render_markdown_lite("plain **bold** plain", theme());
+        let spans = &lines[0].spans;
+        assert_eq!(spans[0].content.to_string(), "plain ");
+        assert!(!spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(spans[1].content.to_string(), "bold");
+        assert!(spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(spans[2].content.to_string(), " plain");
+        assert!(!spans[2].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn handle_input_s_shows_ai_only_status_message_on_human_session() {
+        let entries = vec![make_entry(1000, 2000)];
+        let mut app = SessionApp::new(make_session(), None, entries, HashSet::new());
+        assert!(app.status_message.is_none());
+        let key = crossterm::event::KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(app.handle_input(key));
+        assert_eq!(
+            app.status_message.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("Summaries are only available for AI sessions")
+        );
     }
 
     #[test]

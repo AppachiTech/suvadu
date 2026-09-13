@@ -66,7 +66,7 @@ mod session_data_contract_tests {
         );
         command.id = Some(42);
 
-        let data = build_ai_session_data(summary(), events, vec![command]);
+        let data = build_ai_session_data(summary(), events, vec![command], vec![]);
 
         assert!(matches!(
             data.items[0],
@@ -95,12 +95,26 @@ mod session_data_contract_tests {
             cwd: "/work".into(),
             data: json!({"text":"Explain this"}),
         };
-        let data = build_ai_session_data(summary(), vec![event], vec![]);
+        let data = build_ai_session_data(summary(), vec![event], vec![], vec![]);
         assert_eq!(data.items.len(), 1);
         assert!(matches!(
             data.items[0],
             session_data::AiTimelineItem::Prompt { .. }
         ));
+    }
+
+    #[test]
+    fn build_ai_session_data_carries_summaries_through_unchanged() {
+        let record = crate::models::AiSummaryRecord {
+            id: "summary-1".into(),
+            text: "Did the thing".into(),
+            agent: "claude".into(),
+            model: "sonnet".into(),
+            created_at: 5_000,
+            current: true,
+        };
+        let data = build_ai_session_data(summary(), vec![], vec![], vec![record.clone()]);
+        assert_eq!(data.summaries, vec![record]);
     }
 
     #[test]
@@ -128,6 +142,7 @@ mod session_data_contract_tests {
                 usage_event("usage-1", 2_000, 120),
                 usage_event("usage-2", 3_000, 250),
             ],
+            vec![],
             vec![],
         );
 

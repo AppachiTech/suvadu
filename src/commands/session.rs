@@ -36,7 +36,10 @@ fn load_ai_session_data(
     }
     let entries =
         repo.get_replay_entries(Some(&summary.id), &repository::ReplayFilter::default())?;
-    Ok(session_ui::build_ai_session_data(summary, events, entries))
+    let summaries = repo.ai_summaries_for_session(&summary.id)?;
+    Ok(session_ui::build_ai_session_data(
+        summary, events, entries, summaries,
+    ))
 }
 
 /// Result of the non-TUI session logic, used to decide what the caller should do.
