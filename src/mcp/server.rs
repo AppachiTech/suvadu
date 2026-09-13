@@ -18,11 +18,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // "no such table" error on the first tool call instead of the intended
     // empty-state message. Open-migrate-drop once up front to guarantee the
     // schema is current before the read-only connection is opened.
-    {
-        let db_path = crate::db::get_db_path()?;
-        crate::db::init_db(&db_path)?;
-    }
-    let repo = Repository::init_read_only()?;
+    //
+    // This can fail (e.g. the DB was migrated to a newer schema by a
+    // different Suvadu build than the one running as this MCP server). When
+    // it does, we still complete the MCP handshake below and every
+    // DB-touching call reports the error, instead of the process exiting
+    // before the client ever gets a response — which surfaces to hosts as an
+    // opaque "Connection closed" with no indication of what went wrong.
+    let db_path = crate::db::get_db_path()?;
+    let (repo, db_error) = init_repo(&db_path);
     let config = crate::config::load_config().unwrap_or_default();
     // Apply user risk-ignore suppressions so the assess_risk tool honors them.
     crate::risk::set_ignore_patterns(&config.agent.risk_ignore_patterns);
@@ -68,7 +72,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             "tools/call" => {
                 let rid = id.as_ref().unwrap_or(&serde_json::Value::Null);
-                Some(handle_tool_call(&repo, rid, &request, mcp))
+                Some(repo.as_ref().map_or_else(
+                    || protocol::tool_error(rid, &db_unavailable_message(db_error.as_deref())),
+                    |repo| handle_tool_call(repo, rid, &request, mcp),
+                ))
             }
             "resources/list" => {
                 let rid = id.as_ref().unwrap_or(&serde_json::Value::Null);
@@ -80,7 +87,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             "resources/read" => {
                 let rid = id.as_ref().unwrap_or(&serde_json::Value::Null);
-                Some(handle_resource_read(&repo, rid, &request, mcp))
+                Some(repo.as_ref().map_or_else(
+                    || {
+                        protocol::error_response(
+                            rid,
+                            -32000,
+                            &db_unavailable_message(db_error.as_deref()),
+                        )
+                    },
+                    |repo| handle_resource_read(repo, rid, &request, mcp),
+                ))
             }
             "prompts/list" => {
                 let rid = id.as_ref().unwrap_or(&serde_json::Value::Null);
@@ -112,6 +128,28 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Migrate and open the read-only repository used by the long-lived MCP
+/// session. Returns `(None, Some(reason))` instead of propagating the error
+/// when the DB can't be initialized (e.g. schema newer than this build
+/// supports), so `run` can still complete the MCP handshake and report the
+/// reason on every DB-touching call.
+fn init_repo(db_path: &std::path::PathBuf) -> (Option<Repository>, Option<String>) {
+    match crate::db::init_db(db_path) {
+        Ok(_) => match Repository::init_read_only(db_path) {
+            Ok(repo) => (Some(repo), None),
+            Err(e) => (None, Some(e.to_string())),
+        },
+        Err(e) => (None, Some(e.to_string())),
+    }
+}
+
+/// Message returned for any DB-touching call when the server started without
+/// a usable database connection (see [`init_repo`]).
+fn db_unavailable_message(db_error: Option<&str>) -> String {
+    let reason = db_error.unwrap_or("unknown error");
+    format!("Suvadu database unavailable: {reason}")
 }
 
 fn handle_tool_call(
@@ -230,6 +268,38 @@ mod tests {
             serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
                 .unwrap();
         assert_eq!(decoded["next_offset"], 20);
+    }
+
+    #[test]
+    fn init_repo_reports_reason_instead_of_erroring_on_newer_schema() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        // Create a DB at the current schema, then bump its recorded version
+        // past what this build supports -- simulating a DB last touched by a
+        // newer Suvadu build (the scenario that used to kill mcp-serve
+        // before the client ever got a response).
+        {
+            let conn = crate::db::init_db(&db_path).unwrap();
+            conn.execute("UPDATE schema_version SET version = version + 1", [])
+                .unwrap();
+        }
+
+        let (repo, db_error) = init_repo(&db_path);
+
+        assert!(repo.is_none());
+        let reason = db_error.expect("newer-schema DB should report a reason");
+        assert!(reason.contains("newer than this version"), "{reason}");
+    }
+
+    #[test]
+    fn init_repo_succeeds_on_a_current_schema_db() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let (repo, db_error) = init_repo(&db_path);
+
+        assert!(repo.is_some());
+        assert!(db_error.is_none());
     }
 
     #[test]

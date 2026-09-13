@@ -453,12 +453,12 @@ impl Repository {
         Ok(Self::new(conn))
     }
 
-    /// Open the database in **read-only** mode. No migrations are run.
-    /// Used by the MCP server to prevent accidental writes.
-    pub fn init_read_only() -> crate::db::DbResult<Self> {
-        let db_path = crate::db::get_db_path()?;
+    /// Open the database at `db_path` in **read-only** mode. No migrations
+    /// are run. Used by the MCP server to prevent accidental writes; takes
+    /// an explicit path so it can be exercised against a temp DB in tests.
+    pub fn init_read_only(db_path: &std::path::Path) -> crate::db::DbResult<Self> {
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let conn = Connection::open_with_flags(&db_path, flags)?;
+        let conn = Connection::open_with_flags(db_path, flags)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         Ok(Self::new(conn))
     }
