@@ -205,7 +205,27 @@ fn handle_add_inner(
     // Set executor information
     entry.executor_type = executor_type;
     entry.executor = executor;
-    entry.context = context;
+    // The cached agent_prompt was redacted using whichever directory the
+    // caching hook resolved (e.g. an OpenCode session's single root
+    // directory, not necessarily this command's own workdir/cwd). A
+    // stricter .suvadu.toml scoped to this command's own directory must
+    // still apply, so re-redact defensively with this directory's policy
+    // before storing it under this entry -- this can only add redaction,
+    // never remove what the cache already applied, and only truncation
+    // length is left alone so it keeps matching the imported session's
+    // own prompt text for reconciliation.
+    entry.context = context.map(|mut ctx| {
+        if config.redaction.enabled {
+            if let Some(prompt) = ctx.get("agent_prompt") {
+                let redacted = crate::redact::redact_secrets_with_extra(
+                    prompt,
+                    &config.redaction.extra_patterns,
+                );
+                ctx.insert("agent_prompt".to_string(), redacted);
+            }
+        }
+        ctx
+    });
 
     // Ensure session exists
     if repo.get_session(&session_id)?.is_none() {
@@ -1593,5 +1613,60 @@ mod tests {
         let ctx = entries[0].context.as_ref().unwrap();
         assert_eq!(ctx.get("shell").unwrap(), "zsh");
         assert_eq!(ctx.get("prompt_id").unwrap(), "abc123");
+    }
+
+    #[test]
+    fn test_add_inner_redacts_a_cached_agent_prompt_using_this_commands_own_config() {
+        // The cached agent_prompt (e.g. an OpenCode session's prompt cache)
+        // was already redacted using whatever directory the caching hook
+        // resolved -- not necessarily this command's own workdir. A
+        // stricter .suvadu.toml scoped to this command's own directory
+        // must still apply here, so handle_add_inner re-redacts using its
+        // own resolved config rather than trusting the cache blindly.
+        let (_dir, repo) = test_repo();
+        let cfg = default_config(); // redaction.enabled defaults to true
+
+        let mut ctx = std::collections::HashMap::new();
+        ctx.insert(
+            "agent_prompt".to_string(),
+            "curl --password=sample_password_for_entry_regression".to_string(),
+        );
+        let mut params = make_params("echo hi");
+        params.context = Some(ctx);
+        params.session_id = "redact-session".to_string();
+
+        handle_add_inner(params, &cfg, &repo).unwrap();
+
+        let entries = repo
+            .get_entries_filtered(1, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        let ctx = entries[0].context.as_ref().unwrap();
+        let prompt = ctx.get("agent_prompt").unwrap();
+        assert!(prompt.contains("REDACTED"));
+        assert!(!prompt.contains("sample_password_for_entry_regression"));
+    }
+
+    #[test]
+    fn test_add_inner_leaves_agent_prompt_alone_when_this_directory_disables_redaction() {
+        let (_dir, repo) = test_repo();
+        let mut cfg = default_config();
+        cfg.redaction.enabled = false;
+
+        let mut ctx = std::collections::HashMap::new();
+        ctx.insert(
+            "agent_prompt".to_string(),
+            "already-cached-text".to_string(),
+        );
+        let mut params = make_params("echo hi");
+        params.context = Some(ctx);
+        params.session_id = "no-redact-session".to_string();
+
+        handle_add_inner(params, &cfg, &repo).unwrap();
+
+        let entries = repo
+            .get_entries_filtered(1, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        let ctx = entries[0].context.as_ref().unwrap();
+        assert_eq!(ctx.get("agent_prompt").unwrap(), "already-cached-text");
     }
 }
