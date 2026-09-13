@@ -25,6 +25,9 @@ pub struct SummaryInput {
     pub agent: String,
     pub model: String,
     pub source_ids: Vec<String>,
+    /// Optional previous checkpoint being extended by this summary.
+    #[serde(default)]
+    pub base_summary_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]

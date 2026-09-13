@@ -17,7 +17,7 @@ pub enum DbError {
 pub type DbResult<T> = Result<T, DbError>;
 
 /// Current schema version. Increment when adding new migrations.
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 /// Get the path to the suvadu database file
 pub fn get_db_path() -> DbResult<PathBuf> {
@@ -91,6 +91,7 @@ const ALLOWED_TABLES: &[&str] = &[
     "bookmarks",
     "notes",
     "aliases",
+    "ai_summaries",
 ];
 
 /// Allowed column names for `column_exists`.
@@ -100,6 +101,10 @@ const ALLOWED_COLUMNS: &[&str] = &[
     "executor",
     "description",
     "label",
+    "source_event_count",
+    "source_command_count",
+    "source_prefix_hash",
+    "base_summary_id",
 ];
 
 /// Check whether a column exists on a table.
@@ -121,6 +126,35 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
 /// Independent AI sessions also retain turns that execute no shell commands.
 fn migrate_v8(conn: &Connection) -> DbResult<()> {
     conn.execute_batch(include_str!("ai_sessions/schema.sql"))?;
+    Ok(())
+}
+
+/// Summary checkpoints remember the exact evidence prefix they cover.
+fn migrate_v9(conn: &Connection) -> DbResult<()> {
+    if !column_exists(conn, "ai_summaries", "source_event_count") {
+        conn.execute(
+            "ALTER TABLE ai_summaries ADD COLUMN source_event_count INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !column_exists(conn, "ai_summaries", "source_command_count") {
+        conn.execute(
+            "ALTER TABLE ai_summaries ADD COLUMN source_command_count INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !column_exists(conn, "ai_summaries", "source_prefix_hash") {
+        conn.execute(
+            "ALTER TABLE ai_summaries ADD COLUMN source_prefix_hash TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    if !column_exists(conn, "ai_summaries", "base_summary_id") {
+        conn.execute(
+            "ALTER TABLE ai_summaries ADD COLUMN base_summary_id TEXT",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -313,6 +347,7 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
         (6, migrate_v6),
         (7, migrate_v7),
         (8, migrate_v8),
+        (9, migrate_v9),
     ];
 
     for &(target_version, migrate_fn) in migrations {
@@ -533,6 +568,36 @@ mod tests {
         // After init, version should be SCHEMA_VERSION
         let version = get_schema_version(&conn).unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_v8_summary_table_migrates_to_checkpoint_columns() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER NOT NULL);
+             INSERT INTO schema_version VALUES (8);
+             CREATE TABLE ai_summaries (
+                 id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                 source_revision TEXT NOT NULL, text TEXT NOT NULL,
+                 agent TEXT NOT NULL, model TEXT NOT NULL, source_ids TEXT NOT NULL,
+                 created_at INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+        drop(conn);
+
+        let conn = init_db(&db_path).unwrap();
+        assert_eq!(get_schema_version(&conn).unwrap(), 9);
+        for column in [
+            "source_event_count",
+            "source_command_count",
+            "source_prefix_hash",
+            "base_summary_id",
+        ] {
+            assert!(column_exists(&conn, "ai_summaries", column), "{column}");
+        }
     }
 
     #[test]

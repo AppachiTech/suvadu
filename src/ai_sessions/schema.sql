@@ -23,6 +23,10 @@ CREATE TABLE IF NOT EXISTS ai_summaries (
     session_id TEXT NOT NULL REFERENCES ai_sessions(id) ON DELETE CASCADE,
     source_revision TEXT NOT NULL, text TEXT NOT NULL,
     agent TEXT NOT NULL, model TEXT NOT NULL, source_ids TEXT NOT NULL,
+    source_event_count INTEGER NOT NULL DEFAULT 0,
+    source_command_count INTEGER NOT NULL DEFAULT 0,
+    source_prefix_hash TEXT NOT NULL DEFAULT '',
+    base_summary_id TEXT,
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ai_summaries_session ON ai_summaries(session_id, created_at);

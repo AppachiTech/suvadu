@@ -14,6 +14,7 @@ pub fn list_tools(id: &Value, mcp: &crate::config::McpConfig) -> Value {
     let all_tools = vec![
         super::ai_sessions::list_definition(),
         super::ai_sessions::get_definition(),
+        super::ai_sessions::resolve_definition(),
         search_commands_def(),
         recent_commands_def(),
         command_status_def(),
@@ -70,6 +71,7 @@ pub fn call_tool(
     match name {
         "list_agent_sessions" => super::ai_sessions::list(repo, args, mcp),
         "get_agent_session" => super::ai_sessions::get(repo, args, mcp),
+        "resolve_current_agent_session" => super::ai_sessions::resolve(repo, args, mcp),
         "save_session_summary" => super::ai_sessions::save(repo, args, mcp),
         "search_commands" => handle_search_commands(repo, args, mcp),
         "recent_commands" => handle_recent_commands(repo, args, mcp),
@@ -2105,7 +2107,7 @@ mod tests {
         mcp.disabled_tools = vec!["assess_risk".to_string(), "suggest_next".to_string()];
         let resp = list_tools(&json!(1), &mcp);
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 18);
+        assert_eq!(tools.len(), 19);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(!names.contains(&"assess_risk"));
         assert!(!names.contains(&"suggest_next"));
@@ -2126,7 +2128,7 @@ mod tests {
     fn test_list_tools_count() {
         let resp = list_tools(&json!(1), &default_mcp());
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 20);
+        assert_eq!(tools.len(), 21);
 
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"search_commands"));
@@ -2144,6 +2146,7 @@ mod tests {
         assert!(names.contains(&"replay_agent_session"));
         assert!(names.contains(&"learn_from_failures"));
         assert!(names.contains(&"project_context"));
+        assert!(names.contains(&"resolve_current_agent_session"));
     }
 
     #[test]

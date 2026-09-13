@@ -26,6 +26,7 @@ pub fn handle_initialize(id: &Value) -> Value {
     Before starting work in an unfamiliar project, call `project_context` and `learn_from_failures` to avoid repeating known-bad approaches. \
     Before running a command that looks destructive or unfamiliar, call `assess_risk` first. \
     Check `list_skills`/`search_skills` for existing shared instructions before writing a new checklist from scratch. \
+    When the user asks to summarize this/current agent session, call `resolve_current_agent_session`, read the returned session pages, and call `save_session_summary` only when the user explicitly asks to save. \
     All data is local; nothing leaves this machine."
         }
     })
@@ -115,6 +116,8 @@ mod tests {
         assert!(instructions.contains("learn_from_failures"));
         assert!(instructions.contains("assess_risk"));
         assert!(instructions.contains("list_skills") || instructions.contains("search_skills"));
+        assert!(instructions.contains("resolve_current_agent_session"));
+        assert!(instructions.contains("save_session_summary"));
     }
 
     #[test]

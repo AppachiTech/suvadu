@@ -5,9 +5,15 @@ use crate::db::{DbError, DbResult};
 use crate::models::{SessionKind, SessionSummary};
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+
+fn hash_field(hash: &mut Sha256, value: &[u8]) {
+    hash.update((value.len() as u64).to_le_bytes());
+    hash.update(value);
+}
 
 fn invalid(message: impl Into<String>) -> DbError {
     DbError::Validation(message.into())
@@ -503,6 +509,64 @@ impl Repository {
         )
     }
 
+    /// Fingerprint the exact ordered event/command prefix covered by a summary.
+    /// Returning `None` means the requested prefix is no longer present.
+    fn ai_session_prefix_hash(
+        &self,
+        id: &str,
+        event_count: i64,
+        command_count: i64,
+    ) -> DbResult<Option<String>> {
+        if event_count < 0 || command_count < 0 {
+            return Ok(None);
+        }
+        let mut hash = Sha256::new();
+        hash_field(&mut hash, id.as_bytes());
+        hash_field(&mut hash, b"events");
+        let mut seen_events = 0_i64;
+        let mut statement = self.conn.prepare(
+            "SELECT event_id,data FROM ai_events WHERE session_id=?1 ORDER BY rowid LIMIT ?2",
+        )?;
+        for row in statement.query_map(params![id, event_count], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })? {
+            let (event_id, data) = row?;
+            hash_field(&mut hash, event_id.as_bytes());
+            hash_field(&mut hash, data.as_bytes());
+            seen_events += 1;
+        }
+        if seen_events != event_count {
+            return Ok(None);
+        }
+
+        hash_field(&mut hash, b"commands");
+        let mut seen_commands = 0_i64;
+        let mut statement = self.conn.prepare(
+            "SELECT id,command,cwd,exit_code,started_at,ended_at,duration_ms,context
+             FROM entries WHERE session_id=?1 ORDER BY id LIMIT ?2",
+        )?;
+        for row in statement.query_map(params![id, command_count], |row| {
+            Ok(json!([
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<i32>>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, Option<String>>(7)?,
+            ]))
+        })? {
+            let data = row?.to_string();
+            hash_field(&mut hash, data.as_bytes());
+            seen_commands += 1;
+        }
+        if seen_commands != command_count {
+            return Ok(None);
+        }
+        Ok(Some(format!("sha256:{:x}", hash.finalize())))
+    }
+
     fn shell_session_summaries(
         &self,
         after: Option<i64>,
@@ -649,20 +713,32 @@ impl Repository {
         offset: usize,
         excluded_dirs: &[String],
     ) -> DbResult<Value> {
-        let (sql_limit, sql_offset) = page(limit, offset)?;
+        self.get_ai_session_ranges(id, limit, offset, offset, excluded_dirs)
+    }
+
+    pub fn get_ai_session_ranges(
+        &self,
+        id: &str,
+        limit: usize,
+        event_offset: usize,
+        command_offset: usize,
+        excluded_dirs: &[String],
+    ) -> DbResult<Value> {
+        let (sql_limit, sql_event_offset) = page(limit, event_offset)?;
+        let (_, sql_command_offset) = page(limit, command_offset)?;
         let snapshot = self.conn.unchecked_transaction()?;
         let session = self.ai_session_header(id, excluded_dirs)?;
         let mut statement = self.conn.prepare(
             "SELECT data FROM ai_events WHERE session_id=?1 ORDER BY rowid LIMIT ?2 OFFSET ?3",
         )?;
         let mut events = statement
-            .query_map(params![id, sql_limit + 1, sql_offset], |r| {
+            .query_map(params![id, sql_limit + 1, sql_event_offset], |r| {
                 r.get::<_, String>(0)
             })?
             .map(|row| decode::<AiEvent>(&row?))
             .collect::<DbResult<Vec<_>>>()?;
         let mut statement = self.conn.prepare("SELECT id,command,cwd,exit_code,started_at,duration_ms,context FROM entries WHERE session_id=?1 ORDER BY id LIMIT ?2 OFFSET ?3")?;
-        let mut commands = statement.query_map(params![id,sql_limit+1,sql_offset], |r| {
+        let mut commands = statement.query_map(params![id,sql_limit+1,sql_command_offset], |r| {
             let context: Option<String> = r.get(6)?;
             let context: Value = context.as_deref().and_then(|s| serde_json::from_str(s).ok()).unwrap_or(Value::Null);
             let turn_id = context
@@ -672,18 +748,75 @@ impl Repository {
                 .unwrap_or(Value::Null);
             Ok(json!({"id":format!("command-{}",r.get::<_,i64>(0)?),"command":r.get::<_,String>(1)?,"cwd":r.get::<_,String>(2)?,"exit_code":r.get::<_,Option<i32>>(3)?,"started_at":r.get::<_,i64>(4)?,"duration_ms":r.get::<_,i64>(5)?,"turn_id":turn_id}))
         })?.collect::<Result<Vec<_>,_>>()?;
-        let more = events.len() > limit || commands.len() > limit;
+        let more_events = events.len() > limit;
+        let more_commands = commands.len() > limit;
         events.truncate(limit);
         commands.truncate(limit);
-        let mut statement = self.conn.prepare("SELECT id,source_revision,text,agent,model,source_ids,created_at FROM ai_summaries WHERE session_id=?1 ORDER BY created_at DESC,rowid DESC LIMIT 5")?;
-        let summaries = statement.query_map([id], |r| {
-            let revision: String = r.get(1)?;
-            let sources: String = r.get(5)?;
-            Ok(json!({"id":r.get::<_,String>(0)?,"source_revision":revision,"text":r.get::<_,String>(2)?,"agent":r.get::<_,String>(3)?,"model":r.get::<_,String>(4)?,"source_ids":serde_json::from_str::<Value>(&sources).unwrap_or(Value::Null),"created_at":r.get::<_,i64>(6)?,"generated":true,"stale":session["revision"]!=revision}))
-        })?.collect::<Result<Vec<_>,_>>()?;
+        let mut statement = self.conn.prepare("SELECT id,source_revision,text,agent,model,source_ids,source_event_count,source_command_count,source_prefix_hash,base_summary_id,created_at FROM ai_summaries WHERE session_id=?1 ORDER BY created_at DESC,rowid DESC LIMIT 5")?;
+        let rows = statement
+            .query_map([id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, i64>(7)?,
+                    r.get::<_, String>(8)?,
+                    r.get::<_, Option<String>>(9)?,
+                    r.get::<_, i64>(10)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let current_event_count = session["event_count"].as_i64().unwrap_or_default();
+        let current_command_count = session["command_count"].as_i64().unwrap_or_default();
+        let current_revision = session["revision"].as_str().unwrap_or_default();
+        let mut summaries = Vec::with_capacity(rows.len());
+        for (
+            summary_id,
+            revision,
+            text,
+            agent,
+            model,
+            sources,
+            source_event_count,
+            source_command_count,
+            source_prefix_hash,
+            base_summary_id,
+            created_at,
+        ) in rows
+        {
+            let current = current_revision == revision;
+            let grew = current_event_count >= source_event_count
+                && current_command_count >= source_command_count
+                && (current_event_count > source_event_count
+                    || current_command_count > source_command_count);
+            let prefix_matches = !source_prefix_hash.is_empty()
+                && self
+                    .ai_session_prefix_hash(id, source_event_count, source_command_count)?
+                    .is_some_and(|hash| hash == source_prefix_hash);
+            let has_new_activity = !current && grew && prefix_matches;
+            let incremental_safe = current || has_new_activity;
+            summaries.push(json!({
+                "id":summary_id,"source_revision":revision,"text":text,"agent":agent,
+                "model":model,"source_ids":serde_json::from_str::<Value>(&sources).unwrap_or(Value::Null),
+                "source_event_count":source_event_count,"source_command_count":source_command_count,
+                "base_summary_id":base_summary_id,"created_at":created_at,"generated":true,
+                "current":current,"has_new_activity":has_new_activity,
+                "incremental_safe":incremental_safe,"stale":!incremental_safe,
+                "resume_event_offset":incremental_safe.then_some(source_event_count),
+                "resume_command_offset":incremental_safe.then_some(source_command_count)
+            }));
+        }
         snapshot.commit()?;
+        let next_event_offset = more_events.then_some(event_offset.saturating_add(limit));
+        let next_command_offset = more_commands.then_some(command_offset.saturating_add(limit));
+        let next_offset = (event_offset == command_offset && (more_events || more_commands))
+            .then_some(event_offset.saturating_add(limit));
         Ok(
-            json!({"session":session,"events":events,"commands":commands,"summaries":summaries,"next_offset":more.then_some(offset.saturating_add(limit))}),
+            json!({"session":session,"events":events,"commands":commands,"summaries":summaries,"next_offset":next_offset,"next_event_offset":next_event_offset,"next_command_offset":next_command_offset}),
         )
     }
 
@@ -713,6 +846,36 @@ impl Repository {
                 "Session revision changed; read all pages again before saving a summary",
             ));
         }
+        let source_event_count = session["event_count"].as_i64().unwrap_or_default();
+        let source_command_count = session["command_count"].as_i64().unwrap_or_default();
+        let source_prefix_hash = self
+            .ai_session_prefix_hash(&input.session_id, source_event_count, source_command_count)?
+            .ok_or_else(|| invalid("Cannot fingerprint summary evidence"))?;
+        if let Some(base_summary_id) = input.base_summary_id.as_deref() {
+            let base = tx.query_row(
+                "SELECT session_id,source_event_count,source_command_count,source_prefix_hash,source_ids FROM ai_summaries WHERE id=?1",
+                [base_summary_id],
+                |row| Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?,row.get::<_,i64>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?)),
+            ).optional()?.ok_or_else(|| invalid("Base summary not found"))?;
+            if base.0 != input.session_id
+                || base.3.is_empty()
+                || self.ai_session_prefix_hash(&input.session_id, base.1, base.2)? != Some(base.3)
+            {
+                return Err(invalid(
+                    "Base summary no longer matches this session; rebuild from all evidence",
+                ));
+            }
+            let base_sources = serde_json::from_str::<Vec<String>>(&base.4)
+                .map_err(|_| invalid("Invalid stored summary evidence"))?;
+            if base_sources
+                .iter()
+                .any(|source| !input.source_ids.contains(source))
+            {
+                return Err(invalid(
+                    "Updated summary must retain the base summary's evidence IDs",
+                ));
+            }
+        }
         for source in &input.source_ids {
             let exists: bool = if let Some(command) = source
                 .strip_prefix("command-")
@@ -735,9 +898,11 @@ impl Repository {
             }
         }
         let id = uuid::Uuid::new_v4().to_string();
-        tx.execute("INSERT INTO ai_summaries(id,session_id,source_revision,text,agent,model,source_ids,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![id,input.session_id,input.source_revision,input.text,input.agent,input.model,serde_json::to_string(&input.source_ids).map_err(|_| invalid("Cannot encode sources"))?,chrono::Utc::now().timestamp_millis()])?;
+        tx.execute("INSERT INTO ai_summaries(id,session_id,source_revision,text,agent,model,source_ids,source_event_count,source_command_count,source_prefix_hash,base_summary_id,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",params![id,input.session_id,input.source_revision,input.text,input.agent,input.model,serde_json::to_string(&input.source_ids).map_err(|_| invalid("Cannot encode sources"))?,source_event_count,source_command_count,source_prefix_hash,input.base_summary_id,chrono::Utc::now().timestamp_millis()])?;
         tx.commit()?;
-        Ok(json!({"id":id,"session_id":input.session_id,"generated":true,"stale":false}))
+        Ok(
+            json!({"id":id,"session_id":input.session_id,"generated":true,"current":true,"stale":false,"source_event_count":source_event_count,"source_command_count":source_command_count,"base_summary_id":input.base_summary_id}),
+        )
     }
 
     /// Explicit deletion includes shell evidence and checkpoints, preventing retained summaries.
@@ -789,6 +954,29 @@ mod tests {
             "{}\n",
             json!({"timestamp":"2026-09-12T12:01:00Z","type":"event_msg","payload":{"type":"user_message","message":text}})
         )
+    }
+
+    fn mutate_event(repo: &Repository, event_id: &str) {
+        let original: String = repo
+            .conn
+            .query_row(
+                "SELECT data FROM ai_events WHERE session_id='codex-fixture' AND event_id=?1",
+                [event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        repo.conn
+            .execute(
+                "UPDATE ai_events SET data=?1 WHERE session_id='codex-fixture' AND event_id=?2",
+                rusqlite::params![original.replace("synthetic", "changed"), event_id],
+            )
+            .unwrap();
+        repo.conn
+            .execute(
+                "UPDATE ai_sessions SET revision=revision+1 WHERE id='codex-fixture'",
+                [],
+            )
+            .unwrap();
     }
 
     fn insert_ai_fixture(
@@ -1229,7 +1417,7 @@ mod tests {
     }
 
     #[test]
-    fn summaries_require_same_session_evidence_and_become_stale_after_append() {
+    fn summary_checkpoints_resume_after_append_and_invalidate_on_prefix_change() {
         let (dir, repo) = crate::test_utils::test_repo();
         let path = dir.path().join("fixture.jsonl");
         std::fs::write(&path, records()).unwrap();
@@ -1243,16 +1431,71 @@ mod tests {
             agent: "claude".into(),
             model: "fixture-writer".into(),
             source_ids: vec!["foreign-source".into()],
+            base_summary_id: None,
         };
         assert!(repo.save_ai_summary(&input, &[]).is_err());
         input.source_ids = vec![page["events"][1]["id"].as_str().unwrap().into()];
-        repo.save_ai_summary(&input, &[]).unwrap();
+        let saved = repo.save_ai_summary(&input, &[]).unwrap();
+        let base_summary_id = saved["id"].as_str().unwrap().to_owned();
+        let current = repo.get_ai_session("codex-fixture", 20, 0, &[]).unwrap();
+        let summary = &current["summaries"][0];
+        assert_eq!(summary["current"], true);
+        assert_eq!(summary["stale"], false);
+        assert_eq!(summary["incremental_safe"], true);
+        assert_eq!(
+            summary["source_event_count"],
+            current["session"]["event_count"]
+        );
+        assert_eq!(
+            summary["source_command_count"],
+            current["session"]["command_count"]
+        );
+
         append(&path, &prompt("new request"));
         import(&repo, &path);
+        let appended = repo.get_ai_session("codex-fixture", 20, 0, &[]).unwrap();
+        let summary = &appended["summaries"][0];
+        assert_eq!(summary["current"], false);
+        assert_eq!(summary["stale"], false);
+        assert_eq!(summary["has_new_activity"], true);
+        assert_eq!(summary["incremental_safe"], true);
         assert_eq!(
-            repo.get_ai_session("codex-fixture", 20, 0, &[]).unwrap()["summaries"][0]["stale"],
-            true
+            summary["resume_event_offset"],
+            current["session"]["event_count"]
         );
+        assert_eq!(
+            summary["resume_command_offset"],
+            current["session"]["command_count"]
+        );
+
+        let newest_event = appended["events"].as_array().unwrap().last().unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        input.source_revision = appended["session"]["revision"].as_str().unwrap().to_owned();
+        input.text = "The synthetic fix now includes a new request.".into();
+        input.base_summary_id = Some(base_summary_id.clone());
+        input.source_ids = vec![newest_event.clone()];
+        assert!(repo.save_ai_summary(&input, &[]).is_err());
+        input.source_ids = vec![
+            page["events"][1]["id"].as_str().unwrap().into(),
+            newest_event,
+        ];
+        let updated = repo.save_ai_summary(&input, &[]).unwrap();
+        assert_eq!(updated["base_summary_id"], base_summary_id);
+        let checkpoint = repo.get_ai_session("codex-fixture", 20, 0, &[]).unwrap();
+        assert_eq!(checkpoint["summaries"][0]["current"], true);
+        assert_eq!(
+            checkpoint["summaries"][0]["base_summary_id"],
+            base_summary_id
+        );
+
+        let event_id = page["events"][1]["id"].as_str().unwrap();
+        mutate_event(&repo, event_id);
+        let changed = repo.get_ai_session("codex-fixture", 20, 0, &[]).unwrap();
+        assert_eq!(changed["summaries"][0]["stale"], true);
+        assert_eq!(changed["summaries"][0]["incremental_safe"], false);
+
         assert!(repo.save_ai_summary(&input, &[]).is_err());
         repo.delete_ai_session("codex-fixture").unwrap();
         assert!(repo.get_ai_session("codex-fixture", 20, 0, &[]).is_err());

@@ -18,7 +18,7 @@
 - **<2ms** recording overhead, **<10ms** search across 1M+ entries
 - **AI agent tracking** — auto-detects Claude Code, Cursor, OpenCode, Antigravity, Windsurf, pi.dev, Codex, Aider
 - **Prompt Explorer** — trace every command back to the prompt that triggered it
-- **MCP Server** — 18 tools + 8 resources + 3 prompts. Agent session discovery, project context, failure learning, risk assessment, a shared skills library. Configurable via `suv settings`
+- **MCP Server** — 21 read-only tools + 8 resources + 5 prompts, plus opt-in write tools. Agent session discovery, project context, failure learning, risk assessment, a shared skills library. Configurable via `suv settings`
 - **100% local** — no cloud, no telemetry, no account. MIT licensed.
 
 > **Website & Docs:** [suvadu.sh](https://suvadu.sh) &middot; **CLI Reference:** [suvadu.sh/cli](https://suvadu.sh/cli/) &middot; **Blog:** [suvadu.sh/blog](https://suvadu.sh/blog/) &middot; **What's new:** [CHANGELOG](CHANGELOG.md)
@@ -110,6 +110,8 @@ Claude Code commands link to their native prompt turn after transcript reconcili
 
 For agents configured with MCP, ask: *"What commands failed in this project recently?"*
 
+To create a cross-agent session checkpoint, enable `mcp.allow_session_summaries` in `suv settings`, then ask: *"Summarize and save current session."* Suvadu resolves the current Codex or Claude session without guessing when multiple sessions match. Later requests extend a safe append-only checkpoint from its saved event and command offsets; if earlier captured evidence changed, the agent rebuilds the summary from the full session.
+
 See the [full integration guide](https://suvadu.sh/blog/track-ai-agent-commands-with-suvadu/) and [MCP server docs](https://suvadu.sh/cli/mcp-server/).
 
 ---
@@ -121,7 +123,7 @@ See the [full integration guide](https://suvadu.sh/blog/track-ai-agent-commands-
 | **Search** | Substring search TUI (your own commands by default; `Ctrl+A` shows agents, `Ctrl+E` shows failures only) with filters, Smart mode, detail pane, bookmarks |
 | **History** | Non-interactive `suv history` with filters, `--json`, pipeable to other tools |
 | **Agent Dashboard** | Timeline, risk assessment, per-agent analytics, exportable reports; `suv agent report --fail-on <low\|medium\|high\|critical>` for local CI / git-hook gating |
-| **MCP Server** | 20 tools + 8 resources + 4 prompts — agent session replay and cross-agent summaries, project context, failure learning, configurable |
+| **MCP Server** | 21 read-only tools + 8 resources + 5 prompts, plus opt-in writes — agent session replay and incremental cross-agent summary checkpoints, project context, failure learning, configurable |
 | **Skills Library** | `suv skills` — interactive TUI to browse, add, edit, delete, sync, and review shared skills any MCP-capable agent can read instead of each tool keeping its own copy; `add/list/show/edit/rm/sync` also work as scriptable subcommands |
 | **Prompt Explorer** | Trace commands back to the prompt that triggered them |
 | **Unified Sessions** | `suv sessions` browses human and AI sessions together; native Codex and Claude Code sessions show prompts, responses, commands, every observed model, and provider-reported token totals |
