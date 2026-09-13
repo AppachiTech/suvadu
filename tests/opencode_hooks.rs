@@ -271,6 +271,53 @@ fn opencode_prompt_cache_respects_a_project_suvadu_toml_overlay() {
     );
 }
 
+#[test]
+fn opencode_command_in_a_stricter_child_directory_stays_redacted_and_still_links_to_its_turn() {
+    // The prompt is cached and the session is imported using OpenCode's
+    // single root directory (permissive here), but the command that used
+    // this prompt actually ran in a stricter child directory. The command's
+    // own re-redaction (entry.rs) must still scrub the secret, even though
+    // that now makes its agent_prompt text differ from the (unredacted,
+    // root-policy) imported prompt event -- reconciliation must bridge that
+    // gap by content hash rather than requiring the two texts to match
+    // verbatim.
+    let s = Sandbox::new();
+    let root = s.home.path().join("project");
+    let child = root.join("child");
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::write(root.join(".suvadu.toml"), "[redaction]\nenabled = false\n").unwrap();
+    std::fs::write(child.join(".suvadu.toml"), "[redaction]\nenabled = true\n").unwrap();
+    let root_dir = root.to_string_lossy().to_string();
+    let child_dir = child.to_string_lossy().to_string();
+
+    let secret = "nested_child_secret_should_not_survive_here";
+    let prompt = format!("curl --password={secret} do the thing");
+
+    // Cached at the permissive root: the secret is left untouched here,
+    // matching root's own (lax) policy.
+    s.cache_prompt("ses1", &root_dir, &prompt);
+    // But the command itself ran in the stricter child directory.
+    s.add_command("opencode-ses1", "echo secret-check", &child_dir);
+
+    // Session import also resolves the permissive root's policy, so this
+    // event's own text legitimately still contains the secret.
+    let messages = serde_json::json!([user_message("msg_u1", &prompt)]);
+    s.import_session("ses1", &root_dir, &messages);
+
+    let entries = s.history();
+    let context = &entries[0]["context"];
+    let stored = context["agent_prompt"].as_str().unwrap();
+    assert!(
+        !stored.contains(secret),
+        "the command's own stricter child-directory config must still redact: {stored}"
+    );
+    assert_eq!(
+        context["agent_turn_id"], "msg_u1",
+        "differing redaction policies between the command's directory and \
+         the session root must not prevent linking to the imported turn; context was: {context}"
+    );
+}
+
 fn plugin_path(s: &Sandbox) -> std::path::PathBuf {
     s.home.path().join(".opencode/plugins/suvadu.js")
 }

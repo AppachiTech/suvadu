@@ -110,13 +110,24 @@ fn sanitize_event(
     if crate::util::is_excluded_compiled(text, patterns) {
         return false;
     }
+    // Hashed from the text as captured, before any redaction/truncation, so
+    // `reconcile_agent_command_turns` can match a command's cached prompt to
+    // this event by content identity even when the two were sanitized under
+    // different directories' policies (e.g. a stricter nested-project
+    // `.suvadu.toml` for the command than the session-wide import used) and
+    // so no longer read as equal text.
+    let text_hash = format!("sha256:{:x}", Sha256::digest(text.as_bytes()));
     let safe = if policy.redact {
         crate::redact::redact_secrets_with_extra(text, &policy.extra_patterns)
     } else {
         text.to_owned()
     };
     let truncated = safe.chars().count() > policy.max_chars;
-    event.data = json!({"text":crate::util::truncate_str(&safe, policy.max_chars, "..."), "truncated":truncated});
+    event.data = json!({
+        "text": crate::util::truncate_str(&safe, policy.max_chars, "..."),
+        "truncated": truncated,
+        "text_hash": text_hash
+    });
     true
 }
 
@@ -171,6 +182,33 @@ fn reject_non_advancing_oversized_record(
     Ok(())
 }
 
+/// Find the prompt a command belongs to: by content hash if the command's
+/// cached context carries one (works even when this command's own directory
+/// re-redacted `agent_prompt` more strictly than the session-wide imported
+/// prompt event), else by exact text for older cached prompts or other
+/// agents that never carried a hash.
+fn matching_turn_id<'a>(
+    prompts: &'a [(i64, String, String, Option<String>)],
+    context: &HashMap<String, String>,
+    started_at: i64,
+) -> Option<&'a String> {
+    if let Some(hash) = context.get("agent_prompt_hash") {
+        return prompts
+            .iter()
+            .filter(|(at, _, _, text_hash)| {
+                *at <= started_at && text_hash.as_deref() == Some(hash.as_str())
+            })
+            .max_by_key(|(at, _, _, _)| *at)
+            .map(|(_, turn_id, _, _)| turn_id);
+    }
+    let prompt = context.get("agent_prompt")?;
+    prompts
+        .iter()
+        .filter(|(at, _, text, _)| *at <= started_at && text == prompt)
+        .max_by_key(|(at, _, _, _)| *at)
+        .map(|(_, turn_id, _, _)| turn_id)
+}
+
 fn reconcile_agent_command_turns(tx: &rusqlite::Transaction<'_>, session_id: &str) -> DbResult<()> {
     let prompts = {
         let mut statement = tx.prepare(
@@ -183,7 +221,8 @@ fn reconcile_agent_command_turns(tx: &rusqlite::Transaction<'_>, session_id: &st
         for row in rows {
             let event = decode::<AiEvent>(&row)?;
             if let (Some(turn_id), Some(text)) = (event.turn_id, event.data["text"].as_str()) {
-                prompts.push((event.at, turn_id, text.to_owned()));
+                let text_hash = event.data["text_hash"].as_str().map(str::to_owned);
+                prompts.push((event.at, turn_id, text.to_owned(), text_hash));
             }
         }
         prompts
@@ -214,14 +253,7 @@ fn reconcile_agent_command_turns(tx: &rusqlite::Transaction<'_>, session_id: &st
         if context.contains_key("agent_turn_id") || context.contains_key("codex_turn_id") {
             continue;
         }
-        let Some(prompt) = context.get("agent_prompt") else {
-            continue;
-        };
-        let Some((_, turn_id, _)) = prompts
-            .iter()
-            .filter(|(at, _, text)| *at <= started_at && text == prompt)
-            .max_by_key(|(at, _, _)| *at)
-        else {
+        let Some(turn_id) = matching_turn_id(&prompts, &context, started_at) else {
             continue;
         };
         context.insert("agent_turn_id".into(), turn_id.clone());

@@ -598,6 +598,18 @@ pub fn read_agent_prompt(session_id: &str) -> Option<std::collections::HashMap<S
     }
     let mut ctx = std::collections::HashMap::new();
     ctx.insert("agent_prompt".to_string(), prompt);
+    // The hash (of the prompt before any redaction) lets reconciliation
+    // match this command to its imported session prompt by content
+    // identity even if agent_prompt gets re-redacted more strictly than
+    // the session-wide import for this command's own directory. Only
+    // OpenCode writes this sidecar today; its absence just falls back to
+    // exact-text matching, as before.
+    let hash_file = prompts_dir.join(format!("{session_id}.prompt.hash"));
+    if let Ok(hash) = std::fs::read_to_string(hash_file) {
+        if !hash.is_empty() {
+            ctx.insert("agent_prompt_hash".to_string(), hash);
+        }
+    }
     Some(ctx)
 }
 

@@ -200,9 +200,20 @@ pub fn handle_hook_opencode_prompt(
         return Ok(());
     }
 
+    // Hashed before any redaction/truncation, so a command's own (possibly
+    // stricter, nested-directory) config can re-redact this cached prompt
+    // for display without breaking `reconcile_agent_command_turns`'s match
+    // against the session-wide imported prompt event, which is sanitized
+    // under this same directory's policy and hashes the same raw text.
+    let text_hash = {
+        use sha2::{Digest, Sha256};
+        format!("sha256:{:x}", Sha256::digest(prompt.as_bytes()))
+    };
+
     let prompts_dir = get_prompts_dir()?;
     std::fs::create_dir_all(&prompts_dir)?;
     let prompt_file = prompts_dir.join(format!("opencode-{session_id}.prompt"));
+    let hash_file = prompts_dir.join(format!("opencode-{session_id}.prompt.hash"));
     let safe = if cfg.redaction.enabled {
         crate::redact::redact_secrets_with_extra(&prompt, &cfg.redaction.extra_patterns)
     } else {
@@ -210,11 +221,13 @@ pub fn handle_hook_opencode_prompt(
     };
     let truncated = crate::util::truncate_str(&safe, cfg.agent.prompt_capture_max_chars, "...");
     atomic_write(&prompt_file, &truncated)?;
+    atomic_write(&hash_file, &text_hash)?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&prompt_file, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(&hash_file, std::fs::Permissions::from_mode(0o600));
     }
 
     Ok(())
