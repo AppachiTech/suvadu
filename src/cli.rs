@@ -771,7 +771,7 @@ pub enum AliasesCommands {
 
 #[derive(Subcommand, Debug)]
 pub enum AgentCommands {
-    /// Import a native Codex JSONL transcript incrementally (JSON result)
+    /// Import a native Codex or Claude Code JSONL transcript incrementally, auto-detected (JSON result)
     ImportSession { path: std::path::PathBuf },
     /// List captured AI sessions (JSON)
     Sessions {

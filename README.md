@@ -104,7 +104,7 @@ suv history --executor openai-codex
 suv agent prompts --executor openai-codex
 ```
 
-Codex shell commands link to the prompt from the same turn. Prompts without recorded commands do not appear in the prompt explorer. Capture respects Suvadu's recording and redaction settings. Hook timestamps reflect receipt time; exit status stays unknown when Codex does not provide a structured exit code. This requires a Codex version supporting `UserPromptSubmit` and `PostToolUse` hooks (tested with CLI 0.153.4).
+Codex shell commands link to the prompt from the same turn. Prompts without recorded commands do not appear in the prompt explorer. Capture respects Suvadu's recording and redaction settings. Hook timestamps reflect receipt time; exit status stays unknown when Codex does not provide a structured exit code. This requires a Codex version supporting `UserPromptSubmit` and `PostToolUse` hooks (tested with CLI 0.153.4). Stop and SessionEnd hooks also incrementally import Codex's native transcript for prompts, final assistant answers, and provider-reported token usage, independent of shell commands (bounded to 16 MiB per record) — this part requires a Codex version supporting `Stop`/`SessionEnd` hooks too.
 
 Claude Code commands link to their native prompt turn after transcript reconciliation. Stop and SessionEnd hooks incrementally import local transcript records for prompts, assistant text, models, and provider-reported token usage. Thinking blocks, attachments, images, file contents, and raw tool results are not stored in Suvadu.
 
@@ -128,7 +128,7 @@ See the [full integration guide](https://suvadu.sh/blog/track-ai-agent-commands-
 | **MCP Server** | 21 read-only tools + 8 resources + 5 prompts, plus opt-in writes — agent session replay and incremental cross-agent summary checkpoints, project context, failure learning, configurable |
 | **Skills Library** | `suv skills` — interactive TUI to browse, add, edit, delete, sync, and review shared skills any MCP-capable agent can read instead of each tool keeping its own copy; `add/list/show/edit/rm/sync` also work as scriptable subcommands |
 | **Prompt Explorer** | Trace commands back to the prompt that triggered them |
-| **Unified Sessions** | `suv sessions` browses human and AI sessions together; native Codex and Claude Code sessions show prompts, responses, commands, every observed model, and provider-reported token totals |
+| **Unified Sessions** | `suv sessions` browses human and AI sessions together; native Codex, Claude Code, and OpenCode sessions show prompts, responses, commands, every observed model, and provider-reported token totals — press `s` on an AI session to view its saved summaries in a scrollable overlay (`Tab` toggles rendered/raw, `Ctrl+Y` copies) |
 | **Stats** | Heatmap, hourly distribution, top commands, executor breakdown; `--human` (or `Ctrl+H` in the TUI) excludes AI-agent activity |
 | **Doctor** | `suv doctor` checks shell, hooks, config, database, MCP, and agent hooks health |
 | **Organization** | Tags, bookmarks (`suv bookmarks` opens an interactive picker that recalls one into your prompt), notes, and `suv aliases` — an interactive manager (add/edit/delete) for shell aliases, plus suggestions for your frequently-typed long commands |
