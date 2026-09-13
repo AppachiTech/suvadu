@@ -1,4 +1,4 @@
-//! Incremental adapter for OpenCode's `GET /session/{id}/message` API
+//! Incremental adapter for `OpenCode`'s `GET /session/{id}/message` API
 //! response (`Array<{info: Message, parts: Part[]}>`). Every call carries
 //! the full session history -- the API has no cursor -- so incrementality
 //! (skipping already-seen messages) is entirely handled here in Rust.
@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 pub const ADAPTER_VERSION: u32 = 1;
 
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OpencodeState {
     pub seen_message_ids: HashSet<String>,
@@ -33,9 +33,7 @@ pub fn parse_messages(
         let at = info["time"]["created"]
             .as_i64()
             .ok_or("missing info.time.created")?;
-        let parts = message["parts"]
-            .as_array()
-            .ok_or("missing parts array")?;
+        let parts = message["parts"].as_array().ok_or("missing parts array")?;
         let text = joined_text(parts, &id);
 
         match role {
@@ -72,7 +70,13 @@ pub fn parse_messages(
                 if let Some(tokens) = info.get("tokens").filter(|v| !v.is_null()) {
                     let usage = usage_counters(tokens)?;
                     events.push(next_event(
-                        &mut next, "usage", "usage", at, cwd, turn_id, model,
+                        &mut next,
+                        "usage",
+                        "usage",
+                        at,
+                        cwd,
+                        turn_id,
+                        model,
                         json!({"total": usage}),
                     ));
                 }
@@ -91,8 +95,7 @@ fn joined_text(parts: &[Value], message_id: &str) -> Option<String> {
     let text = parts
         .iter()
         .filter(|part| {
-            part["messageID"].as_str() == Some(message_id)
-                && part["type"].as_str() == Some("text")
+            part["messageID"].as_str() == Some(message_id) && part["type"].as_str() == Some("text")
         })
         .filter_map(|part| part["text"].as_str())
         .collect::<Vec<_>>()
@@ -102,7 +105,7 @@ fn joined_text(parts: &[Value], message_id: &str) -> Option<String> {
 
 /// `AssistantMessage` carries flat `modelID`/`providerID`; `UserMessage`
 /// carries a nested `model: {providerID, modelID}` object. Different shapes
-/// per role, per OpenCode's documented API types.
+/// per role, per `OpenCode`'s documented API types.
 fn model_id(info: &Value, role: &str) -> Option<String> {
     if role == "assistant" {
         info["modelID"].as_str().map(str::to_owned)
@@ -295,7 +298,9 @@ mod tests {
         // Only response + usage; the tool part produced no event of its own,
         // and the extra unrecognized info field didn't cause an error.
         assert_eq!(events.len(), 2);
-        assert!(events.iter().any(|e| e.kind == "response" && e.data["text"] == "Done."));
+        assert!(events
+            .iter()
+            .any(|e| e.kind == "response" && e.data["text"] == "Done."));
         assert!(events.iter().any(|e| e.kind == "usage"));
     }
 
