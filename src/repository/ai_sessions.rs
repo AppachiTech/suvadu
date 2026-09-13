@@ -1751,4 +1751,88 @@ mod tests {
             .unwrap();
         assert_eq!(second["imported_events"], 0);
     }
+
+    #[test]
+    fn import_opencode_session_only_imports_new_messages_on_incremental_growth() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let first_message = serde_json::json!({
+            "info": {
+                "id": "msg_u1", "sessionID": "ses_1", "role": "user",
+                "time": {"created": 1000},
+                "agent": "build", "model": {"providerID": "anthropic", "modelID": "claude-sonnet-5"}
+            },
+            "parts": [{"id": "msg_u1-p1", "sessionID": "ses_1", "messageID": "msg_u1", "type": "text", "text": "hi"}]
+        });
+        let mut messages = vec![first_message];
+
+        let first_call = repo
+            .import_opencode_session(
+                "ses_1",
+                "/work",
+                &serde_json::Value::Array(messages.clone()).to_string(),
+                |_| Ok(crate::ai_sessions::CapturePolicy::default()),
+            )
+            .unwrap();
+        assert_eq!(first_call["imported_events"], 1); // just the prompt
+
+        let second_message = serde_json::json!({
+            "info": {
+                "id": "msg_a1", "sessionID": "ses_1", "role": "assistant",
+                "time": {"created": 1100, "completed": 1600},
+                "parentID": "msg_u1", "modelID": "claude-sonnet-5", "providerID": "anthropic",
+                "mode": "build", "path": {"cwd": "/work", "root": "/work"}, "cost": 0.0,
+                "tokens": {"input": 10, "output": 5, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+                "finish": "stop"
+            },
+            "parts": [{"id": "msg_a1-p1", "sessionID": "ses_1", "messageID": "msg_a1", "type": "text", "text": "hello"}]
+        });
+        messages.push(second_message);
+
+        let second_call = repo
+            .import_opencode_session(
+                "ses_1",
+                "/work",
+                &serde_json::Value::Array(messages).to_string(),
+                |_| Ok(crate::ai_sessions::CapturePolicy::default()),
+            )
+            .unwrap();
+        // Only the new assistant message's events (response + usage) are new;
+        // the first message must not be re-imported.
+        assert_eq!(second_call["imported_events"], 2);
+
+        let session = repo.get_ai_session("opencode-ses_1", 20, 0, &[]).unwrap();
+        assert_eq!(session["events"].as_array().unwrap().len(), 3); // 1 (first call) + 2 (second call)
+    }
+
+    #[test]
+    fn import_opencode_session_rejects_adapter_version_mismatch() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let messages = serde_json::json!([{
+            "info": {
+                "id": "msg_u1", "sessionID": "ses_1", "role": "user",
+                "time": {"created": 1000},
+                "agent": "build", "model": {"providerID": "anthropic", "modelID": "claude-sonnet-5"}
+            },
+            "parts": [{"id": "msg_u1-p1", "sessionID": "ses_1", "messageID": "msg_u1", "type": "text", "text": "hi"}]
+        }])
+        .to_string();
+
+        repo.import_opencode_session("ses_1", "/work", &messages, |_| {
+            Ok(crate::ai_sessions::CapturePolicy::default())
+        })
+        .unwrap();
+
+        repo.conn
+            .execute(
+                "UPDATE ai_sources SET adapter_version=9999 WHERE path='opencode-session:ses_1'",
+                [],
+            )
+            .unwrap();
+
+        assert!(repo
+            .import_opencode_session("ses_1", "/work", &messages, |_| {
+                Ok(crate::ai_sessions::CapturePolicy::default())
+            })
+            .is_err());
+    }
 }
