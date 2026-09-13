@@ -3,6 +3,7 @@ mod exclusion;
 mod file;
 mod format;
 mod highlight;
+mod reconcile_key;
 mod terminal;
 mod timestamp;
 
@@ -11,6 +12,7 @@ pub use exclusion::*;
 pub use file::*;
 pub use format::*;
 pub use highlight::*;
+pub use reconcile_key::*;
 pub use terminal::*;
 pub use timestamp::*;
 

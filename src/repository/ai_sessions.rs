@@ -115,8 +115,13 @@ fn sanitize_event(
     // this event by content identity even when the two were sanitized under
     // different directories' policies (e.g. a stricter nested-project
     // `.suvadu.toml` for the command than the session-wide import used) and
-    // so no longer read as equal text.
-    let text_hash = format!("sha256:{:x}", Sha256::digest(text.as_bytes()));
+    // so no longer read as equal text. Keyed (not a bare hash), or anyone
+    // who can read the database could offline dictionary-guess a redacted
+    // low-entropy secret. Scoped to OpenCode prompts specifically -- the
+    // only case that currently needs this fingerprint at all.
+    let text_hash = (event.kind == "prompt" && event.id.starts_with("opencode-"))
+        .then(|| crate::util::keyed_text_hash(text))
+        .flatten();
     let safe = if policy.redact {
         crate::redact::redact_secrets_with_extra(text, &policy.extra_patterns)
     } else {

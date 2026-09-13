@@ -161,6 +161,64 @@ fn find_prompt_caches(path: &std::path::Path, secret: &str) -> Vec<String> {
     found
 }
 
+/// Recursively find the first file named exactly `name` under `path`.
+fn find_file_named(path: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    for entry in std::fs::read_dir(path).unwrap().flatten() {
+        let entry_path = entry.path();
+        if entry.file_type().unwrap().is_dir() {
+            if let Some(found) = find_file_named(&entry_path, name) {
+                return Some(found);
+            }
+        } else if entry_path.file_name().and_then(|n| n.to_str()) == Some(name) {
+            return Some(entry_path);
+        }
+    }
+    None
+}
+
+#[test]
+fn opencode_prompt_hash_is_keyed_and_the_reconciliation_key_persists_across_processes() {
+    // A bare, unkeyed hash of the raw prompt would let anyone who can read
+    // the database or this sidecar file offline dictionary-guess a
+    // redacted low-entropy secret. The fingerprint must be an HMAC keyed
+    // by a per-install secret, and that secret must be owner-only and
+    // stable across separate `suv` process invocations (the real usage
+    // pattern -- every hook is its own process).
+    let s = Sandbox::new();
+    s.cache_prompt("ses1", "/project", "first prompt, nothing sensitive");
+
+    let hash_file = find_file_named(s.home.path(), "opencode-ses1.prompt.hash")
+        .expect("hash sidecar should have been written");
+    let hash_contents = std::fs::read_to_string(&hash_file).unwrap();
+    assert!(
+        hash_contents.starts_with("hmac-sha256:"),
+        "prompt hash must be a keyed HMAC, not a bare unkeyed hash: {hash_contents}"
+    );
+
+    let key_file =
+        find_file_named(s.home.path(), "reconcile.key").expect("reconciliation key should exist");
+    let key_bytes_first = std::fs::read(&key_file).unwrap();
+    assert_eq!(key_bytes_first.len(), 32);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            key_file.metadata().unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the reconciliation key must be owner-only"
+        );
+    }
+
+    // A second, separate `suv` process must reuse the same persisted key
+    // rather than generating a fresh one.
+    s.cache_prompt("ses2", "/project", "second prompt, different session");
+    let key_bytes_second = std::fs::read(&key_file).unwrap();
+    assert_eq!(
+        key_bytes_first, key_bytes_second,
+        "the reconciliation key must persist across separate process invocations"
+    );
+}
+
 #[test]
 fn opencode_prompt_cache_is_redacted_and_not_hard_cut_at_500_chars() {
     let s = Sandbox::new();

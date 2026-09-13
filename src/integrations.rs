@@ -205,10 +205,9 @@ pub fn handle_hook_opencode_prompt(
     // for display without breaking `reconcile_agent_command_turns`'s match
     // against the session-wide imported prompt event, which is sanitized
     // under this same directory's policy and hashes the same raw text.
-    let text_hash = {
-        use sha2::{Digest, Sha256};
-        format!("sha256:{:x}", Sha256::digest(prompt.as_bytes()))
-    };
+    // Keyed (`keyed_text_hash`, not a bare hash) so the fingerprint alone
+    // can't be dictionary-guessed offline by anyone who can read this file.
+    let text_hash = crate::util::keyed_text_hash(&prompt);
 
     let prompts_dir = get_prompts_dir()?;
     std::fs::create_dir_all(&prompts_dir)?;
@@ -221,13 +220,19 @@ pub fn handle_hook_opencode_prompt(
     };
     let truncated = crate::util::truncate_str(&safe, cfg.agent.prompt_capture_max_chars, "...");
     atomic_write(&prompt_file, &truncated)?;
-    atomic_write(&hash_file, &text_hash)?;
+    if let Some(text_hash) = &text_hash {
+        atomic_write(&hash_file, text_hash)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&hash_file, std::fs::Permissions::from_mode(0o600));
+        }
+    }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&prompt_file, std::fs::Permissions::from_mode(0o600));
-        let _ = std::fs::set_permissions(&hash_file, std::fs::Permissions::from_mode(0o600));
     }
 
     Ok(())
