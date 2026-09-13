@@ -374,50 +374,27 @@ impl SessionApp {
 
     /// Move selection to next entry row, skipping gap rows.
     fn move_down(&mut self) {
-        let page_len = self.page_slice().len();
-        if page_len == 0 {
-            return;
-        }
-        let cur = self.table_state.selected().unwrap_or(0);
-        let mut next = cur + 1;
-        // Skip gap rows
         let page_offset = (self.page - 1) * self.page_size;
-        while next < page_len {
-            if matches!(
-                self.timeline.get(page_offset + next),
-                Some(TimelineRow::Entry(_))
-            ) {
-                break;
-            }
-            next += 1;
-        }
-        if next < page_len {
-            self.table_state.select(Some(next));
+        let current = page_offset + self.table_state.selected().unwrap_or_default();
+        if let Some(next) = ((current + 1)..self.timeline.len())
+            .find(|index| matches!(self.timeline[*index], TimelineRow::Entry(_)))
+        {
+            self.page = next / self.page_size + 1;
+            self.table_state.select(Some(next % self.page_size));
         }
     }
 
     /// Move selection to previous entry row, skipping gap rows.
     fn move_up(&mut self) {
-        let cur = self.table_state.selected().unwrap_or(0);
-        if cur == 0 {
-            return;
-        }
         let page_offset = (self.page - 1) * self.page_size;
-        let mut prev = cur - 1;
-        loop {
-            if matches!(
-                self.timeline.get(page_offset + prev),
-                Some(TimelineRow::Entry(_))
-            ) {
-                break;
-            }
-            if prev == 0 {
-                // No entry row found above, stay at current
-                return;
-            }
-            prev -= 1;
+        let current = page_offset + self.table_state.selected().unwrap_or_default();
+        if let Some(previous) = (0..current)
+            .rev()
+            .find(|index| matches!(self.timeline[*index], TimelineRow::Entry(_)))
+        {
+            self.page = previous / self.page_size + 1;
+            self.table_state.select(Some(previous % self.page_size));
         }
-        self.table_state.select(Some(prev));
     }
 
     fn handle_input(&mut self, key: crossterm::event::KeyEvent) -> bool {
@@ -1079,12 +1056,23 @@ impl AiSessionApp {
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 let current = self.table_state.selected().unwrap_or_default();
-                self.table_state.select(Some(current.saturating_sub(1)));
+                if current > 0 {
+                    self.table_state.select(Some(current - 1));
+                } else if self.page > 1 {
+                    self.page -= 1;
+                    self.table_state
+                        .select(Some(self.page_items().len().saturating_sub(1)));
+                }
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 let last = self.page_items().len().saturating_sub(1);
                 let current = self.table_state.selected().unwrap_or_default();
-                self.table_state.select(Some((current + 1).min(last)));
+                if current < last {
+                    self.table_state.select(Some(current + 1));
+                } else if self.page < self.total_pages() {
+                    self.page += 1;
+                    self.table_state.select(Some(0));
+                }
             }
             KeyCode::Home | KeyCode::Char('g') if !self.data.items.is_empty() => {
                 self.page = 1;
@@ -1742,6 +1730,48 @@ mod tests {
         assert_eq!(app.table_state.selected(), Some(0));
         app.move_up();
         assert_eq!(app.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn human_row_navigation_crosses_page_boundaries() {
+        let entries = (0..51)
+            .map(|index| make_entry(index * 1_000, index * 1_000 + 500))
+            .collect();
+        let mut app = SessionApp::new(make_session(), None, entries, HashSet::new());
+        app.table_state.select(Some(49));
+
+        app.move_down();
+        assert_eq!(app.page, 2);
+        assert_eq!(app.table_state.selected(), Some(0));
+
+        app.move_up();
+        assert_eq!(app.page, 1);
+        assert_eq!(app.table_state.selected(), Some(49));
+    }
+
+    #[test]
+    fn ai_row_navigation_crosses_page_boundaries() {
+        let mut data = make_ai_data();
+        data.items = (0..51)
+            .map(|index| AiTimelineItem::Prompt {
+                at: index,
+                text: format!("prompt {index}"),
+                cwd: "/work".into(),
+                source_id: format!("prompt-{index}"),
+                turn_id: None,
+                model: Some("gpt-test".into()),
+            })
+            .collect();
+        let mut app = AiSessionApp::new(data);
+        app.table_state.select(Some(49));
+
+        app.handle_input(crossterm::event::KeyEvent::from(KeyCode::Down));
+        assert_eq!(app.page, 2);
+        assert_eq!(app.table_state.selected(), Some(0));
+
+        app.handle_input(crossterm::event::KeyEvent::from(KeyCode::Up));
+        assert_eq!(app.page, 1);
+        assert_eq!(app.table_state.selected(), Some(49));
     }
 
     #[test]

@@ -10,6 +10,36 @@ const MAX_INPUT_LEN: usize = 2000;
 const PAGE_SCROLL_LINES: usize = 10;
 
 impl SearchApp {
+    const fn move_result_up(&mut self) -> SearchAction {
+        if let Some(selected) = self.table_state.selected() {
+            if selected > 0 {
+                self.table_state.select(Some(selected - 1));
+            } else if self.pagination.page > 1 {
+                return SearchAction::SetPageLast(self.pagination.page - 1);
+            }
+        }
+        SearchAction::Continue
+    }
+
+    const fn move_result_down(&mut self) -> SearchAction {
+        if let Some(selected) = self.table_state.selected() {
+            if selected + 1 < self.entries.len() {
+                self.table_state.select(Some(selected + 1));
+            } else {
+                let total_pages = self
+                    .pagination
+                    .total_items
+                    .div_ceil(self.pagination.page_size);
+                if self.pagination.page < total_pages {
+                    return SearchAction::SetPage(self.pagination.page + 1);
+                }
+            }
+        } else if !self.entries.is_empty() {
+            self.table_state.select(Some(0));
+        }
+        SearchAction::Continue
+    }
+
     /// Handle a bracketed-paste event. Returns `true` if the paste modified
     /// the main search query (caller should reload), `false` otherwise.
     pub(super) fn handle_paste(&mut self, text: &str) -> bool {
@@ -139,22 +169,8 @@ impl SearchApp {
                 self.query.pop();
                 return SearchAction::Reload;
             }
-            KeyCode::Up => {
-                if let Some(selected) = self.table_state.selected() {
-                    if selected > 0 {
-                        self.table_state.select(Some(selected - 1));
-                    }
-                }
-            }
-            KeyCode::Down => {
-                if let Some(selected) = self.table_state.selected() {
-                    if selected + 1 < self.entries.len() {
-                        self.table_state.select(Some(selected + 1));
-                    }
-                } else if !self.entries.is_empty() {
-                    self.table_state.select(Some(0));
-                }
-            }
+            KeyCode::Up => return self.move_result_up(),
+            KeyCode::Down => return self.move_result_down(),
             KeyCode::PageUp => {
                 self.move_selection_up(PAGE_SCROLL_LINES);
             }
@@ -188,22 +204,8 @@ impl SearchApp {
     fn handle_vim_normal_input(&mut self, key: KeyEvent) -> SearchAction {
         match key.code {
             // Navigation
-            KeyCode::Char('j') | KeyCode::Down => {
-                if let Some(selected) = self.table_state.selected() {
-                    if selected + 1 < self.entries.len() {
-                        self.table_state.select(Some(selected + 1));
-                    }
-                } else if !self.entries.is_empty() {
-                    self.table_state.select(Some(0));
-                }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if let Some(selected) = self.table_state.selected() {
-                    if selected > 0 {
-                        self.table_state.select(Some(selected - 1));
-                    }
-                }
-            }
+            KeyCode::Char('j') | KeyCode::Down => return self.move_result_down(),
+            KeyCode::Char('k') | KeyCode::Up => return self.move_result_up(),
             // Half-page scroll
             KeyCode::Char('G') | KeyCode::End if !self.entries.is_empty() => {
                 self.table_state.select(Some(self.entries.len() - 1));

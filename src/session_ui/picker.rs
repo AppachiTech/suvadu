@@ -223,9 +223,6 @@ impl PickerApp {
         } else if self.page < self.total_pages() {
             self.page += 1;
             self.table_state.select(Some(0));
-        } else {
-            self.page = 1;
-            self.table_state.select(Some(0));
         }
     }
 
@@ -238,10 +235,6 @@ impl PickerApp {
             self.table_state.select(Some(selected - 1));
         } else if self.page > 1 {
             self.page -= 1;
-            self.table_state
-                .select(Some(self.page_len().saturating_sub(1)));
-        } else {
-            self.page = self.total_pages();
             self.table_state
                 .select(Some(self.page_len().saturating_sub(1)));
         }
@@ -843,23 +836,38 @@ mod tests {
     }
 
     #[test]
-    fn next_wraps_around() {
+    fn next_stops_at_last_session() {
         let mut app = PickerApp::new(vec![make_summary("s1", 5), make_summary("s2", 3)]);
         assert_eq!(app.table_state.selected(), Some(0));
         app.next();
         assert_eq!(app.table_state.selected(), Some(1));
         app.next();
+        assert_eq!(app.table_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn prev_stops_at_first_session() {
+        let mut app = PickerApp::new(vec![make_summary("s1", 5), make_summary("s2", 3)]);
+        assert_eq!(app.table_state.selected(), Some(0));
+        app.prev();
         assert_eq!(app.table_state.selected(), Some(0));
     }
 
     #[test]
-    fn prev_wraps_around() {
-        let mut app = PickerApp::new(vec![make_summary("s1", 5), make_summary("s2", 3)]);
-        assert_eq!(app.table_state.selected(), Some(0));
+    fn row_navigation_crosses_session_picker_page_boundaries() {
+        let sessions = (0..51)
+            .map(|index| make_summary(&format!("s{index:02}"), 1))
+            .collect();
+        let mut app = PickerApp::new(sessions);
+        app.table_state.select(Some(49));
+
+        app.next();
+        assert_eq!(app.page, 2);
+        assert_eq!(app.selected_session_id(), Some("s50"));
+
         app.prev();
-        assert_eq!(app.table_state.selected(), Some(1));
-        app.prev();
-        assert_eq!(app.table_state.selected(), Some(0));
+        assert_eq!(app.page, 1);
+        assert_eq!(app.selected_session_id(), Some("s49"));
     }
 
     #[test]

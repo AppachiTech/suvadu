@@ -884,6 +884,32 @@ fn test_handle_input_left_right_pages() {
     assert!(matches!(action, SearchAction::Continue));
 }
 
+#[test]
+fn down_on_last_result_requests_the_next_page() {
+    let entries: Vec<Entry> = (0..50)
+        .map(|i| create_test_entry(&format!("cmd{i}")))
+        .collect();
+    let mut app = SearchApp::new(test_search_config(entries, 51));
+    app.table_state.select(Some(49));
+
+    let action = app.handle_input(KeyEvent::from(KeyCode::Down));
+
+    assert!(matches!(action, SearchAction::SetPage(2)));
+}
+
+#[test]
+fn up_on_first_result_requests_the_previous_page() {
+    let entries = vec![create_test_entry("cmd50")];
+    let mut config = test_search_config(entries, 51);
+    config.page = 2;
+    let mut app = SearchApp::new(config);
+    app.table_state.select(Some(0));
+
+    let action = app.handle_input(KeyEvent::from(KeyCode::Up));
+
+    assert!(matches!(action, SearchAction::SetPageLast(1)));
+}
+
 // ── handle_input dialog routing tests ──
 
 #[test]

@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 - Current Codex `response_item` transcripts now capture real `user.text` prompts and final assistant answers while excluding developer instructions, injected AGENTS/environment context, commentary, reasoning, and duplicate item-completion records.
 - Codex session imports now accept bounded records up to 16 MiB, allowing image-bearing prompts and compaction snapshots to be read without storing embedded images or rolling back model and token capture.
+- Up/Down navigation and trackpad scrolling now continue across page boundaries in Search, Sessions, Agent Dashboard, and both Prompt Explorer views while preserving explicit Left/Right page navigation.
 
 ## [0.4.0] - 2026-09-09
 

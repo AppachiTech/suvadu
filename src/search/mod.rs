@@ -28,6 +28,7 @@ pub enum SearchAction {
     Copy(String),
     Delete(i64),
     SetPage(usize),
+    SetPageLast(usize),
     AssociateSession(i64),
     ToggleBookmark(String),
     SaveNote(i64, String),
@@ -272,6 +273,12 @@ impl SearchApp {
                         SearchAction::Exit => return Ok(None),
                         SearchAction::Reload => self.reload_entries(repo)?,
                         SearchAction::SetPage(page) => self.set_page(repo, page)?,
+                        SearchAction::SetPageLast(page) => {
+                            self.set_page(repo, page)?;
+                            if !self.entries.is_empty() {
+                                self.table_state.select(Some(self.entries.len() - 1));
+                            }
+                        }
                         other => self.dispatch_action(other, repo)?,
                     }
                 }
@@ -374,7 +381,8 @@ impl SearchApp {
             | SearchAction::Select(_)
             | SearchAction::Exit
             | SearchAction::Reload
-            | SearchAction::SetPage(_) => {}
+            | SearchAction::SetPage(_)
+            | SearchAction::SetPageLast(_) => {}
         }
         Ok(())
     }

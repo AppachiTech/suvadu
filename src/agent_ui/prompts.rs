@@ -493,11 +493,8 @@ impl PromptExplorerApp {
         match key.code {
             KeyCode::Esc => return PromptAction::Quit,
             // Row navigation
-            KeyCode::Up => self.list_pager.move_up(),
-            KeyCode::Down => {
-                let len = self.list_page_slice().len();
-                self.list_pager.move_down(len);
-            }
+            KeyCode::Up => self.list_pager.move_up_continuous(self.groups.len()),
+            KeyCode::Down => self.list_pager.move_down_continuous(self.groups.len()),
             KeyCode::Home if !self.list_page_slice().is_empty() => {
                 self.list_pager.state.select(Some(0));
             }
@@ -561,11 +558,12 @@ impl PromptExplorerApp {
                 }
             }
             // Row navigation
-            KeyCode::Up | KeyCode::Char('k') => self.detail_pager.move_up(),
-            KeyCode::Down | KeyCode::Char('j') => {
-                let len = self.detail_page_slice().len();
-                self.detail_pager.move_down(len);
-            }
+            KeyCode::Up | KeyCode::Char('k') => self
+                .detail_pager
+                .move_up_continuous(self.detail_entries().len()),
+            KeyCode::Down | KeyCode::Char('j') => self
+                .detail_pager
+                .move_down_continuous(self.detail_entries().len()),
             KeyCode::Home if !self.detail_page_slice().is_empty() => {
                 self.detail_pager.state.select(Some(0));
             }
@@ -1915,6 +1913,61 @@ mod tests {
         let up = crossterm::event::KeyEvent::from(KeyCode::Up);
         app.handle_input(up, None);
         assert_eq!(app.list_pager.state.selected(), Some(1));
+    }
+
+    #[test]
+    fn row_navigation_crosses_prompt_list_page_boundaries() {
+        let entries = (0..51)
+            .map(|index| {
+                make_entry_with_prompt(
+                    &format!("s{index}"),
+                    "cmd",
+                    &format!("prompt {index}"),
+                    "cc",
+                    Some(0),
+                    index,
+                    1,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut app = PromptExplorerApp::new(&entries);
+        app.list_pager.state.select(Some(49));
+
+        app.handle_input(crossterm::event::KeyEvent::from(KeyCode::Down), None);
+        assert_eq!(app.list_pager.page, 2);
+        assert_eq!(app.list_pager.selected(), Some(0));
+
+        app.handle_input(crossterm::event::KeyEvent::from(KeyCode::Up), None);
+        assert_eq!(app.list_pager.page, 1);
+        assert_eq!(app.list_pager.selected(), Some(49));
+    }
+
+    #[test]
+    fn row_navigation_crosses_prompt_detail_page_boundaries() {
+        let entries = (0..51)
+            .map(|index| {
+                make_entry_with_prompt(
+                    "s1",
+                    &format!("cmd{index}"),
+                    "one prompt",
+                    "cc",
+                    Some(0),
+                    index,
+                    1,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut app = PromptExplorerApp::new(&entries);
+        app.handle_input(crossterm::event::KeyEvent::from(KeyCode::Enter), None);
+        app.detail_pager.state.select(Some(49));
+
+        app.handle_input(crossterm::event::KeyEvent::from(KeyCode::Down), None);
+        assert_eq!(app.detail_pager.page, 2);
+        assert_eq!(app.detail_pager.selected(), Some(0));
+
+        app.handle_input(crossterm::event::KeyEvent::from(KeyCode::Up), None);
+        assert_eq!(app.detail_pager.page, 1);
+        assert_eq!(app.detail_pager.selected(), Some(49));
     }
 
     #[test]

@@ -268,11 +268,8 @@ impl AgentApp {
             KeyCode::Left => self.pager.prev_page(self.visible.len()),
             KeyCode::Right => self.pager.next_page(self.visible.len()),
             // Row navigation
-            KeyCode::Up => self.pager.move_up(),
-            KeyCode::Down => {
-                let len = self.page_slice().len();
-                self.pager.move_down(len);
-            }
+            KeyCode::Up => self.pager.move_up_continuous(self.visible.len()),
+            KeyCode::Down => self.pager.move_down_continuous(self.visible.len()),
             KeyCode::Home if !self.page_slice().is_empty() => {
                 self.pager.state.select(Some(0));
             }
@@ -1160,6 +1157,24 @@ mod tests {
         let tab = crossterm::event::KeyEvent::from(KeyCode::Tab);
         app.handle_input(tab, &repo);
         assert!(!app.detail_open);
+    }
+
+    #[test]
+    fn row_navigation_crosses_dashboard_page_boundaries() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let entries = (0..51)
+            .map(|index| make_entry(&format!("cmd{index}"), Some("claude"), "/tmp"))
+            .collect();
+        let mut app = make_app(entries);
+        app.pager.state.select(Some(49));
+
+        app.handle_input(crossterm::event::KeyEvent::from(KeyCode::Down), &repo);
+        assert_eq!(app.pager.page, 2);
+        assert_eq!(app.pager.selected(), Some(0));
+
+        app.handle_input(crossterm::event::KeyEvent::from(KeyCode::Up), &repo);
+        assert_eq!(app.pager.page, 1);
+        assert_eq!(app.pager.selected(), Some(49));
     }
 
     #[test]

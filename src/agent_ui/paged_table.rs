@@ -47,17 +47,40 @@ impl PagedTable {
             .select(if total_len == 0 { None } else { Some(0) });
     }
 
-    pub const fn move_up(&mut self) {
-        if let Some(cur) = self.state.selected() {
-            self.state.select(Some(cur.saturating_sub(1)));
+    /// Move one row up across page boundaries, stopping at the first row.
+    pub fn move_up_continuous(&mut self, total_len: usize) {
+        if total_len == 0 {
+            return;
+        }
+        match self.selected() {
+            Some(current) if current > 0 => self.state.select(Some(current - 1)),
+            Some(_) if self.page > 1 => {
+                self.page -= 1;
+                let (start, end) = self.bounds(total_len);
+                self.select_last(end - start);
+            }
+            None => self.state.select(Some(0)),
+            _ => {}
         }
     }
 
-    /// `page_len` is the length of the current page's slice (from `bounds`).
-    pub fn move_down(&mut self, page_len: usize) {
-        let max = page_len.saturating_sub(1);
-        if let Some(cur) = self.state.selected() {
-            self.state.select(Some(cur.saturating_add(1).min(max)));
+    /// Move one row down across page boundaries, stopping at the last row.
+    pub fn move_down_continuous(&mut self, total_len: usize) {
+        if total_len == 0 {
+            return;
+        }
+        let (start, end) = self.bounds(total_len);
+        let page_len = end - start;
+        match self.selected() {
+            Some(current) if current + 1 < page_len => {
+                self.state.select(Some(current + 1));
+            }
+            Some(_) if self.page < self.total_pages(total_len) => {
+                self.page += 1;
+                self.state.select(Some(0));
+            }
+            None => self.state.select(Some(0)),
+            _ => {}
         }
     }
 
@@ -149,38 +172,6 @@ mod tests {
         pt.state.select(Some(2));
         pt.reset(0);
         assert_eq!(pt.selected(), None);
-    }
-
-    #[test]
-    fn move_up_clamps_at_zero() {
-        let mut pt = PagedTable::new(10);
-        pt.state.select(Some(0));
-        pt.move_up();
-        assert_eq!(pt.selected(), Some(0));
-    }
-
-    #[test]
-    fn move_up_decrements() {
-        let mut pt = PagedTable::new(10);
-        pt.state.select(Some(3));
-        pt.move_up();
-        assert_eq!(pt.selected(), Some(2));
-    }
-
-    #[test]
-    fn move_down_clamps_at_page_len() {
-        let mut pt = PagedTable::new(10);
-        pt.state.select(Some(4));
-        pt.move_down(5);
-        assert_eq!(pt.selected(), Some(4));
-    }
-
-    #[test]
-    fn move_down_increments() {
-        let mut pt = PagedTable::new(10);
-        pt.state.select(Some(2));
-        pt.move_down(5);
-        assert_eq!(pt.selected(), Some(3));
     }
 
     #[test]
