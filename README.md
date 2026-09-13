@@ -92,7 +92,7 @@ suv skills sync             # Materialize skills into Claude Code/Cursor/Codex
 suv init claude-code    # Claude Code — commands, sessions, tokens + MCP
 suv init codex          # Codex — commands, sessions, tokens + MCP
 suv init cursor         # Cursor — hooks + MCP + prompt capture
-suv init opencode       # OpenCode — plugin + prompt capture
+suv init opencode       # OpenCode — plugin + full session capture (commands, sessions, tokens)
 suv init pi             # pi.dev — extension + prompt capture
 suv init antigravity    # Antigravity — auto-detect
 ```
@@ -107,6 +107,8 @@ suv agent prompts --executor openai-codex
 Codex shell commands link to the prompt from the same turn. Prompts without recorded commands do not appear in the prompt explorer. Capture respects Suvadu's recording and redaction settings. Hook timestamps reflect receipt time; exit status stays unknown when Codex does not provide a structured exit code. This requires a Codex version supporting `UserPromptSubmit` and `PostToolUse` hooks (tested with CLI 0.153.4).
 
 Claude Code commands link to their native prompt turn after transcript reconciliation. Stop and SessionEnd hooks incrementally import local transcript records for prompts, assistant text, models, and provider-reported token usage. Thinking blocks, attachments, images, file contents, and raw tool results are not stored in Suvadu.
+
+`suv init opencode` installs a plugin at `~/.opencode/plugins/suvadu.js` and also registers that directory in `~/.config/opencode/opencode.jsonc`'s `plugin` array — OpenCode does not reliably auto-load plugins from the directory alone. If your `opencode.jsonc` already has JSONC-style comments (which this step can't safely parse and rewrite without risking the rest of your config), it prints the exact line to add yourself instead. Bash commands OpenCode executes are recorded immediately; prompts, assistant responses, model, and token usage are captured when a session goes idle, via OpenCode's own `session.messages` API. Rerun `suv init opencode` after upgrading Suvadu or OpenCode, then fully quit and relaunch OpenCode so the updated plugin and config take effect. Tested against OpenCode CLI 1.18.30; if OpenCode reports a plugin load error after an OpenCode upgrade, its plugin contract may have changed again and `suv init opencode` will need a matching update.
 
 For agents configured with MCP, ask: *"What commands failed in this project recently?"*
 

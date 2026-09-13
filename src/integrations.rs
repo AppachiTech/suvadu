@@ -1352,10 +1352,12 @@ export default function (pi: ExtensionAPI): void {
   });
 }
 "#;
-///
-/// `OpenCode` automatically loads plugins from `~/.opencode/plugins/*.{ts,js}`.
-/// This writes a small JS plugin that uses the `tool.execute.after` hook to
-/// call `suv add` after every bash command opencode executes.
+/// `OpenCode` plugin auto-discovery from `~/.opencode/plugins/*.{ts,js}` alone
+/// was found unreliable against a real local install (the plugin loaded only
+/// once its directory was also explicitly listed in the `"plugin"` array of
+/// `~/.config/opencode/opencode.jsonc`). This writes the plugin script and
+/// then also ensures that config registration, via
+/// `try_configure_opencode_plugin`, rather than relying on auto-discovery.
 pub fn handle_init_opencode() -> Result<(), Box<dyn std::error::Error>> {
     let home = std::env::var("HOME")?;
 
@@ -1373,6 +1375,7 @@ pub fn handle_init_opencode() -> Result<(), Box<dyn std::error::Error>> {
         ("", "")
     };
     let green = if color { "\x1b[32m" } else { "" };
+    let yellow = if color { "\x1b[33m" } else { "" };
     let cyan = if color { "\x1b[36m" } else { "" };
 
     println!("{b}Suvadu \u{2014} OpenCode Integration{r}");
@@ -1381,8 +1384,21 @@ pub fn handle_init_opencode() -> Result<(), Box<dyn std::error::Error>> {
         "{green}\u{2713}{r} Plugin installed: {}",
         plugin_path.display()
     );
+
+    match try_configure_opencode_plugin(&plugins_dir) {
+        Ok(()) => {
+            println!("{green}\u{2713}{r} Registered plugin directory in opencode.jsonc");
+        }
+        Err(e) => {
+            println!("{yellow}\u{26a0}{r} Could not update opencode.jsonc automatically: {e}");
+            println!(
+                "  Add this to ~/.config/opencode/opencode.jsonc yourself: {{\"plugin\": [\"{}\"]}}",
+                plugins_dir.display()
+            );
+        }
+    }
+
     println!();
-    println!("OpenCode will automatically load this plugin on next start.");
     println!("Commands executed by OpenCode will be recorded with executor=opencode.");
     println!("Prompts, responses, model, and token usage are captured when a session goes idle.");
     println!();
@@ -1390,6 +1406,47 @@ pub fn handle_init_opencode() -> Result<(), Box<dyn std::error::Error>> {
     println!("            {cyan}suv agent sessions{r}");
     print_post_install_tips(cyan, r, true, false);
 
+    Ok(())
+}
+
+/// Auto-configure the plugin directory in `OpenCode`'s
+/// `~/.config/opencode/opencode.jsonc`. Adds `plugins_dir` to the top-level
+/// `"plugin"` array if it isn't already listed. Errors (e.g. an existing
+/// config containing JSONC comments, which this plain-JSON parse can't
+/// round-trip safely) are surfaced to the caller rather than risking
+/// corruption of a file that holds the user's other `OpenCode` settings too.
+fn try_configure_opencode_plugin(plugins_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let home = std::env::var("HOME")?;
+    let config_dir = PathBuf::from(&home).join(".config").join("opencode");
+    std::fs::create_dir_all(&config_dir)?;
+    let config_path = config_dir.join("opencode.jsonc");
+
+    let mut config: serde_json::Value = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)?;
+        serde_json::from_str(&content)?
+    } else {
+        serde_json::json!({ "$schema": "https://opencode.ai/config.json" })
+    };
+
+    let obj = config
+        .as_object_mut()
+        .ok_or("opencode.jsonc root is not an object")?;
+    let plugin_entry = obj.entry("plugin").or_insert_with(|| serde_json::json!([]));
+    let plugin_array = plugin_entry
+        .as_array_mut()
+        .ok_or("\"plugin\" in opencode.jsonc is not an array")?;
+
+    let dir_str = plugins_dir.to_string_lossy().to_string();
+    let already_present = plugin_array
+        .iter()
+        .any(|v| v.as_str() == Some(dir_str.as_str()));
+    if already_present {
+        return Ok(());
+    }
+    plugin_array.push(serde_json::Value::String(dir_str));
+
+    let updated = serde_json::to_string_pretty(&config)?;
+    atomic_write(&config_path, &updated)?;
     Ok(())
 }
 
