@@ -1,6 +1,6 @@
 //! Persistent, agent-neutral session evidence. Native logs are read incrementally.
 use super::Repository;
-use crate::ai_sessions::{codex, AiEvent, CapturePolicy, SummaryInput};
+use crate::ai_sessions::{claude, codex, AiEvent, CapturePolicy, SummaryInput};
 use crate::db::{DbError, DbResult};
 use crate::models::{SessionKind, SessionSummary};
 use rusqlite::{params, OptionalExtension};
@@ -129,13 +129,104 @@ impl CaptureGaps {
         }
     }
     fn omits(&self, event: &AiEvent) -> bool {
-        let offset = event
-            .id
-            .strip_prefix("codex-")
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
+        let offset = event_source_offset(&event.id).unwrap_or(0);
         offset < self.all_before || self.dirs.get(&event.cwd).is_some_and(|end| offset < *end)
     }
+}
+
+fn event_source_offset(id: &str) -> Option<u64> {
+    id.strip_prefix("codex-")
+        .and_then(|value| value.parse().ok())
+        .or_else(|| {
+            id.strip_prefix("claude-")
+                .and_then(|value| value.split('-').next())
+                .and_then(|value| value.parse().ok())
+        })
+}
+
+fn reject_non_advancing_oversized_record(
+    bytes: &[u8],
+    consumed: usize,
+    offset: u64,
+    source_len: u64,
+) -> DbResult<()> {
+    const MAX_CHUNK: usize = 16 * 1024 * 1024;
+    if consumed == 0
+        && bytes.len() == MAX_CHUNK
+        && source_len > offset.saturating_add(bytes.len() as u64)
+    {
+        return Err(invalid("Native transcript record exceeds 16 MiB"));
+    }
+    Ok(())
+}
+
+fn reconcile_claude_command_turns(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+) -> DbResult<()> {
+    let prompts = {
+        let mut statement = tx.prepare(
+            "SELECT data FROM ai_events WHERE session_id=?1 AND kind='prompt' ORDER BY rowid",
+        )?;
+        let rows = statement
+            .query_map([session_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut prompts = Vec::new();
+        for row in rows {
+            let event = decode::<AiEvent>(&row)?;
+            if let (Some(turn_id), Some(text)) = (event.turn_id, event.data["text"].as_str()) {
+                prompts.push((event.at, turn_id, text.to_owned()));
+            }
+        }
+        prompts
+    };
+    if prompts.is_empty() {
+        return Ok(());
+    }
+    let commands = {
+        let mut statement = tx.prepare(
+            "SELECT id,started_at,context FROM entries WHERE session_id=?1 ORDER BY started_at,id",
+        )?;
+        let rows = statement
+            .query_map([session_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    for (id, started_at, context) in commands {
+        let Some(context) = context else { continue };
+        let Ok(mut context) = serde_json::from_str::<HashMap<String, String>>(&context) else {
+            continue;
+        };
+        if context.contains_key("agent_turn_id") || context.contains_key("codex_turn_id") {
+            continue;
+        }
+        let Some(prompt) = context.get("agent_prompt") else {
+            continue;
+        };
+        let Some((_, turn_id, _)) = prompts
+            .iter()
+            .filter(|(at, _, text)| *at <= started_at && text == prompt)
+            .max_by_key(|(at, _, _)| *at)
+        else {
+            continue;
+        };
+        context.insert("agent_turn_id".into(), turn_id.clone());
+        tx.execute(
+            "UPDATE entries SET context=?2 WHERE id=?1",
+            params![
+                id,
+                serde_json::to_string(&context)
+                    .map_err(|_| invalid("Cannot encode command context"))?
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 impl Repository {
@@ -211,6 +302,7 @@ impl Repository {
         let mut bytes = Vec::new();
         file.take(MAX_CHUNK).read_to_end(&mut bytes)?;
         let (events, consumed) = codex::parse_chunk(&bytes, offset, &mut state).map_err(invalid)?;
+        reject_non_advancing_oversized_record(&bytes, consumed, offset, metadata.len())?;
         let native = state
             .native_id
             .as_deref()
@@ -247,6 +339,112 @@ impl Repository {
             tx.execute("UPDATE ai_sessions SET revision=revision+1,updated_at=?2,usage_complete=usage_complete AND ?3 WHERE id=?1", params![id,chrono::Utc::now().timestamp_millis(),!skipped])?;
         }
         tx.execute("INSERT INTO ai_sources(path,session_id,identity,byte_offset,state,adapter_version,skipped,gaps) VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(path) DO UPDATE SET byte_offset=excluded.byte_offset,state=excluded.state,skipped=excluded.skipped,gaps=excluded.gaps", params![path_text.as_ref(),id,identity,i64::try_from(offset+consumed as u64).map_err(|_| invalid("Transcript too large"))?,serde_json::to_string(&state).map_err(|_| invalid("Cannot encode checkpoint"))?,codex::ADAPTER_VERSION,skipped,serde_json::to_string(&gaps).map_err(|_| invalid("Cannot encode capture gaps"))?])?;
+        tx.commit()?;
+        Ok(
+            json!({"session_id":id,"imported_events":inserted,"byte_offset":offset+consumed as u64,"has_more":metadata.len()>offset+bytes.len() as u64,"incomplete_tail":consumed<bytes.len(),"coverage":"partial","usage_complete":!skipped}),
+        )
+    }
+
+    /// Consume at most 16 MiB from a Claude Code transcript, advancing only
+    /// complete JSONL records and retaining no tool output or attachments.
+    pub fn import_claude_session(
+        &self,
+        path: &Path,
+        expected_native_id: Option<&str>,
+        policy_for: impl Fn(&str) -> DbResult<CapturePolicy>,
+    ) -> DbResult<Value> {
+        const MAX_CHUNK: u64 = 16 * 1024 * 1024;
+        let path = path.canonicalize()?;
+        let mut file = std::fs::File::open(&path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(invalid("Transcript must be a regular file"));
+        }
+        #[cfg(unix)]
+        let identity = {
+            use std::os::unix::fs::MetadataExt;
+            format!("{}:{}", metadata.dev(), metadata.ino())
+        };
+        #[cfg(not(unix))]
+        let identity = format!("{:?}", metadata.created().ok());
+        let path_text = path.to_string_lossy();
+        let tx = self.conn.unchecked_transaction()?;
+        let previous = tx.query_row(
+            "SELECT byte_offset,state,identity,adapter_version,skipped,gaps FROM ai_sources WHERE path=?1",
+            [path_text.as_ref()], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,u32>(3)?,row.get::<_,bool>(4)?,row.get::<_,String>(5)?))
+        ).optional()?;
+        let (offset, mut state, mut skipped, mut gaps) = if let Some((
+            offset,
+            state,
+            old_identity,
+            version,
+            skipped,
+            gaps,
+        )) = previous
+        {
+            if identity != old_identity
+                || i64::try_from(metadata.len()).map_err(|_| invalid("Transcript too large"))?
+                    < offset
+                || version != claude::ADAPTER_VERSION
+            {
+                return Err(invalid("Transcript was replaced, truncated, or uses a different adapter version; import was not advanced"));
+            }
+            (
+                u64::try_from(offset).map_err(|_| invalid("Invalid checkpoint offset"))?,
+                decode::<claude::ClaudeState>(&state)?,
+                skipped,
+                decode::<CaptureGaps>(&gaps)?,
+            )
+        } else {
+            (
+                0,
+                claude::ClaudeState::default(),
+                false,
+                CaptureGaps::default(),
+            )
+        };
+        file.seek(SeekFrom::Start(offset))?;
+        let mut bytes = Vec::new();
+        file.take(MAX_CHUNK).read_to_end(&mut bytes)?;
+        let (events, consumed) =
+            claude::parse_chunk(&bytes, offset, &mut state).map_err(invalid)?;
+        reject_non_advancing_oversized_record(&bytes, consumed, offset, metadata.len())?;
+        let native = state
+            .native_id
+            .as_deref()
+            .ok_or_else(|| invalid("No complete Claude session messages found"))?;
+        if expected_native_id.is_some_and(|expected| expected != native) {
+            return Err(invalid("Hook session ID does not match transcript"));
+        }
+        let id = format!("claude-{native}");
+        let mut inserted = 0;
+        let mut exclusion_cache = HashMap::new();
+        let tail_policy = policy_for(&state.cwd)?;
+        gaps.observe(&state.cwd, &tail_policy, metadata.len());
+        skipped |= !tail_policy.enabled;
+        for mut event in events {
+            let policy = policy_for(&event.cwd)?;
+            gaps.observe(&event.cwd, &policy, metadata.len());
+            if !policy.enabled || gaps.omits(&event) {
+                skipped = true;
+                continue;
+            }
+            if !sanitize_event(&mut event, &policy, &mut exclusion_cache) {
+                skipped = true;
+                continue;
+            }
+            if skipped && event.kind == "usage" {
+                continue;
+            }
+            tx.execute("INSERT OR IGNORE INTO ai_sessions(id,native_id,agent,cwd,parent_id,created_at,updated_at) VALUES (?1,?2,'claude-code',?3,NULL,?4,?4)", params![id,native,event.cwd,event.at])?;
+            inserted += tx.execute("INSERT OR IGNORE INTO ai_events(session_id,event_id,kind,cwd,data) VALUES (?1,?2,?3,?4,?5)", params![id,event.id,event.kind,event.cwd,serde_json::to_string(&event).map_err(|_| invalid("Cannot encode event"))?])?;
+        }
+        reconcile_claude_command_turns(&tx, &id)?;
+        let advanced = consumed > 0;
+        if advanced {
+            tx.execute("UPDATE ai_sessions SET revision=revision+1,updated_at=?2,usage_complete=usage_complete AND ?3 WHERE id=?1", params![id,chrono::Utc::now().timestamp_millis(),!skipped])?;
+        }
+        tx.execute("INSERT INTO ai_sources(path,session_id,identity,byte_offset,state,adapter_version,skipped,gaps) VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(path) DO UPDATE SET byte_offset=excluded.byte_offset,state=excluded.state,skipped=excluded.skipped,gaps=excluded.gaps", params![path_text.as_ref(),id,identity,i64::try_from(offset+consumed as u64).map_err(|_| invalid("Transcript too large"))?,serde_json::to_string(&state).map_err(|_| invalid("Cannot encode checkpoint"))?,claude::ADAPTER_VERSION,skipped,serde_json::to_string(&gaps).map_err(|_| invalid("Cannot encode capture gaps"))?])?;
         tx.commit()?;
         Ok(
             json!({"session_id":id,"imported_events":inserted,"byte_offset":offset+consumed as u64,"has_more":metadata.len()>offset+bytes.len() as u64,"incomplete_tail":consumed<bytes.len(),"coverage":"partial","usage_complete":!skipped}),
@@ -467,7 +665,12 @@ impl Repository {
         let mut commands = statement.query_map(params![id,sql_limit+1,sql_offset], |r| {
             let context: Option<String> = r.get(6)?;
             let context: Value = context.as_deref().and_then(|s| serde_json::from_str(s).ok()).unwrap_or(Value::Null);
-            Ok(json!({"id":format!("command-{}",r.get::<_,i64>(0)?),"command":r.get::<_,String>(1)?,"cwd":r.get::<_,String>(2)?,"exit_code":r.get::<_,Option<i32>>(3)?,"started_at":r.get::<_,i64>(4)?,"duration_ms":r.get::<_,i64>(5)?,"turn_id":context["codex_turn_id"]}))
+            let turn_id = context
+                .get("agent_turn_id")
+                .or_else(|| context.get("codex_turn_id"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            Ok(json!({"id":format!("command-{}",r.get::<_,i64>(0)?),"command":r.get::<_,String>(1)?,"cwd":r.get::<_,String>(2)?,"exit_code":r.get::<_,Option<i32>>(3)?,"started_at":r.get::<_,i64>(4)?,"duration_ms":r.get::<_,i64>(5)?,"turn_id":turn_id}))
         })?.collect::<Result<Vec<_>,_>>()?;
         let more = events.len() > limit || commands.len() > limit;
         events.truncate(limit);
@@ -757,6 +960,26 @@ mod tests {
                 .len(),
             6
         );
+    }
+
+    #[test]
+    fn oversized_record_fails_instead_of_returning_a_non_advancing_page() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("oversized.jsonl");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(records().lines().next().unwrap().as_bytes())
+            .unwrap();
+        file.write_all(b"\n").unwrap();
+        file.write_all(&vec![b'x'; 16 * 1024 * 1024]).unwrap();
+        file.write_all(b"\n").unwrap();
+
+        let first = import(&repo, &path);
+        assert_eq!(first["has_more"], true);
+        let error = repo
+            .import_codex_session(&path, None, |_| Ok(CapturePolicy::default()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("exceeds 16 MiB"), "{error}");
     }
 
     #[test]

@@ -31,9 +31,33 @@ pub fn import_native(path: &std::path::Path, expected: Option<&str>) -> Result<s
     })?)
 }
 
+pub fn import_native_claude(
+    path: &std::path::Path,
+    expected: Option<&str>,
+) -> Result<serde_json::Value> {
+    let paused = config::is_paused();
+    let repo = crate::repository::Repository::init()?;
+    let policies =
+        std::cell::RefCell::new(std::collections::HashMap::<String, CapturePolicy>::new());
+    Ok(repo.import_claude_session(path, expected, |cwd| {
+        if let Some(policy) = policies.borrow().get(cwd) {
+            return Ok(policy.clone());
+        }
+        let policy = config::load_config_for_dir(std::path::Path::new(cwd))
+            .map(|cfg| capture_policy(cfg, paused))
+            .map_err(|error| crate::db::DbError::Validation(error.to_string()))?;
+        policies.borrow_mut().insert(cwd.to_owned(), policy.clone());
+        Ok(policy)
+    })?)
+}
+
 pub fn import(path: &std::path::Path) -> Result<()> {
+    let agent = detect_native_agent(path)?;
     loop {
-        let result = import_native(path, None)?;
+        let result = match agent {
+            NativeAgent::Codex => import_native(path, None)?,
+            NativeAgent::Claude => import_native_claude(path, None)?,
+        };
         println!("{}", serde_json::to_string_pretty(&result)?);
         if result["has_more"] != true {
             break;
@@ -42,12 +66,53 @@ pub fn import(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum NativeAgent {
+    Codex,
+    Claude,
+}
+
+fn detect_native_agent(path: &std::path::Path) -> Result<NativeAgent> {
+    use std::io::{BufRead, Read};
+
+    const MAX_SCAN: u64 = 16 * 1024 * 1024;
+    let file = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::new(file.take(MAX_SCAN + 1));
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            break;
+        }
+        if line.len() as u64 > MAX_SCAN {
+            return Err("Native transcript record exceeds 16 MiB".into());
+        }
+        let record: serde_json::Value = serde_json::from_slice(&line)?;
+        if record.get("payload").is_some()
+            && matches!(
+                record["type"].as_str(),
+                Some("session_meta" | "turn_context" | "event_msg" | "response_item")
+            )
+        {
+            return Ok(NativeAgent::Codex);
+        }
+        if record
+            .get("sessionId")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        {
+            return Ok(NativeAgent::Claude);
+        }
+    }
+    Err("Could not identify transcript as Codex or Claude Code JSONL within 16 MiB".into())
+}
+
 pub fn list(limit: usize, offset: usize) -> Result<()> {
     let repo = crate::repository::Repository::init()?;
     let result = repo.list_ai_sessions(limit, offset, &[])?;
     println!("{}", serde_json::to_string_pretty(&result)?);
     if offset == 0 && result["sessions"].as_array().is_some_and(Vec::is_empty) {
-        eprintln!("No captured AI sessions yet. {}\n  Finish a fresh local Codex turn, then run `suv agent sessions` again. If still empty, inspect the Codex Output log for hook errors or a missing transcript path.", crate::upgrade_notice::CODEX_SETUP);
+        eprintln!("No captured AI sessions yet.\n  {}\n  {}\n  Finish a fresh local agent turn, then run `suv agent sessions` again. If still empty, inspect the agent's hook/debug log for errors or a missing transcript path.", crate::upgrade_notice::CODEX_SETUP, crate::upgrade_notice::CLAUDE_SETUP);
     }
     Ok(())
 }

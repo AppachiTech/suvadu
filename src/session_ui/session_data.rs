@@ -119,7 +119,11 @@ impl AiTimelineItem {
             Self::Command { entry, .. } => entry
                 .context
                 .as_ref()
-                .and_then(|context| context.get("codex_turn_id"))
+                .and_then(|context| {
+                    context
+                        .get("agent_turn_id")
+                        .or_else(|| context.get("codex_turn_id"))
+                })
                 .map(String::as_str),
         }
     }

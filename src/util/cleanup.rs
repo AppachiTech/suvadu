@@ -73,8 +73,14 @@ pub fn cleanup_claude_settings_at(
 
     let mut removed = false;
 
-    // Remove suvadu entries from both PostToolUse and UserPromptSubmit
-    for key in ["PostToolUse", "UserPromptSubmit"] {
+    // Remove every hook type installed by `suv init claude-code`.
+    for key in [
+        "PostToolUse",
+        "PostToolUseFailure",
+        "UserPromptSubmit",
+        "Stop",
+        "SessionEnd",
+    ] {
         let Some(arr) = settings
             .get_mut("hooks")
             .and_then(|h| h.get_mut(key))
@@ -83,24 +89,23 @@ pub fn cleanup_claude_settings_at(
             continue;
         };
 
-        let original_len = arr.len();
-
-        arr.retain(|group| {
-            group
-                .get("hooks")
-                .and_then(serde_json::Value::as_array)
-                .is_none_or(|hooks| {
-                    !hooks.iter().any(|h| {
-                        h.get("command")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(|cmd| cmd.contains("suvadu"))
-                    })
-                })
+        arr.retain_mut(|group| {
+            let Some(handlers) = group
+                .get_mut("hooks")
+                .and_then(serde_json::Value::as_array_mut)
+            else {
+                return true;
+            };
+            let before = handlers.len();
+            handlers.retain(|handler| {
+                !handler
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|command| command.contains("suvadu"))
+            });
+            removed |= handlers.len() != before;
+            !handlers.is_empty()
         });
-
-        if arr.len() != original_len {
-            removed = true;
-        }
     }
 
     if !removed {
@@ -197,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cleanup_claude_settings_removes_both_hook_types() {
+    fn test_cleanup_claude_settings_removes_all_suvadu_hook_types() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("settings.json");
 
@@ -215,6 +220,31 @@ mod tests {
                         "type": "command",
                         "command": "/home/user/.config/suvadu/hooks/claude-code-prompt.sh"
                     }]
+                }],
+                "PostToolUseFailure": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/home/user/.config/suvadu/hooks/claude-code-post-tool-failure.sh"
+                    }]
+                }],
+                "Stop": [{
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "/home/user/.config/suvadu/hooks/claude-code-session.sh"
+                        },
+                        {
+                            "type": "command",
+                            "command": "/home/user/bin/team-stop.sh"
+                        }
+                    ]
+                }],
+                "SessionEnd": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/home/user/.config/suvadu/hooks/claude-code-session.sh"
+                    }]
                 }]
             }
         });
@@ -225,8 +255,13 @@ mod tests {
 
         let content = std::fs::read_to_string(&path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
-        // Both hook types removed, hooks object cleaned up
-        assert!(parsed.get("hooks").is_none());
+        let stop = parsed["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 1);
+        assert_eq!(stop[0]["hooks"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            stop[0]["hooks"][0]["command"],
+            "/home/user/bin/team-stop.sh"
+        );
     }
 
     #[test]

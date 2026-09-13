@@ -117,7 +117,7 @@ fn record_command(
         .unwrap_or(".");
     let mut context = HashMap::new();
     if let Some(turn) = turn {
-        context.insert("codex_turn_id".into(), turn.into());
+        context.insert("agent_turn_id".into(), turn.into());
         if let Ok(prompt) = std::fs::read_to_string(prompts_dir.join(format!("{turn}.prompt"))) {
             if !prompt.is_empty() {
                 context.insert("agent_prompt".into(), prompt);

@@ -89,7 +89,8 @@ fn ai_session_prompt_count(data: &AiSessionData) -> usize {
                     continue;
                 };
                 let key = context
-                    .get("codex_turn_id")
+                    .get("agent_turn_id")
+                    .or_else(|| context.get("codex_turn_id"))
                     .map_or_else(|| format!("text:{prompt}"), |turn| format!("turn:{turn}"));
                 prompts.insert(key);
             }

@@ -66,23 +66,19 @@ pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
         .or(Some(0));
 
     // Use Claude Code's session_id, prefixed to avoid collision with zsh sessions
-    let session_id = event
+    let native_session_id = event
         .get("session_id")
         .and_then(serde_json::Value::as_str)
-        .filter(|s| is_valid_session_id(s))
-        .map_or_else(
-            || format!("claude-{}", uuid::Uuid::new_v4()),
-            |s| format!("claude-{s}"),
-        );
+        .filter(|s| is_valid_session_id(s));
+    let session_id = native_session_id.map_or_else(
+        || format!("claude-{}", uuid::Uuid::new_v4()),
+        |s| format!("claude-{s}"),
+    );
 
     let now = chrono::Utc::now().timestamp_millis();
 
     // Read cached prompt for this session (set by UserPromptSubmit hook)
-    let context = get_cached_prompt(&session_id).map(|prompt| {
-        let mut ctx = HashMap::new();
-        ctx.insert("agent_prompt".to_string(), prompt);
-        ctx
-    });
+    let context = claude_command_context(&event, native_session_id, &session_id);
 
     crate::commands::entry::handle_add_with_context(crate::commands::entry::AddParams {
         session_id,
@@ -124,14 +120,27 @@ pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if crate::config::is_paused() {
+        return Ok(());
+    }
+    let cfg = crate::config::load_config_cached()?;
+    if !cfg.enabled {
+        return Ok(());
+    }
+
     // Store prompt in cache file (atomic write to avoid corruption on crash)
-    let prompts_dir = get_prompts_dir()?;
-    std::fs::create_dir_all(&prompts_dir)?;
-    let prompt_file = prompts_dir.join(format!("claude-{session_id}.prompt"));
-    // Cap length to keep the cache lightweight (configurable).
-    let max_chars =
-        crate::config::load_config_cached().map_or(4000, |c| c.agent.prompt_capture_max_chars);
-    let truncated = crate::util::truncate_str(prompt, max_chars, "...");
+    let turn_id = event
+        .get("prompt_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| is_valid_session_id(id));
+    let prompt_file = claude_prompt_path(session_id, turn_id)?;
+    std::fs::create_dir_all(prompt_file.parent().ok_or("Invalid prompt cache path")?)?;
+    let safe = if cfg.redaction.enabled {
+        crate::redact::redact_secrets_with_extra(prompt, &cfg.redaction.extra_patterns)
+    } else {
+        prompt.to_owned()
+    };
+    let truncated = crate::util::truncate_str(&safe, cfg.agent.prompt_capture_max_chars, "...");
     atomic_write(&prompt_file, &truncated)?;
 
     // Restrict prompt cache file to owner-only (contains user prompts)
@@ -190,22 +199,18 @@ pub fn handle_hook_claude_code_failure() -> Result<(), Box<dyn std::error::Error
         .and_then(parse_exit_code_from_error)
         .or(Some(1)); // default to 1 if we can't parse
 
-    let session_id = event
+    let native_session_id = event
         .get("session_id")
         .and_then(serde_json::Value::as_str)
-        .filter(|s| is_valid_session_id(s))
-        .map_or_else(
-            || format!("claude-{}", uuid::Uuid::new_v4()),
-            |s| format!("claude-{s}"),
-        );
+        .filter(|s| is_valid_session_id(s));
+    let session_id = native_session_id.map_or_else(
+        || format!("claude-{}", uuid::Uuid::new_v4()),
+        |s| format!("claude-{s}"),
+    );
 
     let now = chrono::Utc::now().timestamp_millis();
 
-    let context = get_cached_prompt(&session_id).map(|prompt| {
-        let mut ctx = HashMap::new();
-        ctx.insert("agent_prompt".to_string(), prompt);
-        ctx
-    });
+    let context = claude_command_context(&event, native_session_id, &session_id);
 
     crate::commands::entry::handle_add_with_context(crate::commands::entry::AddParams {
         session_id,
@@ -218,6 +223,49 @@ pub fn handle_hook_claude_code_failure() -> Result<(), Box<dyn std::error::Error
         executor: Some("claude-code".to_string()),
         context,
     })
+}
+
+/// Reconcile Claude Code's native transcript at the end of each turn/session.
+pub fn handle_hook_claude_session() -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Read;
+
+    let mut input = String::new();
+    std::io::stdin()
+        .take(MAX_HOOK_INPUT_BYTES + 1)
+        .read_to_string(&mut input)?;
+    if input.is_empty() {
+        return Ok(());
+    }
+    if input.len() as u64 > MAX_HOOK_INPUT_BYTES {
+        return Err("Claude hook input exceeds 1 MB".into());
+    }
+    let event: serde_json::Value = serde_json::from_str(&input)?;
+    if !matches!(
+        event["hook_event_name"].as_str(),
+        Some("Stop" | "SessionEnd")
+    ) {
+        return Ok(());
+    }
+    let Some(session_id) = event["session_id"]
+        .as_str()
+        .filter(|id| is_valid_session_id(id))
+    else {
+        return Ok(());
+    };
+    let Some(path) = event["transcript_path"]
+        .as_str()
+        .filter(|path| !path.is_empty())
+    else {
+        return Ok(());
+    };
+    match crate::commands::agent_session::import_native_claude(Path::new(path), Some(session_id)) {
+        Ok(result) if result["has_more"] == true => {
+            eprintln!("suvadu: more transcript data remains; a later hook or suv agent import-session will continue");
+        }
+        Ok(_) => {}
+        Err(error) => eprintln!("suvadu: session capture: {error}"),
+    }
+    Ok(())
 }
 
 /// Handle `afterShellExecution` hook from Cursor — reads JSON event from stdin and records the command.
@@ -376,6 +424,47 @@ fn get_cached_prompt(session_id: &str) -> Option<String> {
     std::fs::read_to_string(prompt_file).ok()
 }
 
+fn claude_prompt_path(
+    native_session_id: &str,
+    turn_id: Option<&str>,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let root = get_prompts_dir()?;
+    Ok(turn_id.map_or_else(
+        || root.join(format!("claude-{native_session_id}.prompt")),
+        |turn| {
+            root.join("claude")
+                .join(native_session_id)
+                .join(format!("{turn}.prompt"))
+        },
+    ))
+}
+
+fn claude_command_context(
+    event: &serde_json::Value,
+    native_session_id: Option<&str>,
+    prefixed_session_id: &str,
+) -> Option<HashMap<String, String>> {
+    let turn = event
+        .get("prompt_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| is_valid_session_id(id));
+    let prompt = native_session_id
+        .and_then(|session| claude_prompt_path(session, turn).ok())
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .or_else(|| get_cached_prompt(prefixed_session_id));
+    if prompt.is_none() && turn.is_none() {
+        return None;
+    }
+    let mut context = HashMap::new();
+    if let Some(prompt) = prompt.filter(|prompt| !prompt.is_empty()) {
+        context.insert("agent_prompt".into(), prompt);
+    }
+    if let Some(turn) = turn {
+        context.insert("agent_turn_id".into(), turn.into());
+    }
+    Some(context)
+}
+
 /// Auto-configure the MCP server in Claude Code's `~/.claude.json`.
 /// Adds `suvadu` to the top-level `mcpServers` if not already present.
 fn try_configure_claude_mcp(bin_path: &str) -> Result<bool, Box<dyn std::error::Error>> {
@@ -523,9 +612,15 @@ pub fn handle_init_claude_code() -> Result<(), Box<dyn std::error::Error>> {
     let prompt_script = agent_hook::script(&bin_path, "hook-claude-prompt", "claude-code");
     crate::util::atomic_write_with_mode(&prompt_hook_path, &prompt_script, 0o700)?;
 
+    // Write the Stop/SessionEnd transcript reconciliation hook.
+    let session_hook_path = hooks_dir.join("claude-code-session.sh");
+    let session_script = agent_hook::script(&bin_path, "hook-claude-session", "claude-code");
+    crate::util::atomic_write_with_mode(&session_hook_path, &session_script, 0o700)?;
+
     let hook_path_str = hook_script_path.to_string_lossy().to_string();
     let failure_hook_path_str = failure_hook_path.to_string_lossy().to_string();
     let prompt_hook_path_str = prompt_hook_path.to_string_lossy().to_string();
+    let session_hook_path_str = session_hook_path.to_string_lossy().to_string();
 
     // Try auto-merge into ~/.claude/settings.json
     let settings_path = PathBuf::from(&home).join(".claude").join("settings.json");
@@ -535,6 +630,7 @@ pub fn handle_init_claude_code() -> Result<(), Box<dyn std::error::Error>> {
         &hook_path_str,
         &failure_hook_path_str,
         &prompt_hook_path_str,
+        &session_hook_path_str,
     );
 
     let color = crate::util::color_enabled();
@@ -551,6 +647,7 @@ pub fn handle_init_claude_code() -> Result<(), Box<dyn std::error::Error>> {
     println!("  {hook_path_str}");
     println!("  {failure_hook_path_str}");
     println!("  {prompt_hook_path_str}");
+    println!("  {session_hook_path_str}");
     println!();
 
     if matches!(auto_configured, Ok(true)) {
@@ -559,7 +656,7 @@ pub fn handle_init_claude_code() -> Result<(), Box<dyn std::error::Error>> {
             settings_path.display()
         );
         println!();
-        println!("Restart Claude Code to activate.");
+        println!("Relaunch Claude Code to activate the updated hooks.");
     } else {
         println!("Add this to ~/.claude/settings.json:");
         println!();
@@ -569,11 +666,13 @@ pub fn handle_init_claude_code() -> Result<(), Box<dyn std::error::Error>> {
                 &hook_path_str,
                 &failure_hook_path_str,
                 &prompt_hook_path_str,
+                &session_hook_path_str,
             )
         );
         println!();
-        println!("Then restart Claude Code to activate.");
+        println!("Then relaunch Claude Code to activate the updated hooks.");
     }
+    println!("For the VS Code extension, fully quit and reopen VS Code.");
 
     // Auto-configure MCP server
     let mcp_configured = try_configure_claude_mcp(&bin_path);
@@ -583,6 +682,10 @@ pub fn handle_init_claude_code() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!();
+    println!(
+        "Session prompts, responses, models, and reported tokens are captured at Stop/SessionEnd."
+    );
+    println!("View sessions: {cyan}suv sessions{r}");
     println!("Verify with: {cyan}suv search --executor agent{r}");
     print_post_install_tips(cyan, r, true, true);
 
@@ -594,6 +697,7 @@ pub fn generate_claude_settings_snippet(
     hook_path: &str,
     failure_hook_path: &str,
     prompt_hook_path: &str,
+    session_hook_path: &str,
 ) -> String {
     serde_json::to_string_pretty(&serde_json::json!({
         "hooks": {
@@ -616,6 +720,20 @@ pub fn generate_claude_settings_snippet(
                     "type": "command",
                     "command": prompt_hook_path
                 }]
+            }],
+            "Stop": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": session_hook_path,
+                    "timeout": 10
+                }]
+            }],
+            "SessionEnd": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": session_hook_path,
+                    "timeout": 10
+                }]
             }]
         }
     }))
@@ -626,7 +744,13 @@ pub fn generate_claude_settings_snippet(
 /// Returns true if any duplicates were removed.
 fn dedup_suvadu_hooks(settings: &mut serde_json::Value) -> bool {
     let mut changed = false;
-    for key in ["PostToolUse", "PostToolUseFailure", "UserPromptSubmit"] {
+    for key in [
+        "PostToolUse",
+        "PostToolUseFailure",
+        "UserPromptSubmit",
+        "Stop",
+        "SessionEnd",
+    ] {
         let Some(arr) = settings
             .get_mut("hooks")
             .and_then(|h| h.get_mut(key))
@@ -635,29 +759,36 @@ fn dedup_suvadu_hooks(settings: &mut serde_json::Value) -> bool {
             continue;
         };
         let mut seen_suvadu = false;
-        let before = arr.len();
-        arr.retain(|group| {
-            let is_suvadu = group
-                .get("hooks")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|hooks| {
-                    hooks.iter().any(|h| {
-                        h.get("command")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(is_suvadu_hook_command)
-                    })
-                });
-            if is_suvadu {
-                if seen_suvadu {
-                    return false; // drop duplicate
+        arr.retain_mut(|group| {
+            let Some(handlers) = group
+                .get_mut("hooks")
+                .and_then(serde_json::Value::as_array_mut)
+            else {
+                return true;
+            };
+            handlers.retain(|handler| {
+                let is_suvadu = handler
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(is_suvadu_hook_command);
+                if !is_suvadu {
+                    return true;
                 }
-                seen_suvadu = true;
+                if seen_suvadu {
+                    changed = true;
+                    false
+                } else {
+                    seen_suvadu = true;
+                    true
+                }
+            });
+            if handlers.is_empty() {
+                changed = true;
+                false
+            } else {
+                true
             }
-            true
         });
-        if arr.len() != before {
-            changed = true;
-        }
     }
     changed
 }
@@ -723,12 +854,37 @@ fn add_hook_entry(
     Ok(())
 }
 
+fn add_claude_session_hooks(
+    hooks_obj: &mut serde_json::Map<String, serde_json::Value>,
+    session_hook_path: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let mut added = false;
+    for hook_type in ["Stop", "SessionEnd"] {
+        if !has_suvadu_hook_in_obj(hooks_obj, hook_type) {
+            add_hook_entry(
+                hooks_obj,
+                hook_type,
+                serde_json::json!({
+                    "hooks": [{
+                        "type": "command",
+                        "command": session_hook_path,
+                        "timeout": 10
+                    }]
+                }),
+            )?;
+            added = true;
+        }
+    }
+    Ok(added)
+}
+
 /// Try to merge Suvadu hooks into an existing Claude settings file.
 pub fn try_merge_claude_settings(
     settings_path: &Path,
     hook_path: &str,
     failure_hook_path: &str,
     prompt_hook_path: &str,
+    session_hook_path: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     if !settings_path.exists() {
         return Ok(false);
@@ -779,9 +935,11 @@ pub fn try_merge_claude_settings(
             true
         };
 
+        let added_session = add_claude_session_hooks(hooks_obj, session_hook_path)?;
+
         // Also deduplicate
         let deduped = dedup_suvadu_hooks(&mut settings);
-        if added_failure || added_prompt || deduped {
+        if added_failure || added_prompt || added_session || deduped {
             let updated = serde_json::to_string_pretty(&settings)?;
             atomic_write(settings_path, &updated)?;
         }
@@ -806,6 +964,8 @@ pub fn try_merge_claude_settings(
             }]
         }),
     )?;
+
+    add_claude_session_hooks(hooks_obj, session_hook_path)?;
 
     add_hook_entry(
         hooks_obj,
@@ -1538,6 +1698,7 @@ mod tests {
             "/usr/local/bin/hook.sh",
             "/usr/local/bin/failure-hook.sh",
             "/usr/local/bin/prompt-hook.sh",
+            "/usr/local/bin/session-hook.sh",
         );
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(parsed["hooks"]["PostToolUse"].is_array());
@@ -1568,6 +1729,7 @@ mod tests {
         let hook_path = "/home/user/.config/suvadu/hooks/claude-code-post-tool.sh";
         let failure_hook_path = "/home/user/.config/suvadu/hooks/claude-code-post-tool-failure.sh";
         let prompt_hook_path = "/home/user/.config/suvadu/hooks/claude-code-prompt.sh";
+        let session_hook_path = "/home/user/.config/suvadu/hooks/claude-code-session.sh";
 
         // Start with empty settings
         std::fs::write(&settings_path, "{}").unwrap();
@@ -1578,6 +1740,7 @@ mod tests {
             hook_path,
             failure_hook_path,
             prompt_hook_path,
+            session_hook_path,
         )
         .unwrap();
         assert!(result);
@@ -1607,6 +1770,7 @@ mod tests {
             hook_path,
             failure_hook_path,
             prompt_hook_path,
+            session_hook_path,
         )
         .unwrap();
         assert!(result2);
@@ -1637,6 +1801,7 @@ mod tests {
         let hook_path = "/home/user/.config/suvadu/hooks/claude-code-post-tool.sh";
         let failure_hook_path = "/home/user/.config/suvadu/hooks/claude-code-post-tool-failure.sh";
         let prompt_hook_path = "/home/user/.config/suvadu/hooks/claude-code-prompt.sh";
+        let session_hook_path = "/home/user/.config/suvadu/hooks/claude-code-session.sh";
 
         // Existing settings with other config
         let existing = serde_json::json!({
@@ -1657,6 +1822,7 @@ mod tests {
             hook_path,
             failure_hook_path,
             prompt_hook_path,
+            session_hook_path,
         )
         .unwrap();
         assert!(result);
@@ -1684,6 +1850,7 @@ mod tests {
             "/path/to/hook.sh",
             "/path/to/failure-hook.sh",
             "/path/to/prompt-hook.sh",
+            "/path/to/session-hook.sh",
         );
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
@@ -1728,6 +1895,7 @@ mod tests {
         let hook_path = "/home/user/.config/suvadu/hooks/claude-code-post-tool.sh";
         let failure_hook_path = "/home/user/.config/suvadu/hooks/claude-code-post-tool-failure.sh";
         let prompt_hook_path = "/home/user/.config/suvadu/hooks/claude-code-prompt.sh";
+        let session_hook_path = "/home/user/.config/suvadu/hooks/claude-code-session.sh";
 
         // Simulate 4 duplicate UserPromptSubmit entries (as seen in the wild)
         let settings = serde_json::json!({
@@ -1756,6 +1924,7 @@ mod tests {
             hook_path,
             failure_hook_path,
             prompt_hook_path,
+            session_hook_path,
         )
         .unwrap();
         assert!(result);
@@ -1779,7 +1948,10 @@ mod tests {
                 "UserPromptSubmit": [
                     {"hooks": [{"type": "command", "command": "/path/to/suvadu/hook.sh"}]},
                     {"hooks": [{"type": "command", "command": "/other/tool/hook.sh"}]},
-                    {"hooks": [{"type": "command", "command": "/path/to/suvadu/hook.sh"}]}
+                    {"hooks": [
+                        {"type": "command", "command": "/path/to/suvadu/hook.sh"},
+                        {"type": "command", "command": "/team/mixed-group-hook.sh"}
+                    ]}
                 ]
             }
         });
@@ -1788,8 +1960,7 @@ mod tests {
         assert!(changed);
 
         let arr = settings["hooks"]["UserPromptSubmit"].as_array().unwrap();
-        assert_eq!(arr.len(), 2); // 1 suvadu + 1 other
-                                  // First entry is suvadu, second is the other tool
+        assert_eq!(arr.len(), 3); // 1 suvadu + 2 unrelated handlers/groups
         assert!(arr[0]["hooks"][0]["command"]
             .as_str()
             .unwrap()
@@ -1798,6 +1969,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("other"));
+        assert_eq!(arr[2]["hooks"][0]["command"], "/team/mixed-group-hook.sh");
     }
 
     #[test]

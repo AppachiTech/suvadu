@@ -90,6 +90,7 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
         Commands::HookCodex => integrations::codex::handle_hook(),
         Commands::HookClaudeCode => integrations::handle_hook_claude_code(),
         Commands::HookClaudeCodeFailure => integrations::handle_hook_claude_code_failure(),
+        Commands::HookClaudeSession => integrations::handle_hook_claude_session(),
         Commands::HookCursor => integrations::handle_hook_cursor(),
         Commands::HookCursorPrompt => integrations::handle_hook_cursor_prompt(),
         Commands::HookClaudePrompt => integrations::handle_hook_claude_prompt(),
@@ -385,6 +386,7 @@ const fn is_user_facing_command(cmd: &Commands) -> bool {
             | Commands::HookClaudeCode
             | Commands::HookCodex
             | Commands::HookClaudeCodeFailure
+            | Commands::HookClaudeSession
             | Commands::HookCursor
             | Commands::HookCursorPrompt
             | Commands::McpServe

@@ -78,7 +78,7 @@ suv sessions                # Browse shell and AI sessions together
 suv doctor                  # Check installation health
 suv agent dashboard         # Monitor AI agent activity
 suv agent prompts           # Browse prompts and their commands
-suv agent sessions          # List captured Codex sessions and reported tokens
+suv agent sessions          # List captured Codex/Claude sessions and reported tokens
 suv skills                  # Interactive skills management (browse, add, edit, sync, review)
 suv skills add my-skill     # Add a skill any MCP-capable agent can read
 suv skills sync             # Materialize skills into Claude Code/Cursor/Codex
@@ -89,15 +89,15 @@ suv skills sync             # Materialize skills into Claude Code/Cursor/Codex
 ## AI Agent Setup
 
 ```bash
-suv init claude-code    # Claude Code — hooks + MCP + prompt capture
-suv init codex          # Codex — shell-command hooks + prompt capture
+suv init claude-code    # Claude Code — commands, sessions, tokens + MCP
+suv init codex          # Codex — commands, sessions, tokens + MCP
 suv init cursor         # Cursor — hooks + MCP + prompt capture
 suv init opencode       # OpenCode — plugin + prompt capture
 suv init pi             # pi.dev — extension + prompt capture
 suv init antigravity    # Antigravity — auto-detect
 ```
 
-For Codex, restart after setup and review/trust the Suvadu hooks when prompted (or use `/hooks`). Setup preserves unrelated hooks and backs up existing `hooks.json` before changing it. It uses `CODEX_HOME` when set, otherwise `~/.codex`.
+After setup, relaunch the configured agent. For either VS Code extension, fully quit and reopen VS Code. Codex also requires reviewing/trusting the Suvadu hooks when prompted (or through `/hooks`). Both installers preserve unrelated hooks and configure the Suvadu MCP server; Codex backs up an existing `hooks.json` before changing it and uses `CODEX_HOME` when set.
 
 ```bash
 suv history --executor openai-codex
@@ -106,7 +106,9 @@ suv agent prompts --executor openai-codex
 
 Codex shell commands link to the prompt from the same turn. Prompts without recorded commands do not appear in the prompt explorer. Capture respects Suvadu's recording and redaction settings. Hook timestamps reflect receipt time; exit status stays unknown when Codex does not provide a structured exit code. This requires a Codex version supporting `UserPromptSubmit` and `PostToolUse` hooks (tested with CLI 0.153.4).
 
-For agents configured with MCP, ask: *"What commands failed in this project recently?"* Codex hook setup does not configure MCP.
+Claude Code commands link to their native prompt turn after transcript reconciliation. Stop and SessionEnd hooks incrementally import local transcript records for prompts, assistant text, models, and provider-reported token usage. Thinking blocks, attachments, images, file contents, and raw tool results are not stored in Suvadu.
+
+For agents configured with MCP, ask: *"What commands failed in this project recently?"*
 
 See the [full integration guide](https://suvadu.sh/blog/track-ai-agent-commands-with-suvadu/) and [MCP server docs](https://suvadu.sh/cli/mcp-server/).
 
@@ -122,7 +124,7 @@ See the [full integration guide](https://suvadu.sh/blog/track-ai-agent-commands-
 | **MCP Server** | 20 tools + 8 resources + 4 prompts — agent session replay and cross-agent summaries, project context, failure learning, configurable |
 | **Skills Library** | `suv skills` — interactive TUI to browse, add, edit, delete, sync, and review shared skills any MCP-capable agent can read instead of each tool keeping its own copy; `add/list/show/edit/rm/sync` also work as scriptable subcommands |
 | **Prompt Explorer** | Trace commands back to the prompt that triggered them |
-| **Unified Sessions** | `suv sessions` browses human and AI sessions together; native Codex sessions show prompts, final responses, commands, every observed model, and provider-reported token totals |
+| **Unified Sessions** | `suv sessions` browses human and AI sessions together; native Codex and Claude Code sessions show prompts, responses, commands, every observed model, and provider-reported token totals |
 | **Stats** | Heatmap, hourly distribution, top commands, executor breakdown; `--human` (or `Ctrl+H` in the TUI) excludes AI-agent activity |
 | **Doctor** | `suv doctor` checks shell, hooks, config, database, MCP, and agent hooks health |
 | **Organization** | Tags, bookmarks (`suv bookmarks` opens an interactive picker that recalls one into your prompt), notes, and `suv aliases` — an interactive manager (add/edit/delete) for shell aliases, plus suggestions for your frequently-typed long commands |

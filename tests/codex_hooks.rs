@@ -80,6 +80,24 @@ fn tool(turn: &str, command: &str, response: &serde_json::Value) -> serde_json::
     serde_json::json!({"hook_event_name":"PostToolUse", "session_id":"session-123", "turn_id":turn, "tool_use_id":format!("call-{turn}"), "tool_name":"Bash", "cwd":"/project", "tool_input":{"command":command}, "tool_response":response})
 }
 
+fn run_hook(s: &Sandbox, command: &str, event: &serde_json::Value) -> Output {
+    let mut child = s
+        .command()
+        .arg(command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(event.to_string().as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
 #[test]
 fn codex_commands_keep_their_turn_prompt_and_real_executor() {
     let s = Sandbox::new();
@@ -380,4 +398,321 @@ fn codex_session_hook_and_cli_correlate_native_events_usage_and_commands() {
     let sessions: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(sessions["sessions"], json!([]));
     assert!(s.history().is_empty());
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // End-to-end fixture keeps all privacy and usage cases visible.
+fn claude_session_hook_imports_prompts_responses_models_and_usage_once() {
+    use serde_json::json;
+    let s = Sandbox::new();
+    let transcript = s.home.path().join("claude-session.jsonl");
+    let usage = json!({
+        "input_tokens": 2,
+        "cache_creation_input_tokens": 10,
+        "cache_read_input_tokens": 20,
+        "output_tokens": 5
+    });
+    let rows = [
+        json!({
+            "type":"user", "sessionId":"session-123", "uuid":"user-1",
+            "promptId":"prompt-1", "timestamp":"2020-01-01T10:00:00Z",
+            "cwd":s.home.path(), "promptSource":"typed", "origin":{"kind":"human"},
+            "message":{"role":"user","content":"Inspect the project"}
+        }),
+        json!({
+            "type":"user", "sessionId":"session-123", "uuid":"meta-1",
+            "promptId":"prompt-1", "timestamp":"2020-01-01T10:00:00Z",
+            "cwd":s.home.path(), "isMeta":true,
+            "message":{"role":"user","content":"injected metadata secret"}
+        }),
+        json!({
+            "type":"assistant", "sessionId":"session-123", "uuid":"assistant-thinking",
+            "requestId":"request-1", "apiBlockIndex":0, "parentUuid":"user-1",
+            "timestamp":"2026-09-13T10:00:01Z", "cwd":s.home.path(),
+            "message":{"id":"message-1","role":"assistant","model":"claude-test-model",
+                "content":[{"type":"thinking","thinking":"private reasoning"}],"usage":usage}
+        }),
+        json!({
+            "type":"assistant", "sessionId":"session-123", "uuid":"assistant-text",
+            "requestId":"request-1", "apiBlockIndex":1, "parentUuid":"assistant-thinking",
+            "timestamp":"2026-09-13T10:00:02Z", "cwd":s.home.path(),
+            "message":{"id":"message-1","role":"assistant","model":"claude-test-model",
+                "content":[{"type":"text","text":"The project is clean."}],"usage":usage}
+        }),
+        json!({
+            "type":"assistant", "sessionId":"session-123", "uuid":"assistant-text-replay",
+            "requestId":"request-1", "apiBlockIndex":1, "parentUuid":"assistant-thinking",
+            "timestamp":"2026-09-13T10:00:02Z", "cwd":s.home.path(),
+            "message":{"id":"message-1","role":"assistant","model":"claude-test-model",
+                "content":[{"type":"text","text":"The project is clean."}],"usage":usage}
+        }),
+        json!({
+            "type":"assistant", "sessionId":"session-123", "uuid":"assistant-tool",
+            "requestId":"request-1", "apiBlockIndex":2, "parentUuid":"assistant-text",
+            "timestamp":"2026-09-13T10:00:03Z", "cwd":s.home.path(),
+            "message":{"id":"message-1","role":"assistant","model":"claude-test-model",
+                "content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"secret"}}],"usage":usage}
+        }),
+        json!({
+            "type":"assistant", "sessionId":"session-123", "uuid":"assistant-api-error",
+            "requestId":"request-error", "isApiErrorMessage":true,
+            "timestamp":"2026-09-13T10:00:04Z", "cwd":s.home.path(),
+            "message":{"id":"message-error","role":"assistant","model":"<synthetic>",
+                "content":[{"type":"text","text":"The provider returned an error."}],
+                "usage":{"input_tokens":0,"output_tokens":0}}
+        }),
+    ];
+    let mut file = std::fs::File::create(&transcript).unwrap();
+    for row in rows {
+        writeln!(file, "{row}").unwrap();
+    }
+
+    let mut child = s
+        .command()
+        .arg("hook-claude-session")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            json!({
+                "hook_event_name":"Stop", "session_id":"session-123",
+                "transcript_path":transcript, "cwd":s.home.path()
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+    let result = child.wait_with_output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    let output = s.run(&["agent", "session", "claude-session-123"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let session: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(session["session"]["agent"], "claude-code");
+    assert_eq!(session["session"]["model"], "claude-test-model");
+    assert_eq!(session["session"]["models"], json!(["claude-test-model"]));
+    assert_eq!(session["session"]["usage"]["input_tokens"], 32);
+    assert_eq!(session["session"]["usage"]["cached_input_tokens"], 20);
+    assert_eq!(session["session"]["usage"]["cache_write_input_tokens"], 10);
+    assert_eq!(session["session"]["usage"]["output_tokens"], 5);
+    assert_eq!(session["session"]["usage"]["total_tokens"], 37);
+    let events = session["events"].as_array().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["kind"] == "usage")
+            .count(),
+        1
+    );
+    assert!(events
+        .iter()
+        .any(|event| event["kind"] == "prompt" && event["data"]["text"] == "Inspect the project"));
+    assert!(events.iter().any(
+        |event| event["kind"] == "response" && event["data"]["text"] == "The project is clean."
+    ));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["kind"] == "response"
+                && event["data"]["text"] == "The project is clean.")
+            .count(),
+        1
+    );
+    let stored = serde_json::to_string(&session).unwrap();
+    assert!(!stored.contains("private reasoning"));
+    assert!(!stored.contains("secret"));
+    assert!(!stored.contains("injected metadata"));
+}
+
+#[test]
+fn claude_init_adds_session_hooks_without_replacing_custom_hooks() {
+    let s = Sandbox::new();
+    let settings = s.home.path().join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let custom = serde_json::json!({"hooks":{
+        "Stop":[{"hooks":[{"type":"command","command":"/opt/team/stop.sh"}]}]
+    }});
+    std::fs::write(&settings, custom.to_string()).unwrap();
+
+    let output = s.run(&["init", "claude-code"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let message = String::from_utf8_lossy(&output.stdout);
+    assert!(message.contains("Relaunch Claude Code"));
+    assert!(message.contains("suv sessions"));
+    assert!(message.contains("reported tokens"));
+    let parsed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert!(parsed["hooks"]["Stop"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |group| group["hooks"].as_array().unwrap().iter().any(|hook| {
+                hook["command"]
+                    .as_str()
+                    .is_some_and(|command| command.ends_with("claude-code-session.sh"))
+            })
+        ));
+    assert_eq!(parsed["hooks"]["Stop"][0], custom["hooks"]["Stop"][0]);
+    assert!(parsed["hooks"]["SessionEnd"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |group| group["hooks"].as_array().unwrap().iter().any(|hook| {
+                hook["command"]
+                    .as_str()
+                    .is_some_and(|command| command.ends_with("claude-code-session.sh"))
+            })
+        ));
+    assert!(s
+        .home
+        .path()
+        .join(".config/suvadu/hooks/claude-code-session.sh")
+        .is_file());
+
+    let first = std::fs::read_to_string(&settings).unwrap();
+    assert!(s.run(&["init", "claude-code"]).status.success());
+    assert_eq!(first, std::fs::read_to_string(settings).unwrap());
+}
+
+#[test]
+fn import_session_auto_detects_claude_transcripts() {
+    let s = Sandbox::new();
+    let transcript = s.home.path().join("claude-import.jsonl");
+    let row = serde_json::json!({
+        "type":"user", "sessionId":"import-123", "uuid":"user-1",
+        "promptId":"prompt-1", "timestamp":"2026-09-13T10:00:00Z",
+        "cwd":s.home.path(), "promptSource":"typed", "origin":{"kind":"human"},
+        "message":{"role":"user","content":"Imported prompt"}
+    });
+    let ignored = serde_json::json!({
+        "type":"queue-operation", "operation":"enqueue", "timestamp":"2026-09-13T09:59:59Z"
+    });
+    std::fs::write(&transcript, format!("{ignored}\n{row}\n")).unwrap();
+
+    let output = s.run(&["agent", "import-session", transcript.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let imported: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(imported["session_id"], "claude-import-123");
+}
+
+#[test]
+fn claude_commands_link_to_their_own_prompt_ids() {
+    let s = Sandbox::new();
+    for (prompt, command) in [
+        ("First request", "printf first"),
+        ("Second request", "printf second"),
+    ] {
+        let output = run_hook(
+            &s,
+            "hook-claude-prompt",
+            &serde_json::json!({
+                "hook_event_name":"UserPromptSubmit", "session_id":"session-123",
+                "cwd":s.home.path(), "prompt":prompt
+            }),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = run_hook(
+            &s,
+            "hook-claude-code",
+            &serde_json::json!({
+                "hook_event_name":"PostToolUse", "session_id":"session-123",
+                "cwd":s.home.path(), "tool_name":"Bash",
+                "tool_input":{"command":command}, "tool_response":{"exit_code":0}
+            }),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let entries = s.history();
+    let first = entries
+        .iter()
+        .find(|entry| entry["command"] == "printf first")
+        .unwrap();
+    assert!(first["context"].get("agent_turn_id").is_none());
+    assert_eq!(first["context"]["agent_prompt"], "First request");
+    let second = entries
+        .iter()
+        .find(|entry| entry["command"] == "printf second")
+        .unwrap();
+    assert!(second["context"].get("agent_turn_id").is_none());
+    assert_eq!(second["context"]["agent_prompt"], "Second request");
+
+    let transcript = s.home.path().join("claude-linked.jsonl");
+    let rows = [
+        serde_json::json!({
+            "type":"user", "sessionId":"session-123", "uuid":"user-1",
+            "promptId":"prompt-1", "timestamp":"2020-01-01T10:00:00Z",
+            "cwd":s.home.path(), "promptSource":"typed", "origin":{"kind":"human"},
+            "message":{"role":"user","content":"First request"}
+        }),
+        serde_json::json!({
+            "type":"user", "sessionId":"session-123", "uuid":"user-2",
+            "promptId":"prompt-2", "timestamp":"2020-01-01T10:01:00Z",
+            "cwd":s.home.path(), "promptSource":"typed", "origin":{"kind":"human"},
+            "message":{"role":"user","content":"Second request"}
+        }),
+    ];
+    let mut file = std::fs::File::create(&transcript).unwrap();
+    for row in rows {
+        writeln!(file, "{row}").unwrap();
+    }
+    let hook = run_hook(
+        &s,
+        "hook-claude-session",
+        &serde_json::json!({
+            "hook_event_name":"Stop", "session_id":"session-123",
+            "transcript_path":transcript, "cwd":s.home.path()
+        }),
+    );
+    assert!(
+        hook.status.success(),
+        "{}",
+        String::from_utf8_lossy(&hook.stderr)
+    );
+
+    let output = s.run(&["agent", "session", "claude-session-123"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let session: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let commands = session["commands"].as_array().unwrap();
+    assert!(commands.iter().any(|command| {
+        command["command"] == "printf first" && command["turn_id"] == "prompt-1"
+    }));
+    assert!(commands.iter().any(|command| {
+        command["command"] == "printf second" && command["turn_id"] == "prompt-2"
+    }));
 }

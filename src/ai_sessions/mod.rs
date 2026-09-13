@@ -1,4 +1,5 @@
 //! Agent-neutral session records and versioned native transcript adapters.
+pub mod claude;
 pub mod codex;
 
 use serde::{Deserialize, Serialize};

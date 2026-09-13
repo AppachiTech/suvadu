@@ -192,6 +192,10 @@ pub enum Commands {
     #[command(name = "hook-claude-code-failure", hide = true)]
     HookClaudeCodeFailure,
 
+    /// Process a Claude Code `Stop` or `SessionEnd` hook event (reads JSON from stdin)
+    #[command(name = "hook-claude-session", hide = true)]
+    HookClaudeSession,
+
     /// Process a Cursor `afterShellExecution` hook event (reads JSON from stdin)
     #[command(name = "hook-cursor", hide = true)]
     HookCursor,
