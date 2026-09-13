@@ -51,6 +51,19 @@ pub fn import_native_claude(
     })?)
 }
 
+pub fn import_native_opencode(
+    session_id: &str,
+    cwd: &str,
+    messages_json: &str,
+) -> Result<serde_json::Value> {
+    let paused = config::is_paused();
+    let repo = crate::repository::Repository::init()?;
+    let policy = config::load_config_for_dir(std::path::Path::new(cwd))
+        .map(|cfg| capture_policy(cfg, paused))
+        .map_err(|error| crate::db::DbError::Validation(error.to_string()))?;
+    Ok(repo.import_opencode_session(session_id, cwd, messages_json, |_| Ok(policy.clone()))?)
+}
+
 pub fn import(path: &std::path::Path) -> Result<()> {
     let agent = detect_native_agent(path)?;
     loop {

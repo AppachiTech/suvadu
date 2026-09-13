@@ -268,6 +268,40 @@ pub fn handle_hook_claude_session() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// OpenCode sends a full session's message history per call (unlike the
+/// other hooks' small single-event payloads), so this uses its own larger
+/// cap instead of the shared `MAX_HOOK_INPUT_BYTES`.
+const MAX_OPENCODE_HOOK_INPUT_BYTES: u64 = 16 * 1024 * 1024;
+
+pub fn handle_hook_opencode_session(
+    session_id: &str,
+    directory: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Read;
+
+    let Some(directory) = directory else {
+        return Ok(());
+    };
+    if !is_valid_session_id(session_id) {
+        return Ok(());
+    }
+    let mut input = String::new();
+    std::io::stdin()
+        .take(MAX_OPENCODE_HOOK_INPUT_BYTES + 1)
+        .read_to_string(&mut input)?;
+    if input.is_empty() {
+        return Ok(());
+    }
+    if input.len() as u64 > MAX_OPENCODE_HOOK_INPUT_BYTES {
+        return Err("OpenCode hook input exceeds 16 MB".into());
+    }
+    match crate::commands::agent_session::import_native_opencode(session_id, directory, &input) {
+        Ok(_) => {}
+        Err(error) => eprintln!("suvadu: OpenCode session capture: {error}"),
+    }
+    Ok(())
+}
+
 /// Handle `afterShellExecution` hook from Cursor — reads JSON event from stdin and records the command.
 ///
 /// Cursor's payload: `{ "command": "...", "output": "...", "exit_code": 0, "cwd": "...",

@@ -196,6 +196,15 @@ pub enum Commands {
     #[command(name = "hook-claude-session", hide = true)]
     HookClaudeSession,
 
+    /// Process an OpenCode `session.idle` hook event (reads message JSON from stdin)
+    #[command(name = "hook-opencode-session", hide = true)]
+    HookOpencodeSession {
+        #[arg(long)]
+        session_id: String,
+        #[arg(long)]
+        directory: Option<String>,
+    },
+
     /// Process a Cursor `afterShellExecution` hook event (reads JSON from stdin)
     #[command(name = "hook-cursor", hide = true)]
     HookCursor,
@@ -1214,5 +1223,27 @@ mod tests {
     fn test_cli_accepts_session_singular_alias() {
         let cli = Cli::try_parse_from(["suv", "session"]).unwrap();
         assert!(matches!(cli.command, Commands::Sessions { .. }));
+    }
+
+    #[test]
+    fn hook_opencode_session_parses_session_id_and_directory() {
+        let cli = Cli::parse_from([
+            "suv",
+            "hook-opencode-session",
+            "--session-id",
+            "ses_abc123",
+            "--directory",
+            "/work",
+        ]);
+        match cli.command {
+            Commands::HookOpencodeSession {
+                session_id,
+                directory,
+            } => {
+                assert_eq!(session_id, "ses_abc123");
+                assert_eq!(directory.as_deref(), Some("/work"));
+            }
+            _ => panic!("Expected HookOpencodeSession"),
+        }
     }
 }
