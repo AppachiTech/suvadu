@@ -90,12 +90,15 @@ pub fn parse_messages(
 }
 
 /// Join every `text`-type part belonging to `message_id`, in array order.
-/// Reasoning and tool parts are deliberately excluded.
+/// Reasoning and tool parts are deliberately excluded. A part missing
+/// `messageID` is still included (tolerated, not required) since the API's
+/// response shape already scopes `parts` to their own message.
 fn joined_text(parts: &[Value], message_id: &str) -> Option<String> {
     let text = parts
         .iter()
         .filter(|part| {
-            part["messageID"].as_str() == Some(message_id) && part["type"].as_str() == Some("text")
+            part["type"].as_str() == Some("text")
+                && part["messageID"].as_str().is_none_or(|id| id == message_id)
         })
         .filter_map(|part| part["text"].as_str())
         .collect::<Vec<_>>()
@@ -115,10 +118,15 @@ fn model_id(info: &Value, role: &str) -> Option<String> {
 }
 
 fn usage_counters(tokens: &Value) -> Result<Value, String> {
-    let input = counter(tokens.get("input"))?;
+    let raw_input = counter(tokens.get("input"))?;
     let output = counter(tokens.get("output"))?;
+    let reasoning = counter(tokens.get("reasoning"))?;
     let cached_input = counter(tokens.get("cache").and_then(|c| c.get("read")))?;
     let cache_write_input = counter(tokens.get("cache").and_then(|c| c.get("write")))?;
+    let input = raw_input
+        .checked_add(cached_input)
+        .and_then(|value| value.checked_add(cache_write_input))
+        .ok_or("input token counter overflow")?;
     let total = input
         .checked_add(output)
         .ok_or("total token counter overflow")?;
@@ -127,6 +135,7 @@ fn usage_counters(tokens: &Value) -> Result<Value, String> {
         "cached_input_tokens": cached_input,
         "cache_write_input_tokens": cache_write_input,
         "output_tokens": output,
+        "reasoning_output_tokens": reasoning,
         "total_tokens": total
     }))
 }
@@ -234,11 +243,12 @@ mod tests {
         let events = parse_messages(&messages, "/work", &mut state).unwrap();
 
         let usage = events.iter().find(|e| e.kind == "usage").unwrap();
-        assert_eq!(usage.data["total"]["input_tokens"], 100);
+        assert_eq!(usage.data["total"]["input_tokens"], 115);
         assert_eq!(usage.data["total"]["cached_input_tokens"], 10);
         assert_eq!(usage.data["total"]["cache_write_input_tokens"], 5);
         assert_eq!(usage.data["total"]["output_tokens"], 50);
-        assert_eq!(usage.data["total"]["total_tokens"], 150);
+        assert_eq!(usage.data["total"]["reasoning_output_tokens"], 0);
+        assert_eq!(usage.data["total"]["total_tokens"], 165);
     }
 
     #[test]
@@ -273,6 +283,25 @@ mod tests {
         let mut state = OpencodeState::default();
         let events = parse_messages(&messages, "/work", &mut state).unwrap();
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn joined_text_tolerates_parts_missing_message_id() {
+        let messages = vec![json!({
+            "info": {
+                "id": "msg_a1", "sessionID": "ses_1", "role": "assistant",
+                "time": {"created": 1000, "completed": 1500},
+                "parentID": "msg_u1", "modelID": "m", "providerID": "p",
+                "mode": "build", "path": {"cwd": "/work", "root": "/work"}, "cost": 0.0,
+                "tokens": {"input": 1, "output": 1, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+                "finish": "stop"
+            },
+            "parts": [{"id": "p1", "sessionID": "ses_1", "type": "text", "text": "Done."}]
+        })];
+        let mut state = OpencodeState::default();
+        let events = parse_messages(&messages, "/work", &mut state).unwrap();
+        let response = events.iter().find(|e| e.kind == "response").unwrap();
+        assert_eq!(response.data["text"], "Done.");
     }
 
     #[test]
