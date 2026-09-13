@@ -196,7 +196,7 @@ pub enum Commands {
     #[command(name = "hook-claude-session", hide = true)]
     HookClaudeSession,
 
-    /// Process an OpenCode `session.idle` hook event (reads message JSON from stdin)
+    /// Process an `OpenCode` `session.idle` hook event (reads message JSON from stdin)
     #[command(name = "hook-opencode-session", hide = true)]
     HookOpencodeSession {
         #[arg(long)]

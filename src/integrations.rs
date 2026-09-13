@@ -268,7 +268,7 @@ pub fn handle_hook_claude_session() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// OpenCode sends a full session's message history per call (unlike the
+/// `OpenCode` sends a full session's message history per call (unlike the
 /// other hooks' small single-event payloads), so this uses its own larger
 /// cap instead of the shared `MAX_HOOK_INPUT_BYTES`.
 const MAX_OPENCODE_HOOK_INPUT_BYTES: u64 = 16 * 1024 * 1024;
@@ -279,7 +279,7 @@ pub fn handle_hook_opencode_session(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Read;
 
-    let Some(directory) = directory else {
+    let Some(directory) = directory.filter(|directory| !directory.is_empty()) else {
         return Ok(());
     };
     if !is_valid_session_id(session_id) {
