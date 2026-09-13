@@ -1,6 +1,6 @@
 //! Persistent, agent-neutral session evidence. Native logs are read incrementally.
 use super::Repository;
-use crate::ai_sessions::{claude, codex, AiEvent, CapturePolicy, SummaryInput};
+use crate::ai_sessions::{claude, codex, opencode, AiEvent, CapturePolicy, SummaryInput};
 use crate::db::{DbError, DbResult};
 use crate::models::{AiSummaryRecord, SessionKind, SessionSummary};
 use rusqlite::{params, OptionalExtension};
@@ -148,6 +148,11 @@ fn event_source_offset(id: &str) -> Option<u64> {
                 .and_then(|value| value.split('-').next())
                 .and_then(|value| value.parse().ok())
         })
+        .or_else(|| {
+            id.strip_prefix("opencode-")
+                .and_then(|value| value.split('-').next())
+                .and_then(|value| value.parse().ok())
+        })
 }
 
 fn reject_non_advancing_oversized_record(
@@ -166,10 +171,7 @@ fn reject_non_advancing_oversized_record(
     Ok(())
 }
 
-fn reconcile_claude_command_turns(
-    tx: &rusqlite::Transaction<'_>,
-    session_id: &str,
-) -> DbResult<()> {
+fn reconcile_agent_command_turns(tx: &rusqlite::Transaction<'_>, session_id: &str) -> DbResult<()> {
     let prompts = {
         let mut statement = tx.prepare(
             "SELECT data FROM ai_events WHERE session_id=?1 AND kind='prompt' ORDER BY rowid",
@@ -445,7 +447,7 @@ impl Repository {
             tx.execute("INSERT OR IGNORE INTO ai_sessions(id,native_id,agent,cwd,parent_id,created_at,updated_at) VALUES (?1,?2,'claude-code',?3,NULL,?4,?4)", params![id,native,event.cwd,event.at])?;
             inserted += tx.execute("INSERT OR IGNORE INTO ai_events(session_id,event_id,kind,cwd,data) VALUES (?1,?2,?3,?4,?5)", params![id,event.id,event.kind,event.cwd,serde_json::to_string(&event).map_err(|_| invalid("Cannot encode event"))?])?;
         }
-        reconcile_claude_command_turns(&tx, &id)?;
+        reconcile_agent_command_turns(&tx, &id)?;
         let advanced = consumed > 0;
         if advanced {
             tx.execute("UPDATE ai_sessions SET revision=revision+1,updated_at=?2,usage_complete=usage_complete AND ?3 WHERE id=?1", params![id,chrono::Utc::now().timestamp_millis(),!skipped])?;
@@ -455,6 +457,120 @@ impl Repository {
         Ok(
             json!({"session_id":id,"imported_events":inserted,"byte_offset":offset+consumed as u64,"has_more":metadata.len()>offset+bytes.len() as u64,"incomplete_tail":consumed<bytes.len(),"coverage":"partial","usage_complete":!skipped}),
         )
+    }
+
+    /// Import a full `OpenCode` session-message array. Unlike the file-backed
+    /// adapters, there is no byte offset to checkpoint: every call hands in
+    /// the complete history, and incrementality is tracked by message ID
+    /// inside `OpencodeState`.
+    pub fn import_opencode_session(
+        &self,
+        session_id: &str,
+        cwd: &str,
+        messages_json: &str,
+        policy_for: impl Fn(&str) -> DbResult<CapturePolicy>,
+    ) -> DbResult<Value> {
+        let messages: Vec<Value> = serde_json::from_str(messages_json)
+            .map_err(|error| invalid(format!("Invalid OpenCode message JSON: {error}")))?;
+        let path = format!("opencode-session:{session_id}");
+        let id = format!("opencode-{session_id}");
+        let tx = self.conn.unchecked_transaction()?;
+        let previous = tx
+            .query_row(
+                "SELECT state,adapter_version,skipped,gaps FROM ai_sources WHERE path=?1",
+                [&path],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u32>(1)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let (mut state, mut skipped, mut gaps) =
+            if let Some((state, version, skipped, gaps)) = previous {
+                if version != opencode::ADAPTER_VERSION {
+                    return Err(invalid(
+                    "OpenCode session uses a different adapter version; import was not advanced",
+                ));
+                }
+                (
+                    decode::<opencode::OpencodeState>(&state)?,
+                    skipped,
+                    decode::<CaptureGaps>(&gaps)?,
+                )
+            } else {
+                (
+                    opencode::OpencodeState::default(),
+                    false,
+                    CaptureGaps::default(),
+                )
+            };
+
+        let events = opencode::parse_messages(&messages, cwd, &mut state).map_err(invalid)?;
+        let mut inserted = 0;
+        let mut exclusion_cache = HashMap::new();
+        let tail_policy = policy_for(cwd)?;
+        let end = state.next_seq;
+        gaps.observe(cwd, &tail_policy, end);
+        skipped |= !tail_policy.enabled;
+        for mut event in events {
+            let policy = policy_for(&event.cwd)?;
+            gaps.observe(&event.cwd, &policy, end);
+            if !policy.enabled || gaps.omits(&event) {
+                skipped = true;
+                continue;
+            }
+            if !sanitize_event(&mut event, &policy, &mut exclusion_cache) {
+                skipped = true;
+                continue;
+            }
+            if skipped && event.kind == "usage" {
+                continue;
+            }
+            tx.execute(
+                "INSERT OR IGNORE INTO ai_sessions(id,native_id,agent,cwd,parent_id,created_at,updated_at) VALUES (?1,?2,'opencode',?3,NULL,?4,?4)",
+                params![id, session_id, event.cwd, event.at],
+            )?;
+            inserted += tx.execute(
+                "INSERT OR IGNORE INTO ai_events(session_id,event_id,kind,cwd,data) VALUES (?1,?2,?3,?4,?5)",
+                params![
+                    id,
+                    event.id,
+                    event.kind,
+                    event.cwd,
+                    serde_json::to_string(&event).map_err(|_| invalid("Cannot encode event"))?
+                ],
+            )?;
+        }
+        reconcile_agent_command_turns(&tx, &id)?;
+        if inserted > 0 {
+            tx.execute(
+                "UPDATE ai_sessions SET revision=revision+1,updated_at=?2,usage_complete=usage_complete AND ?3 WHERE id=?1",
+                params![id, chrono::Utc::now().timestamp_millis(), !skipped],
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO ai_sources(path,session_id,identity,byte_offset,state,adapter_version,skipped,gaps) VALUES (?1,?2,'opencode-api',0,?3,?4,?5,?6) ON CONFLICT(path) DO UPDATE SET state=excluded.state,skipped=excluded.skipped,gaps=excluded.gaps",
+            params![
+                path,
+                id,
+                serde_json::to_string(&state).map_err(|_| invalid("Cannot encode checkpoint"))?,
+                opencode::ADAPTER_VERSION,
+                skipped,
+                serde_json::to_string(&gaps).map_err(|_| invalid("Cannot encode capture gaps"))?
+            ],
+        )?;
+        tx.commit()?;
+        Ok(json!({
+            "session_id": id,
+            "imported_events": inserted,
+            "has_more": false,
+            "coverage": "partial",
+            "usage_complete": !skipped
+        }))
     }
 
     fn ai_session_header(&self, id: &str, excluded_dirs: &[String]) -> DbResult<Value> {
@@ -1589,5 +1705,50 @@ mod tests {
         assert!(records[0].current);
         assert_eq!(records[1].text, "First summary");
         assert!(!records[1].current);
+    }
+
+    #[test]
+    fn import_opencode_session_stores_events_and_dedupes_on_reimport() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let messages = serde_json::json!([
+            {
+                "info": {
+                    "id": "msg_u1", "sessionID": "ses_1", "role": "user",
+                    "time": {"created": 1000},
+                    "agent": "build", "model": {"providerID": "anthropic", "modelID": "claude-sonnet-5"}
+                },
+                "parts": [{"id": "msg_u1-p1", "sessionID": "ses_1", "messageID": "msg_u1", "type": "text", "text": "hi"}]
+            },
+            {
+                "info": {
+                    "id": "msg_a1", "sessionID": "ses_1", "role": "assistant",
+                    "time": {"created": 1100, "completed": 1600},
+                    "parentID": "msg_u1", "modelID": "claude-sonnet-5", "providerID": "anthropic",
+                    "mode": "build", "path": {"cwd": "/work", "root": "/work"}, "cost": 0.0,
+                    "tokens": {"input": 10, "output": 5, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+                    "finish": "stop"
+                },
+                "parts": [{"id": "msg_a1-p1", "sessionID": "ses_1", "messageID": "msg_a1", "type": "text", "text": "hello"}]
+            }
+        ])
+        .to_string();
+
+        let result = repo
+            .import_opencode_session("ses_1", "/work", &messages, |_| {
+                Ok(crate::ai_sessions::CapturePolicy::default())
+            })
+            .unwrap();
+        assert_eq!(result["imported_events"], 3); // prompt, response, usage
+
+        let session = repo.get_ai_session("opencode-ses_1", 20, 0, &[]).unwrap();
+        assert_eq!(session["session"]["agent"], "opencode");
+        assert_eq!(session["events"].as_array().unwrap().len(), 3);
+
+        let second = repo
+            .import_opencode_session("ses_1", "/work", &messages, |_| {
+                Ok(crate::ai_sessions::CapturePolicy::default())
+            })
+            .unwrap();
+        assert_eq!(second["imported_events"], 0);
     }
 }
