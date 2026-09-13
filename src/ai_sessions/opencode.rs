@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 pub const ADAPTER_VERSION: u32 = 1;
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OpencodeState {
     pub seen_message_ids: HashSet<String>,
@@ -21,11 +21,12 @@ pub fn parse_messages(
     cwd: &str,
     state: &mut OpencodeState,
 ) -> Result<Vec<AiEvent>, String> {
+    let mut next = state.clone();
     let mut events = Vec::new();
     for message in messages {
         let info = &message["info"];
         let id = required_string(info, "id")?.to_owned();
-        if state.seen_message_ids.contains(&id) {
+        if next.seen_message_ids.contains(&id) {
             continue;
         }
         let role = required_string(info, "role")?;
@@ -42,7 +43,7 @@ pub fn parse_messages(
                 if let Some(text) = text {
                     let model = model_id(info, role);
                     events.push(next_event(
-                        state,
+                        &mut next,
                         "prompt",
                         "prompt",
                         at,
@@ -58,7 +59,7 @@ pub fn parse_messages(
                 let turn_id = optional_string(info, "parentID");
                 if let Some(text) = text {
                     events.push(next_event(
-                        state,
+                        &mut next,
                         "response",
                         "response",
                         at,
@@ -68,18 +69,19 @@ pub fn parse_messages(
                         json!({"text": text}),
                     ));
                 }
-                if let Some(tokens) = info.get("tokens") {
+                if let Some(tokens) = info.get("tokens").filter(|v| !v.is_null()) {
                     let usage = usage_counters(tokens)?;
                     events.push(next_event(
-                        state, "usage", "usage", at, cwd, turn_id, model,
+                        &mut next, "usage", "usage", at, cwd, turn_id, model,
                         json!({"total": usage}),
                     ));
                 }
             }
             _ => {}
         }
-        state.seen_message_ids.insert(id);
+        next.seen_message_ids.insert(id);
     }
+    *state = next;
     Ok(events)
 }
 
@@ -215,6 +217,7 @@ mod tests {
         assert_eq!(events[0].kind, "prompt");
         assert_eq!(events[0].data["text"], "Fix the bug");
         assert_eq!(events[0].turn_id.as_deref(), Some("msg_u1"));
+        assert_eq!(events[0].model.as_deref(), Some("claude-sonnet-5"));
         assert_eq!(events[1].kind, "response");
         assert_eq!(events[1].data["text"], "Fixed it.");
         assert_eq!(events[1].turn_id.as_deref(), Some("msg_u1")); // parentID groups the turn
@@ -294,5 +297,26 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert!(events.iter().any(|e| e.kind == "response" && e.data["text"] == "Done."));
         assert!(events.iter().any(|e| e.kind == "usage"));
+    }
+
+    #[test]
+    fn state_is_unchanged_on_parse_error() {
+        let messages = vec![
+            user_message("msg_u1", "Fix the bug", 1_000),
+            json!({
+                "info": {
+                    "id": "msg_bad", "sessionID": "ses_1",
+                    "time": {"created": 1_100}
+                    // missing "role" field
+                },
+                "parts": []
+            }),
+        ];
+        let mut state = OpencodeState::default();
+        let state_before = state.clone();
+
+        let result = parse_messages(&messages, "/work", &mut state);
+        assert!(result.is_err());
+        assert_eq!(state, state_before);
     }
 }
