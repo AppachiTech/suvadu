@@ -155,19 +155,31 @@ pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Handle the `hook-opencode-prompt` command — caches an `OpenCode` prompt.
 ///
-/// The plugin (`OPENCODE_PLUGIN_SCRIPT` below) passes the session ID as
-/// `--session-id` and pipes the raw prompt text on stdin, since it has no
-/// access to Suvadu's config or redaction logic itself. This routes the
-/// prompt through the exact same redact-then-truncate pipeline as the
-/// Claude Code and Codex prompt hooks above (`cfg.redaction`,
-/// `cfg.agent.prompt_capture_max_chars`) so the cached text an operator
-/// sees matches what's stored on import, and so `reconcile_agent_command_turns`'s
-/// exact-text match against the imported `prompt` `AiEvent` (which goes
-/// through the same policy via `sanitize_event`) still succeeds for prompts
-/// that get redacted or truncated.
-pub fn handle_hook_opencode_prompt(session_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+/// The plugin (`OPENCODE_PLUGIN_SCRIPT` below) passes the session ID and
+/// `input.directory` as `--session-id`/`--directory` and pipes the raw
+/// prompt text on stdin, since it has no access to Suvadu's config or
+/// redaction logic itself. This routes the prompt through the exact same
+/// redact-then-truncate pipeline as the Claude Code and Codex prompt hooks
+/// above (`cfg.redaction`, `cfg.agent.prompt_capture_max_chars`) so the
+/// cached text an operator sees matches what's stored on import, and so
+/// `reconcile_agent_command_turns`'s exact-text match against the imported
+/// `prompt` `AiEvent` (which goes through the same policy via
+/// `sanitize_event`) still succeeds for prompts that get redacted or
+/// truncated. Uses `load_config_for_dir(directory)` rather than the global
+/// config, matching `import_native_opencode`'s per-project policy for the
+/// same directory — a project `.suvadu.toml` that changes redaction or
+/// `prompt_capture_max_chars` would otherwise reintroduce a cache/import
+/// mismatch, or leave a secret unredacted in the cache when the project
+/// (unlike global config) turns redaction on.
+pub fn handle_hook_opencode_prompt(
+    session_id: &str,
+    directory: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Read;
 
+    let Some(directory) = directory.filter(|directory| !directory.is_empty()) else {
+        return Ok(());
+    };
     if !is_valid_session_id(session_id) {
         return Ok(());
     }
@@ -183,7 +195,7 @@ pub fn handle_hook_opencode_prompt(session_id: &str) -> Result<(), Box<dyn std::
     if crate::config::is_paused() {
         return Ok(());
     }
-    let cfg = crate::config::load_config_cached()?;
+    let cfg = crate::config::load_config_for_dir(Path::new(directory))?;
     if !cfg.enabled {
         return Ok(());
     }
@@ -1125,11 +1137,14 @@ const userMessageIDs = new Set();
 // limit, so this is the same redact-then-truncate path every other agent
 // integration's prompt cache goes through (and what the session-history
 // import below compares against when grouping commands under a prompt).
-function cachePrompt(sessionID, prompt) {
+// `directory` is passed through so both sides resolve the same
+// project-local config (a .suvadu.toml can override redaction/length),
+// not just the global one.
+function cachePrompt(sessionID, prompt, directory) {
   try {
     spawnSync(
       "suv",
-      ["hook-opencode-prompt", "--session-id", sessionID],
+      ["hook-opencode-prompt", "--session-id", sessionID, "--directory", directory],
       { input: prompt, stdio: ["pipe", "ignore", "inherit"], timeout: 5000 }
     );
   } catch {
@@ -1175,7 +1190,7 @@ export default async (input) => {
         const part = evt.properties?.part;
         if (part?.type === "text" && part?.text && part?.messageID && userMessageIDs.has(part.messageID)) {
           const sessionID = part.sessionID || "unknown";
-          cachePrompt(sessionID, part.text);
+          cachePrompt(sessionID, part.text, input.directory);
           userMessageIDs.delete(part.messageID);
         }
       }
@@ -2221,6 +2236,24 @@ mod tests {
         assert!(!OPENCODE_PLUGIN_SCRIPT.contains("writeFileSync"));
         assert!(!OPENCODE_PLUGIN_SCRIPT.contains("mkdirSync"));
         assert!(!OPENCODE_PLUGIN_SCRIPT.contains(".slice(0, 500)"));
+    }
+
+    #[test]
+    fn opencode_plugin_passes_the_session_directory_to_the_prompt_cache() {
+        // Without the directory, the prompt cache falls back to global config
+        // while session import (hook-opencode-session, already passed
+        // input.directory) resolves a project .suvadu.toml — a mismatch that
+        // can leave a secret unredacted, or a length mismatch that breaks
+        // reconcile_agent_command_turns' exact-text match, for that project.
+        assert!(
+            OPENCODE_PLUGIN_SCRIPT.contains("function cachePrompt(sessionID, prompt, directory)")
+        );
+        assert!(OPENCODE_PLUGIN_SCRIPT.contains(
+            r#"["hook-opencode-prompt", "--session-id", sessionID, "--directory", directory]"#
+        ));
+        assert!(
+            OPENCODE_PLUGIN_SCRIPT.contains("cachePrompt(sessionID, part.text, input.directory)")
+        );
     }
 
     #[test]

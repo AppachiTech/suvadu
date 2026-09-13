@@ -221,12 +221,16 @@ pub enum Commands {
     #[command(name = "hook-claude-prompt", hide = true)]
     HookClaudePrompt,
 
-    /// Cache an `OpenCode` prompt (session ID via flag, raw prompt text on stdin),
-    /// redacted and truncated the same way as every other agent's prompt cache
+    /// Cache an `OpenCode` prompt (session ID and directory via flags, raw
+    /// prompt text on stdin), redacted and truncated the same way as every
+    /// other agent's prompt cache, using the project-local config for
+    /// `directory` (matching `hook-opencode-session`'s import policy)
     #[command(name = "hook-opencode-prompt", hide = true)]
     HookOpencodePrompt {
         #[arg(long)]
         session_id: String,
+        #[arg(long)]
+        directory: Option<String>,
     },
 
     #[command(hide = true)]
@@ -1256,11 +1260,22 @@ mod tests {
     }
 
     #[test]
-    fn hook_opencode_prompt_parses_session_id() {
-        let cli = Cli::parse_from(["suv", "hook-opencode-prompt", "--session-id", "ses_abc123"]);
+    fn hook_opencode_prompt_parses_session_id_and_directory() {
+        let cli = Cli::parse_from([
+            "suv",
+            "hook-opencode-prompt",
+            "--session-id",
+            "ses_abc123",
+            "--directory",
+            "/work",
+        ]);
         match cli.command {
-            Commands::HookOpencodePrompt { session_id } => {
+            Commands::HookOpencodePrompt {
+                session_id,
+                directory,
+            } => {
                 assert_eq!(session_id, "ses_abc123");
+                assert_eq!(directory.as_deref(), Some("/work"));
             }
             _ => panic!("Expected HookOpencodePrompt"),
         }

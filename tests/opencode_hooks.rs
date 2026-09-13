@@ -48,9 +48,15 @@ impl Sandbox {
         );
         result
     }
-    fn cache_prompt(&self, session_id: &str, prompt: &str) {
+    fn cache_prompt(&self, session_id: &str, directory: &str, prompt: &str) {
         self.run_with_stdin(
-            &["hook-opencode-prompt", "--session-id", session_id],
+            &[
+                "hook-opencode-prompt",
+                "--session-id",
+                session_id,
+                "--directory",
+                directory,
+            ],
             prompt,
         );
     }
@@ -165,7 +171,7 @@ fn opencode_prompt_cache_is_redacted_and_not_hard_cut_at_500_chars() {
         "test prompt must exceed the old hardcoded cache cutoff"
     );
 
-    s.cache_prompt("ses1", &prompt);
+    s.cache_prompt("ses1", "/project", &prompt);
     s.add_command("opencode-ses1", "echo redaction-check", "/project");
 
     let entries = s.history();
@@ -193,7 +199,7 @@ fn opencode_session_import_links_a_command_to_a_prompt_over_500_chars() {
 
     // Live path: the plugin caches the prompt as it's typed, then a bash
     // command executes and picks up the cached (redacted) prompt as context.
-    s.cache_prompt("ses1", &prompt);
+    s.cache_prompt("ses1", "/project", &prompt);
     s.add_command("opencode-ses1", "echo redaction-check", "/project");
 
     // Later: session.idle fires and the plugin imports the full session
@@ -210,6 +216,59 @@ fn opencode_session_import_links_a_command_to_a_prompt_over_500_chars() {
     );
     let stored = context["agent_prompt"].as_str().unwrap();
     assert!(!stored.contains(secret));
+}
+
+#[test]
+fn opencode_prompt_cache_respects_a_project_suvadu_toml_overlay() {
+    let s = Sandbox::new();
+    let project = s.home.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    // A project overlay that diverges from the global defaults (redaction
+    // on, 4000-char cap): shrinks the cap (well past where the secret sits)
+    // and turns redaction off. Before routing the prompt cache through
+    // load_config_for_dir(directory), the cache always used the global
+    // config, so this project's own policy would have been ignored for the
+    // cached copy.
+    std::fs::write(
+        project.join(".suvadu.toml"),
+        "[agent]\nprompt_capture_max_chars = 200\n[redaction]\nenabled = false\n",
+    )
+    .unwrap();
+    let project_dir = project.to_string_lossy().to_string();
+
+    let secret = "overlay_secret_should_survive_here";
+    let prompt = format!("token={secret} {}", "padding ".repeat(40));
+    assert!(prompt.len() > 300, "prompt must exceed the overlay's cap");
+
+    s.cache_prompt("ses1", &project_dir, &prompt);
+    s.add_command("opencode-ses1", "echo overlay-check", &project_dir);
+
+    let entries = s.history();
+    let stored = entries[0]["context"]["agent_prompt"].as_str().unwrap();
+    // The overlay turns redaction off for this project, unlike the global
+    // default, so the secret (well within the 200-char cap) is expected to
+    // survive here...
+    assert!(
+        stored.contains(secret),
+        "project overlay disabling redaction was not applied to the cache: {stored}"
+    );
+    // ...but its much shorter max_chars must still apply, not the 4000-char
+    // global default (which would keep the whole prompt).
+    assert!(
+        stored.len() < prompt.len() && stored.len() < 300,
+        "expected the project overlay's 200-char cap, not the global default: {stored}"
+    );
+
+    // Session import already resolved this same directory's config before
+    // this fix. The two independently-processed copies must still match
+    // for reconcile_agent_command_turns to link them.
+    let messages = serde_json::json!([user_message("msg_u1", &prompt)]);
+    s.import_session("ses1", &project_dir, &messages);
+    let entries = s.history();
+    assert_eq!(
+        entries[0]["context"]["agent_turn_id"], "msg_u1",
+        "cache and import must resolve the same project overlay to reconcile"
+    );
 }
 
 fn plugin_path(s: &Sandbox) -> std::path::PathBuf {

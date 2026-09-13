@@ -98,9 +98,10 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
         Commands::HookCursor => integrations::handle_hook_cursor(),
         Commands::HookCursorPrompt => integrations::handle_hook_cursor_prompt(),
         Commands::HookClaudePrompt => integrations::handle_hook_claude_prompt(),
-        Commands::HookOpencodePrompt { session_id } => {
-            integrations::handle_hook_opencode_prompt(&session_id)
-        }
+        Commands::HookOpencodePrompt {
+            session_id,
+            directory,
+        } => integrations::handle_hook_opencode_prompt(&session_id, directory.as_deref()),
         Commands::McpServe => mcp::run(),
         cmd @ Commands::Search { .. } => run_search(cmd),
         Commands::Get {
@@ -488,6 +489,7 @@ mod tests {
         assert!(!is_user_facing_command(&Commands::HookClaudePrompt));
         assert!(!is_user_facing_command(&Commands::HookOpencodePrompt {
             session_id: "abc".to_string(),
+            directory: None,
         }));
         assert!(!is_user_facing_command(&Commands::Man));
         assert!(!is_user_facing_command(&Commands::Completions {
