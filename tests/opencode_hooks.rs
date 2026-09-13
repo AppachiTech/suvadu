@@ -220,6 +220,73 @@ fn opencode_prompt_hash_is_keyed_and_the_reconciliation_key_persists_across_proc
 }
 
 #[test]
+#[allow(clippy::needless_collect)] // must spawn every process before waiting on any
+fn opencode_concurrent_first_use_key_creation_is_race_safe() {
+    // On a fresh install, many hook invocations can race to create
+    // reconcile.key for the first time. This end-to-end version, racing
+    // real separate `suv` processes, confirms the deployed binary behaves
+    // correctly under concurrent first use (every process gets a valid,
+    // consistent, owner-only key) but real process spawn overhead
+    // (milliseconds) dwarfs the actual race window (a syscall or two), so
+    // it won't reliably reproduce a create-then-write/rename-clobber
+    // regression by itself -- see
+    // `concurrent_first_use_never_misses_a_key_or_disagrees_on_it` in
+    // src/util/reconcile_key.rs, which packs synchronized in-process
+    // threads tightly enough to actually catch that (reliably reproduced
+    // against the prior implementation before this fix).
+    let s = Sandbox::new();
+    let n = 8;
+    let results: Vec<std::process::Output> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..n)
+            .map(|i| {
+                let s = &s;
+                scope.spawn(move || {
+                    s.run_with_stdin(
+                        &[
+                            "hook-opencode-prompt",
+                            "--session-id",
+                            &format!("ses{i}"),
+                            "--directory",
+                            "/project",
+                        ],
+                        &format!("concurrent prompt number {i}"),
+                    )
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert_eq!(results.len(), n);
+
+    // Every hash sidecar must exist and be a keyed HMAC, never missing or
+    // garbage from a partially-written key file caught mid-race.
+    for i in 0..n {
+        let hash_file = find_file_named(s.home.path(), &format!("opencode-ses{i}.prompt.hash"))
+            .unwrap_or_else(|| panic!("hash sidecar for ses{i} should exist despite the race"));
+        let contents = std::fs::read_to_string(&hash_file).unwrap();
+        assert!(
+            contents.starts_with("hmac-sha256:"),
+            "ses{i} hash was not a valid keyed HMAC: {contents}"
+        );
+    }
+
+    // Exactly one reconciliation key must have won the race, and it must
+    // be owner-only from the moment it became visible.
+    let key_file = find_file_named(s.home.path(), "reconcile.key")
+        .expect("a reconciliation key should have been created");
+    assert_eq!(std::fs::read(&key_file).unwrap().len(), 32);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            key_file.metadata().unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the reconciliation key must be owner-only, with no window at any other mode"
+        );
+    }
+}
+
+#[test]
 fn opencode_prompt_cache_is_redacted_and_not_hard_cut_at_500_chars() {
     let s = Sandbox::new();
     let secret = "sample_password_for_opencode_regression";
