@@ -1028,8 +1028,21 @@ mod tests {
         assert_eq!(form.focus, FormField::Description);
     }
 
+    /// Serializes the two tests below against each other. `cargo test` runs
+    /// tests in parallel threads, and both tests mutate the process-global
+    /// `EDITOR` env var that `edit_body` reads — without this lock, one
+    /// test's `set_var`/`remove_var` can interleave with the other's read,
+    /// occasionally invoking the wrong "editor" for one of them (surfaced
+    /// as a rare `edit_body_returns_none_when_editor_exits_nonzero` failure
+    /// under `cargo tarpaulin`, whose instrumentation widens the race
+    /// window enough to hit it).
+    static EDITOR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn edit_body_roundtrips_through_a_fake_editor() {
+        let _guard = EDITOR_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::TempDir::new().unwrap();
         let fake_editor = dir.path().join("fake_editor.sh");
         std::fs::write(
@@ -1056,6 +1069,9 @@ mod tests {
 
     #[test]
     fn edit_body_returns_none_when_editor_exits_nonzero() {
+        let _guard = EDITOR_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let prev = std::env::var("EDITOR").ok();
         std::env::set_var("EDITOR", "false");
         let result = edit_body("content").unwrap();
