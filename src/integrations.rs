@@ -800,6 +800,13 @@ pub fn handle_init_claude_code() -> Result<(), Box<dyn std::error::Error>> {
         println!("  AI agents can now query your shell history via MCP.");
     }
 
+    if matches!(try_install_builtin_skills(), Ok(true)) {
+        println!("{green}\u{2713}{r} Installed the suvadu-session-memory skill");
+        println!(
+            "  Reinforces preferring Suvadu's own session summaries over a generic memory note."
+        );
+    }
+
     println!();
     println!(
         "Session prompts, responses, models, and reported tokens are captured at Stop/SessionEnd."
@@ -809,6 +816,24 @@ pub fn handle_init_claude_code() -> Result<(), Box<dyn std::error::Error>> {
     print_post_install_tips(cyan, r, true, true);
 
     Ok(())
+}
+
+/// Seed/refresh suvadu-owned builtin skills and materialize them into
+/// Claude Code's native format immediately, so they're available after
+/// the very first `suv init claude-code`, not only after a later manual
+/// `suv skills sync`. Best-effort: any failure here (config load,
+/// database, sync) must not fail `suv init claude-code` itself, matching
+/// how the MCP-registration step just above already handles its own
+/// failure silently.
+fn try_install_builtin_skills() -> Result<bool, Box<dyn std::error::Error>> {
+    let config = crate::config::load_config_cached()?;
+    let repo = crate::repository::Repository::init()?;
+    if !crate::skills_builtin::ensure_installed(&repo, &config)? {
+        return Ok(false);
+    }
+    let cwd = std::env::current_dir()?;
+    crate::skills_sync::sync(&repo, &[crate::cli::SyncTarget::ClaudeCode], &cwd, false)?;
+    Ok(true)
 }
 
 /// Generate the JSON snippet for Claude Code settings.

@@ -7,10 +7,8 @@ use crate::db::DbResult;
 use crate::models::{NewSkill, SKILL_SCOPE_GLOBAL, SKILL_SOURCE_SUVADU, SKILL_STATUS_ACTIVE};
 use crate::repository::Repository;
 
-#[allow(dead_code)]
 const SESSION_MEMORY_DESCRIPTION: &str = "Use when the user asks to summarize, save, or recall what happened in the current or a recent coding/terminal session — prefer this over writing a generic memory note.";
 
-#[allow(dead_code)]
 const SESSION_MEMORY_BODY: &str =
     "When the user asks to summarize, save, or recall what happened in this
 (or a recent) coding session — e.g. \"summarize this session and save it\",
@@ -32,7 +30,6 @@ session's work.";
 /// Suvadu-owned skills to seed/refresh, each gated on the config it
 /// depends on. Currently just the one; a `Vec` so a future addition
 /// doesn't need to change `ensure_installed`'s shape.
-#[allow(dead_code)]
 fn builtin_skills(config: &Config) -> Vec<NewSkill> {
     let mut skills = Vec::new();
     if config.mcp.allow_session_summaries {
@@ -60,7 +57,6 @@ fn builtin_skills(config: &Config) -> Vec<NewSkill> {
 /// Returns `true` if anything was created or changed, so a caller that
 /// wants to materialize immediately (`suv init claude-code`) knows
 /// whether a sync is worth running at all.
-#[allow(dead_code)]
 pub fn ensure_installed(repo: &Repository, config: &Config) -> DbResult<bool> {
     let mut changed = false;
     for skill in builtin_skills(config) {

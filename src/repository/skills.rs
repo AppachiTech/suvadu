@@ -133,7 +133,6 @@ impl Repository {
     /// existing row's `description`, `body`, and `triggers` already match
     /// `new` exactly; `update_skill` itself has no such check and
     /// unconditionally advances `version` on every call.
-    #[allow(dead_code)]
     pub fn upsert_skill(&self, new: &NewSkill) -> DbResult<Skill> {
         let Some(existing) = self.get_skill(&new.name, &new.scope)? else {
             return self.create_skill(new);
