@@ -19,6 +19,7 @@ mod risk;
 mod search;
 mod session_ui;
 mod settings_ui;
+mod skills_builtin;
 mod skills_sync;
 mod skills_ui;
 mod stats_ui;
