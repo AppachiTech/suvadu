@@ -111,3 +111,54 @@ fn suv_init_claude_code_skips_the_skill_when_summaries_disabled() {
 
     assert!(!skill_md_path(&s).exists());
 }
+
+#[test]
+fn suv_skills_sync_installs_the_skill_without_a_prior_init() {
+    let s = Sandbox::new();
+    s.enable_session_summaries();
+
+    // No `suv init claude-code` at all — just a bare sync.
+    let result = s.run(&["skills", "sync"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    let content = std::fs::read_to_string(skill_md_path(&s))
+        .expect("suv skills sync alone should install and materialize the skill");
+    assert!(content.contains("resolve_current_agent_session"));
+}
+
+#[test]
+fn suv_skills_sync_default_reaches_cursor_and_codex_too() {
+    let s = Sandbox::new();
+    s.enable_session_summaries();
+
+    let result = s.run(&["skills", "sync"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    // Cursor has no stable global rules location, so a global skill lands
+    // in the *current directory's* .cursor/rules/ — `Sandbox::command()`
+    // sets `current_dir` to the sandbox's own tempdir specifically so this
+    // (and nothing else) is where `suv skills sync`'s child process sees
+    // as its cwd, rather than polluting the real cargo test run's cwd.
+    let cursor_rule = s
+        .home
+        .path()
+        .join(".cursor/rules/suvadu-session-memory.mdc");
+    assert!(
+        cursor_rule.exists(),
+        "expected {} to exist",
+        cursor_rule.display()
+    );
+
+    let codex_agents = find_file_named(s.home.path(), "AGENTS.md")
+        .expect("Codex's AGENTS.md should exist after a default sync");
+    let agents_content = std::fs::read_to_string(&codex_agents).unwrap();
+    assert!(agents_content.contains("resolve_current_agent_session"));
+}

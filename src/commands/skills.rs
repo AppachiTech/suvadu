@@ -322,6 +322,15 @@ fn handle_sync(
         |t| vec![t],
     );
     let cwd = std::env::current_dir()?;
+
+    // Seed/refresh suvadu-owned builtin skills before syncing, so a bare
+    // `suv skills sync` installs them even without a prior
+    // `suv init claude-code`. Unlike that call site's best-effort
+    // handling, errors here propagate — `suv skills sync` already fails
+    // loudly on a real error (see the `?` on the sync call just below).
+    let config = crate::config::load_config_cached()?;
+    crate::skills_builtin::ensure_installed(repo, &config)?;
+
     let report = crate::skills_sync::sync(repo, &targets, &cwd, dry_run)?;
     for line in &report.lines {
         println!("{line}");
