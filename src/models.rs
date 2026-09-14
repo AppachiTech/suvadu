@@ -299,8 +299,9 @@ pub const SKILL_SOURCE_SUVADU: &str = "suvadu";
 /// A reusable instruction/prompt shared across AI coding agents via MCP.
 ///
 /// `scope` is either [`SKILL_SCOPE_GLOBAL`] or an absolute directory path the
-/// skill is specific to. `source` is [`SKILL_SOURCE_HUMAN`] or `agent:<name>`
-/// for agent-proposed skills (see [`SKILL_STATUS_PENDING`]).
+/// skill is specific to. `source` is [`SKILL_SOURCE_HUMAN`], `agent:<name>`
+/// for agent-proposed skills (see [`SKILL_STATUS_PENDING`]), or
+/// [`SKILL_SOURCE_SUVADU`] for a skill suvadu itself seeds and keeps current.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Skill {
     pub id: String,

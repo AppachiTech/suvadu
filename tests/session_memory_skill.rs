@@ -26,6 +26,17 @@ impl Sandbox {
     fn run(&self, args: &[&str]) -> Output {
         self.command().args(args).output().unwrap()
     }
+    /// Same environment as `command()`, but with `current_dir` overridden —
+    /// for exercising behavior that depends on the process cwd differing
+    /// from `$HOME`, while keeping the same sandboxed database/config.
+    fn command_in(&self, dir: &std::path::Path) -> Command {
+        let mut cmd = self.command();
+        cmd.current_dir(dir);
+        cmd
+    }
+    fn run_in(&self, dir: &std::path::Path, args: &[&str]) -> Output {
+        self.command_in(dir).args(args).output().unwrap()
+    }
     /// Ensures config.toml exists (via `suv enable`), then turns on
     /// `mcp.allow_session_summaries` — off by default, and there's no
     /// non-interactive CLI flag to set it directly.
@@ -196,4 +207,100 @@ fn suv_skills_sync_dry_run_does_not_persist_the_builtin_skill_seed() {
 
     // No files should have been written either.
     assert!(!skill_md_path(&s).exists());
+}
+
+#[test]
+fn suv_init_claude_code_still_materializes_after_a_prior_sync_already_seeded_it() {
+    let s = Sandbox::new();
+    s.enable_session_summaries();
+
+    // Seed the skill via a bare sync first (no prior init) — after this,
+    // the DB row is already at its current version, so `ensure_installed`
+    // reports `changed = false` on every subsequent call.
+    let sync_result = s.run(&["skills", "sync"]);
+    assert!(
+        sync_result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sync_result.stderr)
+    );
+    let skill_md = skill_md_path(&s);
+    assert!(skill_md.exists(), "sync should have materialized SKILL.md");
+
+    // Simulate the materialized file going missing (e.g. a prior transient
+    // sync failure, or a user deleting it) while the DB row stays seeded.
+    // Before this fix, `try_install_builtin_skills` only ran the sync when
+    // `ensure_installed` reported a change, so this file would stay
+    // missing forever even after a fresh `suv init claude-code`.
+    std::fs::remove_file(&skill_md).unwrap();
+    assert!(!skill_md.exists());
+
+    let init_result = s.run(&["init", "claude-code"]);
+    assert!(
+        init_result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init_result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&init_result.stdout);
+    assert!(
+        stdout.contains("Installed the suvadu-session-memory skill"),
+        "expected the checkmark line to still print even though the skill \
+         row was already seeded by the prior sync; stdout was:\n{stdout}"
+    );
+
+    let content = std::fs::read_to_string(&skill_md).expect(
+        "suv init claude-code should re-materialize SKILL.md even when \
+         ensure_installed reports no change",
+    );
+    assert!(content.contains("resolve_current_agent_session"));
+}
+
+#[test]
+fn suv_init_claude_code_syncs_against_home_not_the_process_cwd() {
+    let s = Sandbox::new();
+    s.enable_session_summaries();
+
+    // A project directory that is NOT under $HOME, holding its own
+    // project-scoped skill (scope == this directory's path).
+    let project_dir = tempfile::tempdir().unwrap();
+    let add_result = s.run_in(
+        project_dir.path(),
+        &[
+            "skills",
+            "add",
+            "project-only-skill",
+            "--description",
+            "d",
+            "--body",
+            "b",
+            "--scope",
+            "here",
+        ],
+    );
+    assert!(
+        add_result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add_result.stderr)
+    );
+
+    // Run `suv init claude-code` FROM that project directory.
+    let init_result = s.run_in(project_dir.path(), &["init", "claude-code"]);
+    assert!(
+        init_result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init_result.stderr)
+    );
+
+    // The global builtin skill still lands under $HOME.
+    assert!(skill_md_path(&s).exists());
+
+    // But nothing should have been written under the project directory.
+    // Before this fix, `try_install_builtin_skills` synced against
+    // `std::env::current_dir()`, which picked up this project-scoped
+    // skill (`scope == cwd_str`) and wrote it into the project
+    // directory — something `suv init claude-code` had never done
+    // before this feature.
+    assert!(
+        !project_dir.path().join(".claude").exists(),
+        "suv init claude-code must not write anything under the process cwd"
+    );
 }

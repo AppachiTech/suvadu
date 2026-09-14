@@ -800,7 +800,7 @@ pub fn handle_init_claude_code() -> Result<(), Box<dyn std::error::Error>> {
         println!("  AI agents can now query your shell history via MCP.");
     }
 
-    if matches!(try_install_builtin_skills(), Ok(true)) {
+    if matches!(try_install_builtin_skills(&home), Ok(true)) {
         println!("{green}\u{2713}{r} Installed the suvadu-session-memory skill");
         println!(
             "  Reinforces preferring Suvadu's own session summaries over a generic memory note."
@@ -821,18 +821,30 @@ pub fn handle_init_claude_code() -> Result<(), Box<dyn std::error::Error>> {
 /// Seed/refresh suvadu-owned builtin skills and materialize them into
 /// Claude Code's native format immediately, so they're available after
 /// the very first `suv init claude-code`, not only after a later manual
-/// `suv skills sync`. Best-effort: any failure here (config load,
-/// database, sync) must not fail `suv init claude-code` itself, matching
-/// how the MCP-registration step just above already handles its own
-/// failure silently.
-fn try_install_builtin_skills() -> Result<bool, Box<dyn std::error::Error>> {
+/// `suv skills sync`. Runs the sync unconditionally whenever any builtin
+/// skill's gate is satisfied — not only when `ensure_installed` reports a
+/// change — so a skill already seeded by an earlier `suv skills sync`, or
+/// whose materialized file is missing after a prior transient failure,
+/// still gets (re)written on this call. Always syncs against `$HOME`
+/// (never the process's current directory), so this step stays scoped to
+/// global skills regardless of which directory `suv init claude-code` is
+/// run from. Best-effort: any failure here (config load, database, sync)
+/// must not fail `suv init claude-code` itself, matching how the
+/// MCP-registration step just above already handles its own failure
+/// silently.
+fn try_install_builtin_skills(home: &str) -> Result<bool, Box<dyn std::error::Error>> {
     let config = crate::config::load_config_cached()?;
-    let repo = crate::repository::Repository::init()?;
-    if !crate::skills_builtin::ensure_installed(&repo, &config)? {
+    if !crate::skills_builtin::any_builtin_skill_enabled(&config) {
         return Ok(false);
     }
-    let cwd = std::env::current_dir()?;
-    crate::skills_sync::sync(&repo, &[crate::cli::SyncTarget::ClaudeCode], &cwd, false)?;
+    let repo = crate::repository::Repository::init()?;
+    crate::skills_builtin::ensure_installed(&repo, &config)?;
+    crate::skills_sync::sync(
+        &repo,
+        &[crate::cli::SyncTarget::ClaudeCode],
+        std::path::Path::new(home),
+        false,
+    )?;
     Ok(true)
 }
 

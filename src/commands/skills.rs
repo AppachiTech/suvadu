@@ -325,8 +325,13 @@ fn handle_sync(
 
     // Seed/refresh suvadu-owned builtin skills before syncing, so a bare
     // `suv skills sync` installs them even without a prior
-    // `suv init claude-code`. Unlike that call site's best-effort
-    // handling, errors here propagate — `suv skills sync` already fails
+    // `suv init claude-code`. Config-load failures degrade to `Config`'s
+    // defaults (matching `suv mcp-serve`'s own
+    // `load_config().unwrap_or_default()` fallback) rather than blocking
+    // sync of the user's own skills over a malformed config.toml — the
+    // default has `allow_session_summaries = false`, i.e. the gate simply
+    // reads as off. A real database error from `ensure_installed` still
+    // propagates via `?`, matching how `suv skills sync` already fails
     // loudly on a real error (see the `?` on the sync call just below).
     // Gated on `!dry_run`: `ensure_installed` upserts into the skills
     // table, a real DB write, and `--dry-run` must never mutate state —
@@ -335,7 +340,7 @@ fn handle_sync(
     // the new skill's rollout; accepted as a smaller cost than a
     // "dry run" flag silently writing persistent state.
     if !dry_run {
-        let config = crate::config::load_config_cached()?;
+        let config = crate::config::load_config_cached().unwrap_or_default();
         crate::skills_builtin::ensure_installed(repo, &config)?;
     }
 

@@ -13,12 +13,16 @@ const SESSION_MEMORY_BODY: &str =
     "When the user asks to summarize, save, or recall what happened in this
 (or a recent) coding session — e.g. \"summarize this session and save it\",
 \"what did we do earlier\" — prefer Suvadu's own session tracking over
-writing a generic memory note:
+writing a generic memory note, if Suvadu's MCP tools are available in this
+session:
 
 1. Call `resolve_current_agent_session` (don't guess an ID).
 2. Read it with `get_agent_session`, paging through events/commands.
 3. If the user explicitly asked to save, call `save_session_summary` with
    the exact event/command IDs you cited as evidence.
+
+If these tools aren't available (Suvadu's MCP server isn't connected in
+this session), fall back to a normal memory note instead.
 
 Why: Suvadu's summary is anchored to the real commands and events
 captured for this project, not a paraphrase — durable and re-readable by
@@ -44,6 +48,16 @@ fn builtin_skills(config: &Config) -> Vec<NewSkill> {
         });
     }
     skills
+}
+
+/// Whether any suvadu-owned builtin skill's gate is currently satisfied — i.e.
+/// whether `ensure_installed` would seed or keep anything active for this
+/// config. Lets a caller that wants unconditional materialization (not just
+/// on change, see `ensure_installed`'s doc comment) decide whether running a
+/// sync is worth it at all, without duplicating each skill's own gate
+/// condition here.
+pub fn any_builtin_skill_enabled(config: &Config) -> bool {
+    !builtin_skills(config).is_empty()
 }
 
 /// Seed/refresh every suvadu-owned builtin skill whose gate is currently
@@ -115,5 +129,11 @@ mod tests {
         ensure_installed(&repo, &config_with_summaries(true)).unwrap();
         let changed_again = ensure_installed(&repo, &config_with_summaries(true)).unwrap();
         assert!(!changed_again);
+    }
+
+    #[test]
+    fn any_builtin_skill_enabled_matches_the_gate() {
+        assert!(!any_builtin_skill_enabled(&config_with_summaries(false)));
+        assert!(any_builtin_skill_enabled(&config_with_summaries(true)));
     }
 }
