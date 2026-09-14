@@ -291,6 +291,11 @@ pub const SKILL_STATUS_PENDING: &str = "pending_review";
 pub const SKILL_STATUS_ARCHIVED: &str = "archived";
 /// Source value for a human-authored skill (as opposed to `agent:<name>`).
 pub const SKILL_SOURCE_HUMAN: &str = "human";
+/// Source value for a skill suvadu itself seeds and keeps current (as
+/// opposed to a human-authored or agent-proposed one). Always `active`,
+/// never routed through `propose_skill`'s pending-review flow.
+#[allow(dead_code)]
+pub const SKILL_SOURCE_SUVADU: &str = "suvadu";
 
 /// A reusable instruction/prompt shared across AI coding agents via MCP.
 ///

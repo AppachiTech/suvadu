@@ -128,6 +128,32 @@ impl Repository {
         self.get_skill(name, scope)
     }
 
+    /// Create a skill, or update it in place if `(name, scope)` already
+    /// exists. A no-op — no version bump, no `updated_at` change — if the
+    /// existing row's `description`, `body`, and `triggers` already match
+    /// `new` exactly; `update_skill` itself has no such check and
+    /// unconditionally advances `version` on every call.
+    #[allow(dead_code)]
+    pub fn upsert_skill(&self, new: &NewSkill) -> DbResult<Skill> {
+        let Some(existing) = self.get_skill(&new.name, &new.scope)? else {
+            return self.create_skill(new);
+        };
+        if existing.description == new.description
+            && existing.body == new.body
+            && existing.triggers == new.triggers
+        {
+            return Ok(existing);
+        }
+        self.update_skill(
+            &new.name,
+            &new.scope,
+            Some(&new.description),
+            Some(&new.body),
+            Some(&new.triggers),
+        )?
+        .ok_or_else(|| DbError::Validation("skill was deleted during upsert".into()))
+    }
+
     /// Set a skill's `status` (e.g. approving or archiving it). Returns
     /// `None` if no skill matches `(name, scope)`.
     pub fn set_skill_status(
@@ -355,6 +381,61 @@ mod tests {
             .unwrap();
         let ok = repo.create_skill(&new_skill("dup", "/tmp/project", SKILL_STATUS_ACTIVE));
         assert!(ok.is_ok());
+    }
+
+    #[test]
+    fn upsert_skill_creates_when_absent() {
+        let (_dir, repo) = test_repo();
+        let created = repo
+            .upsert_skill(&new_skill(
+                "new-one",
+                SKILL_SCOPE_GLOBAL,
+                SKILL_STATUS_ACTIVE,
+            ))
+            .unwrap();
+        assert_eq!(created.version, 1);
+        assert_eq!(created.name, "new-one");
+    }
+
+    #[test]
+    fn upsert_skill_updates_when_content_differs() {
+        let (_dir, repo) = test_repo();
+        repo.create_skill(&new_skill(
+            "changing",
+            SKILL_SCOPE_GLOBAL,
+            SKILL_STATUS_ACTIVE,
+        ))
+        .unwrap();
+
+        let mut updated = new_skill("changing", SKILL_SCOPE_GLOBAL, SKILL_STATUS_ACTIVE);
+        updated.body = "# changing\n\nDo a different thing now.".to_string();
+        let result = repo.upsert_skill(&updated).unwrap();
+
+        assert_eq!(result.version, 2);
+        assert_eq!(result.body, "# changing\n\nDo a different thing now.");
+    }
+
+    #[test]
+    fn upsert_skill_is_a_noop_when_content_is_identical() {
+        let (_dir, repo) = test_repo();
+        let first = repo
+            .upsert_skill(&new_skill(
+                "stable",
+                SKILL_SCOPE_GLOBAL,
+                SKILL_STATUS_ACTIVE,
+            ))
+            .unwrap();
+
+        let second = repo
+            .upsert_skill(&new_skill(
+                "stable",
+                SKILL_SCOPE_GLOBAL,
+                SKILL_STATUS_ACTIVE,
+            ))
+            .unwrap();
+
+        assert_eq!(second.version, first.version);
+        assert_eq!(second.updated_at, first.updated_at);
     }
 
     #[test]
