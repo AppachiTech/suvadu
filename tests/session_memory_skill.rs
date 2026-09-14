@@ -162,3 +162,38 @@ fn suv_skills_sync_default_reaches_cursor_and_codex_too() {
     let agents_content = std::fs::read_to_string(&codex_agents).unwrap();
     assert!(agents_content.contains("resolve_current_agent_session"));
 }
+
+#[test]
+fn suv_skills_sync_dry_run_does_not_persist_the_builtin_skill_seed() {
+    let s = Sandbox::new();
+    s.enable_session_summaries();
+
+    // No prior `suv init claude-code` or `suv skills sync` — the skill
+    // has never been seeded into the DB before this dry run.
+    let result = s.run(&["skills", "sync", "--dry-run"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    // `--dry-run` must preview without writing — including to the
+    // database. `ensure_installed` upserts a row, so it must be skipped
+    // entirely on a dry run rather than merely suppressing the file
+    // writes it feeds into.
+    let list = s.run(&["skills", "list", "--json"]);
+    assert!(
+        list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    let list_json = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        !list_json.contains("suvadu-session-memory"),
+        "suv skills sync --dry-run must not persist the builtin skill into \
+         the skills table, but `suv skills list --json` shows it:\n{list_json}"
+    );
+
+    // No files should have been written either.
+    assert!(!skill_md_path(&s).exists());
+}

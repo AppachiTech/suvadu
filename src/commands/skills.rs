@@ -328,8 +328,16 @@ fn handle_sync(
     // `suv init claude-code`. Unlike that call site's best-effort
     // handling, errors here propagate — `suv skills sync` already fails
     // loudly on a real error (see the `?` on the sync call just below).
-    let config = crate::config::load_config_cached()?;
-    crate::skills_builtin::ensure_installed(repo, &config)?;
+    // Gated on `!dry_run`: `ensure_installed` upserts into the skills
+    // table, a real DB write, and `--dry-run` must never mutate state —
+    // it only previews the file writes below. This means a first-time
+    // `--dry-run` (before the skill has ever been seeded) won't preview
+    // the new skill's rollout; accepted as a smaller cost than a
+    // "dry run" flag silently writing persistent state.
+    if !dry_run {
+        let config = crate::config::load_config_cached()?;
+        crate::skills_builtin::ensure_installed(repo, &config)?;
+    }
 
     let report = crate::skills_sync::sync(repo, &targets, &cwd, dry_run)?;
     for line in &report.lines {
