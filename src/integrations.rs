@@ -1443,10 +1443,12 @@ export default function (pi: ExtensionAPI): void {
 /// was found unreliable against a real local install (the plugin loaded only
 /// once its directory was also explicitly listed in the `"plugin"` array of
 /// `~/.config/opencode/opencode.jsonc`). This writes the plugin script and
-/// then also ensures that config registration, via
-/// `try_configure_opencode_plugin`, rather than relying on auto-discovery.
+/// then ensures both that config registration and MCP server registration,
+/// via `try_configure_opencode`, rather than relying on auto-discovery.
 pub fn handle_init_opencode() -> Result<(), Box<dyn std::error::Error>> {
     let home = std::env::var("HOME")?;
+    let current_exe = std::env::current_exe()?;
+    let bin_path = current_exe.to_string_lossy().to_string();
 
     // Write plugin to opencode's global plugins directory
     let plugins_dir = PathBuf::from(&home).join(".opencode").join("plugins");
@@ -1472,14 +1474,17 @@ pub fn handle_init_opencode() -> Result<(), Box<dyn std::error::Error>> {
         plugin_path.display()
     );
 
-    match try_configure_opencode_plugin(&plugins_dir) {
+    match try_configure_opencode(&plugins_dir, &bin_path) {
         Ok(()) => {
             println!("{green}\u{2713}{r} Registered plugin directory in opencode.jsonc");
+            println!("{green}\u{2713}{r} MCP server auto-configured in opencode.jsonc");
+            println!("  AI agents in OpenCode can now query your shell history via MCP.");
         }
         Err(e) => {
             println!("{yellow}\u{26a0}{r} Could not update opencode.jsonc automatically: {e}");
+            println!("  Add this to ~/.config/opencode/opencode.jsonc yourself:");
             println!(
-                "  Add this to ~/.config/opencode/opencode.jsonc yourself: {{\"plugin\": [\"{}\"]}}",
+                "  {{\"plugin\": [\"{}\"], \"mcp\": {{\"suvadu\": {{\"type\": \"local\", \"command\": [\"{bin_path}\", \"mcp-serve\"]}}}}}}",
                 plugins_dir.display()
             );
         }
@@ -1496,13 +1501,21 @@ pub fn handle_init_opencode() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Auto-configure the plugin directory in `OpenCode`'s
-/// `~/.config/opencode/opencode.jsonc`. Adds `plugins_dir` to the top-level
-/// `"plugin"` array if it isn't already listed. Errors (e.g. an existing
-/// config containing JSONC comments, which this plain-JSON parse can't
-/// round-trip safely) are surfaced to the caller rather than risking
-/// corruption of a file that holds the user's other `OpenCode` settings too.
-fn try_configure_opencode_plugin(plugins_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+/// Auto-configure `OpenCode`'s `~/.config/opencode/opencode.jsonc`: adds
+/// `plugins_dir` to the top-level `"plugin"` array, and registers `suvadu`
+/// as a local MCP server under `"mcp"` (`OpenCode`'s own `"mcp".<name>` shape,
+/// distinct from Claude Code/Cursor's `"mcpServers"` and Codex's
+/// `[mcp_servers.*]`). Each is only added if not already present -- an
+/// existing `"mcp".suvadu` entry is left untouched rather than overwritten,
+/// so a user's own customization (e.g. `"enabled": false`) survives a
+/// rerun. Errors (e.g. an existing config containing JSONC comments, which
+/// this plain-JSON parse can't round-trip safely) are surfaced to the
+/// caller rather than risking corruption of a file that holds the user's
+/// other `OpenCode` settings too.
+fn try_configure_opencode(
+    plugins_dir: &Path,
+    bin_path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let home = std::env::var("HOME")?;
     let config_dir = PathBuf::from(&home).join(".config").join("opencode");
     std::fs::create_dir_all(&config_dir)?;
@@ -1518,22 +1531,38 @@ fn try_configure_opencode_plugin(plugins_dir: &Path) -> Result<(), Box<dyn std::
     let obj = config
         .as_object_mut()
         .ok_or("opencode.jsonc root is not an object")?;
+
     let plugin_entry = obj.entry("plugin").or_insert_with(|| serde_json::json!([]));
     let plugin_array = plugin_entry
         .as_array_mut()
         .ok_or("\"plugin\" in opencode.jsonc is not an array")?;
-
     let dir_str = plugins_dir.to_string_lossy().to_string();
-    let already_present = plugin_array
+    let plugin_changed = !plugin_array
         .iter()
         .any(|v| v.as_str() == Some(dir_str.as_str()));
-    if already_present {
-        return Ok(());
+    if plugin_changed {
+        plugin_array.push(serde_json::Value::String(dir_str));
     }
-    plugin_array.push(serde_json::Value::String(dir_str));
 
-    let updated = serde_json::to_string_pretty(&config)?;
-    atomic_write(&config_path, &updated)?;
+    let mcp_entry = obj.entry("mcp").or_insert_with(|| serde_json::json!({}));
+    let mcp_obj = mcp_entry
+        .as_object_mut()
+        .ok_or("\"mcp\" in opencode.jsonc is not an object")?;
+    let mcp_changed = !mcp_obj.contains_key("suvadu");
+    if mcp_changed {
+        mcp_obj.insert(
+            "suvadu".to_string(),
+            serde_json::json!({
+                "type": "local",
+                "command": [bin_path, "mcp-serve"]
+            }),
+        );
+    }
+
+    if plugin_changed || mcp_changed {
+        let updated = serde_json::to_string_pretty(&config)?;
+        atomic_write(&config_path, &updated)?;
+    }
     Ok(())
 }
 

@@ -493,6 +493,74 @@ fn suv_init_opencode_writes_the_fixed_plugin_and_registers_it_once() {
 }
 
 #[test]
+fn suv_init_opencode_registers_an_mcp_server_and_is_idempotent() {
+    // OpenCode supports MCP the same as Claude Code/Cursor/Codex, but under
+    // its own "mcp".<name> shape (not "mcpServers" or "[mcp_servers.*]").
+    // Without this, an OpenCode session has no way to reach suvadu's MCP
+    // tools (search_commands, get_agent_session, resolve_current_agent_session,
+    // etc.) even though command/session capture works via the plugin alone.
+    let s = Sandbox::new();
+
+    let first = s.run(&["init", "opencode"]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(opencode_config_path(&s)).unwrap()).unwrap();
+    let server = &config["mcp"]["suvadu"];
+    assert_eq!(server["type"], "local");
+    let command = server["command"].as_array().unwrap();
+    assert_eq!(command.len(), 2);
+    assert!(
+        command[0].as_str().unwrap().ends_with("/suv") || command[0].as_str().unwrap() == "suv",
+        "command[0] should be the suv binary path: {command:?}"
+    );
+    assert_eq!(command[1], "mcp-serve");
+
+    // Re-running init must not duplicate or reset an existing entry.
+    let second = s.run(&["init", "opencode"]);
+    assert!(second.status.success());
+    let config2: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(opencode_config_path(&s)).unwrap()).unwrap();
+    assert_eq!(config2["mcp"].as_object().unwrap().len(), 1);
+    assert_eq!(config2["mcp"]["suvadu"], config["mcp"]["suvadu"]);
+}
+
+#[test]
+fn suv_init_opencode_preserves_a_users_customized_mcp_entry() {
+    // A user who disabled or otherwise customized the suvadu MCP entry
+    // (e.g. "enabled": false) must not have that silently reset on the
+    // next suv init opencode -- only a missing entry should be added.
+    let s = Sandbox::new();
+    let config_path = opencode_config_path(&s);
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config_path,
+        serde_json::json!({
+            "mcp": {
+                "suvadu": {"type": "local", "command": ["suv", "mcp-serve"], "enabled": false}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let result = s.run(&["init", "opencode"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(config["mcp"]["suvadu"]["enabled"], false);
+    assert_eq!(config["mcp"]["suvadu"]["command"][0], "suv");
+}
+
+#[test]
 fn suv_init_opencode_does_not_corrupt_a_jsonc_config_it_cannot_parse() {
     let s = Sandbox::new();
     let config_path = opencode_config_path(&s);
@@ -516,4 +584,9 @@ fn suv_init_opencode_does_not_corrupt_a_jsonc_config_it_cannot_parse() {
     );
     let stdout = String::from_utf8(result.stdout).unwrap();
     assert!(stdout.contains("Could not update opencode.jsonc automatically"));
+    // The manual fallback must cover both the plugin registration and the
+    // MCP server, not just whichever one this function used to configure.
+    assert!(stdout.contains("\"plugin\""));
+    assert!(stdout.contains("\"mcp\""));
+    assert!(stdout.contains("mcp-serve"));
 }
