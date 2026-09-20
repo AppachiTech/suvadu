@@ -15,154 +15,371 @@ use ratatui::{
 use std::io;
 
 use super::format::{
-    build_command_text, entry_row_styles, format_executor, format_exit_code, ColumnLayout,
+    build_command_text, detail_placement, display_width, entry_row_styles, fit_hints, fit_prefix,
+    format_executor, format_exit_code, ColumnLayout, DetailPlacement, Hint, StatusSegment,
+    DETAIL_BOTTOM_HEIGHT,
 };
 use super::{centered_rect, fill_text, DialogState, SearchApp};
+
+/// Cells reserved for the `"+N"` marker that stands in for status-row filter
+/// badges which do not fit.
+const MORE_FILTERS_WIDTH: usize = 5;
+
+/// Push one footer hint (`" ^F "` + `" Filter  "`) onto `spans`.
+fn push_hint(spans: &mut Vec<Span<'static>>, hint: Hint, key: Style, label: Style) {
+    spans.push(Span::styled(format!(" {} ", hint.key), key));
+    spans.push(Span::styled(format!(" {}  ", hint.label), label));
+}
 
 impl SearchApp {
     pub(super) fn render(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
     ) -> io::Result<()> {
-        terminal.draw(|f| {
-            let t = theme();
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(1), // Branding
-                    Constraint::Length(3), // Query input
-                    Constraint::Min(0),    // Results list
-                    Constraint::Length(2), // Help text
-                ])
-                .split(f.area());
+        terminal.draw(|f| self.draw(f))?;
 
-            // Minimalist Header
-            let branding = Line::from(vec![Span::styled(
-                "SUVADU SEARCH",
-                Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
-            )]);
-            f.render_widget(
-                Paragraph::new(branding).alignment(Alignment::Center),
-                chunks[0],
+        Ok(())
+    }
+
+    /// Backend-independent draw pass. Kept separate from [`Self::render`] so
+    /// tests can render the whole screen into a `TestBackend`.
+    pub(super) fn draw(&mut self, f: &mut ratatui::Frame) {
+        let t = theme();
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // Branding
+                Constraint::Length(3), // Query input
+                Constraint::Length(1), // Scope / mode status row
+                Constraint::Min(0),    // Results list
+                Constraint::Length(2), // Help text
+            ])
+            .split(f.area());
+
+        // Minimalist Header
+        let branding = Line::from(vec![Span::styled(
+            "SUVADU SEARCH",
+            Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+        )]);
+        f.render_widget(
+            Paragraph::new(branding).alignment(Alignment::Center),
+            chunks[0],
+        );
+
+        // Dynamic Search Bar
+        let active_filters = self.active_filter_count();
+        let filter_badge = if active_filters > 0 {
+            format!(
+                " [{active_filters} filter{}]",
+                if active_filters > 1 { "s" } else { "" }
+            )
+        } else {
+            String::new()
+        };
+        let unique_badge = if self.view.unique_mode {
+            " [unique]"
+        } else {
+            ""
+        };
+
+        // Any overlay (filter, help, delete, goto, tag, note) takes focus
+        // away from the search box, so it renders dimmed while one is up.
+        let overlay_focused = !matches!(self.dialog, DialogState::None);
+        let vim_normal = self.vim_enabled && self.vim_mode == super::VimMode::Normal;
+        let search_border_color = if overlay_focused || vim_normal {
+            t.border
+        } else {
+            t.border_focus
+        };
+        let search_title = if overlay_focused {
+            "Search"
+        } else if vim_normal {
+            "Search (Normal)"
+        } else {
+            "Search (Typing)"
+        };
+        let query_display = format!("{}{filter_badge}{unique_badge}", self.query);
+        let query = Paragraph::new(query_display)
+            .style(Style::default().fg(t.text))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(search_border_color))
+                    .title(search_title),
             );
+        f.render_widget(query, chunks[1]);
 
-            // Dynamic Search Bar
-            let active_filters = self.active_filter_count();
-            let filter_badge = if active_filters > 0 {
-                format!(
-                    " [{active_filters} filter{}]",
-                    if active_filters > 1 { "s" } else { "" }
-                )
-            } else {
-                String::new()
-            };
-            let unique_badge = if self.view.unique_mode {
-                " [unique]"
-            } else {
-                ""
-            };
+        // Persistent scope / matching-mode status row
+        self.render_status_row(f, chunks[2]);
 
-            let in_filter = matches!(self.dialog, DialogState::Filter);
-            let vim_normal = self.vim_enabled && self.vim_mode == super::VimMode::Normal;
-            let search_border_color = if in_filter || vim_normal {
-                t.border
-            } else {
-                t.border_focus
-            };
-            let search_title = if in_filter {
-                "Search"
-            } else if vim_normal {
-                "Search (Normal)"
-            } else {
-                "Search (Typing)"
-            };
-            let query_display = format!("{}{filter_badge}{unique_badge}", self.query);
-            let query = Paragraph::new(query_display)
-                .style(Style::default().fg(t.text))
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded)
-                        .border_style(Style::default().fg(search_border_color))
-                        .title(search_title),
-                );
-            f.render_widget(query, chunks[1]);
+        // Results Table + Optional Detail Pane
+        self.render_results_area(f, chunks[3]);
 
-            // Results Table + Optional Detail Pane
-            if self.view.detail_pane_open {
-                let result_chunks = Layout::default()
+        // Footer
+        self.render_footer(f, chunks[4]);
+
+        // Render Overlays
+        match self.dialog {
+            DialogState::Filter => self.render_filter_popup(f, f.area()),
+            DialogState::GoToPage { .. } => self.render_goto_dialog(f, f.area()),
+            DialogState::Delete { .. } => self.render_delete_dialog(f, f.area()),
+            DialogState::TagAssociation => self.render_tag_dialog(f, f.area()),
+            DialogState::Note { .. } => self.render_note_dialog(f, f.area()),
+            DialogState::Help => self.render_help_dialog(f, f.area()),
+            DialogState::None => {}
+        }
+    }
+
+    // --- results area placement (PROD-03) ---
+
+    /// Render the results table plus, if it fits, the detail pane.
+    ///
+    /// On narrow terminals a 30% side pane squeezes the command column until
+    /// results are unreadable, so the pane moves underneath the results (where
+    /// it also has the full width for wrapping multiline commands).
+    fn render_results_area(&mut self, f: &mut ratatui::Frame, area: Rect) {
+        match detail_placement(self.view.detail_pane_open, area.width, area.height) {
+            DetailPlacement::Right => {
+                let chunks = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([
                         Constraint::Percentage(70), // Results
                         Constraint::Percentage(30), // Detail
                     ])
-                    .split(chunks[2]);
-                self.render_results_table(f, result_chunks[0]);
-                self.render_detail_pane(f, result_chunks[1]);
+                    .split(area);
+                self.render_results_table(f, chunks[0]);
+                self.render_detail_pane(f, chunks[1]);
+            }
+            DetailPlacement::Bottom => {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(5), Constraint::Length(DETAIL_BOTTOM_HEIGHT)])
+                    .split(area);
+                self.render_results_table(f, chunks[0]);
+                self.render_detail_pane(f, chunks[1]);
+            }
+            DetailPlacement::Hidden => self.render_results_table(f, area),
+        }
+    }
+
+    // --- persistent status row (PROD-03) ---
+
+    /// Scope, matching mode, result mode and agent visibility, as a compact
+    /// always-visible row between the search box and the results.
+    pub(super) fn render_status_row(&self, f: &mut ratatui::Frame, area: Rect) {
+        let t = theme();
+        let label_style = Style::default()
+            .fg(t.text_secondary)
+            .add_modifier(Modifier::BOLD);
+        let value_style = Style::default()
+            .bg(t.primary)
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD);
+
+        let width = area.width as usize;
+        let segments = self.status_segments();
+        let shown = fit_prefix(&segments, width, StatusSegment::width);
+
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut used = 0usize;
+        for segment in &segments[..shown] {
+            spans.push(Span::styled(format!(" {} ", segment.label), label_style));
+            spans.push(Span::styled(format!(" {} ", segment.value), value_style));
+            spans.push(Span::raw(" "));
+            used += segment.width();
+        }
+
+        // Active filters trail the fixed segments; any that do not fit are
+        // replaced by a "+N" marker instead of being clipped.
+        let mut remaining = width.saturating_sub(used);
+        let mut hidden = 0usize;
+        for (text, style) in self.active_filter_badges() {
+            let badge_width = display_width(&text) + 1;
+            if hidden == 0 && badge_width + MORE_FILTERS_WIDTH <= remaining {
+                spans.push(Span::styled(text, style));
+                spans.push(Span::raw(" "));
+                remaining -= badge_width;
             } else {
-                self.render_results_table(f, chunks[2]);
+                hidden += 1;
             }
-
-            // Footer
-            self.render_footer(f, chunks[3]);
-
-            // Render Overlays
-            match self.dialog {
-                DialogState::Filter => self.render_filter_popup(f, f.area()),
-                DialogState::GoToPage { .. } => self.render_goto_dialog(f, f.area()),
-                DialogState::Delete { .. } => self.render_delete_dialog(f, f.area()),
-                DialogState::TagAssociation => self.render_tag_dialog(f, f.area()),
-                DialogState::Note { .. } => self.render_note_dialog(f, f.area()),
-                DialogState::Help => self.render_help_dialog(f, f.area()),
-                DialogState::None => {}
+        }
+        if hidden > 0 {
+            let marker = format!(" +{hidden} ");
+            if display_width(&marker) <= remaining {
+                spans.push(Span::styled(marker, Style::default().fg(t.text_muted)));
             }
-        })?;
+        }
 
-        Ok(())
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
+    /// The fixed status segments, in the order they are dropped from the right
+    /// when the terminal is too narrow for all of them.
+    fn status_segments(&self) -> Vec<StatusSegment> {
+        vec![
+            StatusSegment::new(
+                "Scope",
+                if self.filters.cwd.is_some() {
+                    "Here"
+                } else {
+                    "All dirs"
+                },
+            ),
+            StatusSegment::new(
+                "Match",
+                if self.view.context_boost {
+                    "Smart"
+                } else {
+                    "Recent"
+                },
+            ),
+            StatusSegment::new(
+                "Agents",
+                if self.filters.show_agents {
+                    "Shown"
+                } else {
+                    "Hidden"
+                },
+            ),
+            StatusSegment::new(
+                "Show",
+                if self.view.unique_mode {
+                    "Unique"
+                } else {
+                    "All"
+                },
+            ),
+        ]
+    }
+
+    /// Colored badges for the filters that are not covered by a fixed segment.
+    fn active_filter_badges(&self) -> Vec<(String, Style)> {
+        let t = theme();
+        let mut badges = Vec::new();
+        if self.filters.after.is_some() || self.filters.before.is_some() {
+            badges.push((
+                " date ".to_string(),
+                Style::default().bg(t.info).fg(Color::Black),
+            ));
+        }
+        if self.filters.tag_id.is_some() {
+            badges.push((
+                " tag ".to_string(),
+                Style::default().bg(t.warning).fg(Color::Black),
+            ));
+        }
+        if self.filters.exit_code.is_some() {
+            badges.push((
+                " exit ".to_string(),
+                Style::default().bg(t.error).fg(Color::White),
+            ));
+        }
+        if self.filters.executor_type.is_some() {
+            badges.push((
+                " exec ".to_string(),
+                Style::default().bg(t.badge_executor).fg(Color::White),
+            ));
+        }
+        if self.filters.failed_only {
+            badges.push((
+                " failed ".to_string(),
+                Style::default().bg(t.error).fg(Color::White),
+            ));
+        }
+        if self.filters.bookmarks_only {
+            badges.push((
+                " marked ".to_string(),
+                Style::default().bg(t.warning).fg(Color::Black),
+            ));
+        }
+        badges
     }
 
     // --- render_footer (decomposed) ---
 
+    /// Footer hints, laid out to the terminal width.
+    ///
+    /// Help and the cancel hint are pinned, the accept/navigate/filter/detail
+    /// hints come next, and secondary actions fill whatever is left. A hint
+    /// that does not fit entirely is dropped — never clipped mid-badge. Every
+    /// dropped shortcut is still listed in the help overlay (`?`).
     pub(super) fn render_footer(&self, f: &mut ratatui::Frame, area: Rect) {
         let t = theme();
-        let total_pages = self
-            .pagination
-            .total_items
-            .div_ceil(self.pagination.page_size)
-            .max(1);
-        let progress_pct = (self.pagination.page * 100)
-            .checked_div(total_pages)
-            .unwrap_or(0);
+        let badge_key_style = Style::default().bg(t.badge_bg).fg(t.text);
+        let badge_label_style = Style::default().fg(t.text_secondary);
 
-        let status_text = if let Some((msg, time)) = &self.status_message {
-            if time.elapsed() < std::time::Duration::from_secs(2) {
-                Some(msg.clone())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let mut budget = area.width as usize;
 
-        let mut help_badges = self.build_help_badges();
-        self.append_active_filter_badges(&mut help_badges);
+        // 1. Vim mode badge — says which key set is live.
+        let mode = self.vim_mode_badge();
+        let show_mode = mode
+            .as_ref()
+            .is_some_and(|(text, _)| display_width(text) + 4 <= budget);
+        if let (true, Some((text, _))) = (show_mode, mode.as_ref()) {
+            budget -= display_width(text) + 4;
+        }
 
-        // Page progress
-        let page_info = format!(
-            " {}/{} ({progress_pct}%) ",
-            self.pagination.page, total_pages
-        );
-        help_badges.push(Span::styled(page_info, Style::default().fg(t.text_muted)));
+        // 2. Help stays discoverable at every width.
+        let help = Hint::new("?", "Help");
+        let show_help = help.width() <= budget;
+        if show_help {
+            budget -= help.width();
+        }
 
-        if let Some(msg) = status_text {
-            help_badges.push(Span::styled(
+        // 3. Cancel / quit.
+        let quit = self.quit_hint();
+        let show_quit = quit.width() <= budget;
+        if show_quit {
+            budget -= quit.width();
+        }
+
+        // 4. Transient status message (result of the last action).
+        let status = self.transient_status_message();
+        let show_status = status
+            .as_ref()
+            .is_some_and(|msg| display_width(msg) + 2 <= budget);
+        if let (true, Some(msg)) = (show_status, status.as_ref()) {
+            budget -= display_width(msg) + 2;
+        }
+
+        // 5. Ordered hints, dropped whole from the tail.
+        let hints = self.footer_hints();
+        let shown = fit_hints(&hints, budget);
+        budget -= hints[..shown].iter().map(Hint::width).sum::<usize>();
+
+        // 6. Page position, only if there is room left over.
+        let page_info = self.page_indicator();
+        let show_page = display_width(&page_info) + 2 <= budget;
+
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        if let (true, Some((text, style))) = (show_mode, mode) {
+            spans.push(Span::styled(format!(" {text} "), style));
+            spans.push(Span::styled("  ", badge_label_style));
+        }
+        if show_quit {
+            push_hint(&mut spans, quit, badge_key_style, badge_label_style);
+        }
+        for hint in &hints[..shown] {
+            push_hint(&mut spans, *hint, badge_key_style, badge_label_style);
+        }
+        if show_help {
+            push_hint(&mut spans, help, badge_key_style, badge_label_style);
+        }
+        if show_page {
+            spans.push(Span::styled(
+                format!(" {page_info} "),
+                Style::default().fg(t.text_muted),
+            ));
+        }
+        if let (true, Some(msg)) = (show_status, status) {
+            spans.push(Span::styled(
                 format!(" {msg} "),
                 Style::default().fg(t.success).add_modifier(Modifier::BOLD),
             ));
         }
 
-        let help_line = Line::from(help_badges);
-        let help_paragraph = Paragraph::new(help_line).block(
+        let help_paragraph = Paragraph::new(Line::from(spans)).block(
             Block::default()
                 .borders(Borders::TOP)
                 .border_type(BorderType::Rounded)
@@ -171,175 +388,91 @@ impl SearchApp {
         f.render_widget(help_paragraph, area);
     }
 
-    #[allow(clippy::too_many_lines)]
-    fn build_help_badges(&self) -> Vec<Span<'static>> {
-        let t = theme();
-        let badge_key_style = Style::default().bg(t.badge_bg).fg(t.text);
-        let badge_label_style = Style::default().fg(t.text_secondary);
-
-        // Vim mode indicator
-        if self.vim_enabled {
-            let is_normal = self.vim_mode == super::VimMode::Normal;
-            let mut badges = vec![
-                Span::styled(
-                    if is_normal { " NORMAL " } else { " INSERT " },
-                    Style::default()
-                        .bg(if is_normal { t.primary } else { t.success })
-                        .fg(Color::Black)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("  ", badge_label_style),
-            ];
-            if is_normal {
-                badges.extend_from_slice(&[
-                    Span::styled(" j/k ", badge_key_style),
-                    Span::styled(" Nav  ", badge_label_style),
-                    Span::styled(" ^U/^D ", badge_key_style),
-                    Span::styled(" Scroll  ", badge_label_style),
-                    Span::styled(" / ", badge_key_style),
-                    Span::styled(" Search  ", badge_label_style),
-                    Span::styled(" q ", badge_key_style),
-                    Span::styled(" Quit  ", badge_label_style),
-                ]);
-            } else {
-                badges.extend_from_slice(&[
-                    Span::styled(" Esc ", badge_key_style),
-                    Span::styled(" Normal  ", badge_label_style),
-                ]);
-            }
-            return badges;
+    /// The vim mode indicator, when vim keys are enabled.
+    fn vim_mode_badge(&self) -> Option<(&'static str, Style)> {
+        if !self.vim_enabled {
+            return None;
         }
-
-        vec![
-            Span::styled(" Esc ", badge_key_style),
-            Span::styled(" Quit  ", badge_label_style),
-            Span::styled(" ^F ", badge_key_style),
-            Span::styled(" Filter  ", badge_label_style),
-            Span::styled(" ^D ", badge_key_style),
-            Span::styled(" Delete  ", badge_label_style),
-            Span::styled(" ^T ", badge_key_style),
-            Span::styled(" Tag  ", badge_label_style),
-            Span::styled(" ^G ", badge_key_style),
-            Span::styled(" Goto  ", badge_label_style),
-            Span::styled(" ^U ", badge_key_style),
-            Span::styled(
-                if self.view.unique_mode {
-                    " All  "
-                } else {
-                    " Unique  "
-                },
-                badge_label_style,
-            ),
-            Span::styled(" ^Y ", badge_key_style),
-            Span::styled(" Copy  ", badge_label_style),
-            Span::styled(" ^B ", badge_key_style),
-            Span::styled(" Bookmark  ", badge_label_style),
-            Span::styled(" ^N ", badge_key_style),
-            Span::styled(" Note  ", badge_label_style),
-            Span::styled(" ^L ", badge_key_style),
-            Span::styled(
-                if self.filters.cwd.is_some() {
-                    " All Dirs  "
-                } else {
-                    " Here  "
-                },
-                badge_label_style,
-            ),
-            Span::styled(" ^S ", badge_key_style),
-            Span::styled(
-                if self.view.context_boost {
-                    " Recent  "
-                } else {
-                    " Smart  "
-                },
-                badge_label_style,
-            ),
-            Span::styled(" ^A ", badge_key_style),
-            Span::styled(
-                if self.filters.show_agents {
-                    " Hide AI  "
-                } else {
-                    " Show AI  "
-                },
-                badge_label_style,
-            ),
-            Span::styled(" ^E ", badge_key_style),
-            Span::styled(
-                if self.filters.failed_only {
-                    " All  "
-                } else {
-                    " Failed  "
-                },
-                badge_label_style,
-            ),
-            Span::styled(" ^O ", badge_key_style),
-            Span::styled(
-                if self.filters.bookmarks_only {
-                    " All  "
-                } else {
-                    " Marked  "
-                },
-                badge_label_style,
-            ),
-            Span::styled(" Tab ", badge_key_style),
-            Span::styled(
-                if self.view.detail_pane_open {
-                    " Hide  "
-                } else {
-                    " Detail  "
-                },
-                badge_label_style,
-            ),
-            Span::styled(" ? ", badge_key_style),
-            Span::styled(" Help  ", badge_label_style),
-        ]
+        let t = theme();
+        let is_normal = self.vim_mode == super::VimMode::Normal;
+        Some((
+            if is_normal { "NORMAL" } else { "INSERT" },
+            Style::default()
+                .bg(if is_normal { t.primary } else { t.success })
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        ))
     }
 
-    fn append_active_filter_badges(&self, badges: &mut Vec<Span<'static>>) {
-        let t = theme();
+    /// The cancel hint: quit, or leave vim insert mode.
+    const fn quit_hint(&self) -> Hint {
+        if self.vim_enabled {
+            if matches!(self.vim_mode, super::VimMode::Normal) {
+                Hint::new("q", "Quit")
+            } else {
+                Hint::new("Esc", "Normal")
+            }
+        } else {
+            Hint::new("Esc", "Quit")
+        }
+    }
 
-        if self.filters.after.is_some() || self.filters.before.is_some() {
-            badges.push(Span::styled(
-                " date ",
-                Style::default().bg(t.info).fg(Color::Black),
-            ));
-            badges.push(Span::raw(" "));
-        }
-        if self.filters.tag_id.is_some() {
-            badges.push(Span::styled(
-                " tag ",
-                Style::default().bg(t.warning).fg(Color::Black),
-            ));
-            badges.push(Span::raw(" "));
-        }
-        if self.filters.exit_code.is_some() {
-            badges.push(Span::styled(
-                " exit ",
-                Style::default().bg(t.error).fg(Color::White),
-            ));
-            badges.push(Span::raw(" "));
-        }
-        if self.filters.executor_type.is_some() {
-            badges.push(Span::styled(
-                " exec ",
-                Style::default().bg(t.badge_executor).fg(Color::White),
-            ));
-            badges.push(Span::raw(" "));
-        }
-        if self.filters.cwd.is_some() {
-            badges.push(Span::styled(
-                " dir ",
-                Style::default().bg(t.badge_path).fg(Color::Black),
-            ));
-            badges.push(Span::raw(" "));
-        }
-        if self.view.context_boost {
-            badges.push(Span::styled(
-                " smart ",
-                Style::default().bg(t.success).fg(Color::Black),
-            ));
-            badges.push(Span::raw(" "));
-        }
+    /// Footer hints in priority order. Labels are fixed (the current state is
+    /// shown in the status row instead) so badges do not jump around as the
+    /// user toggles modes.
+    fn footer_hints(&self) -> Vec<Hint> {
+        let mut hints = if self.vim_enabled && self.vim_mode == super::VimMode::Normal {
+            vec![
+                Hint::new("j/k", "Nav"),
+                Hint::new("\u{21b5}", "Run"),
+                Hint::new("/", "Search"),
+                Hint::new("^F", "Filter"),
+                Hint::new("Tab", "Detail"),
+                Hint::new("^U/^D", "Scroll"),
+            ]
+        } else {
+            vec![
+                Hint::new("\u{21b5}", "Run"),
+                Hint::new("\u{2191}\u{2193}", "Nav"),
+                Hint::new("^F", "Filter"),
+                Hint::new("Tab", "Detail"),
+            ]
+        };
+        hints.extend_from_slice(&[
+            Hint::new("^Y", "Copy"),
+            Hint::new("^B", "Bookmark"),
+            Hint::new("^U", "Unique"),
+            Hint::new("^A", "Agents"),
+            Hint::new("^L", "Scope"),
+            Hint::new("^E", "Failed"),
+            Hint::new("^O", "Marked"),
+            Hint::new("^N", "Note"),
+            Hint::new("^T", "Tag"),
+            Hint::new("^D", "Delete"),
+            Hint::new("^G", "Goto"),
+            Hint::new("^S", "Match"),
+        ]);
+        hints
+    }
+
+    /// `"2/7 (28%)"` — current page position.
+    fn page_indicator(&self) -> String {
+        let total_pages = self
+            .pagination
+            .total_items
+            .div_ceil(self.pagination.page_size)
+            .max(1);
+        let progress_pct = (self.pagination.page * 100)
+            .checked_div(total_pages)
+            .unwrap_or(0);
+        format!("{}/{total_pages} ({progress_pct}%)", self.pagination.page)
+    }
+
+    /// The last action's result, while it is still fresh.
+    fn transient_status_message(&self) -> Option<String> {
+        self.status_message.as_ref().and_then(|(msg, time)| {
+            (time.elapsed() < std::time::Duration::from_secs(2)).then(|| msg.clone())
+        })
     }
 
     // --- render_results_table (decomposed) ---
@@ -1167,7 +1300,7 @@ impl SearchApp {
         let _ = &self.dialog;
 
         let t = theme();
-        let popup_area = centered_rect(70, 80, area);
+        let popup_area = centered_rect(90, 85, area);
         f.render_widget(Clear, popup_area);
 
         let block = Block::default()
@@ -1177,9 +1310,18 @@ impl SearchApp {
             .border_style(Style::default().fg(t.primary))
             .style(Style::default().bg(t.bg_elevated));
 
-        let lines = build_help_lines(t);
-        let content = Paragraph::new(lines).block(block);
-        f.render_widget(content, popup_area);
+        // Two columns so the full shortcut list — including everything the
+        // footer had to drop — fits an 80x24 terminal without scrolling.
+        let inner = block.inner(popup_area);
+        f.render_widget(block, popup_area);
+
+        let (left, right) = build_help_columns(t, self.vim_enabled);
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(inner);
+        f.render_widget(Paragraph::new(left), columns[0]);
+        f.render_widget(Paragraph::new(right), columns[1]);
     }
 
     fn highlight_command(command: &str, width: usize) -> ratatui::text::Text<'static> {
@@ -1203,53 +1345,81 @@ fn help_row(key: &'static str, desc: &'static str, t: &crate::theme::Theme) -> L
     ])
 }
 
-fn build_help_lines(t: &crate::theme::Theme) -> Vec<Line<'static>> {
-    vec![
+/// The full shortcut reference, split into two columns.
+///
+/// Every shortcut lives here, including the advanced ones the footer drops on
+/// narrow terminals, so `?` is always the complete answer.
+fn build_help_columns(
+    t: &crate::theme::Theme,
+    vim_enabled: bool,
+) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+    let mut left = vec![
         Line::from(""),
         help_section("\u{2500}\u{2500} Navigation \u{2500}\u{2500}", t),
-        help_row(
-            "  \u{2191}/\u{2193}/j/k        ",
-            "Move selection up/down",
-            t,
-        ),
-        help_row("  PgUp/PgDn       ", "Previous/next page", t),
-        help_row("  ^G              ", "Go to page...", t),
-        help_row("  Home/End        ", "First/last entry", t),
+    ];
+    if vim_enabled {
+        left.extend([
+            help_row("  j/k \u{2191}/\u{2193}   ", "Move selection", t),
+            help_row("  h/l \u{2190}/\u{2192}   ", "Prev/next page", t),
+            help_row("  g/G       ", "First/last entry", t),
+            help_row("  ^U/^D     ", "Half-page scroll", t),
+        ]);
+    } else {
+        left.extend([
+            help_row("  \u{2191}/\u{2193}       ", "Move selection", t),
+            help_row("  \u{2190}/\u{2192}       ", "Prev/next page", t),
+            help_row("  Home/End  ", "First/last entry", t),
+        ]);
+    }
+    left.extend([
+        help_row("  PgUp/PgDn ", "Page up/down", t),
+        help_row("  ^G        ", "Go to page...", t),
         Line::from(""),
         help_section("\u{2500}\u{2500} Actions \u{2500}\u{2500}", t),
-        help_row("  Enter           ", "Select command", t),
-        help_row("  Paste           ", "Paste from clipboard", t),
-        help_row("  ^Y              ", "Copy command to clipboard", t),
-        help_row("  ^D              ", "Delete entry", t),
-        help_row("  ^B              ", "Toggle bookmark", t),
-        help_row("  ^N              ", "Add/edit note", t),
+        help_row("  Enter     ", "Run command", t),
+        help_row("  ^Y        ", "Copy to clipboard", t),
+        help_row("  ^B        ", "Toggle bookmark", t),
+        help_row("  ^N        ", "Add/edit note", t),
+        help_row("  ^D        ", "Delete entry", t),
+        help_row("  ^T        ", "Tag session", t),
+        help_row("  Paste     ", "Paste into query", t),
+    ]);
+
+    let mut right = vec![
         Line::from(""),
         help_section("\u{2500}\u{2500} Filters \u{2500}\u{2500}", t),
-        help_row(
-            "  ^F              ",
-            "Filter dialog (date, tag, exit code)",
-            t,
-        ),
-        help_row("  ^T              ", "Tag current session", t),
-        help_row("  ^L              ", "Toggle directory filter", t),
-        help_row("  ^A              ", "Toggle AI-agent commands", t),
-        help_row("  ^E              ", "Toggle failed-only (errors)", t),
-        help_row("  ^O              ", "Toggle bookmarked-only", t),
+        help_row("  ^F        ", "Filter dialog", t),
+        help_row("  ^L        ", "Scope: this dir", t),
+        help_row("  ^A        ", "AI-agent commands", t),
+        help_row("  ^E        ", "Failed only", t),
+        help_row("  ^O        ", "Bookmarked only", t),
         Line::from(""),
         help_section("\u{2500}\u{2500} Display \u{2500}\u{2500}", t),
-        help_row("  ^U              ", "Toggle unique/all mode", t),
-        help_row("  Tab             ", "Toggle detail pane", t),
-        help_row("  ^S              ", "Toggle context boost", t),
+        help_row("  ^U        ", "Unique/all results", t),
+        help_row("  ^S        ", "Match smart/recent", t),
+        help_row("  Tab       ", "Detail pane", t),
         Line::from(""),
         help_section("\u{2500}\u{2500} Other \u{2500}\u{2500}", t),
-        help_row("  ?/F1            ", "This help", t),
-        help_row("  Esc/q           ", "Exit", t),
+        help_row("  ?/F1      ", "This help", t),
+    ];
+    if vim_enabled {
+        right.extend([
+            help_row("  i or /    ", "Insert (type query)", t),
+            help_row("  Esc       ", "Normal mode", t),
+            help_row("  q         ", "Quit", t),
+        ]);
+    } else {
+        right.push(help_row("  Esc       ", "Exit", t));
+    }
+    right.extend([
         Line::from(""),
         Line::from(Span::styled(
             "Press any key to close",
             Style::default().fg(t.text_muted),
         )),
-    ]
+    ]);
+
+    (left, right)
 }
 
 #[cfg(test)]
