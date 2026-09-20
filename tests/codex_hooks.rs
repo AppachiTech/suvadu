@@ -336,11 +336,17 @@ fn doctor_reports_a_stale_agent_hook_instead_of_counting_it_as_healthy() {
     }
     let result = s.run(&["doctor"]);
     let out = String::from_utf8(result.stdout).unwrap();
-    let line = out.lines().find(|l| l.contains("Agent hooks")).unwrap();
+    // Doctor reports integrations per agent, so the broken Claude Code hook
+    // shows on that agent's row and its repair in the Repairs section.
+    let line = out.lines().find(|l| l.contains("Claude Code")).unwrap();
     assert!(!line.contains('✓'), "Broken hook reported healthy: {line}");
     assert!(
-        line.contains("suv init"),
-        "Missing actionable repair: {line}"
+        line.contains("broken"),
+        "Broken hook not called out: {line}"
+    );
+    assert!(
+        out.contains("suv init claude-code"),
+        "Missing actionable repair:\n{out}"
     );
 }
 
@@ -715,4 +721,34 @@ fn claude_commands_link_to_their_own_prompt_ids() {
     assert!(commands.iter().any(|command| {
         command["command"] == "printf second" && command["turn_id"] == "prompt-2"
     }));
+}
+
+/// `suv doctor` is a diagnostic: it must report a missing database rather than
+/// quietly creating one, so a clean machine still looks clean afterwards.
+#[test]
+fn doctor_does_not_create_a_database_on_a_clean_machine() {
+    fn contains_db(dir: &Path) -> bool {
+        std::fs::read_dir(dir).is_ok_and(|entries| {
+            entries.flatten().any(|entry| {
+                let path = entry.path();
+                if path.is_dir() {
+                    contains_db(&path)
+                } else {
+                    path.file_name().is_some_and(|name| name == "history.db")
+                }
+            })
+        })
+    }
+
+    let s = Sandbox::new();
+    let out = String::from_utf8(s.run(&["doctor"]).stdout).unwrap();
+    let line = out
+        .lines()
+        .find(|l| l.contains("Database"))
+        .unwrap_or_else(|| panic!("no Database row:\n{out}"));
+    assert!(line.contains("not created yet"), "{line}");
+    assert!(
+        !contains_db(s.home.path()),
+        "doctor must not create a database:\n{out}"
+    );
 }

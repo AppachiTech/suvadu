@@ -2798,3 +2798,37 @@ fn test_stats_with_period_filter() {
     assert_eq!(week_stats.top_directories.len(), 1);
     assert_eq!(week_stats.top_directories[0].0, "/recent");
 }
+
+// ── Executor counts for diagnostics ──────────────────────
+
+#[test]
+fn count_entries_by_executor_matches_the_exact_executor_name() {
+    let (_dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 1000);
+    repo.insert_session(&session).unwrap();
+
+    for (cmd, executor) in [
+        ("a", "claude-code"),
+        ("b", "claude-code"),
+        ("c", "openai-codex"),
+        ("d", "codex-wrapper"),
+    ] {
+        let mut entry = Entry::new(
+            session.id.clone(),
+            cmd.to_string(),
+            "/tmp".into(),
+            Some(0),
+            1000,
+            1100,
+        );
+        entry.executor_type = Some("agent".to_string());
+        entry.executor = Some(executor.to_string());
+        repo.insert_entry(&entry).unwrap();
+    }
+
+    assert_eq!(repo.count_entries_by_executor("claude-code").unwrap(), 2);
+    assert_eq!(repo.count_entries_by_executor("openai-codex").unwrap(), 1);
+    // A substring must not count: "codex" is not "openai-codex".
+    assert_eq!(repo.count_entries_by_executor("codex").unwrap(), 0);
+    assert_eq!(repo.count_entries_by_executor("cursor").unwrap(), 0);
+}

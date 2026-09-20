@@ -530,6 +530,19 @@ impl Repository {
 
     /// Get distinct executor labels (e.g. "agent: claude-code", "human: terminal").
     /// Returns a sorted list of `"type: name"` strings for use in filter UIs.
+    /// Count entries whose `executor` is exactly `executor`.
+    ///
+    /// Diagnostics need an exact match: the `QueryFilter` executor filter is a
+    /// substring `LIKE`, which would let "codex" count "openai-codex" and make
+    /// an unused integration look active.
+    pub fn count_entries_by_executor(&self, executor: &str) -> DbResult<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM entries WHERE executor = ?1",
+            [executor],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn get_distinct_executors(&self) -> DbResult<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT

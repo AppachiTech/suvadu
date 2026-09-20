@@ -7,6 +7,19 @@
 //! duplicated as separate hardcoded conditionals per call site, so adding or
 //! renaming an integration meant hunting down every copy. Now it's one table.
 
+/// How `suv init <id>` installs this integration — which is also how
+/// `suv doctor` decides whether it is installed at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallKind {
+    /// Hook scripts written into `~/.config/suvadu/hooks/<id>-*.sh`.
+    HookScripts,
+    /// A single plugin/extension file, at this path relative to `$HOME`.
+    PluginFile(&'static str),
+    /// Nothing to install: the agent's terminal is covered by the ordinary
+    /// shell hooks, which tag commands via an environment variable.
+    ShellHooks,
+}
+
 /// Static facts about one supported agent/IDE integration.
 pub struct AgentIntegration {
     /// Identifier used in `suv init <id>` and in hook-script filenames
@@ -17,6 +30,16 @@ pub struct AgentIntegration {
     /// Path to this agent's MCP server registration file, relative to
     /// `$HOME`. `None` if this integration doesn't support the MCP server.
     pub mcp_config_relpath: Option<&'static str>,
+    /// The `entries.executor` value stored for commands this agent runs, so
+    /// diagnostics can count what was actually captured for it.
+    pub executor_name: &'static str,
+    /// The `ai_sessions.agent` value for native session capture, or `None`
+    /// when this integration has no native session timeline.
+    pub session_agent: Option<&'static str>,
+    /// Process base names that mean this agent is running on this machine.
+    pub process_names: &'static [&'static str],
+    /// What `suv init <id>` installs.
+    pub install: InstallKind,
 }
 
 impl AgentIntegration {
@@ -33,31 +56,55 @@ pub const REGISTRY: &[AgentIntegration] = &[
         id: "claude-code",
         display_name: "Claude Code",
         mcp_config_relpath: Some(".claude.json"),
+        executor_name: "claude-code",
+        session_agent: Some("claude-code"),
+        process_names: &["claude"],
+        install: InstallKind::HookScripts,
     },
     AgentIntegration {
         id: "codex",
         display_name: "Codex",
         mcp_config_relpath: None,
+        executor_name: "openai-codex",
+        session_agent: Some("openai-codex"),
+        process_names: &["codex"],
+        install: InstallKind::HookScripts,
     },
     AgentIntegration {
         id: "cursor",
         display_name: "Cursor",
         mcp_config_relpath: Some(".cursor/mcp.json"),
+        executor_name: "cursor",
+        session_agent: None,
+        process_names: &["Cursor", "cursor"],
+        install: InstallKind::HookScripts,
     },
     AgentIntegration {
         id: "antigravity",
         display_name: "Antigravity",
         mcp_config_relpath: None,
+        executor_name: "antigravity",
+        session_agent: None,
+        process_names: &["Antigravity", "antigravity"],
+        install: InstallKind::ShellHooks,
     },
     AgentIntegration {
         id: "opencode",
         display_name: "OpenCode",
         mcp_config_relpath: None,
+        executor_name: "opencode",
+        session_agent: Some("opencode"),
+        process_names: &["opencode"],
+        install: InstallKind::PluginFile(".opencode/plugins/suvadu.js"),
     },
     AgentIntegration {
         id: "pi",
         display_name: "pi.dev",
         mcp_config_relpath: None,
+        executor_name: "pi",
+        session_agent: None,
+        process_names: &["pi"],
+        install: InstallKind::PluginFile(".pi/agent/extensions/suvadu.ts"),
     },
 ];
 
@@ -96,6 +143,15 @@ mod tests {
         for a in REGISTRY {
             assert!(!a.id.is_empty());
             assert!(!a.display_name.is_empty());
+        }
+    }
+
+    #[test]
+    fn every_registry_entry_declares_the_facts_diagnostics_need() {
+        for a in REGISTRY {
+            assert!(!a.executor_name.is_empty(), "{}", a.id);
+            assert!(!a.process_names.is_empty(), "{}", a.id);
+            assert!(a.session_agent.is_none_or(|s| !s.is_empty()), "{}", a.id);
         }
     }
 
