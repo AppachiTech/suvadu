@@ -80,6 +80,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // are installed here, before the server starts answering calls.
     if matches!(cli.command, Commands::McpServe) {
         let cfg = config::load_config_for_cwd().unwrap_or_default();
+        // Custom risk rules and suppressions are the user's, so the
+        // `assess_risk` tool must apply the same set an interactive
+        // `suv guard` would, not the built-ins alone.
+        risk::set_ignore_patterns(&cfg.agent.risk_ignore_patterns);
+        risk::set_extra_patterns(&cfg.agent.risk_extra_patterns);
         ai_sessions::set_summary_policy(ai_sessions::CapturePolicy {
             redact: cfg.redaction.enabled,
             extra_patterns: cfg.redaction.extra_patterns,
