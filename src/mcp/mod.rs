@@ -1,8 +1,9 @@
 mod ai_sessions;
+pub mod catalog;
 mod prompts;
 mod protocol;
-mod resources;
+pub mod resources;
 mod server;
-mod tools;
+pub mod tools;
 
 pub use server::run;

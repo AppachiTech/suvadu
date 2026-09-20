@@ -12,22 +12,16 @@ use chrono::TimeZone;
 
 /// Return the `resources/list` response.
 pub fn list_resources(id: &Value, mcp: &crate::config::McpConfig) -> Value {
-    let all_resources = vec![
-        json!({"uri": "suvadu://history/recent", "name": "Recent Commands", "description": "Last 20 commands with exit codes, directories, and executors", "mimeType": "text/plain"}),
-        json!({"uri": "suvadu://failures/recent", "name": "Recent Failures", "description": "Commands that failed in the last 24 hours, grouped by prompt", "mimeType": "text/plain"}),
-        json!({"uri": "suvadu://stats/today", "name": "Today's Stats", "description": "Command count, success rate, top commands, and top directories for today", "mimeType": "text/plain"}),
-        json!({"uri": "suvadu://risk/summary", "name": "Risk Summary", "description": "Risk assessment summary of recent agent commands", "mimeType": "text/plain"}),
-        json!({"uri": "suvadu://agents/activity", "name": "Agent Activity", "description": "Overview of AI agent activity: which agents, how many commands, success rates", "mimeType": "text/plain"}),
-        json!({"uri": "suvadu://agents/sessions", "name": "Recent Agent Sessions", "description": "Summary of the 5 most recent AI agent sessions, with prompts and command counts", "mimeType": "text/plain"}),
-        json!({"uri": "suvadu://context/project", "name": "Project Context", "description": "Project briefing for the current directory: common commands, recent failures, agent activity, and workflow tips", "mimeType": "text/plain"}),
-        json!({"uri": "suvadu://skills/index", "name": "Skills Index", "description": "Active skills in the shared cross-agent skills library — reusable instructions any MCP-capable agent can read instead of keeping its own copy", "mimeType": "text/plain"}),
-    ];
-    let resources: Vec<Value> = all_resources
-        .into_iter()
-        .filter(|r| {
-            let uri = r["uri"].as_str().unwrap_or("");
-            let suffix = uri.strip_prefix("suvadu://").unwrap_or(uri);
-            !mcp.disabled_resources.iter().any(|d| d == suffix)
+    let resources: Vec<Value> = super::catalog::RESOURCES
+        .iter()
+        .filter(|entry| super::catalog::resource_available(entry, mcp))
+        .map(|entry| {
+            json!({
+                "uri": entry.uri(),
+                "name": entry.title,
+                "description": entry.description,
+                "mimeType": "text/plain"
+            })
         })
         .collect();
     json!({
@@ -761,15 +755,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_list_resources_count() {
+    fn test_list_resources_advertises_the_whole_catalog() {
         let mcp = crate::config::McpConfig::default();
         let resp = list_resources(&json!(1), &mcp);
         let resources = resp["result"]["resources"].as_array().unwrap();
-        assert_eq!(resources.len(), 8);
         for r in resources {
             assert!(r["uri"].is_string());
             assert!(r["name"].is_string());
             assert!(r["mimeType"].is_string());
+        }
+        let advertised: std::collections::BTreeSet<String> = resources
+            .iter()
+            .map(|r| r["uri"].as_str().unwrap().to_string())
+            .collect();
+        let cataloged: std::collections::BTreeSet<String> = super::super::catalog::RESOURCES
+            .iter()
+            .map(super::super::catalog::ResourceEntry::uri)
+            .collect();
+        assert_eq!(advertised, cataloged);
+    }
+
+    #[test]
+    fn every_catalog_resource_has_a_reader() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mcp = crate::config::McpConfig::default();
+        for entry in super::super::catalog::RESOURCES {
+            let uri = entry.uri();
+            let result = read_resource(&repo, &uri, &mcp);
+            assert!(
+                result.is_ok(),
+                "catalog resource {uri} has no reader: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_catalog_resource_can_be_disabled() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        for entry in super::super::catalog::RESOURCES {
+            let mcp = crate::config::McpConfig {
+                disabled_resources: vec![entry.uri_suffix.to_string()],
+                ..Default::default()
+            };
+            let resp = list_resources(&json!(1), &mcp);
+            let still_listed = resp["result"]["resources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["uri"].as_str() == Some(entry.uri().as_str()));
+            assert!(
+                !still_listed,
+                "{} is still advertised while disabled",
+                entry.uri_suffix
+            );
+            let err = read_resource(&repo, &entry.uri(), &mcp)
+                .expect_err("a disabled resource must not be readable");
+            assert!(err.contains("disabled"), "{err}");
         }
     }
 

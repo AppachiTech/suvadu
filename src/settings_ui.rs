@@ -16,33 +16,36 @@ use std::io;
 
 const EXECUTOR_TYPES: &[&str] = &["agent", "ide", "ci"];
 
-const MCP_TOOLS: &[&str] = &[
-    "search_commands",
-    "recent_commands",
-    "command_status",
-    "get_prompts",
-    "session_history",
-    "get_stats",
-    "list_sessions",
-    "what_changed",
-    "what_failed",
-    "suggest_next",
-    "assess_risk",
-    "find_agent_session",
-    "replay_agent_session",
-    "learn_from_failures",
-    "project_context",
-];
+// The MCP tab is generated from the shared capability catalog, so it can
+// never again list fewer tools/resources than the server advertises.
+use crate::mcp::catalog::{self, ResourceEntry, ToolEntry, WriteOptIn};
 
-const MCP_RESOURCES: &[&str] = &[
-    "history/recent",
-    "failures/recent",
-    "stats/today",
-    "risk/summary",
-    "agents/activity",
-    "agents/sessions",
-    "context/project",
-];
+const MCP_TOOLS: &[ToolEntry] = catalog::TOOLS;
+const MCP_RESOURCES: &[ResourceEntry] = catalog::RESOURCES;
+const MCP_OPT_INS: &[WriteOptIn] = WriteOptIn::ALL;
+
+/// Selectable-item layout of the MCP tab: two numeric defaults, then the
+/// write opt-ins, then every tool, every resource, and the excluded dirs.
+const MCP_OPT_INS_START: usize = 2;
+/// Everything on the MCP tab that isn't a tool, a resource or an excluded dir.
+const MCP_FIXED_ITEMS: usize = MCP_OPT_INS_START + MCP_OPT_INS.len();
+const MCP_TOOLS_START: usize = MCP_FIXED_ITEMS;
+const MCP_RESOURCES_START: usize = MCP_TOOLS_START + MCP_TOOLS.len();
+const MCP_DIRS_START: usize = MCP_RESOURCES_START + MCP_RESOURCES.len();
+
+/// The MCP server loads `config.toml` once, in `mcp::server::run`, before its
+/// stdio loop — so nothing saved here reaches a running server.
+const MCP_RESTART_NOTICE: &str =
+    "Restart your MCP client to apply — the server reads this config at startup";
+
+/// Row index of a write opt-in on the MCP tab.
+fn mcp_opt_in_row(opt_in: WriteOptIn) -> usize {
+    MCP_OPT_INS_START
+        + MCP_OPT_INS
+            .iter()
+            .position(|o| *o == opt_in)
+            .expect("opt-in is listed in WriteOptIn::ALL")
+}
 
 #[derive(Debug, PartialEq)]
 enum InputMode {
@@ -89,7 +92,7 @@ impl SettingsTab {
             Self::Exclusions => config.exclusions.len(),
             Self::AutoTags => config.auto_tags.len(),
             Self::Agents => config.agents.len(),
-            Self::Mcp => 2 + MCP_TOOLS.len() + MCP_RESOURCES.len() + config.mcp.exclude_dirs.len(),
+            Self::Mcp => MCP_DIRS_START + config.mcp.exclude_dirs.len(),
         }
     }
 
@@ -147,6 +150,9 @@ struct AppState {
     agent_list_state: ListState,
     save_status: Option<String>,
     dirty: bool,
+    /// Set when an MCP setting changed, so the save message can say that a
+    /// running MCP server won't see it until the client restarts.
+    mcp_dirty: bool,
 }
 
 impl AppState {
@@ -169,7 +175,63 @@ impl AppState {
             agent_list_state: ListState::default(),
             save_status: None,
             dirty: false,
+            mcp_dirty: false,
         }
+    }
+
+    /// Record an edit to an MCP setting.
+    const fn mark_mcp_dirty(&mut self) {
+        self.dirty = true;
+        self.mcp_dirty = true;
+    }
+
+    /// Message for a successful save, naming the restart requirement only
+    /// when an MCP setting actually changed.
+    fn saved_message(&self) -> String {
+        if self.mcp_dirty {
+            format!("Settings saved! {MCP_RESTART_NOTICE}.")
+        } else {
+            "Settings saved!".to_string()
+        }
+    }
+
+    /// Flip one write opt-in. Tools gated by it immediately show their new
+    /// effective state; tools a user explicitly disabled stay disabled.
+    fn toggle_mcp_opt_in(&mut self, opt_in: WriteOptIn) {
+        let now_on = !opt_in.is_on(&self.config.mcp);
+        opt_in.set(&mut self.config.mcp, now_on);
+        let gated: Vec<&str> = MCP_TOOLS
+            .iter()
+            .filter(|t| t.write_opt_in == Some(opt_in))
+            .map(|t| t.name)
+            .collect();
+        self.save_status = Some(if now_on {
+            format!("{} on — {} now available", opt_in.label(), gated.join(", "))
+        } else {
+            format!(
+                "{} off — {} no longer available (saved data is kept)",
+                opt_in.label(),
+                gated.join(", ")
+            )
+        });
+        self.mark_mcp_dirty();
+    }
+
+    /// Flip one tool's *effective* availability. The catalog reconciles the
+    /// write opt-in and the `disabled_tools` entry together, so the row a
+    /// user sees is never contradicted by a second hidden switch.
+    fn toggle_mcp_tool(&mut self, entry: &ToolEntry) {
+        let want = !catalog::tool_state(entry, &self.config.mcp).is_available();
+        catalog::set_tool_available(entry, &mut self.config.mcp, want);
+        let name = entry.name;
+        self.save_status = Some(match (want, entry.write_opt_in) {
+            (true, Some(opt_in)) => {
+                format!("Enabled: {name} (turned on \"{}\")", opt_in.label())
+            }
+            (true, None) => format!("Enabled: {name}"),
+            (false, _) => format!("Disabled: {name}"),
+        });
+        self.mark_mcp_dirty();
     }
 
     const fn next_tab(&mut self) {
@@ -323,8 +385,9 @@ impl AppState {
                 if let Err(e) = save_config(&self.config) {
                     self.save_status = Some(format!("Error saving: {e}"));
                 } else {
-                    self.save_status = Some("Settings saved!".to_string());
+                    self.save_status = Some(self.saved_message());
                     self.dirty = false;
+                    self.mcp_dirty = false;
                 }
             }
             KeyCode::Tab => self.next_tab(),
@@ -352,7 +415,7 @@ impl AppState {
                     && self.current_tab == SettingsTab::Mcp =>
             {
                 // Add only works for exclude_dirs
-                let dirs_start = 2 + MCP_TOOLS.len() + MCP_RESOURCES.len();
+                let dirs_start = MCP_DIRS_START;
                 if self.selected_item >= dirs_start || self.config.mcp.exclude_dirs.is_empty() {
                     self.input_mode = InputMode::Editing;
                     self.input_buffer.clear();
@@ -362,12 +425,12 @@ impl AppState {
                 if key.modifiers.contains(KeyModifiers::CONTROL)
                     && self.current_tab == SettingsTab::Mcp =>
             {
-                let dirs_start = 2 + MCP_TOOLS.len() + MCP_RESOURCES.len();
+                let dirs_start = MCP_DIRS_START;
                 if self.selected_item >= dirs_start && !self.config.mcp.exclude_dirs.is_empty() {
                     let idx = self.selected_item - dirs_start;
                     if idx < self.config.mcp.exclude_dirs.len() {
                         let removed = self.config.mcp.exclude_dirs.remove(idx);
-                        self.dirty = true;
+                        self.mark_mcp_dirty();
                         self.save_status = Some(format!("Removed: {removed}"));
                         if self.selected_item > dirs_start
                             && self.selected_item >= dirs_start + self.config.mcp.exclude_dirs.len()
@@ -486,28 +549,22 @@ impl AppState {
                         self.input_mode = InputMode::Editing;
                         self.input_buffer = self.config.mcp.default_limit.to_string();
                     }
-                    (SettingsTab::Mcp, idx) if idx >= 2 && idx < 2 + MCP_TOOLS.len() => {
-                        let tool = MCP_TOOLS[idx - 2].to_string();
-                        if let Some(pos) = self
-                            .config
-                            .mcp
-                            .disabled_tools
-                            .iter()
-                            .position(|d| d == &tool)
-                        {
-                            self.config.mcp.disabled_tools.remove(pos);
-                            self.save_status = Some(format!("Enabled: {tool}"));
-                        } else {
-                            self.config.mcp.disabled_tools.push(tool.clone());
-                            self.save_status = Some(format!("Disabled: {tool}"));
-                        }
-                        self.dirty = true;
+                    (SettingsTab::Mcp, idx)
+                        if (MCP_OPT_INS_START..MCP_TOOLS_START).contains(&idx) =>
+                    {
+                        self.toggle_mcp_opt_in(MCP_OPT_INS[idx - MCP_OPT_INS_START]);
                     }
                     (SettingsTab::Mcp, idx)
-                        if idx >= 2 + MCP_TOOLS.len()
-                            && idx < 2 + MCP_TOOLS.len() + MCP_RESOURCES.len() =>
+                        if (MCP_TOOLS_START..MCP_RESOURCES_START).contains(&idx) =>
                     {
-                        let res = MCP_RESOURCES[idx - 2 - MCP_TOOLS.len()].to_string();
+                        self.toggle_mcp_tool(&MCP_TOOLS[idx - MCP_TOOLS_START]);
+                    }
+                    (SettingsTab::Mcp, idx)
+                        if (MCP_RESOURCES_START..MCP_DIRS_START).contains(&idx) =>
+                    {
+                        let res = MCP_RESOURCES[idx - MCP_RESOURCES_START]
+                            .uri_suffix
+                            .to_string();
                         if let Some(pos) = self
                             .config
                             .mcp
@@ -521,7 +578,7 @@ impl AppState {
                             self.config.mcp.disabled_resources.push(res.clone());
                             self.save_status = Some(format!("Disabled: {res}"));
                         }
-                        self.dirty = true;
+                        self.mark_mcp_dirty();
                     }
                     _ => self.toggle_bool(),
                 }
@@ -629,7 +686,7 @@ impl AppState {
                 } else if self.current_tab == SettingsTab::Mcp && self.selected_item == 0 {
                     if let Ok(n) = self.input_buffer.parse::<u32>() {
                         self.config.mcp.default_days = n.clamp(1, 365);
-                        self.dirty = true;
+                        self.mark_mcp_dirty();
                         self.save_status = Some(format!(
                             "MCP default days set to {}",
                             self.config.mcp.default_days
@@ -641,7 +698,7 @@ impl AppState {
                 } else if self.current_tab == SettingsTab::Mcp && self.selected_item == 1 {
                     if let Ok(n) = self.input_buffer.parse::<u32>() {
                         self.config.mcp.default_limit = n.clamp(1, 500);
-                        self.dirty = true;
+                        self.mark_mcp_dirty();
                         self.save_status = Some(format!(
                             "MCP default limit set to {}",
                             self.config.mcp.default_limit
@@ -653,7 +710,7 @@ impl AppState {
                 } else if self.current_tab == SettingsTab::Mcp && !self.input_buffer.is_empty() {
                     let val = self.input_buffer.trim().to_string();
                     self.config.mcp.exclude_dirs.push(val.clone());
-                    self.dirty = true;
+                    self.mark_mcp_dirty();
                     self.save_status = Some(format!("Excluded dir: {val}"));
                     self.input_mode = InputMode::Normal;
                 } else if self.current_tab == SettingsTab::Agents {
@@ -1014,8 +1071,15 @@ const fn get_setting_description(tab: usize, item: usize) -> &'static str {
         (4, _) => "Custom agent detection rules. When an env var is set, suvadu tags commands with that agent name and type. Custom agents are checked before built-in agents. Restart your shell (source ~/.zshrc) after adding or removing agents.",
         (5, 0) => "Default time window in days for MCP tools (1-365). Agents use this when they don't specify a date range.",
         (5, 1) => "Default result limit for MCP tools (1-500). Agents use this when they don't specify a limit.",
-        (5, n) if n >= 2 && n < 2 + MCP_TOOLS.len() => "Toggle with Enter/Space. Unchecked tools won't appear in the MCP tools list. Agents won't be able to call disabled tools.",
-        (5, n) if n >= 2 + MCP_TOOLS.len() && n < 2 + MCP_TOOLS.len() + MCP_RESOURCES.len() => "Toggle with Enter/Space. Unchecked resources won't be auto-injected into agent context.",
+        (5, n) if MCP_OPT_INS_START <= n && n < MCP_TOOLS_START => {
+            MCP_OPT_INS[n - MCP_OPT_INS_START].description()
+        }
+        (5, n) if MCP_TOOLS_START <= n && n < MCP_RESOURCES_START => {
+            MCP_TOOLS[n - MCP_TOOLS_START].summary
+        }
+        (5, n) if MCP_RESOURCES_START <= n && n < MCP_DIRS_START => {
+            MCP_RESOURCES[n - MCP_RESOURCES_START].description
+        }
         (5, _) => "Directories to exclude from MCP queries. Commands in these dirs won't be returned to agents. [a] add, [d] delete.",
         _ => "Use [a] to add new items, [d] to delete selected items",
     }
@@ -1398,6 +1462,98 @@ fn mcp_section_header(label: &str) -> ListItem<'static> {
     ]))
 }
 
+/// Write opt-ins. Off by default: these are the only settings that let a
+/// connected agent write anything back into Suvadu.
+fn push_mcp_opt_in_items(
+    mcp: &crate::config::McpConfig,
+    selected: usize,
+    items: &mut Vec<ListItem<'static>>,
+    row_map: &mut Vec<Option<usize>>,
+) {
+    let gated = MCP_TOOLS.iter().filter(|t| !t.default_available()).count();
+    items.push(ListItem::new(""));
+    row_map.push(None);
+    items.push(mcp_section_header(&format!(
+        "Writes — {gated} tools, off by default"
+    )));
+    row_map.push(None);
+
+    for opt_in in MCP_OPT_INS {
+        let idx = mcp_opt_in_row(*opt_in);
+        items.push(setting_toggle(
+            opt_in.label(),
+            opt_in.is_on(mcp),
+            selected == idx,
+        ));
+        row_map.push(Some(idx));
+    }
+}
+
+/// One row per catalog tool, showing its *effective* state and the reason it
+/// is off — never an enabled-looking checkbox for a tool the server will not
+/// advertise, and never two checkboxes that contradict each other.
+fn push_mcp_tool_items(
+    mcp: &crate::config::McpConfig,
+    selected: usize,
+    items: &mut Vec<ListItem<'static>>,
+    row_map: &mut Vec<Option<usize>>,
+) {
+    let available = MCP_TOOLS
+        .iter()
+        .filter(|t| catalog::tool_state(t, mcp).is_available())
+        .count();
+    items.push(ListItem::new(""));
+    row_map.push(None);
+    items.push(mcp_section_header(&format!(
+        "Tools ({available}/{} available, Enter to toggle)",
+        MCP_TOOLS.len()
+    )));
+    row_map.push(None);
+
+    for (i, tool) in MCP_TOOLS.iter().enumerate() {
+        let idx = MCP_TOOLS_START + i;
+        let state = catalog::tool_state(tool, mcp);
+        let label = state.reason().map_or_else(
+            || tool.name.to_string(),
+            |reason| format!("{} — {reason}", tool.name),
+        );
+        items.push(setting_toggle(
+            &label,
+            state.is_available(),
+            selected == idx,
+        ));
+        row_map.push(Some(idx));
+    }
+}
+
+/// One row per catalog resource. Resources are read-only, so the only thing
+/// that can turn one off is an explicit `mcp.disabled_resources` entry.
+fn push_mcp_resource_items(
+    mcp: &crate::config::McpConfig,
+    selected: usize,
+    items: &mut Vec<ListItem<'static>>,
+    row_map: &mut Vec<Option<usize>>,
+) {
+    let available = MCP_RESOURCES
+        .iter()
+        .filter(|r| catalog::resource_available(r, mcp))
+        .count();
+    items.push(ListItem::new(""));
+    row_map.push(None);
+    items.push(mcp_section_header(&format!(
+        "Resources ({available}/{} available, Enter to toggle)",
+        MCP_RESOURCES.len()
+    )));
+    row_map.push(None);
+
+    for (i, res) in MCP_RESOURCES.iter().enumerate() {
+        let idx = MCP_RESOURCES_START + i;
+        let enabled = catalog::resource_available(res, mcp);
+        items.push(setting_toggle(res.uri_suffix, enabled, selected == idx));
+        row_map.push(Some(idx));
+    }
+}
+
 fn build_mcp_items(
     mcp: &crate::config::McpConfig,
     selected: usize,
@@ -1407,6 +1563,16 @@ fn build_mcp_items(
     // Track which visual rows map to selectable items
     // Non-selectable header rows are skipped during navigation
     let mut row_map: Vec<Option<usize>> = Vec::new();
+
+    // The server snapshots this config at startup (mcp::server::run), so say
+    // so once, at the top, rather than only after a save.
+    items.push(ListItem::new(Line::from(vec![Span::styled(
+        format!("  {MCP_RESTART_NOTICE}"),
+        Style::default()
+            .fg(t.text_muted)
+            .add_modifier(Modifier::ITALIC),
+    )])));
+    row_map.push(None);
 
     // Defaults section
     items.push(mcp_section_header("Defaults"));
@@ -1428,43 +1594,9 @@ fn build_mcp_items(
     ));
     row_map.push(Some(1));
 
-    // Tools section
-    let tools_disabled = mcp.disabled_tools.len();
-    let tools_label = if tools_disabled > 0 {
-        format!("Tools ({tools_disabled} disabled)")
-    } else {
-        "Tools (Enter to toggle)".to_string()
-    };
-    items.push(ListItem::new(""));
-    row_map.push(None);
-    items.push(mcp_section_header(&tools_label));
-    row_map.push(None);
-
-    for (i, tool) in MCP_TOOLS.iter().enumerate() {
-        let idx = 2 + i;
-        let enabled = !mcp.disabled_tools.iter().any(|d| d == tool);
-        items.push(setting_toggle(tool, enabled, selected == idx));
-        row_map.push(Some(idx));
-    }
-
-    // Resources section
-    let res_disabled = mcp.disabled_resources.len();
-    let res_label = if res_disabled > 0 {
-        format!("Resources ({res_disabled} disabled)")
-    } else {
-        "Resources (Enter to toggle)".to_string()
-    };
-    items.push(ListItem::new(""));
-    row_map.push(None);
-    items.push(mcp_section_header(&res_label));
-    row_map.push(None);
-
-    for (i, res) in MCP_RESOURCES.iter().enumerate() {
-        let idx = 2 + MCP_TOOLS.len() + i;
-        let enabled = !mcp.disabled_resources.iter().any(|d| d == res);
-        items.push(setting_toggle(res, enabled, selected == idx));
-        row_map.push(Some(idx));
-    }
+    push_mcp_opt_in_items(mcp, selected, &mut items, &mut row_map);
+    push_mcp_tool_items(mcp, selected, &mut items, &mut row_map);
+    push_mcp_resource_items(mcp, selected, &mut items, &mut row_map);
 
     // Exclude dirs section
     items.push(ListItem::new(""));
@@ -1488,7 +1620,7 @@ fn build_mcp_items(
         row_map.push(None);
     } else {
         for (i, dir) in mcp.exclude_dirs.iter().enumerate() {
-            let idx = 2 + MCP_TOOLS.len() + MCP_RESOURCES.len() + i;
+            let idx = MCP_DIRS_START + i;
             let selected = selected == idx;
             let arrow = if selected { " <<" } else { "" };
             let text = Line::from(vec![
@@ -1511,12 +1643,19 @@ fn render_mcp_tab(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     let mcp = &app.config.mcp;
     let (items, row_map) = build_mcp_items(mcp, app.selected_item);
 
-    let disabled_count = mcp.disabled_tools.len() + mcp.disabled_resources.len();
-    let title = if disabled_count > 0 {
-        format!(" MCP Server ({disabled_count} disabled) ")
-    } else {
-        " MCP Server ".to_string()
-    };
+    let available_tools = MCP_TOOLS
+        .iter()
+        .filter(|t| catalog::tool_state(t, mcp).is_available())
+        .count();
+    let available_resources = MCP_RESOURCES
+        .iter()
+        .filter(|r| catalog::resource_available(r, mcp))
+        .count();
+    let title = format!(
+        " MCP Server ({available_tools}/{} tools, {available_resources}/{} resources) ",
+        MCP_TOOLS.len(),
+        MCP_RESOURCES.len()
+    );
 
     let visual_row = row_map
         .iter()
@@ -2349,6 +2488,7 @@ mod tests {
     // ── handle_input 's' saves config ──────────────────────────────────
     #[test]
     fn test_handle_input_s_attempts_save() {
+        let _guard = crate::config::config_file_test_lock();
         let mut app = AppState::new(Config::default());
         app.dirty = true;
 
@@ -2451,6 +2591,7 @@ mod tests {
     // ── ConfirmQuit 'y' with save attempt ──────────────────────────────
     #[test]
     fn test_confirm_quit_y_save_attempt() {
+        let _guard = crate::config::config_file_test_lock();
         let mut app = AppState::new(Config::default());
         app.dirty = true;
 
@@ -2870,14 +3011,14 @@ mod tests {
         let mut app = AppState::new(config);
         app.current_tab = SettingsTab::Mcp;
 
-        // Item 2 = first tool (search_commands)
-        app.selected_item = 2;
+        // First tool row
+        app.selected_item = MCP_TOOLS_START;
         assert!(app.config.mcp.disabled_tools.is_empty());
 
         // Toggle off
         app.handle_input(KeyEvent::from(KeyCode::Enter));
         assert_eq!(app.config.mcp.disabled_tools.len(), 1);
-        assert_eq!(app.config.mcp.disabled_tools[0], "search_commands");
+        assert_eq!(app.config.mcp.disabled_tools[0], MCP_TOOLS[0].name);
         assert!(app.dirty);
 
         // Toggle back on
@@ -2891,8 +3032,8 @@ mod tests {
         let mut app = AppState::new(config);
         app.current_tab = SettingsTab::Mcp;
 
-        // Item 2 + 15 tools = 17 = first resource (history/recent)
-        app.selected_item = 2 + MCP_TOOLS.len();
+        // First resource row
+        app.selected_item = MCP_RESOURCES_START;
         assert!(app.config.mcp.disabled_resources.is_empty());
 
         app.handle_input(KeyEvent::from(KeyCode::Enter));
@@ -2943,7 +3084,224 @@ mod tests {
     fn test_mcp_tab_item_count() {
         let config = Config::default();
         let count = SettingsTab::Mcp.item_count(&config);
-        // 2 defaults + 15 tools + 7 resources + 0 exclude dirs
-        assert_eq!(count, 2 + MCP_TOOLS.len() + MCP_RESOURCES.len());
+        assert_eq!(
+            count,
+            MCP_FIXED_ITEMS + MCP_TOOLS.len() + MCP_RESOURCES.len()
+        );
+    }
+
+    // ── Catalog / server / settings agreement ───────────────────
+    //
+    // These assert by *identity*, never by an expected count: the settings
+    // tab and the MCP server must offer exactly the same capability names,
+    // so neither can silently gain or lose one.
+
+    fn all_opt_ins_on() -> crate::config::McpConfig {
+        crate::config::McpConfig {
+            allow_session_summaries: true,
+            allow_skill_proposals: true,
+            ..Default::default()
+        }
+    }
+
+    fn advertised_tool_names(mcp: &crate::config::McpConfig) -> std::collections::BTreeSet<String> {
+        let resp = crate::mcp::tools::list_tools(&serde_json::json!(1), mcp);
+        resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn advertised_resource_suffixes(
+        mcp: &crate::config::McpConfig,
+    ) -> std::collections::BTreeSet<String> {
+        let resp = crate::mcp::resources::list_resources(&serde_json::json!(1), mcp);
+        resp["result"]["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                r["uri"]
+                    .as_str()
+                    .unwrap()
+                    .trim_start_matches("suvadu://")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn settings_tool_list_matches_server_advertised_tools() {
+        let listed: std::collections::BTreeSet<String> =
+            MCP_TOOLS.iter().map(|t| t.name.to_string()).collect();
+        assert_eq!(listed, advertised_tool_names(&all_opt_ins_on()));
+    }
+
+    #[test]
+    fn settings_resource_list_matches_server_advertised_resources() {
+        let listed: std::collections::BTreeSet<String> = MCP_RESOURCES
+            .iter()
+            .map(|r| r.uri_suffix.to_string())
+            .collect();
+        assert_eq!(listed, advertised_resource_suffixes(&all_opt_ins_on()));
+    }
+
+    #[test]
+    fn mcp_tab_exposes_session_summary_opt_in() {
+        let mut app = AppState::new(Config::default());
+        app.current_tab = SettingsTab::Mcp;
+        app.selected_item = mcp_opt_in_row(WriteOptIn::SessionSummaries);
+        assert!(!app.config.mcp.allow_session_summaries);
+
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert!(app.config.mcp.allow_session_summaries);
+        assert!(app.dirty);
+
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert!(!app.config.mcp.allow_session_summaries);
+    }
+
+    #[test]
+    fn mcp_tab_exposes_skill_proposal_opt_in() {
+        let mut app = AppState::new(Config::default());
+        app.current_tab = SettingsTab::Mcp;
+        app.selected_item = mcp_opt_in_row(WriteOptIn::SkillProposals);
+        assert!(!app.config.mcp.allow_skill_proposals);
+
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert!(app.config.mcp.allow_skill_proposals);
+    }
+
+    #[test]
+    fn enabling_session_summaries_persists_and_advertises_the_write_tool() {
+        let _guard = crate::config::config_file_test_lock();
+        let path = crate::config::get_config_path().unwrap();
+        let restore = std::fs::read_to_string(&path).ok();
+
+        let mut app = AppState::new(Config::default());
+        app.current_tab = SettingsTab::Mcp;
+        app.selected_item = mcp_opt_in_row(WriteOptIn::SessionSummaries);
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        app.handle_input(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+        let saved = crate::config::load_config().unwrap();
+        assert!(saved.mcp.allow_session_summaries);
+        assert!(advertised_tool_names(&saved.mcp).contains("save_session_summary"));
+        // The MCP server reads config once at startup, so the UI has to say so.
+        let status = app.save_status.clone().unwrap_or_default();
+        assert!(
+            status.to_lowercase().contains("restart"),
+            "save status should mention restarting the MCP client: {status}"
+        );
+
+        match restore {
+            Some(contents) => std::fs::write(&path, contents).unwrap(),
+            None => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+
+    #[test]
+    fn gated_tool_row_shows_effective_state_not_a_second_toggle() {
+        use crate::mcp::catalog::{tool_state, ToolState};
+        let mut config = Config::default();
+
+        // Opt-in off: the write tool reads as unavailable with a reason.
+        assert_eq!(
+            tool_state(catalog_tool("save_session_summary"), &config.mcp),
+            ToolState::NeedsOptIn(WriteOptIn::SessionSummaries)
+        );
+
+        // Opt-in on but explicitly disabled: still unavailable, different reason.
+        config.mcp.allow_session_summaries = true;
+        config.mcp.disabled_tools = vec!["save_session_summary".to_string()];
+        assert_eq!(
+            tool_state(catalog_tool("save_session_summary"), &config.mcp),
+            ToolState::Disabled
+        );
+
+        config.mcp.disabled_tools.clear();
+        assert_eq!(
+            tool_state(catalog_tool("save_session_summary"), &config.mcp),
+            ToolState::Available
+        );
+    }
+
+    fn catalog_tool(name: &str) -> &'static crate::mcp::catalog::ToolEntry {
+        crate::mcp::catalog::find_tool(name).expect("catalog entry")
+    }
+
+    #[test]
+    fn every_mcp_item_has_exactly_one_row() {
+        let mut config = Config::default();
+        config.mcp.exclude_dirs = vec!["/tmp/a".to_string(), "/tmp/b".to_string()];
+        let (items, row_map) = build_mcp_items(&config.mcp, 0);
+        assert_eq!(items.len(), row_map.len());
+
+        let mut mapped: Vec<usize> = row_map.iter().flatten().copied().collect();
+        mapped.sort_unstable();
+        let expected: Vec<usize> = (0..SettingsTab::Mcp.item_count(&config)).collect();
+        assert_eq!(
+            mapped, expected,
+            "every selectable MCP item must have exactly one row, and no row may point past the end"
+        );
+    }
+
+    #[test]
+    fn disabling_a_tool_does_not_reset_unrelated_settings() {
+        let mut config = Config::default();
+        config.search.page_limit = 321;
+        config.mcp.exclude_dirs = vec!["/tmp/secret".to_string()];
+        config.mcp.allow_skill_proposals = true;
+
+        let mut app = AppState::new(config);
+        app.current_tab = SettingsTab::Mcp;
+        app.selected_item = MCP_TOOLS_START;
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(app.config.mcp.disabled_tools, vec![MCP_TOOLS[0].name]);
+        assert_eq!(app.config.search.page_limit, 321);
+        assert_eq!(app.config.mcp.exclude_dirs, vec!["/tmp/secret".to_string()]);
+        assert!(app.config.mcp.allow_skill_proposals);
+    }
+
+    #[test]
+    fn toggling_a_gated_tool_on_turns_on_its_opt_in() {
+        let mut app = AppState::new(Config::default());
+        app.current_tab = SettingsTab::Mcp;
+        let row = MCP_TOOLS_START
+            + MCP_TOOLS
+                .iter()
+                .position(|t| t.name == "save_session_summary")
+                .unwrap();
+        app.selected_item = row;
+
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert!(app.config.mcp.allow_session_summaries);
+        assert!(app.config.mcp.disabled_tools.is_empty());
+        assert!(advertised_tool_names(&app.config.mcp).contains("save_session_summary"));
+
+        // Turning the row back off disables just that tool; the opt-in it
+        // shares with nothing else is left for the user to decide.
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(
+            app.config.mcp.disabled_tools,
+            vec!["save_session_summary".to_string()]
+        );
+        assert!(!advertised_tool_names(&app.config.mcp).contains("save_session_summary"));
+    }
+
+    #[test]
+    fn saving_a_non_mcp_change_does_not_mention_restarting() {
+        let _guard = crate::config::config_file_test_lock();
+        let mut app = AppState::new(Config::default());
+        app.current_tab = SettingsTab::Search;
+        app.selected_item = 1;
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        app.handle_input(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(app.save_status.as_deref(), Some("Settings saved!"));
     }
 }

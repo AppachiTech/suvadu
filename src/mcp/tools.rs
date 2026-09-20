@@ -9,47 +9,51 @@ use crate::util;
 /// Maximum number of replay entries to fetch when grouping prompts.
 const MAX_PROMPT_ENTRIES: usize = 5000;
 
-/// Return the `tools/list` response, filtering out disabled tools.
+/// The JSON-RPC definition of one catalog tool.
+///
+/// Deliberately an explicit `match`, not a table of function pointers: a
+/// name in the catalog with no arm here is a compile-time-visible gap that
+/// `catalog_tools_all_have_definitions` fails on, and nothing outside the
+/// catalog can be advertised.
+fn tool_definition(name: &str) -> Option<Value> {
+    Some(match name {
+        "list_agent_sessions" => super::ai_sessions::list_definition(),
+        "get_agent_session" => super::ai_sessions::get_definition(),
+        "resolve_current_agent_session" => super::ai_sessions::resolve_definition(),
+        "save_session_summary" => super::ai_sessions::save_definition(),
+        "search_commands" => search_commands_def(),
+        "recent_commands" => recent_commands_def(),
+        "command_status" => command_status_def(),
+        "get_prompts" => get_prompts_def(),
+        "session_history" => session_history_def(),
+        "get_stats" => get_stats_def(),
+        "list_sessions" => list_sessions_def(),
+        "what_changed" => what_changed_def(),
+        "what_failed" => what_failed_def(),
+        "suggest_next" => suggest_next_def(),
+        "assess_risk" => assess_risk_def(),
+        "find_agent_session" => find_agent_session_def(),
+        "replay_agent_session" => replay_agent_session_def(),
+        "learn_from_failures" => learn_from_failures_def(),
+        "project_context" => project_context_def(),
+        "list_skills" => list_skills_def(),
+        "get_skill" => get_skill_def(),
+        "search_skills" => search_skills_def(),
+        "propose_skill" => propose_skill_def(),
+        _ => return None,
+    })
+}
+
+/// Return the `tools/list` response.
+///
+/// Driven by `catalog::TOOLS` so the advertised set and the settings UI
+/// cannot drift: a tool appears only when its effective state (write opt-in
+/// satisfied, not in `mcp.disabled_tools`) is available.
 pub fn list_tools(id: &Value, mcp: &crate::config::McpConfig) -> Value {
-    let all_tools = vec![
-        super::ai_sessions::list_definition(),
-        super::ai_sessions::get_definition(),
-        super::ai_sessions::resolve_definition(),
-        search_commands_def(),
-        recent_commands_def(),
-        command_status_def(),
-        get_prompts_def(),
-        session_history_def(),
-        get_stats_def(),
-        list_sessions_def(),
-        what_changed_def(),
-        what_failed_def(),
-        suggest_next_def(),
-        assess_risk_def(),
-        find_agent_session_def(),
-        replay_agent_session_def(),
-        learn_from_failures_def(),
-        project_context_def(),
-        list_skills_def(),
-        get_skill_def(),
-        search_skills_def(),
-    ];
-    let mut all_tools = all_tools;
-    // `propose_skill` writes a pending-review skill and is off by default:
-    // a store agents can both read and write is a shared-memory poisoning
-    // target, so it's only advertised when explicitly opted into.
-    if mcp.allow_skill_proposals {
-        all_tools.push(propose_skill_def());
-    }
-    if mcp.allow_session_summaries {
-        all_tools.push(super::ai_sessions::save_definition());
-    }
-    let tools: Vec<Value> = all_tools
-        .into_iter()
-        .filter(|t| {
-            let name = t["name"].as_str().unwrap_or("");
-            !mcp.disabled_tools.iter().any(|d| d == name)
-        })
+    let tools: Vec<Value> = super::catalog::TOOLS
+        .iter()
+        .filter(|entry| super::catalog::tool_state(entry, mcp).is_available())
+        .filter_map(|entry| tool_definition(entry.name))
         .collect();
     json!({
         "jsonrpc": "2.0",
@@ -65,8 +69,13 @@ pub fn call_tool(
     args: &Value,
     mcp: &crate::config::McpConfig,
 ) -> Result<String, String> {
-    if mcp.disabled_tools.iter().any(|d| d == name) {
-        return Err(format!("Tool '{name}' is disabled via MCP configuration"));
+    // One gate for both ways a tool can be unavailable (explicitly disabled,
+    // or a write whose opt-in is off), so an unadvertised tool can never be
+    // invoked directly either. Handlers keep their own guards as well.
+    let state = super::catalog::tool_state_by_name(name, mcp);
+    if !state.is_available() && super::catalog::find_tool(name).is_some() {
+        let reason = state.reason().unwrap_or_else(|| "disabled".to_string());
+        return Err(format!("Tool '{name}' is disabled: {reason}"));
     }
     match name {
         "list_agent_sessions" => super::ai_sessions::list(repo, args, mcp),
@@ -2124,29 +2133,115 @@ mod tests {
         assert!(result.unwrap_err().contains("disabled"));
     }
 
-    #[test]
-    fn test_list_tools_count() {
-        let resp = list_tools(&json!(1), &default_mcp());
-        let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 21);
+    // ── Catalog ↔ advertisement identity ───────────────────────
+    //
+    // Asserted by name, never by an expected count, so adding a tool can
+    // never leave the catalog, the advertisement and the settings UI out of
+    // step (see also `settings_ui::tests`).
 
-        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert!(names.contains(&"search_commands"));
-        assert!(names.contains(&"recent_commands"));
-        assert!(names.contains(&"command_status"));
-        assert!(names.contains(&"get_prompts"));
-        assert!(names.contains(&"session_history"));
-        assert!(names.contains(&"get_stats"));
-        assert!(names.contains(&"list_sessions"));
-        assert!(names.contains(&"what_changed"));
-        assert!(names.contains(&"what_failed"));
-        assert!(names.contains(&"suggest_next"));
-        assert!(names.contains(&"assess_risk"));
-        assert!(names.contains(&"find_agent_session"));
-        assert!(names.contains(&"replay_agent_session"));
-        assert!(names.contains(&"learn_from_failures"));
-        assert!(names.contains(&"project_context"));
-        assert!(names.contains(&"resolve_current_agent_session"));
+    fn advertised(mcp: &crate::config::McpConfig) -> std::collections::BTreeSet<String> {
+        let resp = list_tools(&json!(1), mcp);
+        resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn catalog_names<F>(keep: F) -> std::collections::BTreeSet<String>
+    where
+        F: Fn(&super::super::catalog::ToolEntry) -> bool,
+    {
+        super::super::catalog::TOOLS
+            .iter()
+            .filter(|t| keep(t))
+            .map(|t| t.name.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn catalog_tools_all_have_definitions() {
+        for entry in super::super::catalog::TOOLS {
+            let def = tool_definition(entry.name)
+                .unwrap_or_else(|| panic!("no JSON definition for catalog tool {}", entry.name));
+            assert_eq!(
+                def["name"].as_str().unwrap(),
+                entry.name,
+                "definition name disagrees with the catalog name"
+            );
+        }
+    }
+
+    #[test]
+    fn advertised_tools_match_catalog_default_availability() {
+        assert_eq!(
+            advertised(&default_mcp()),
+            catalog_names(super::super::catalog::ToolEntry::default_available),
+            "default advertisement must be exactly the catalog's default-available tools"
+        );
+    }
+
+    #[test]
+    fn advertised_tools_match_the_whole_catalog_with_opt_ins_on() {
+        let mcp = crate::config::McpConfig {
+            allow_session_summaries: true,
+            allow_skill_proposals: true,
+            ..Default::default()
+        };
+        assert_eq!(advertised(&mcp), catalog_names(|_| true));
+    }
+
+    #[test]
+    fn every_catalog_tool_can_be_disabled_and_then_cannot_be_invoked() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        for entry in super::super::catalog::TOOLS {
+            let mcp = crate::config::McpConfig {
+                allow_session_summaries: true,
+                allow_skill_proposals: true,
+                disabled_tools: vec![entry.name.to_string()],
+                ..Default::default()
+            };
+            assert!(
+                !advertised(&mcp).contains(entry.name),
+                "{} is still advertised while disabled",
+                entry.name
+            );
+            let err = call_tool(&repo, entry.name, &json!({}), &mcp)
+                .expect_err("a disabled tool must not be invocable");
+            assert!(
+                err.contains("disabled"),
+                "{} was rejected without saying it is disabled: {err}",
+                entry.name
+            );
+        }
+    }
+
+    #[test]
+    fn write_tools_cannot_be_invoked_until_their_opt_in_is_on() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        for entry in super::super::catalog::TOOLS {
+            let Some(opt_in) = entry.write_opt_in else {
+                continue;
+            };
+            let mcp = default_mcp();
+            assert!(!opt_in.is_on(&mcp), "writes must be off by default");
+            let err = call_tool(&repo, entry.name, &json!({}), &mcp)
+                .expect_err("a write tool must not be invocable before its opt-in");
+            assert!(
+                err.contains(opt_in.config_key()),
+                "{} should point at {}: {err}",
+                entry.name,
+                opt_in.config_key()
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_tool_is_still_an_unknown_tool_error() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let err = call_tool(&repo, "not_a_tool", &json!({}), &default_mcp()).unwrap_err();
+        assert!(err.contains("Unknown tool"), "{err}");
     }
 
     #[test]
