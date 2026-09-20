@@ -598,9 +598,30 @@ pub fn run_search(
     let noted_entry_ids = repo.get_noted_entry_ids().unwrap_or_default();
     let executors = repo.get_distinct_executors().unwrap_or_default();
 
-    let _guard = crate::util::TerminalGuardStderr::new()?;
+    // Compact recall keeps the surrounding shell context on screen by
+    // drawing into an inline viewport instead of the alternate screen. It is
+    // opt-in (`--compact` / `search.compact`), needs no daemon or PTY proxy,
+    // and the full-screen inspector stays the default.
+    let surface = if args.compact {
+        let rows = crossterm::terminal::size().map_or(24, |(_, rows)| rows);
+        crate::util::RecallSurface::Inline {
+            height: crate::util::inline_height(rows),
+        }
+    } else {
+        crate::util::RecallSurface::FullScreen
+    };
+
+    let _guard = crate::util::TerminalGuardStderr::for_surface(surface)?;
     let backend = CrosstermBackend::new(io::stderr());
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = match surface {
+        crate::util::RecallSurface::Inline { height } => Terminal::with_options(
+            backend,
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Inline(height),
+            },
+        )?,
+        crate::util::RecallSurface::FullScreen => Terminal::new(backend)?,
+    };
 
     let mut app = SearchApp::new(SearchConfig {
         entries,
@@ -647,6 +668,12 @@ pub fn run_search(
     });
 
     let result = app.run(&mut terminal, repo);
+    // An inline viewport lives in the normal screen buffer, so it has to
+    // erase itself: the shell prompt must come back where it was, with the
+    // surrounding context intact.
+    if matches!(surface, crate::util::RecallSurface::Inline { .. }) {
+        terminal.clear()?;
+    }
     terminal.show_cursor()?;
     result
 }
