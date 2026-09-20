@@ -843,7 +843,7 @@ fn try_install_builtin_skills(home: &str) -> Result<bool, Box<dyn std::error::Er
         &repo,
         &[crate::cli::SyncTarget::ClaudeCode],
         std::path::Path::new(home),
-        false,
+        crate::skills_sync::SyncOptions::apply(),
     )?;
     Ok(true)
 }

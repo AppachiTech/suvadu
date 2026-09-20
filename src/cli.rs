@@ -950,11 +950,30 @@ pub enum SkillsCommands {
         triggers: Vec<String>,
     },
 
-    /// Remove a skill
+    /// Remove a skill from the library (generated agent files are left in
+    /// place — see `suv skills cleanup`)
     Rm {
         /// Skill name
         name: String,
         /// "global", "here", or an explicit directory path (default: best match)
+        #[arg(long)]
+        scope: Option<String>,
+    },
+
+    /// Stop a skill syncing without deleting it (reversible with `enable`)
+    Disable {
+        /// Skill name
+        name: String,
+        /// "global", "here", or an explicit directory path (default: best match)
+        #[arg(long)]
+        scope: Option<String>,
+    },
+
+    /// Re-activate a disabled skill
+    Enable {
+        /// Skill name
+        name: String,
+        /// "global", "here", or an explicit directory path (default: the one disabled skill)
         #[arg(long)]
         scope: Option<String>,
     },
@@ -968,6 +987,23 @@ pub enum SkillsCommands {
         #[arg(long, value_enum)]
         target: Option<SyncTarget>,
         /// Preview what would be written without writing
+        #[arg(long)]
+        dry_run: bool,
+        /// Overwrite managed sections that were edited outside suvadu
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Remove agent files suvadu generated for skills that are gone or
+    /// disabled. Only touches suvadu's own managed sections
+    #[command(
+        after_help = "Examples:\n  suv skills cleanup --dry-run  # list the orphaned files first\n  suv skills cleanup            # remove them"
+    )]
+    Cleanup {
+        /// Clean only this target (default: all)
+        #[arg(long, value_enum)]
+        target: Option<SyncTarget>,
+        /// Preview what would be removed without removing
         #[arg(long)]
         dry_run: bool,
     },
