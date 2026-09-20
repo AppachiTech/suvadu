@@ -183,12 +183,12 @@ pub fn resolve(repo: &Repository, args: &Value, mcp: &McpConfig) -> Result<Strin
     let listed = repo
         .list_ai_sessions(100, 0, &mcp.exclude_dirs)
         .map_err(|error| error.to_string())?;
-    let candidates = listed["sessions"]
+    let matched = listed["sessions"]
         .as_array()
         .into_iter()
         .flatten()
         .filter(|session| {
-            cwd.as_deref().is_none_or(|cwd| session["cwd"] == cwd)
+            cwd.as_deref().is_some_and(|cwd| session["cwd"] == cwd)
                 && agent.is_none_or(|agent| match agent {
                     "codex" | "openai-codex" => session["agent"] == "openai-codex",
                     "claude" | "claude-code" => session["agent"] == "claude-code",
@@ -196,22 +196,69 @@ pub fn resolve(repo: &Repository, args: &Value, mcp: &McpConfig) -> Result<Strin
                     _ => false,
                 })
         })
-        .take(10)
         .cloned()
         .collect::<Vec<_>>();
-    if candidates.len() == 1 {
-        return Ok(json!({
-            "resolved":true,"session_id":candidates[0]["id"],"source":"unambiguous_cwd",
-            "session":candidates[0],
-            "capture_lag_note":"The current in-progress turn is imported at Stop/SessionEnd, so this session can lag until the turn finishes."
-        }).to_string());
+    let truncated = matched.len() > MAX_CANDIDATES;
+    let mut candidates = matched;
+    candidates.truncate(MAX_CANDIDATES);
+    // With no directory to match against, nothing here is evidence that a
+    // session is *this* session, so the caller sees the unfiltered recent
+    // list as candidates rather than a pick.
+    if cwd.is_none() {
+        let fallback = listed["sessions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .take(MAX_CANDIDATES)
+            .cloned()
+            .collect::<Vec<_>>();
+        return Ok(cwd_resolution(None, fallback, false).to_string());
     }
-    Ok(json!({
-        "resolved":false,
-        "reason":if candidates.is_empty() {"No captured session matches the available agent and directory hints"} else {"Multiple captured sessions match; ask the user to choose a session ID"},
-        "candidates":candidates,
-        "capture_lag_note":"The current in-progress turn is imported at Stop/SessionEnd, so retry after the turn finishes if the expected session is missing."
-    }).to_string())
+    Ok(cwd_resolution(cwd.as_deref(), candidates, truncated).to_string())
+}
+
+/// At most this many candidates are returned for the user to choose from.
+const MAX_CANDIDATES: usize = 10;
+
+/// Decide what to return once the candidate list is known. Kept separate
+/// from the lookup so each branch is directly testable, and so the
+/// "convenient pick" cases are impossible to reintroduce by accident: no
+/// directory means no resolution, and more than one match is always the
+/// user's choice, never the newest one.
+fn cwd_resolution(cwd: Option<&str>, candidates: Vec<Value>, truncated: bool) -> Value {
+    const LAG: &str = "The current in-progress turn is imported at Stop/SessionEnd, so this session can lag until the turn finishes.";
+    if cwd.is_none() {
+        return json!({
+            "resolved": false,
+            "reason": "No working directory was available to match against, so no session was chosen. Pass cwd, or ask the user for an explicit session_id.",
+            "candidates": candidates,
+            "candidates_truncated": truncated,
+            "capture_lag_note": LAG
+        });
+    }
+    if candidates.len() == 1 {
+        let session = candidates.into_iter().next().unwrap_or(Value::Null);
+        return json!({
+            "resolved": true,
+            "session_id": session["id"],
+            "source": "unambiguous_cwd",
+            "match_reason": format!("Only captured session in {}", cwd.unwrap_or_default()),
+            "verify_note": "Matched on working directory alone, not on this agent's own session identity. If the session below is not the work in progress, ask the user for an explicit session_id.",
+            "session": session,
+            "capture_lag_note": LAG
+        });
+    }
+    json!({
+        "resolved": false,
+        "reason": if candidates.is_empty() {
+            "No captured session matches the available agent and directory hints".to_string()
+        } else {
+            format!("{} captured sessions match; ask the user to choose a session ID", candidates.len())
+        },
+        "candidates": candidates,
+        "candidates_truncated": truncated,
+        "capture_lag_note": "The current in-progress turn is imported at Stop/SessionEnd, so retry after the turn finishes if the expected session is missing."
+    })
 }
 
 /// Shared preflight, also called by the server before opening a writable database.
@@ -576,5 +623,188 @@ mod tests {
             super::super::tools::call_tool(&repo, "save_session_summary", &args, &excluded)
                 .is_err()
         );
+    }
+
+    fn candidate(id: &str, cwd: &str) -> Value {
+        json!({"id": id, "cwd": cwd, "agent": "openai-codex", "last_activity_at": 1_000})
+    }
+
+    /// Without a directory to match against, "the only captured session"
+    /// is just "the most recent session" wearing a disguise. Refuse rather
+    /// than hand back an unrelated project's work as the current one.
+    #[test]
+    fn resolver_refuses_to_pick_a_session_with_no_directory_to_match() {
+        let resolved = cwd_resolution(None, vec![candidate("codex-a", "/elsewhere")], false);
+        assert_eq!(resolved["resolved"], false);
+        assert!(
+            resolved["reason"]
+                .as_str()
+                .unwrap()
+                .to_lowercase()
+                .contains("directory"),
+            "{resolved}"
+        );
+        assert_eq!(resolved["candidates"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn resolver_takes_the_only_session_in_the_directory_but_says_why() {
+        let resolved = cwd_resolution(
+            Some("/work/project"),
+            vec![candidate("codex-a", "/work/project")],
+            false,
+        );
+        assert_eq!(resolved["resolved"], true);
+        assert_eq!(resolved["session_id"], "codex-a");
+        assert_eq!(resolved["source"], "unambiguous_cwd");
+        assert!(resolved["match_reason"]
+            .as_str()
+            .unwrap()
+            .contains("/work/project"));
+        // Directory is a weak signal; the agent must be told to confirm.
+        assert!(resolved["verify_note"].is_string());
+    }
+
+    /// A truncated candidate list must say it was truncated — otherwise an
+    /// agent asking the user to choose offers a menu missing the right one.
+    #[test]
+    fn resolver_declares_a_truncated_candidate_list() {
+        let resolved = cwd_resolution(
+            Some("/work/project"),
+            vec![
+                candidate("codex-a", "/work/project"),
+                candidate("codex-b", "/work/project"),
+            ],
+            true,
+        );
+        assert_eq!(resolved["resolved"], false);
+        assert_eq!(resolved["candidates_truncated"], true);
+        assert!(resolved["reason"].as_str().unwrap().contains("choose"));
+    }
+
+    #[test]
+    fn resolver_reports_no_match_rather_than_falling_back() {
+        let resolved = cwd_resolution(Some("/work/project"), vec![], false);
+        assert_eq!(resolved["resolved"], false);
+        assert_eq!(resolved["candidates"], json!([]));
+        assert!(resolved["reason"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("no captured session"));
+    }
+
+    /// A long session must stay fully reachable one page at a time, and a
+    /// single page must never look like the whole thing.
+    #[test]
+    fn long_sessions_stay_reachable_page_by_page_and_windows_admit_they_are_partial() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let mut records = vec![
+            json!({"timestamp":"2026-09-12T10:00:00Z","type":"session_meta","payload":{"id":"long","cwd":"/work/project"}}),
+        ];
+        for index in 0..250 {
+            records.push(json!({
+                "timestamp": "2026-09-12T10:00:01Z",
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": format!("request {index}")}
+            }));
+        }
+        let path = dir.path().join("long.jsonl");
+        std::fs::write(
+            &path,
+            records
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        loop {
+            let result = repo
+                .import_codex_session(&path, None, |_| {
+                    Ok(crate::ai_sessions::CapturePolicy::default())
+                })
+                .unwrap();
+            if result["has_more"] != true {
+                break;
+            }
+        }
+        let mcp = McpConfig::default();
+
+        let first = call_json(
+            &repo,
+            "get_agent_session",
+            &json!({"session_id": "codex-long", "limit": 100}),
+            &mcp,
+        );
+        let total = first["session"]["event_count"].as_u64().unwrap();
+        assert!(total >= 250, "{total}");
+        assert_eq!(first["events_total"], json!(total));
+        assert_eq!(
+            first["events_complete"], false,
+            "a 100-event window is not the session"
+        );
+
+        let mut seen = Vec::new();
+        let mut offset = Some(0_u64);
+        let mut pages = 0;
+        while let Some(current) = offset {
+            let page = call_json(
+                &repo,
+                "get_agent_session",
+                &json!({"session_id": "codex-long", "limit": 100, "event_offset": current}),
+                &mcp,
+            );
+            for event in page["events"].as_array().unwrap() {
+                seen.push(event["id"].as_str().unwrap().to_owned());
+            }
+            offset = page["next_event_offset"].as_u64();
+            pages += 1;
+            assert!(pages < 20, "pagination did not terminate");
+        }
+        assert_eq!(seen.len() as u64, total);
+        let unique = seen.iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), seen.len(), "a page repeated records");
+    }
+
+    /// Older sessions must stay reachable through the list, not fall off
+    /// the first page forever.
+    #[test]
+    fn older_sessions_remain_reachable_through_list_pagination() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        for (index, native) in ["old", "middle", "newest"].iter().enumerate() {
+            let path = dir.path().join(format!("{native}.jsonl"));
+            std::fs::write(
+                &path,
+                format!(
+                    "{}\n{}\n",
+                    json!({"timestamp":"2026-09-12T10:00:00Z","type":"session_meta","payload":{"id":native,"cwd":format!("/work/{native}")}}),
+                    json!({"timestamp":"2026-09-12T10:00:01Z","type":"event_msg","payload":{"type":"user_message","message":format!("request {index}")}}),
+                ),
+            )
+            .unwrap();
+            repo.import_codex_session(&path, None, |_| {
+                Ok(crate::ai_sessions::CapturePolicy::default())
+            })
+            .unwrap();
+        }
+        let mcp = McpConfig::default();
+        let mut ids = Vec::new();
+        let mut offset = Some(0_u64);
+        while let Some(current) = offset {
+            let page = call_json(
+                &repo,
+                "list_agent_sessions",
+                &json!({"limit": 1, "offset": current}),
+                &mcp,
+            );
+            for session in page["sessions"].as_array().unwrap() {
+                ids.push(session["id"].as_str().unwrap().to_owned());
+            }
+            offset = page["next_offset"].as_u64();
+        }
+        assert_eq!(ids.len(), 3, "{ids:?}");
+        assert!(ids.contains(&"codex-old".to_string()), "{ids:?}");
     }
 }

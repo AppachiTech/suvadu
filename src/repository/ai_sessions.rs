@@ -1027,6 +1027,39 @@ impl Repository {
         let more_commands = commands.len() > limit;
         events.truncate(limit);
         commands.truncate(limit);
+        let summaries = self.summary_checkpoints_json(id, &session)?;
+        let event_total = session["event_count"].as_i64().unwrap_or_default();
+        let command_total = session["command_count"].as_i64().unwrap_or_default();
+        snapshot.commit()?;
+        let next_event_offset = more_events.then_some(event_offset.saturating_add(limit));
+        let next_command_offset = more_commands.then_some(command_offset.saturating_add(limit));
+        let next_offset = (event_offset == command_offset && (more_events || more_commands))
+            .then_some(event_offset.saturating_add(limit));
+        // A window is never allowed to read as the whole session: say how
+        // many records exist and whether this response holds all of them.
+        let events_complete = event_offset == 0 && !more_events;
+        let commands_complete = command_offset == 0 && !more_commands;
+        Ok(json!({
+            "session": session,
+            "events": events,
+            "commands": commands,
+            "summaries": summaries,
+            "next_offset": next_offset,
+            "next_event_offset": next_event_offset,
+            "next_command_offset": next_command_offset,
+            "events_total": event_total,
+            "commands_total": command_total,
+            "events_complete": events_complete,
+            "commands_complete": commands_complete,
+            "session_complete": events_complete && commands_complete,
+            "completeness_note": "events_complete/commands_complete describe this response only. Follow next_event_offset and next_command_offset until both are null before treating anything as the whole session."
+        }))
+    }
+
+    /// The newest saved summary checkpoints for a session, as the MCP
+    /// session read reports them: the stored text plus how its basis stands
+    /// against the evidence now, and where a safe incremental read resumes.
+    fn summary_checkpoints_json(&self, id: &str, session: &Value) -> DbResult<Vec<Value>> {
         let mut statement = self.conn.prepare("SELECT id,source_revision,text,agent,model,source_ids,source_event_count,source_command_count,source_prefix_hash,base_summary_id,created_at FROM ai_summaries WHERE session_id=?1 ORDER BY created_at DESC,rowid DESC LIMIT 5")?;
         let rows = statement
             .query_map([id], |r| {
@@ -1062,7 +1095,7 @@ impl Repository {
         {
             let basis = self.summary_basis(
                 id,
-                &session,
+                session,
                 &SummarySource {
                     revision: &revision,
                     event_count: source_event_count,
@@ -1085,14 +1118,7 @@ impl Repository {
                 "resume_command_offset":incremental_safe.then_some(source_command_count)
             }));
         }
-        snapshot.commit()?;
-        let next_event_offset = more_events.then_some(event_offset.saturating_add(limit));
-        let next_command_offset = more_commands.then_some(command_offset.saturating_add(limit));
-        let next_offset = (event_offset == command_offset && (more_events || more_commands))
-            .then_some(event_offset.saturating_add(limit));
-        Ok(
-            json!({"session":session,"events":events,"commands":commands,"summaries":summaries,"next_offset":next_offset,"next_event_offset":next_event_offset,"next_command_offset":next_command_offset}),
-        )
+        Ok(summaries)
     }
 
     pub fn save_ai_summary(
