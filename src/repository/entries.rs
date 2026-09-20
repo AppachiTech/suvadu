@@ -534,6 +534,7 @@ impl Repository {
                 last_activity_at: row.get(7)?,
                 preview: None,
                 capture: None,
+                revision: None,
             })
         })?;
 

@@ -244,6 +244,10 @@ pub struct SessionSummary {
     /// Capture completeness for a captured agent session. `None` for a plain
     /// shell session, which has no transcript that could be missing records.
     pub capture: Option<CaptureStatus>,
+    /// The captured session's revision string — what a summary or handoff
+    /// has to cite so a reader can tell whether the evidence moved on.
+    /// `None` for a plain shell session.
+    pub revision: Option<String>,
 }
 
 /// How a saved summary stands against the evidence it was written from.

@@ -1,3 +1,4 @@
+use crate::ai_sessions::handoff::{HandoffCommand, HandoffSession};
 use crate::ai_sessions::AiEvent;
 use crate::models::{AiSummaryRecord, Entry, SessionSummary};
 
@@ -8,6 +9,10 @@ pub struct AiSessionData {
     pub items: Vec<AiTimelineItem>,
     /// Saved AI-generated summaries for this session, newest first.
     pub summaries: Vec<AiSummaryRecord>,
+    /// Whether `mcp.allow_session_summaries` is on. The viewer needs this to
+    /// explain an empty summary list honestly: with the opt-in off, no
+    /// connected agent can save one however nicely the user asks.
+    pub summary_writes_enabled: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -136,6 +141,7 @@ pub fn build_ai_session_data(
     events: Vec<AiEvent>,
     entries: Vec<Entry>,
     summaries: Vec<AiSummaryRecord>,
+    summary_writes_enabled: bool,
 ) -> AiSessionData {
     let usage = events
         .iter()
@@ -201,5 +207,67 @@ pub fn build_ai_session_data(
         usage,
         items,
         summaries,
+        summary_writes_enabled,
+    }
+}
+
+/// Collect the captured records a handoff cites. Reads only what is in
+/// `data` — no model is invoked and nothing is inferred; every judgement
+/// section stays a fill-in marker for the receiving agent.
+pub fn handoff_session(data: &AiSessionData) -> HandoffSession {
+    let goal = data.items.iter().find_map(|item| match item {
+        AiTimelineItem::Prompt {
+            text, source_id, ..
+        } => Some((source_id.clone(), text.clone())),
+        _ => None,
+    });
+    let latest_answer = data.items.iter().rev().find_map(|item| match item {
+        AiTimelineItem::Response {
+            text, source_id, ..
+        } => Some((source_id.clone(), text.clone())),
+        _ => None,
+    });
+    let commands = data
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            AiTimelineItem::Command { entry, source_id } => Some(HandoffCommand {
+                id: source_id.clone(),
+                command: entry.command.clone(),
+                exit_code: entry.exit_code,
+            }),
+            _ => None,
+        })
+        .collect();
+    HandoffSession {
+        session_id: data.summary.id.clone(),
+        revision: data
+            .summary
+            .revision
+            .clone()
+            .unwrap_or_else(|| "unknown".into()),
+        agent: data
+            .summary
+            .agent
+            .clone()
+            .unwrap_or_else(|| "unknown agent".into()),
+        project: data
+            .summary
+            .cwd
+            .clone()
+            .unwrap_or_else(|| "unknown project".into()),
+        goal,
+        latest_answer,
+        commands,
+        capture_known_missing: data
+            .summary
+            .capture
+            .as_ref()
+            .map(|capture| capture.known_missing.clone())
+            .unwrap_or_default(),
+        summary: data
+            .summaries
+            .first()
+            .map(|record| (record.id.clone(), record.basis.label().to_owned())),
     }
 }

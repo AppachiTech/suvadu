@@ -979,6 +979,16 @@ struct SummaryPanelState {
     raw_view: bool,
 }
 
+/// A scrollable, copyable block of text shown over the timeline: the
+/// handoff scaffold, or the in-place explanation of why there is no saved
+/// summary. Kept as plain owned text so the same panel serves both and a
+/// test can read exactly what the user is being told.
+struct TextPanel {
+    title: String,
+    body: String,
+    scroll: u16,
+}
+
 struct AiSessionApp {
     data: AiSessionData,
     table_state: TableState,
@@ -988,6 +998,7 @@ struct AiSessionApp {
     home: String,
     status_message: Option<(String, std::time::Instant)>,
     summary_panel: Option<SummaryPanelState>,
+    text_panel: Option<TextPanel>,
 }
 
 impl AiSessionApp {
@@ -1005,6 +1016,7 @@ impl AiSessionApp {
             home: dirs_home(),
             status_message: None,
             summary_panel: None,
+            text_panel: None,
         }
     }
 
@@ -1053,16 +1065,58 @@ impl AiSessionApp {
 
     fn open_summary_panel(&mut self) {
         if self.data.summaries.is_empty() {
-            self.status_message = Some((
-                "No summary yet — ask your connected AI agent to summarize this session".into(),
-                std::time::Instant::now(),
-            ));
+            self.text_panel = Some(TextPanel {
+                title: " SUVADU SUMMARIES ".into(),
+                body: no_summary_explanation(self.data.summary_writes_enabled),
+                scroll: 0,
+            });
         } else {
             self.summary_panel = Some(SummaryPanelState {
                 index: 0,
                 scroll: 0,
                 raw_view: false,
             });
+        }
+    }
+
+    /// Build the handoff scaffold from this session's captured records.
+    /// Local records only: no model is invoked and nothing is charged.
+    fn open_handoff_panel(&mut self) {
+        let handoff = crate::session_ui::session_data::handoff_session(&self.data);
+        self.text_panel = Some(TextPanel {
+            title: " SUVADU HANDOFF ".into(),
+            body: crate::ai_sessions::handoff::scaffold(&handoff),
+            scroll: 0,
+        });
+    }
+
+    /// Key handling while a text panel is open.
+    fn handle_text_panel_input(&mut self, key: crossterm::event::KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.text_panel = None,
+            KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let text = self.text_panel.as_ref().map(|panel| panel.body.clone());
+                if let Some(text) = text {
+                    let copied = arboard::Clipboard::new()
+                        .and_then(|mut clipboard| clipboard.set_text(text))
+                        .is_ok();
+                    self.status_message = Some((
+                        if copied { "Copied!" } else { "Copy failed" }.into(),
+                        std::time::Instant::now(),
+                    ));
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(panel) = &mut self.text_panel {
+                    panel.scroll = panel.scroll.saturating_sub(1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(panel) = &mut self.text_panel {
+                    panel.scroll = panel.scroll.saturating_add(1);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1125,6 +1179,10 @@ impl AiSessionApp {
     }
 
     fn handle_input(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        if self.text_panel.is_some() {
+            self.handle_text_panel_input(key);
+            return true;
+        }
         if self.summary_panel.is_some() {
             self.handle_summary_panel_input(key);
             return true;
@@ -1133,6 +1191,7 @@ impl AiSessionApp {
             KeyCode::Esc | KeyCode::Char('q') => return false,
             KeyCode::Tab => self.detail_open = !self.detail_open,
             KeyCode::Char('s') => self.open_summary_panel(),
+            KeyCode::Char('h') => self.open_handoff_panel(),
             KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(text) = self.selected_item().map(AiTimelineItem::copy_text) {
                     let copied = arboard::Clipboard::new()
@@ -1213,6 +1272,9 @@ impl AiSessionApp {
         self.render_footer(f, chunks[3], t);
         if let Some(panel) = &mut self.summary_panel {
             render_summary_panel(f, f.area(), t, &self.data.summaries, panel);
+        }
+        if let Some(panel) = &mut self.text_panel {
+            render_text_panel(f, f.area(), t, panel);
         }
     }
 
@@ -1438,7 +1500,9 @@ impl AiSessionApp {
             Span::styled(" ^Y ", key),
             Span::styled(" Copy  ", label),
             Span::styled(" s ", key),
-            Span::styled(" Summary ", label),
+            Span::styled(" Summaries  ", label),
+            Span::styled(" h ", key),
+            Span::styled(" Handoff ", label),
         ];
         if self.selected_linked_command().is_some() {
             spans.push(Span::styled(" Enter ", key));
@@ -1660,6 +1724,78 @@ fn render_summary_panel(
     f.render_widget(Paragraph::new(Line::from(footer)), layout[4]);
 }
 
+/// What to tell a user who asked for summaries and there are none. With
+/// writes off this is not "not yet" but "not possible until you opt in", so
+/// it names the exact settings path instead of a config key alone.
+fn no_summary_explanation(writes_enabled: bool) -> String {
+    if writes_enabled {
+        "No summary has been saved for this session yet.\n\n\
+         Suvadu never writes one itself and never calls a model. Ask your connected agent to \
+         summarize this session and to save it — it stores the text through \
+         `save_session_summary`, citing the exact events and commands it used.\n\n\
+         Press h to prepare a handoff from the captured records instead. That reads local \
+         records only."
+            .to_string()
+    } else {
+        "Saved session summaries are turned off, so no agent can store one yet.\n\n\
+         Suvadu never writes a summary itself and never calls a model: a connected agent \
+         authors the text, and only when you explicitly ask it to save.\n\n\
+         To allow that:\n\
+         \u{20} 1. Run `suv settings` → MCP → Writes → Allow Saved Session Summaries\n\
+         \u{20} 2. Restart your MCP client so it picks up the newly advertised tool.\n\n\
+         Press h to prepare a handoff from the captured records instead. That needs no \
+         permission — it reads local records only."
+            .to_string()
+    }
+}
+
+/// Scrollable overlay for a block of plain text (the handoff scaffold, or
+/// the explanation above).
+fn render_text_panel(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    t: &crate::theme::Theme,
+    panel: &mut TextPanel,
+) {
+    let popup_area = crate::util::centered_rect(76, 76, area);
+    f.render_widget(Clear, popup_area);
+    let block = Block::default()
+        .title(panel.title.clone())
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(t.primary))
+        .style(Style::default().bg(t.bg_elevated));
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+    panel.scroll = clamp_scroll(&panel.body, layout[0].width, layout[0].height, panel.scroll);
+    f.render_widget(
+        Paragraph::new(render_markdown_lite(&panel.body, t))
+            .wrap(Wrap { trim: false })
+            .scroll((panel.scroll, 0)),
+        layout[0],
+    );
+
+    let key = Style::default().bg(t.badge_bg).fg(t.text);
+    let label = Style::default().fg(t.text_secondary);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" q/Esc ", key),
+            Span::styled(" Close  ", label),
+            Span::styled(" ↑↓ ", key),
+            Span::styled(" Scroll  ", label),
+            Span::styled(" ^Y ", key),
+            Span::styled(" Copy ", label),
+        ])),
+        layout[1],
+    );
+}
+
 /// Badge line for the summary panel: which evidence state this saved
 /// summary is in, which version is open, and the render mode.
 fn summary_header_line(
@@ -1820,6 +1956,7 @@ mod tests {
                 first_activity_at: 1_000,
                 last_activity_at: 2_000,
                 preview: Some("Fix the flaky parser test".into()),
+                revision: Some("e1-c0-0".into()),
                 capture: Some(crate::models::CaptureStatus {
                     complete: true,
                     known_missing: Vec::new(),
@@ -1841,6 +1978,7 @@ mod tests {
                 model: Some("gpt-test".into()),
             }],
             summaries: vec![],
+            summary_writes_enabled: true,
         }
     }
 
@@ -2208,16 +2346,106 @@ mod tests {
         assert!(note.to_lowercase().contains("rebuild"), "{note}");
     }
 
+    /// With summary writes switched off, "no summary yet" is not the real
+    /// answer — no agent can save one until the opt-in is on, and the user
+    /// needs to be told where that switch is without leaving the screen.
     #[test]
-    fn s_with_no_summaries_shows_status_message_and_no_panel() {
+    fn s_without_summaries_explains_disabled_summary_writes_in_place() {
+        let mut data = make_ai_data();
+        data.summary_writes_enabled = false;
+        let mut app = AiSessionApp::new(data);
+        let key = crossterm::event::KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(app.handle_input(key));
+
+        let notice = app.text_panel.as_ref().expect("an in-place explanation");
+        assert!(
+            notice.body.to_lowercase().contains("settings"),
+            "{}",
+            notice.body
+        );
+        assert!(notice.body.contains("MCP"), "{}", notice.body);
+        assert!(notice.body.contains("Writes"), "{}", notice.body);
+        assert!(
+            notice.body.contains("Allow Saved Session Summaries"),
+            "{}",
+            notice.body
+        );
+        assert!(
+            notice.body.to_lowercase().contains("restart"),
+            "{}",
+            notice.body
+        );
+    }
+
+    /// With the opt-in on and still no summary, the answer is different:
+    /// the connected agent writes it, suvadu never does.
+    #[test]
+    fn s_without_summaries_but_writes_enabled_points_at_the_connected_agent() {
+        let mut app = AiSessionApp::new(make_ai_data());
+        let key = crossterm::event::KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(app.handle_input(key));
+        let notice = app.text_panel.as_ref().expect("an in-place explanation");
+        assert!(
+            notice.body.contains("save_session_summary"),
+            "{}",
+            notice.body
+        );
+        assert!(
+            !notice.body.contains("Allow Saved Session Summaries"),
+            "should not send the user to a switch that is already on: {}",
+            notice.body
+        );
+    }
+
+    #[test]
+    fn h_prepares_a_handoff_from_captured_records_only() {
+        let mut app = AiSessionApp::new(make_ai_data());
+        let key = crossterm::event::KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
+        assert!(app.handle_input(key));
+        let panel = app.text_panel.as_ref().expect("a handoff panel");
+        assert!(panel.title.to_lowercase().contains("handoff"));
+        for heading in [
+            "## Goal",
+            "## Relevant failures",
+            "## Changed-file evidence",
+            "## Verification state",
+            "## Next actions",
+            "## Source references",
+        ] {
+            assert!(panel.body.contains(heading), "{heading} missing");
+        }
+        assert!(panel.body.contains(crate::ai_sessions::handoff::FILL_IN));
+    }
+
+    #[test]
+    fn a_text_panel_closes_on_escape_and_scrolls() {
+        let mut app = AiSessionApp::new(make_ai_data());
+        assert!(app.handle_input(crossterm::event::KeyEvent::new(
+            KeyCode::Char('h'),
+            KeyModifiers::NONE
+        )));
+        assert!(app.handle_input(crossterm::event::KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE
+        )));
+        assert_eq!(app.text_panel.as_ref().map(|panel| panel.scroll), Some(1));
+        assert!(app.handle_input(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE
+        )));
+        assert!(app.text_panel.is_none());
+    }
+
+    /// Replaces an older two-second status line: an explanation the user
+    /// can read, scroll and copy beats a toast that vanishes.
+    #[test]
+    fn s_with_no_summaries_opens_an_explanation_rather_than_a_toast() {
         let mut app = AiSessionApp::new(make_ai_data());
         let key = crossterm::event::KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
         assert!(app.handle_input(key));
         assert!(app.summary_panel.is_none());
-        assert_eq!(
-            app.status_message.as_ref().map(|(msg, _)| msg.as_str()),
-            Some("No summary yet — ask your connected AI agent to summarize this session")
-        );
+        assert!(app.status_message.is_none());
+        assert!(app.text_panel.is_some());
     }
 
     #[test]

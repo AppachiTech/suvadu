@@ -90,6 +90,7 @@ fn merge_ai_header(sessions: &mut HashMap<String, SessionSummary>, id: String, h
     let agent = header["agent"].as_str().map(str::to_owned);
     let usage_complete = header["usage_complete"].as_bool().unwrap_or(false);
     let preview = header["preview"].as_str().map(str::to_owned);
+    let revision = header["revision"].as_str().map(str::to_owned);
     let capture = Some(CaptureStatus {
         complete: header["capture"]["complete"].as_bool().unwrap_or(false),
         known_missing: header["capture"]["known_missing"]
@@ -110,6 +111,7 @@ fn merge_ai_header(sessions: &mut HashMap<String, SessionSummary>, id: String, h
                 summary.preview.clone_from(&preview);
             }
             summary.capture.clone_from(&capture);
+            summary.revision.clone_from(&revision);
             summary.cwd.clone_from(&cwd);
             summary.agent.clone_from(&agent);
             summary.model.clone_from(&model);
@@ -140,6 +142,7 @@ fn merge_ai_header(sessions: &mut HashMap<String, SessionSummary>, id: String, h
             last_activity_at,
             preview,
             capture,
+            revision,
         });
 }
 
@@ -869,6 +872,7 @@ impl Repository {
                     .as_deref()
                     .map(row_preview),
                 capture: None,
+                revision: None,
             })
         })?;
         let mut sessions = HashMap::new();

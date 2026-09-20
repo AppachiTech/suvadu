@@ -928,6 +928,7 @@ mod tests {
             last_activity_at: 1_700_000_060_000,
             preview: None,
             capture: None,
+            revision: None,
         }
     }
 
