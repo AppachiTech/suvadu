@@ -350,6 +350,33 @@ impl Repository {
         Ok(count)
     }
 
+    /// The distinct commands a pattern delete would remove, newest first and
+    /// capped at `limit`, so a preview can show what goes rather than only
+    /// how many rows go.
+    pub fn preview_entries_by_pattern(
+        &self,
+        pattern: &str,
+        is_regex: bool,
+        before_timestamp: Option<i64>,
+        limit: usize,
+    ) -> DbResult<Vec<String>> {
+        let (mut sql, params) = Self::build_pattern_sql(
+            "SELECT command, MAX(started_at) AS latest FROM entries",
+            pattern,
+            is_regex,
+            before_timestamp,
+        )?;
+        sql.push_str(" GROUP BY command ORDER BY latest DESC LIMIT ");
+        sql.push_str(&limit.to_string());
+        let mut stmt = self.conn.prepare(&sql)?;
+        let commands = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(commands)
+    }
+
     /// Count preview of deletion (Dry Run)
     pub fn count_entries_by_pattern(
         &self,

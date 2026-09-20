@@ -306,6 +306,24 @@ fn handle_delete_with_repo(
                 date.format("%Y-%m-%d %H:%M:%S")
             );
         }
+        // A count alone can't be checked. Show the commands themselves so a
+        // too-broad pattern is visible before anything is removed.
+        let sample =
+            repo.preview_entries_by_pattern(pattern, is_regex, before_timestamp, PREVIEW_LIMIT)?;
+        if !sample.is_empty() {
+            println!("\nWould delete (newest distinct commands first):");
+            for command in &sample {
+                println!("  {}", crate::util::truncate_str(command, 100, "…"));
+            }
+            let shown = i64::try_from(sample.len()).unwrap_or(i64::MAX);
+            let total = i64::try_from(count).unwrap_or(i64::MAX);
+            if total > shown {
+                println!("  … and {} more matching row(s)", total - shown);
+            }
+        }
+        for line in deletion_disclosure(None) {
+            println!("{line}");
+        }
         return Ok(());
     }
 
@@ -329,10 +347,14 @@ fn handle_delete_with_repo(
     // Snapshot the database before an irreversible delete so the operation is
     // recoverable. Skipped with --no-backup. A backup failure aborts the delete
     // rather than proceeding without a safety net.
+    let mut backup_path = None;
     if !no_backup {
         match timestamped_backup_path("predelete") {
             Ok(path) => match repo.backup_to(&path) {
-                Ok(()) => println!("Backed up to {} before deleting.", path.display()),
+                Ok(()) => {
+                    println!("Backed up to {} before deleting.", path.display());
+                    backup_path = Some(path);
+                }
                 Err(e) => {
                     return Err(format!(
                         "Backup failed ({e}); aborting delete. Re-run with --no-backup to skip the backup."
@@ -351,8 +373,53 @@ fn handle_delete_with_repo(
 
     let deleted = repo.delete_entries(pattern, is_regex, before_timestamp)?;
     println!("✓ Deleted {deleted} entries.");
+    for line in deletion_disclosure(backup_path.as_deref()) {
+        println!("{line}");
+    }
 
     Ok(())
+}
+
+/// How many distinct commands a delete preview lists.
+const PREVIEW_LIMIT: usize = 10;
+
+/// What a `suv delete` does and — more importantly — does not do.
+///
+/// Removing a row from `SQLite` is not erasure: the page it lived on stays in
+/// the file until something reuses it, the pre-delete snapshot is a full copy
+/// of the database as it was a moment ago, and earlier backups and exports
+/// are untouched. Saying this plainly is the difference between an undo and a
+/// promise the storage layer cannot keep.
+fn deletion_disclosure(backup: Option<&std::path::Path>) -> Vec<String> {
+    let mut lines = vec![
+        "\nWhat this removes:".to_string(),
+        "  · the matching command rows, their notes and their search-index entries".to_string(),
+        "  · nothing else: empty shell sessions, agent session records and saved summaries stay"
+            .to_string(),
+        "    (summaries that cited a deleted command are kept and marked stale;".to_string(),
+        "     remove an agent session with `suv agent delete-session <id>`)".to_string(),
+        "\nWhat it does not do — this is not a secure erase:".to_string(),
+        "  · deleted rows keep their pages inside history.db until a VACUUM reuses them"
+            .to_string(),
+    ];
+    match backup {
+        Some(path) => lines.push(format!(
+            "  · the pre-delete backup {} still contains every deleted command",
+            path.display()
+        )),
+        None => lines.push(
+            "  · any existing backup in the backups directory still contains these commands"
+                .to_string(),
+        ),
+    }
+    lines.push(
+        "  · earlier backups, `suv export` files and filesystem snapshots are untouched"
+            .to_string(),
+    );
+    lines.push(
+        "  Delete those copies yourself if the commands must not be recoverable.".to_string(),
+    );
+    lines
 }
 
 /// Build a timestamped backup path in the backups dir, e.g.

@@ -2923,4 +2923,68 @@ fn session_scope_also_narrows_unique_results() {
         .expect("cargo build should be in session A");
     assert_eq!(build.1, 1);
     assert_eq!(repo.count_unique_filtered(&scoped).unwrap(), 2);
+
+#[test]
+fn preview_entries_by_pattern_returns_the_matching_commands() {
+    let (_dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 1000);
+    repo.insert_session(&session).unwrap();
+    for (i, cmd) in ["git status", "git push --force", "cargo test"]
+        .iter()
+        .enumerate()
+    {
+        let at = 1000 + i64::try_from(i).unwrap();
+        repo.insert_entry(&crate::models::Entry::new(
+            session.id.clone(),
+            (*cmd).to_string(),
+            "/tmp".into(),
+            Some(0),
+            at,
+            at,
+        ))
+        .unwrap();
+    }
+
+    let preview = repo
+        .preview_entries_by_pattern("git", false, None, 10)
+        .unwrap();
+    assert_eq!(preview.len(), 2);
+    assert!(preview.contains(&"git push --force".to_string()));
+    assert!(!preview.contains(&"cargo test".to_string()));
+
+    // The preview is bounded: a user with thousands of matches gets a sample.
+    let sample = repo
+        .preview_entries_by_pattern("git", false, None, 1)
+        .unwrap();
+    assert_eq!(sample.len(), 1);
+}
+
+#[test]
+fn deleting_entries_removes_their_notes_and_leaves_the_session_row_behind() {
+    let (_dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 1000);
+    repo.insert_session(&session).unwrap();
+    let entry = crate::models::Entry::new(
+        session.id.clone(),
+        "deploy production".to_string(),
+        "/tmp".into(),
+        Some(0),
+        1000,
+        1100,
+    );
+    let id = repo.insert_entry(&entry).unwrap();
+    repo.upsert_note(id, "the scary one").unwrap();
+    assert!(repo.get_note(id).unwrap().is_some());
+
+    assert_eq!(repo.delete_entries("deploy", false, None).unwrap(), 1);
+
+    assert!(
+        repo.get_note(id).unwrap().is_none(),
+        "a note must not outlive the command it annotates"
+    );
+    assert!(
+        repo.get_session(&session.id).unwrap().is_some(),
+        "the session row stays behind and is only cleaned up on request"
+    );
+}
 }

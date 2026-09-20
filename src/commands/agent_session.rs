@@ -139,8 +139,19 @@ pub fn get(id: &str, limit: usize, offset: usize) -> Result<()> {
 }
 pub fn delete(id: &str) -> Result<()> {
     let repo = crate::repository::Repository::init()?;
+    // Say what is about to go before it goes: a session id on its own gives
+    // no sense of how much evidence hangs off it.
+    let preview = repo.ai_session_deletion_preview(id)?;
+    println!(
+        "Deleting session {id}: {} captured event(s), {} recorded command(s), {} saved summary/summaries.",
+        preview.events, preview.commands, preview.summaries
+    );
     let count = repo.delete_ai_session(id)?;
     println!("Deleted session {id} and {count} session/command records. Native agent transcripts are unchanged.");
+    println!(
+        "This is not a secure erase: the rows keep their pages in history.db until a VACUUM \
+         reuses them, and any backup in the backups directory still contains this session."
+    );
     Ok(())
 }
 

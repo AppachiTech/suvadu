@@ -67,6 +67,14 @@ fn row_preview(text: &str) -> String {
     crate::util::truncate_str(&collapsed, PREVIEW_MAX_CHARS, "…")
 }
 
+/// What deleting one agent session would remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AiSessionDeletion {
+    pub events: i64,
+    pub commands: i64,
+    pub summaries: i64,
+}
+
 fn hash_field(hash: &mut Sha256, value: &[u8]) {
     hash.update((value.len() as u64).to_le_bytes());
     hash.update(value);
@@ -1354,6 +1362,30 @@ impl Repository {
         })
     }
 
+    /// What [`Self::delete_ai_session`] would remove, without removing it.
+    ///
+    /// Read-only, so a caller can show the user the size of the deletion
+    /// before asking them to accept it. An unknown session is an error rather
+    /// than an empty preview, so "nothing to delete" can never be mistaken
+    /// for "nothing matched".
+    pub fn ai_session_deletion_preview(&self, id: &str) -> DbResult<AiSessionDeletion> {
+        let exists: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ai_sessions WHERE id=?1 UNION SELECT 1 FROM ai_sources WHERE session_id=?1)",
+            [id],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Err(invalid("AI session not found"));
+        }
+        let count =
+            |sql: &str| -> DbResult<i64> { Ok(self.conn.query_row(sql, [id], |row| row.get(0))?) };
+        Ok(AiSessionDeletion {
+            events: count("SELECT COUNT(*) FROM ai_events WHERE session_id=?1")?,
+            commands: count("SELECT COUNT(*) FROM entries WHERE session_id=?1")?,
+            summaries: count("SELECT COUNT(*) FROM ai_summaries WHERE session_id=?1")?,
+        })
+    }
+
     /// Explicit deletion includes shell evidence and checkpoints, preventing retained summaries.
     pub fn delete_ai_session(&self, id: &str) -> DbResult<usize> {
         let tx = self.conn.unchecked_transaction()?;
@@ -2418,5 +2450,66 @@ mod tests {
             "changed earlier evidence must invalidate the prior basis"
         );
         assert!(!broken[0].basis.is_usable());
+    }
+
+    /// `suv agent delete-session` has to be able to say what it is about to
+    /// remove before it removes it, and the preview itself must be read-only.
+    #[test]
+    fn agent_session_deletion_is_previewable_before_anything_is_removed() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("fixture.jsonl");
+        std::fs::write(&path, records()).unwrap();
+        import(&repo, &path);
+
+        let page = repo.get_ai_session("codex-fixture", 20, 0, &[]).unwrap();
+        repo.save_ai_summary(
+            &SummaryInput {
+                session_id: "codex-fixture".into(),
+                source_revision: page["session"]["revision"].as_str().unwrap().into(),
+                text: "What this session did".into(),
+                agent: "claude".into(),
+                model: "fixture-writer".into(),
+                source_ids: vec![page["events"][0]["id"].as_str().unwrap().into()],
+                base_summary_id: None,
+            },
+            &[],
+        )
+        .unwrap();
+
+        let preview = repo.ai_session_deletion_preview("codex-fixture").unwrap();
+        assert_eq!(
+            preview.events,
+            page["session"]["event_count"].as_i64().unwrap()
+        );
+        assert_eq!(preview.summaries, 1);
+        assert_eq!(
+            preview.commands,
+            page["session"]["command_count"].as_i64().unwrap()
+        );
+
+        // A preview is not a deletion.
+        assert!(repo.get_ai_session("codex-fixture", 20, 0, &[]).is_ok());
+        assert_eq!(
+            repo.ai_summaries_for_session("codex-fixture")
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // An unknown id is an error, not a silent empty preview.
+        assert!(repo.ai_session_deletion_preview("no-such-session").is_err());
+
+        // And the numbers the preview promised are what the delete takes.
+        repo.delete_ai_session("codex-fixture").unwrap();
+        let remaining: i64 = repo
+            .conn
+            .query_row("SELECT COUNT(*) FROM ai_summaries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0);
+        let events: i64 = repo
+            .conn
+            .query_row("SELECT COUNT(*) FROM ai_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(events, 0);
     }
 }
