@@ -16,21 +16,34 @@ Matching modes (--match, or ^X in the UI) decide WHICH entries match:
 
 How a query is read, in every mode:
   - Words are ANDed, never ORed. A missing word means no match.
-  - Matching is case-insensitive for ASCII. Non-ASCII letters compare
-    case-sensitively (README finds readme; ECHO does not find echo's accented form).
+  - Matching is case-insensitive. terms and fuzzy fold case for non-ASCII
+    letters too (ECHO finds echo's accented form); literal and prefix are
+    matched by SQLite's LIKE, which folds ASCII only.
   - There is no quoting syntax: \" and ' are ordinary characters to find.
     Use --match literal for a phrase with spaces or punctuation.
   - Punctuation is never stripped. git-push is one word and matches only git-push.
+  - Every mode narrows in the database, so how old a match is never decides
+    whether it is found.
 
 Scopes (--scope, or ^P in the UI) decide WHERE to look:
   all         everything recorded (default; ^R resets to this)
-  directory   commands run in exactly the current directory
-  workspace   commands run anywhere in the current repository or worktree
-  session     commands from the current shell session
+  directory   commands run in exactly the current directory (not its subtree)
+  workspace   commands run anywhere under the nearest enclosing Git repository
+              or linked worktree (a linked worktree is its own workspace)
+  session     commands from the current shell session ($SUVADU_SESSION_ID)
 An unavailable scope (no repository, no session) says so and falls back explicitly.
 
-Ranking is separate again: ^S switches smart/recent, ^U unique/all. Changing
-the ranking never changes which entries match.
+Ranking is separate again, and never changes which entries match. For terms
+and fuzzy, matches are ordered by how well they match — whole-query prefix,
+then contiguous substring, then your words in order, then in any order —
+and within a tier by a fuzzy score adjusted for command length, for having
+been typed by you rather than an agent, and (in Smart rank) for having run
+in exactly this directory. Nothing is boosted for having been run often or
+for having exited 0. literal, prefix and an empty query are not re-ranked at
+all: those come back newest first.
+^S switches Smart rank (with the this-directory boost) and Recent (without
+it); ^U switches unique/all. At most 5000 matches are ranked, which bounds
+the ordering work, not how much history was searched.
 
 Agent, bot, CI and script commands stay hidden unless --include-agents is
 given or ^A is pressed. Nothing ever includes them silently.
@@ -83,7 +96,7 @@ Organize:
 Data:
   backup       Back up the database to a file (consistent snapshot)
   export       Export history to a file (JSON, JSONL, or CSV format)
-  import       Import history from a file (JSONL or Zsh history format)
+  import       Import history from a file (JSONL, Zsh, Bash, or an Atuin database)
   delete       Bulk delete commands matching a pattern
   gc           Remove orphaned data and compact the database
 
@@ -105,7 +118,7 @@ Options:
 
 Shortcuts (after `suv init <shell>`):
   Ctrl+R       Interactive search, replaces your shell's reverse search (suv search)
-  Up/Down      Recall your history, most relevant command first
+  Up/Down      Recall your history, most recent command first
 
 Run `suv <command> --help` for a command's own flags and examples.\
 ";

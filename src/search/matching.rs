@@ -21,9 +21,16 @@
 //!   `terms` mode;
 //!   entries whose terms appear contiguously and in query order rank higher,
 //!   but a scattered match is still a match.
-//! * **Case:** matching is case-insensitive for ASCII. Non-ASCII letters are
-//!   compared case-sensitively, because the underlying SQL `LIKE` only folds
-//!   ASCII — `README` finds `readme`, `ÉCHO` does not find `écho`.
+//! * **Case:** matching is always case-insensitive for ASCII, and how far it
+//!   goes beyond that depends on the mode. `terms` and `fuzzy` are re-ranked
+//!   in memory after SQL narrowing, so they fold case with Rust's full
+//!   Unicode lowercasing — a non-ASCII term also narrows through
+//!   `suvadu_contains_ci()` rather than `LIKE`, so `ÉCHO` does find `écho`.
+//!   `literal` and `prefix` are answered by SQL alone, and SQLite's `LIKE`
+//!   folds ASCII only, so in those two modes `ÉCHO` does not find `écho`.
+//!   [`MatchMode::matches`] below is the ASCII-only reference predicate used
+//!   by tests and by `fuzzy`'s subsequence check; it is not the live filter
+//!   for `terms`.
 //! * **Quoting:** there is no quoting syntax. `"` and `'` are ordinary
 //!   characters that must appear in the entry. To match a phrase that contains
 //!   spaces or punctuation exactly, use `literal` mode.
@@ -92,8 +99,11 @@ impl MatchMode {
         }
     }
 
-    /// The documented predicate for this mode. Mirrors the SQL exactly,
-    /// including ASCII-only case folding.
+    /// The documented predicate for this mode, folding ASCII case only.
+    /// This mirrors what `literal` and `prefix` do in SQL exactly. It is the
+    /// reference the tests check against, and the subsequence check `fuzzy`
+    /// applies after SQL narrowing — it is *not* the live filter for `terms`,
+    /// which folds non-ASCII case too (see the module docs).
     pub fn matches(self, haystack: &str, query: &str) -> bool {
         let q = query.trim();
         if q.is_empty() {
