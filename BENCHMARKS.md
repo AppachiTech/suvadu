@@ -103,6 +103,27 @@ Recording overhead per command: p50 82µs, p95 151µs, p99 1.42ms.
   much larger history.
 - 1M was not run for this baseline.
 
+### Matching modes (PROD-09)
+
+`suv search` gained explicit matching modes. All four narrow candidates in
+SQL, so none of them falls back to scanning a recent window, but they do not
+cost the same. Measured on the same machine at 100,000 entries with
+`cargo test --release --bin suv matching_mode_latency_on_a_large_history --
+--ignored --nocapture`:
+
+| Mode      | Query                  | Time   |
+|-----------|------------------------|--------|
+| `terms`   | `workspace rare_old`   | 16.9ms |
+| `literal` | `workspace rare_old`   | 16.9ms |
+| `prefix`  | `cargo test`           | 16.2ms |
+| `fuzzy`   | `wrkspc`               | 60.2ms |
+
+`fuzzy` narrows by the query's distinct characters, which is the only sound
+superset of a subsequence match. A single-character `LIKE` cannot use the
+trigram index, so each character costs a scan — roughly 3.5x the default
+mode here. That is the price of the mode, not a regression in it, and
+`fuzzy` is opt-in. `terms` remains the default and is unchanged.
+
 ## Known gaps
 
 - **Ranking quality is not measured.** The judged set records which command

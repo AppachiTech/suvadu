@@ -2812,6 +2812,34 @@ fn typed_search_latency_on_a_large_history() {
         );
     }
 }
+
+#[test]
+#[ignore = "builds a 100k-entry database; run explicitly with --ignored"]
+fn matching_mode_latency_on_a_large_history() {
+    // Fuzzy narrows by single characters, which no trigram index can serve,
+    // so it is expected to be the slowest mode. This prints the cost rather
+    // than asserting it: latency is machine-dependent.
+    let (_dir, repo) = repo_with_old_command("cargo test --workspace rare_old", 100_000);
+
+    for (mode, query) in [
+        (MatchMode::Terms, "workspace rare_old"),
+        (MatchMode::Literal, "workspace rare_old"),
+        (MatchMode::Prefix, "cargo test"),
+        (MatchMode::Fuzzy, "wrkspc"),
+    ] {
+        let mut app = SearchApp::new(test_search_config(vec![], 100_001));
+        app.recall.match_mode = mode;
+        app.query = query.into();
+        let start = std::time::Instant::now();
+        app.reload_entries(&repo).unwrap();
+        println!(
+            "{:8} {query:?}: {} results in {:?}",
+            mode.label(),
+            app.pagination.total_items,
+            start.elapsed()
+        );
+    }
+}
 // ───────────────────────────────────────────────────────────────────────────
 // PROD-09: the matching modes and the recall scopes, end to end against a
 // real database. These are the behaviour the docs and the website promise.
