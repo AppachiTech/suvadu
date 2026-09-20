@@ -343,6 +343,59 @@ fn upgraded_history_is_readable_and_searchable_through_the_repository() {
     assert_eq!(hits[0].tag_name.as_deref(), Some("work"));
 }
 
+/// Installs from before schema versioning existed have no `schema_version`
+/// table at all — only the original tables and their data.
+#[test]
+fn an_unversioned_pre_release_database_upgrades_and_keeps_its_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.db");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(V1_CORE).unwrap();
+    // v3's aliases table exists in the fixture data, so seed without it.
+    conn.execute_batch(
+        "INSERT INTO tags (id, name, description) VALUES (1, 'work', 'work project');
+         INSERT INTO sessions (id, hostname, created_at, tag_id) VALUES ('shell-1', 'oldhost', 1000, 1);
+         INSERT INTO entries (id, session_id, command, cwd, exit_code, started_at, ended_at, duration_ms, context, tag_id, executor_type, executor)
+             VALUES (1, 'shell-1', 'git commit -m ''ancient history''', '/work', 0, 1000, 1100, 100, NULL, 1, NULL, NULL);",
+    )
+    .unwrap();
+    assert!(!table_exists(&conn, "schema_version"));
+    assert!(!table_exists(&conn, "aliases"));
+    drop(conn);
+
+    let conn = db::init_db(&path).unwrap();
+    assert_eq!(schema_version(&conn), 9);
+    assert_eq!(scalar_i64(&conn, "SELECT COUNT(*) FROM entries"), 1);
+    assert!(table_exists(&conn, "aliases"));
+    assert_current_schema_present(&conn);
+    assert_fts_covers_all_entries(&conn);
+}
+
+/// Restoring an old backup is an upgrade: the file was written by whichever
+/// release took it, not by the one reading it now.
+#[test]
+fn a_backup_written_by_an_older_release_upgrades_when_restored() {
+    let dir = tempfile::tempdir().unwrap();
+    let old_backup = released_database(dir.path(), 5);
+    let restored = dir.path().join("history.db");
+    std::fs::copy(&old_backup, &restored).unwrap();
+
+    let repo = Repository::new(db::init_db(&restored).unwrap());
+    let entries = repo
+        .get_entries_filtered(100, 0, &suvadu::repository::QueryFilter::default())
+        .unwrap();
+    assert_eq!(entries.len(), 3);
+    // The restored copy is usable immediately, including for agent records
+    // whose tables the old backup never had.
+    assert_eq!(
+        repo.list_ai_sessions(10, 0, &[]).unwrap()["sessions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
 #[test]
 fn upgrading_twice_changes_nothing() {
     let dir = tempfile::tempdir().unwrap();
