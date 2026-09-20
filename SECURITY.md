@@ -98,23 +98,23 @@ threat, not a row delete.
 
 ### Redaction and exclusions by ingestion path
 
-The same configuration governs every path that writes to the database, with
-one documented exception.
+The same configuration governs every path that writes to the database.
 
 | Path | Space-prefix skipped | Exclusions applied | Redaction applied |
 |---|---|---|---|
 | Live shell/agent recording (`suv add`, hooks) | yes | yes | yes |
 | Bash import (`suv import --from bash-history`, including `--dry-run`) | yes | yes | yes |
-| Zsh import (`suv import --from zsh-history`) | yes | **no** | **no** |
+| Zsh import (`suv import --from zsh-history`, including `--dry-run`) | yes | yes | yes |
+| Atuin import (`suv import --from atuin-db`, including `--dry-run`) | yes | yes | yes |
 | JSONL import (`suv import`) | n/a | no — restoring a Suvadu export is meant to reproduce it exactly | no |
 | Native transcript ingestion (Codex, Claude Code, OpenCode) | n/a | yes, per directory | yes, per directory |
 | Session summaries saved over MCP | n/a | yes — matching text is refused, not trimmed | yes |
 
-Known gap: the **Zsh importer stores what the file contains**. If
-`~/.zsh_history` already holds secrets, importing it copies them into the
-database verbatim, and `exclusions` are not consulted. Filter the file before
-importing, or remove the entries afterwards with `suv delete` (and then the
-backups, per *Deleting data*).
+Redaction rewrites the text before it is stored, so a secret already sitting
+in `~/.zsh_history` is redacted on the way in rather than copied verbatim. It
+is still worth removing secrets at the source: redaction recognises known
+patterns and your configured `redaction.extra_patterns`, and cannot promise to
+catch a format it has never seen.
 
 ### Secret Redaction
 

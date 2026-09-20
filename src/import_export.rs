@@ -481,8 +481,55 @@ pub fn handle_import_zsh_history(
 
     println!("Parsed {} commands from {file}", parsed.len());
 
+    // Apply the same policy live recording and the Bash importer apply, so a
+    // secret already sitting in ~/.zsh_history is redacted before storage and
+    // an excluded command is never imported. Until this was added, importing
+    // could store text that typing the same command would have redacted.
+    let config = crate::config::load_config()?;
+    let exclusions = (!config.exclusions.is_empty())
+        .then(|| crate::util::compile_exclusions(&config.exclusions));
+    let mut ignored = 0u64;
+    let mut excluded = 0u64;
+    let mut redacted = 0u64;
+    let parsed: Vec<(String, i64, i64)> = parsed
+        .into_iter()
+        .filter_map(|(raw, started_at, duration)| {
+            match apply_recording_policy(&raw, &config, exclusions.as_deref()) {
+                RecordingPolicy::Ignored => {
+                    ignored += 1;
+                    None
+                }
+                RecordingPolicy::Excluded => {
+                    excluded += 1;
+                    None
+                }
+                RecordingPolicy::Keep {
+                    command,
+                    redacted: was_redacted,
+                } => {
+                    if was_redacted {
+                        redacted += 1;
+                    }
+                    Some((command, started_at, duration))
+                }
+            }
+        })
+        .collect();
+
+    let policy_counts = |imported: &str| {
+        println!("  {imported}");
+        println!("  Excluded by config: {excluded}");
+        println!("  Blank/space-prefixed, not recorded: {ignored}");
+        println!("  Redacted before storage: {redacted}");
+    };
+
     if dry_run {
         print_zsh_import_preview(&parsed);
+        println!();
+        policy_counts(&format!(
+            "Dry run complete. {} entry(ies) would be imported.",
+            parsed.len()
+        ));
         return Ok(());
     }
 
@@ -511,7 +558,7 @@ pub fn handle_import_zsh_history(
     let (imported, skipped) = import_entries_batch(&repo, &parsed, &session_id, now)?;
     tx.commit()?;
     println!("\n✓ Import complete:");
-    println!("  Imported: {imported}");
+    policy_counts(&format!("Imported: {imported}"));
     println!("  Skipped:  {skipped} (duplicates/empty)");
     println!("  Session:  {session_id}");
 

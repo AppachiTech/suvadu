@@ -196,13 +196,11 @@ fn bash_import_preview_shows_redacted_text_only() {
     );
 }
 
-/// Known gap, pinned rather than assumed: unlike live recording and the Bash
-/// importer, the Zsh importer stores what the file says. A `~/.zsh_history`
-/// that already contains secrets is imported verbatim, and `exclusions` are
-/// not consulted. SECURITY.md documents this; if it is ever fixed, this test
-/// is the thing that says so.
+/// The Zsh importer applies the same policy as live recording and the Bash
+/// importer: a secret in `~/.zsh_history` is redacted before storage, and an
+/// excluded command is not imported at all.
 #[test]
-fn zsh_import_does_not_apply_redaction_or_exclusions_today() {
+fn zsh_import_redacts_secrets_and_honours_exclusions() {
     let s = Sandbox::new();
     let file = s.fixture(
         "zsh_history",
@@ -215,14 +213,13 @@ fn zsh_import_does_not_apply_redaction_or_exclusions_today() {
 
     let stored = s.stored_commands().join("\n");
     assert!(
-        stored.contains("ghp_abcdefghijklmnopqrstuvwxyz0123"),
-        "zsh import gained redaction — update SECURITY.md and this test:\n{stored}"
+        !stored.contains("ghp_abcdefghijklmnopqrstuvwxyz0123"),
+        "an imported secret must be redacted before storage:\n{stored}"
     );
     assert!(
-        stored.contains("vault login"),
-        "zsh import gained exclusion support — update SECURITY.md and this test:\n{stored}"
+        !stored.contains("vault login"),
+        "an excluded command must not be imported:\n{stored}"
     );
-    // The one rule it does share with every other path.
     assert!(
         !stored.contains("quiet secret"),
         "space-prefixed history lines must never be imported:\n{stored}"
