@@ -101,7 +101,17 @@ pub fn parse_triggers(input: &str) -> Vec<String> {
 }
 
 pub fn format_sync_status(report: &crate::skills_sync::SyncReport) -> (StatusLevel, String) {
-    if report.written == 0 {
+    let conflicts = report.conflicts();
+    if conflicts > 0 {
+        return (
+            StatusLevel::Error,
+            format!(
+                "Synced {} file(s); {conflicts} left untouched — edited outside suvadu. Run `suv skills sync --dry-run` to see them",
+                report.written()
+            ),
+        );
+    }
+    if report.written() == 0 {
         (
             StatusLevel::Info,
             "Nothing to sync — no active skills, or everything already up to date".to_string(),
@@ -109,9 +119,61 @@ pub fn format_sync_status(report: &crate::skills_sync::SyncReport) -> (StatusLev
     } else {
         (
             StatusLevel::Info,
-            format!("Synced: {} file(s) written", report.written),
+            format!("Synced: {} file(s) written", report.written()),
         )
     }
+}
+
+/// The right-hand preview pane: scope, state, origin, and the exact agent
+/// files this skill is materialized into, above the body itself.
+pub fn preview_text(s: &Skill, destinations: &[crate::skills_sync::Destination]) -> String {
+    use std::fmt::Write as _;
+    let mut out = format!("{}\n", s.name);
+    let _ = writeln!(out, "scope:    {}", s.scope);
+    let _ = writeln!(
+        out,
+        "state:    {}",
+        crate::commands::skills::state_label(&s.status)
+    );
+    let _ = writeln!(
+        out,
+        "origin:   {}",
+        crate::commands::skills::origin_label(&s.source)
+    );
+    let _ = writeln!(out, "version:  {}", s.version);
+    if !s.triggers.is_empty() {
+        let _ = writeln!(out, "triggers: {}", s.triggers.join(", "));
+    }
+    if destinations.is_empty() {
+        let _ = writeln!(out, "syncs to: nothing right now");
+    } else {
+        let _ = writeln!(out, "syncs to:");
+        for d in destinations {
+            let _ = writeln!(out, "  {}", d.path.display());
+        }
+    }
+    if !s.description.is_empty() {
+        let _ = write!(out, "\n{}\n", s.description);
+    }
+    let _ = write!(out, "\n{}", s.body);
+    out
+}
+
+/// Delete confirmation copy. Says what removal does *not* do, so nobody
+/// expects the agent files to disappear with the library entry.
+pub fn delete_confirm_text(name: &str) -> String {
+    format!(
+        "Delete skill '{name}'? [y/N]\n\nThis removes it from the library only. Files already\ngenerated from it stay on disk until you run\n`suv skills cleanup` (`--dry-run` to preview).\nTo stop it syncing but keep it, use `suv skills disable`."
+    )
+}
+
+/// Destinations for `skill` from the process's current directory, or none
+/// if the cwd can't be read.
+fn destinations_here(skill: &Skill) -> Vec<crate::skills_sync::Destination> {
+    std::env::current_dir().map_or_else(
+        |_| Vec::new(),
+        |cwd| crate::skills_sync::destinations_for(skill, &crate::skills_sync::ALL_TARGETS, &cwd),
+    )
 }
 
 /// After removing the item at `removed_index` from a list, what selection
@@ -352,13 +414,14 @@ fn handle_browse_key(
             }
         }
         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            let targets = [
-                crate::cli::SyncTarget::ClaudeCode,
-                crate::cli::SyncTarget::Cursor,
-                crate::cli::SyncTarget::Codex,
-            ];
+            let targets = crate::skills_sync::ALL_TARGETS;
             let cwd = std::env::current_dir()?;
-            app.status_message = match crate::skills_sync::sync(repo, &targets, &cwd, false) {
+            app.status_message = match crate::skills_sync::sync(
+                repo,
+                &targets,
+                &cwd,
+                crate::skills_sync::SyncOptions::apply(),
+            ) {
                 Ok(report) => Some(format_sync_status(&report)),
                 Err(e) => Some((StatusLevel::Error, format!("Sync failed: {e}"))),
             };
@@ -769,35 +832,20 @@ fn render_browse(
         .highlight_symbol(" > ");
     f.render_stateful_widget(list, panes[0], &mut app.list_state);
 
-    let preview_text = if empty {
+    let body_text = if empty {
         "No matching skills.".to_string()
     } else {
         app.selected_skill()
-            .map(|s| {
-                use std::fmt::Write;
-                let mut out = format!("{}\n", s.name);
-                let _ = writeln!(out, "scope:   {}", s.scope);
-                let _ = writeln!(out, "version: {}", s.version);
-                if !s.triggers.is_empty() {
-                    let _ = writeln!(out, "triggers: {}", s.triggers.join(", "));
-                }
-                if !s.description.is_empty() {
-                    let _ = write!(out, "\n{}\n", s.description);
-                }
-                let _ = write!(out, "\n{}", s.body);
-                out
-            })
+            .map(|s| preview_text(s, &destinations_here(s)))
             .unwrap_or_default()
     };
-    let preview = Paragraph::new(preview_text)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(t.border))
-                .title(" Preview "),
-        );
+    let preview = Paragraph::new(body_text).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(t.border))
+            .title(" Preview "),
+    );
     f.render_widget(preview, panes[1]);
 
     render_browse_footer(f, app, rows[2], t);
@@ -853,15 +901,17 @@ fn render_delete_dialog(f: &mut ratatui::Frame, app: &SkillsApp, t: &crate::them
     let Mode::ConfirmDelete { name, .. } = &app.mode else {
         return;
     };
-    let area = centered_rect(50, 3, f.area());
+    let area = centered_rect(64, 10, f.area());
     f.render_widget(ratatui::widgets::Clear, area);
-    let dialog = Paragraph::new(Line::from(format!("Delete skill '{name}'? [y/N]"))).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(t.error))
-            .title(" Confirm delete "),
-    );
+    let dialog = Paragraph::new(delete_confirm_text(name))
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(t.error))
+                .title(" Confirm delete "),
+        );
     f.render_widget(dialog, area);
 }
 
@@ -966,31 +1016,19 @@ fn render_review(f: &mut ratatui::Frame, app: &mut SkillsApp, area: ratatui::lay
         .highlight_symbol(" > ");
     f.render_stateful_widget(list, panes[0], &mut app.pending_state);
 
-    let preview_text = app
+    let body_text = app
         .pending_state
         .selected()
         .and_then(|i| app.pending.get(i))
-        .map(|s| {
-            use std::fmt::Write;
-            let mut out = format!("{}\n", s.name);
-            let _ = writeln!(out, "scope:   {}", s.scope);
-            let _ = writeln!(out, "source:  {}", s.source);
-            if !s.description.is_empty() {
-                let _ = write!(out, "\n{}\n", s.description);
-            }
-            let _ = write!(out, "\n{}", s.body);
-            out
-        })
+        .map(|s| preview_text(s, &destinations_here(s)))
         .unwrap_or_default();
-    let preview = Paragraph::new(preview_text)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(t.border))
-                .title(" Preview "),
-        );
+    let preview = Paragraph::new(body_text).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(t.border))
+            .title(" Preview "),
+    );
     f.render_widget(preview, panes[1]);
 }
 
@@ -1009,6 +1047,80 @@ fn centered_rect(width: u16, height: u16, area: ratatui::layout::Rect) -> ratatu
 mod tests {
     use super::*;
     use crate::models::SKILL_SCOPE_GLOBAL;
+
+    /// Build a `SyncReport` with `created` created files and `conflicted`
+    /// conflicts, for the status-line formatting tests.
+    fn sync_report_with(created: usize, conflicted: usize) -> crate::skills_sync::SyncReport {
+        use crate::skills_sync::{ChangeKind, FileChange, SyncReport};
+        let make = |kind: ChangeKind, i: usize| FileChange {
+            target: crate::cli::SyncTarget::ClaudeCode,
+            path: std::path::PathBuf::from(format!("/tmp/skill-{i}/SKILL.md")),
+            kind,
+            skills: vec![format!("skill-{i}")],
+            diff: Vec::new(),
+            detail: None,
+        };
+        SyncReport {
+            changes: (0..created)
+                .map(|i| make(ChangeKind::Create, i))
+                .chain((0..conflicted).map(|i| make(ChangeKind::Conflict, 100 + i)))
+                .collect(),
+            notes: Vec::new(),
+            dry_run: false,
+        }
+    }
+
+    #[test]
+    fn preview_shows_state_origin_and_the_files_a_skill_syncs_to() {
+        let s = skill("release", "cut a release", &["release"]);
+        let dests = vec![crate::skills_sync::Destination {
+            target: crate::cli::SyncTarget::ClaudeCode,
+            path: std::path::PathBuf::from("/home/u/.claude/skills/release/SKILL.md"),
+            managed: crate::skills_sync::ManagedKind::WholeFile,
+        }];
+        let out = preview_text(&s, &dests);
+        assert!(out.contains("release"));
+        assert!(out.contains("global"));
+        assert!(out.contains("active"), "state must be visible: {out}");
+        assert!(out.contains("you"), "origin must be visible: {out}");
+        assert!(
+            out.contains("/home/u/.claude/skills/release/SKILL.md"),
+            "destinations must be visible: {out}"
+        );
+    }
+
+    #[test]
+    fn preview_of_a_proposal_says_it_is_awaiting_review_and_syncs_nowhere() {
+        let mut s = skill("proposed", "an idea", &[]);
+        s.status = crate::models::SKILL_STATUS_PENDING.to_string();
+        s.source = "agent:claude-code".to_string();
+        let out = preview_text(&s, &[]);
+        assert!(out.contains("pending review"), "{out}");
+        assert!(out.contains("claude-code"), "{out}");
+        assert!(out.contains("not synced"), "{out}");
+    }
+
+    #[test]
+    fn format_sync_status_surfaces_conflicts_as_an_error() {
+        let report = sync_report_with(1, 2);
+        let (level, msg) = format_sync_status(&report);
+        assert!(matches!(level, StatusLevel::Error));
+        assert!(msg.contains('2'), "conflict count must be shown: {msg}");
+        assert!(
+            msg.contains("edited outside suvadu") || msg.contains("conflict"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn delete_confirmation_says_generated_files_are_left_behind() {
+        let text = delete_confirm_text("release");
+        assert!(text.contains("release"));
+        assert!(
+            text.contains("cleanup"),
+            "must point at the deliberate cleanup step: {text}"
+        );
+    }
 
     #[test]
     fn copy_feedback_names_the_skill() {
@@ -1098,10 +1210,7 @@ mod tests {
 
     #[test]
     fn format_sync_status_reports_written_count() {
-        let report = crate::skills_sync::SyncReport {
-            written: 3,
-            lines: vec!["wrote a".into(), "wrote b".into()],
-        };
+        let report = sync_report_with(3, 0);
         let (level, msg) = format_sync_status(&report);
         assert!(matches!(level, StatusLevel::Info));
         assert_eq!(msg, "Synced: 3 file(s) written");
@@ -1109,10 +1218,7 @@ mod tests {
 
     #[test]
     fn format_sync_status_reports_nothing_to_sync() {
-        let report = crate::skills_sync::SyncReport {
-            written: 0,
-            lines: vec![],
-        };
+        let report = sync_report_with(0, 0);
         let (level, msg) = format_sync_status(&report);
         assert!(matches!(level, StatusLevel::Info));
         assert_eq!(
