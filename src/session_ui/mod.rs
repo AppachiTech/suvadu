@@ -31,6 +31,8 @@ mod session_data_contract_tests {
             success_count: 1,
             first_activity_at: 1_000,
             last_activity_at: 4_000,
+            preview: None,
+            capture: None,
         }
     }
 

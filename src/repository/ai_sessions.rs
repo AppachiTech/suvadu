@@ -2,7 +2,7 @@
 use super::Repository;
 use crate::ai_sessions::{claude, codex, opencode, AiEvent, CapturePolicy, SummaryInput};
 use crate::db::{DbError, DbResult};
-use crate::models::{AiSummaryRecord, SessionKind, SessionSummary};
+use crate::models::{AiSummaryRecord, CaptureStatus, SessionKind, SessionSummary};
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -18,6 +18,17 @@ const CAPTURE_UNVERIFIABLE: [&str; 3] = [
     "Non-shell tool calls, file edits and their contents are not captured",
     "Child sessions started from this one are not merged into it",
 ];
+
+/// Longest row preview kept, in characters.
+const PREVIEW_MAX_CHARS: usize = 120;
+
+/// Collapse captured text into one bounded line for a session row. Never an
+/// identity: two sessions can legitimately share a preview, which is exactly
+/// why the deterministic ID stays on the row beside it.
+fn row_preview(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    crate::util::truncate_str(&collapsed, PREVIEW_MAX_CHARS, "…")
+}
 
 fn hash_field(hash: &mut Sha256, value: &[u8]) {
     hash.update((value.len() as u64).to_le_bytes());
@@ -69,10 +80,27 @@ fn merge_ai_header(sessions: &mut HashMap<String, SessionSummary>, id: String, h
     let cwd = header["cwd"].as_str().map(str::to_owned);
     let agent = header["agent"].as_str().map(str::to_owned);
     let usage_complete = header["usage_complete"].as_bool().unwrap_or(false);
+    let preview = header["preview"].as_str().map(str::to_owned);
+    let capture = Some(CaptureStatus {
+        complete: header["capture"]["complete"].as_bool().unwrap_or(false),
+        known_missing: header["capture"]["known_missing"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+    });
     sessions
         .entry(id.clone())
         .and_modify(|summary| {
             summary.kind = SessionKind::Ai;
+            // The captured prompt beats a first-command preview from the
+            // shell side: it says what the session was *for*.
+            if preview.is_some() {
+                summary.preview.clone_from(&preview);
+            }
+            summary.capture.clone_from(&capture);
             summary.cwd.clone_from(&cwd);
             summary.agent.clone_from(&agent);
             summary.model.clone_from(&model);
@@ -101,6 +129,8 @@ fn merge_ai_header(sessions: &mut HashMap<String, SessionSummary>, id: String, h
             success_count: 0,
             first_activity_at,
             last_activity_at,
+            preview,
+            capture,
         });
 }
 
@@ -651,6 +681,7 @@ impl Repository {
         let mut event_count = 0_i64;
         let mut first_activity_at = None;
         let mut last_activity_at = None;
+        let mut preview = None;
         for data in event_statement.query_map([id], |r| r.get::<_, String>(0))? {
             let event = decode::<AiEvent>(&data?)?;
             event_count += 1;
@@ -658,6 +689,9 @@ impl Repository {
                 Some(first_activity_at.map_or(event.at, |current: i64| current.min(event.at)));
             last_activity_at =
                 Some(last_activity_at.map_or(event.at, |current: i64| current.max(event.at)));
+            if preview.is_none() && event.kind == "prompt" {
+                preview = event.data["text"].as_str().map(row_preview);
+            }
             if let Some(model) = event.model {
                 latest_model = Some(model.clone());
                 if !models.contains(&model) {
@@ -668,7 +702,7 @@ impl Repository {
         let model = latest_model;
         let capture = self.ai_capture_status(id, row.7)?;
         Ok(
-            json!({"id":id,"native_id":row.0,"agent":row.1,"cwd":row.2,"parent_id":row.3,"created_at":row.4,"updated_at":row.5,"first_activity_at":first_activity_at.unwrap_or(row.4),"last_activity_at":last_activity_at.unwrap_or(row.5),"revision":format!("e{}-c{count}-{max_id}",row.6),"model":model,"models":models,"usage":usage,"coverage":"partial","usage_complete":row.7,"event_count":event_count,"command_count":count,"capture":capture,"coverage_note":"Captured native transcript events and locally recorded shell commands only; child sessions, non-shell tools and unavailable records are not combined."}),
+            json!({"id":id,"native_id":row.0,"agent":row.1,"cwd":row.2,"parent_id":row.3,"created_at":row.4,"updated_at":row.5,"first_activity_at":first_activity_at.unwrap_or(row.4),"last_activity_at":last_activity_at.unwrap_or(row.5),"revision":format!("e{}-c{count}-{max_id}",row.6),"model":model,"models":models,"usage":usage,"coverage":"partial","usage_complete":row.7,"event_count":event_count,"command_count":count,"preview":preview,"capture":capture,"coverage_note":"Captured native transcript events and locally recorded shell commands only; child sessions, non-shell tools and unavailable records are not combined."}),
         )
     }
 
@@ -788,7 +822,8 @@ impl Repository {
                     SUM(CASE WHEN e.exit_code=0 THEN 1 ELSE 0 END),MIN(e.started_at),
                     MAX(e.ended_at),MIN(e.cwd),
                     MAX(CASE WHEN e.executor_type IS NOT NULL AND e.executor_type NOT IN ('human','unknown') THEN 1 ELSE 0 END),
-                    MAX(CASE WHEN e.executor_type IS NOT NULL AND e.executor_type NOT IN ('human','unknown') THEN e.executor END)
+                    MAX(CASE WHEN e.executor_type IS NOT NULL AND e.executor_type NOT IN ('human','unknown') THEN e.executor END),
+                    (SELECT command FROM entries WHERE session_id=s.id ORDER BY started_at,id LIMIT 1)
              FROM sessions s
              JOIN entries e ON e.session_id=s.id
              LEFT JOIN tags t ON t.id=s.tag_id
@@ -820,6 +855,11 @@ impl Repository {
                 success_count: row.get(5)?,
                 first_activity_at: row.get(6)?,
                 last_activity_at: row.get(7)?,
+                preview: row
+                    .get::<_, Option<String>>(11)?
+                    .as_deref()
+                    .map(row_preview),
+                capture: None,
             })
         })?;
         let mut sessions = HashMap::new();
@@ -2046,5 +2086,130 @@ mod tests {
         assert_eq!(header["capture"]["complete"], false, "{header}");
         let missing = header["capture"]["known_missing"].to_string();
         assert!(missing.contains("/work/project"), "{missing}");
+    }
+
+    /// A row in `suv sessions` has to be told apart at a glance: which
+    /// project, which agent, when, and what it was about. The prompt preview
+    /// and capture status therefore travel with the summary, not just with a
+    /// full session read.
+    #[test]
+    fn unified_session_rows_carry_project_prompt_preview_and_capture_status() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("fixture.jsonl");
+        std::fs::write(&path, records()).unwrap();
+        import(&repo, &path);
+        let mut shell = Session::new("host-a".into(), 1_000);
+        shell.id = "shell-1".into();
+        repo.insert_session(&shell).unwrap();
+        for (command, at) in [("cargo build", 2_000), ("cargo test", 3_000)] {
+            repo.insert_entry(&Entry::new(
+                shell.id.clone(),
+                command.into(),
+                "/work/other".into(),
+                Some(0),
+                at,
+                at + 10,
+            ))
+            .unwrap();
+        }
+
+        let sessions = repo.list_unified_sessions(None, None, 10).unwrap();
+        let ai = sessions
+            .iter()
+            .find(|session| session.id == "codex-fixture")
+            .expect("captured AI session");
+        assert_eq!(ai.cwd.as_deref(), Some("/work/project"));
+        assert_eq!(ai.preview.as_deref(), Some("Fix the synthetic test"));
+        let capture = ai
+            .capture
+            .as_ref()
+            .expect("AI session carries capture status");
+        assert!(capture.complete);
+        assert!(capture.known_missing.is_empty());
+
+        let shell = sessions
+            .iter()
+            .find(|session| session.id == "shell-1")
+            .expect("shell session");
+        assert_eq!(shell.preview.as_deref(), Some("cargo build"));
+        assert!(
+            shell.capture.is_none(),
+            "a plain shell session has no transcript capture to be incomplete"
+        );
+    }
+
+    #[test]
+    fn session_row_preview_is_single_lined_and_bounded() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("fixture.jsonl");
+        let long = format!("first line\nsecond line {}", "x".repeat(300));
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                json!({"timestamp":"2026-09-12T12:00:00Z","type":"session_meta","payload":{"id":"fixture","cwd":"/work/project"}}),
+                json!({"timestamp":"2026-09-12T12:00:01Z","type":"event_msg","payload":{"type":"user_message","message":long}}),
+            ),
+        )
+        .unwrap();
+        import(&repo, &path);
+        let preview = repo.get_ai_session("codex-fixture", 5, 0, &[]).unwrap()["session"]
+            ["preview"]
+            .as_str()
+            .expect("preview")
+            .to_owned();
+        assert!(!preview.contains('\n'), "{preview}");
+        assert!(
+            preview.chars().count() <= 120,
+            "{}",
+            preview.chars().count()
+        );
+        assert!(preview.starts_with("first line second line"), "{preview}");
+    }
+
+    /// A capture gap is a property of the recording, not of the commands, so
+    /// a summary with a clean success count still reports the gap.
+    #[test]
+    fn session_row_capture_status_survives_a_clean_command_run() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("fixture.jsonl");
+        std::fs::write(&path, records()).unwrap();
+        repo.import_codex_session(&path, None, |_| {
+            Ok(CapturePolicy {
+                enabled: false,
+                paused: true,
+                ..CapturePolicy::default()
+            })
+        })
+        .unwrap();
+        append(&path, &prompt("after resume"));
+        import(&repo, &path);
+        repo.insert_session(&Session {
+            id: "codex-fixture".into(),
+            hostname: "host".into(),
+            created_at: 1_000,
+            tag_id: None,
+        })
+        .unwrap();
+        repo.insert_entry(&Entry::new(
+            "codex-fixture".into(),
+            "cargo test".into(),
+            "/work/project".into(),
+            Some(0),
+            2_000,
+            2_010,
+        ))
+        .unwrap();
+
+        let summary = repo
+            .list_unified_sessions(None, None, 10)
+            .unwrap()
+            .into_iter()
+            .find(|session| session.id == "codex-fixture")
+            .expect("captured session");
+        assert_eq!(summary.success_count, summary.cmd_count);
+        let capture = summary.capture.expect("capture status");
+        assert!(!capture.complete);
+        assert!(!capture.known_missing.is_empty());
     }
 }

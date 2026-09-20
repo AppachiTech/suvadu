@@ -207,6 +207,17 @@ impl std::fmt::Display for SessionKind {
     }
 }
 
+/// What is known to be *missing* from a captured agent session, kept apart
+/// from whether the captured commands succeeded. `complete` only ever means
+/// "suvadu recorded no gap", never "everything the agent did is here".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CaptureStatus {
+    pub complete: bool,
+    /// Human-readable gaps suvadu actually observed (a paused window, a
+    /// directory where capture was off, token counters it could not follow).
+    pub known_missing: Vec<String>,
+}
+
 /// Summary of a shell or AI session for the unified session browser.
 #[derive(Debug, Clone)]
 pub struct SessionSummary {
@@ -226,6 +237,13 @@ pub struct SessionSummary {
     pub success_count: i64,
     pub first_activity_at: i64,
     pub last_activity_at: i64,
+    /// First prompt (captured agent session) or first command (shell
+    /// session), single-lined and truncated. Purely for telling rows apart
+    /// at a glance — the deterministic `id` stays the session's identity.
+    pub preview: Option<String>,
+    /// Capture completeness for a captured agent session. `None` for a plain
+    /// shell session, which has no transcript that could be missing records.
+    pub capture: Option<CaptureStatus>,
 }
 
 /// A saved AI-session summary (generated interpretation, not captured

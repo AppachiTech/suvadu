@@ -1773,6 +1773,11 @@ mod tests {
                 success_count: 0,
                 first_activity_at: 1_000,
                 last_activity_at: 2_000,
+                preview: Some("Fix the flaky parser test".into()),
+                capture: Some(crate::models::CaptureStatus {
+                    complete: true,
+                    known_missing: Vec::new(),
+                }),
             },
             usage: Some(crate::session_ui::session_data::AiSessionUsage {
                 total: Some(123),
