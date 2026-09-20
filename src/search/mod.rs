@@ -1,7 +1,9 @@
 mod data;
 mod format;
 pub mod matching;
+pub mod scope;
 pub use matching::MatchMode;
+pub use scope::{RecallContext, RecallScope};
 mod input;
 mod render;
 
