@@ -422,7 +422,7 @@ mod tests {
         (dir, repo)
     }
 
-    fn call_json(repo: &Repository, name: &str, args: &Value, mcp: &McpConfig) -> Value {
+    pub(super) fn call_json(repo: &Repository, name: &str, args: &Value, mcp: &McpConfig) -> Value {
         serde_json::from_str(&super::super::tools::call_tool(repo, name, args, mcp).unwrap())
             .unwrap()
     }
@@ -806,5 +806,398 @@ mod tests {
         }
         assert_eq!(ids.len(), 3, "{ids:?}");
         assert!(ids.contains(&"codex-old".to_string()), "{ids:?}");
+    }
+}
+
+/// The PROD-11 acceptance walkthrough, driven entirely through the MCP tool
+/// layer against tempfile fixtures: agent A finishes a synthetic task with a
+/// failed attempt and a later success, saves an explicit checkpoint, and
+/// agent B — a different provider, with none of A's context — retrieves the
+/// right session and can name the failure, the latest verified state, the
+/// unresolved work and the records each came from. Then the same walkthrough
+/// under ambiguity, without the write opt-in, with stale evidence and with
+/// incomplete capture.
+#[cfg(test)]
+mod two_agent_handoff {
+    use super::tests::call_json;
+    use super::*;
+    use crate::repository::Repository;
+    use std::io::Write;
+
+    const PROJECT: &str = "/work/parser";
+
+    fn writes_on() -> McpConfig {
+        McpConfig {
+            allow_session_summaries: true,
+            ..McpConfig::default()
+        }
+    }
+
+    /// Agent A's session: one prompt, a failed test run, an edit, a passing
+    /// test run, and a final answer claiming success.
+    fn agent_a_session(dir: &std::path::Path, repo: &Repository, native: &str) -> String {
+        let path = dir.join(format!("{native}.jsonl"));
+        let records = [
+            json!({"timestamp":"2026-09-19T09:00:00Z","type":"session_meta","payload":{"id":native,"cwd":PROJECT}}),
+            json!({"timestamp":"2026-09-19T09:00:01Z","type":"turn_context","payload":{"turn_id":"turn-1","cwd":PROJECT,"model":"model-a"}}),
+            json!({"timestamp":"2026-09-19T09:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"Fix the flaky parser test"}}),
+            json!({"timestamp":"2026-09-19T09:05:00Z","type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"The parser test passes now. I did not re-run the full suite."}}),
+        ];
+        std::fs::write(
+            &path,
+            records
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        repo.import_codex_session(&path, Some(native), |_| {
+            Ok(crate::ai_sessions::CapturePolicy::default())
+        })
+        .unwrap();
+
+        let session_id = format!("codex-{native}");
+        repo.insert_session(&crate::models::Session {
+            id: session_id.clone(),
+            hostname: "fixture".into(),
+            created_at: 0,
+            tag_id: None,
+        })
+        .unwrap();
+        for (command, exit, at) in [
+            ("cargo test parser", 101, 1_000),
+            ("sed -i '' 's/sleep/poll/' src/parser.rs", 0, 2_000),
+            ("cargo test parser", 0, 3_000),
+        ] {
+            repo.insert_entry(&crate::models::Entry {
+                id: None,
+                session_id: session_id.clone(),
+                command: command.into(),
+                cwd: PROJECT.into(),
+                exit_code: Some(exit),
+                started_at: at,
+                ended_at: at + 10,
+                duration_ms: 10,
+                context: None,
+                tag_name: None,
+                tag_id: None,
+                executor_type: Some("agent".into()),
+                executor: Some("openai-codex".into()),
+            })
+            .unwrap();
+        }
+        session_id
+    }
+
+    /// Agent A's explicit checkpoint, saved only because the user asked.
+    fn save_checkpoint(repo: &Repository, session: &Value, text: &str) -> Value {
+        let mut source_ids = session["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["id"].clone())
+            .collect::<Vec<_>>();
+        source_ids.extend(
+            session["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|command| command["id"].clone()),
+        );
+        call_json(
+            repo,
+            "save_session_summary",
+            &json!({
+                "session_id": session["session"]["id"],
+                "source_revision": session["session"]["revision"],
+                "text": text,
+                "agent": "openai-codex",
+                "model": "model-a",
+                "source_ids": source_ids
+            }),
+            &writes_on(),
+        )
+    }
+
+    const CHECKPOINT: &str = "Goal: fix the flaky parser test [codex-241]. \
+        First attempt `cargo test parser` failed with exit 101 [command-1]. \
+        Replaced the sleep with a poll [command-2]; `cargo test parser` then \
+        passed [command-3]. Unresolved: the full suite was never run.";
+
+    #[test]
+    fn agent_b_retrieves_the_session_and_can_name_failure_verified_state_and_open_work() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        agent_a_session(dir.path(), &repo, "run-1");
+        let mcp = writes_on();
+
+        // Agent A reads its own session and saves a checkpoint on request.
+        let session = call_json(
+            &repo,
+            "get_agent_session",
+            &json!({"session_id": "codex-run-1", "limit": 100}),
+            &mcp,
+        );
+        assert_eq!(session["session_complete"], true);
+        save_checkpoint(&repo, &session, CHECKPOINT);
+
+        // Agent B arrives with nothing but the working directory.
+        let resolved = call_json(
+            &repo,
+            "resolve_current_agent_session",
+            &json!({"cwd": PROJECT}),
+            &mcp,
+        );
+        assert_eq!(resolved["resolved"], true);
+        assert_eq!(resolved["session_id"], "codex-run-1");
+
+        let seen = call_json(
+            &repo,
+            "get_agent_session",
+            &json!({"session_id": resolved["session_id"], "limit": 100}),
+            &mcp,
+        );
+
+        // The failed attempt and the later success are both retrievable, as
+        // records rather than as prose.
+        let commands = seen["commands"].as_array().unwrap();
+        let failure = commands
+            .iter()
+            .find(|command| command["exit_code"] == 101)
+            .expect("the failed attempt");
+        let verified = commands
+            .iter()
+            .rev()
+            .find(|command| command["command"] == "cargo test parser" && command["exit_code"] == 0)
+            .expect("the later success");
+        assert_ne!(failure["id"], verified["id"]);
+
+        // The checkpoint is current and every record it cites is in the
+        // session, so agent B can check each claim rather than trust it.
+        let checkpoint = &seen["summaries"][0];
+        assert_eq!(checkpoint["basis"], "CURRENT");
+        assert_eq!(checkpoint["agent"], "openai-codex");
+        assert_eq!(checkpoint["generated"], true);
+        let known = seen["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(commands.iter())
+            .map(|record| record["id"].as_str().unwrap().to_owned())
+            .collect::<std::collections::HashSet<_>>();
+        for cited in checkpoint["source_ids"].as_array().unwrap() {
+            assert!(
+                known.contains(cited.as_str().unwrap()),
+                "checkpoint cites {cited} which is not in the session"
+            );
+        }
+        assert!(checkpoint["text"].as_str().unwrap().contains("Unresolved"));
+
+        // And the agent's own final answer is available as a claim, next to
+        // the capture caveats that stop it reading as proof.
+        let answer = seen["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["kind"] == "response")
+            .expect("final answer");
+        assert!(answer["data"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("did not re-run the full suite"));
+        assert!(!seen["session"]["capture"]["unverifiable"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn two_sessions_in_one_directory_are_never_resolved_for_agent_b() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        agent_a_session(dir.path(), &repo, "run-1");
+        agent_a_session(dir.path(), &repo, "run-2");
+
+        let resolved = call_json(
+            &repo,
+            "resolve_current_agent_session",
+            &json!({"cwd": PROJECT}),
+            &writes_on(),
+        );
+        assert_eq!(resolved["resolved"], false);
+        assert_eq!(resolved["candidates"].as_array().unwrap().len(), 2);
+        assert!(resolved["reason"].as_str().unwrap().contains("choose"));
+        // Each candidate is distinguishable without opening it.
+        for candidate in resolved["candidates"].as_array().unwrap() {
+            assert_eq!(candidate["cwd"], PROJECT);
+            assert_eq!(candidate["preview"], "Fix the flaky parser test");
+            assert!(candidate["id"].as_str().unwrap().starts_with("codex-run-"));
+        }
+    }
+
+    #[test]
+    fn without_the_write_opt_in_no_checkpoint_is_stored_and_the_refusal_is_actionable() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        agent_a_session(dir.path(), &repo, "run-1");
+        let off = McpConfig::default();
+
+        let session = call_json(
+            &repo,
+            "get_agent_session",
+            &json!({"session_id": "codex-run-1", "limit": 100}),
+            &off,
+        );
+        let error = super::super::tools::call_tool(
+            &repo,
+            "save_session_summary",
+            &json!({
+                "session_id": "codex-run-1",
+                "source_revision": session["session"]["revision"],
+                "text": CHECKPOINT,
+                "agent": "openai-codex",
+                "model": "model-a",
+                "source_ids": ["command-1"]
+            }),
+            &off,
+        )
+        .unwrap_err();
+        assert!(error.contains("mcp.allow_session_summaries"), "{error}");
+
+        // Nothing was written, and reading stays available: agent B can
+        // still work from the records themselves.
+        let after = call_json(
+            &repo,
+            "get_agent_session",
+            &json!({"session_id": "codex-run-1", "limit": 100}),
+            &off,
+        );
+        assert_eq!(after["summaries"], json!([]));
+        assert_eq!(after["commands"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn appended_evidence_extends_the_checkpoint_and_changed_evidence_invalidates_it() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        agent_a_session(dir.path(), &repo, "run-1");
+        let mcp = writes_on();
+        let session = call_json(
+            &repo,
+            "get_agent_session",
+            &json!({"session_id": "codex-run-1", "limit": 100}),
+            &mcp,
+        );
+        save_checkpoint(&repo, &session, CHECKPOINT);
+
+        // A later command appends evidence: the checkpoint still holds and
+        // says where to resume from.
+        repo.insert_entry(&crate::models::Entry {
+            id: None,
+            session_id: "codex-run-1".into(),
+            command: "cargo test".into(),
+            cwd: PROJECT.into(),
+            exit_code: Some(0),
+            started_at: 4_000,
+            ended_at: 4_010,
+            duration_ms: 10,
+            context: None,
+            tag_name: None,
+            tag_id: None,
+            executor_type: Some("agent".into()),
+            executor: Some("openai-codex".into()),
+        })
+        .unwrap();
+        let extended = call_json(
+            &repo,
+            "get_agent_session",
+            &json!({"session_id": "codex-run-1", "limit": 100}),
+            &mcp,
+        );
+        assert_eq!(extended["summaries"][0]["basis"], "NEW ACTIVITY");
+        assert_eq!(extended["summaries"][0]["incremental_safe"], true);
+        assert_eq!(extended["summaries"][0]["resume_command_offset"], 3);
+
+        // Removing an earlier command changes the evidence the checkpoint
+        // was written from, rather than merely adding to it, so the basis
+        // is gone and must be rebuilt.
+        repo.delete_entry(1).unwrap();
+        let broken = call_json(
+            &repo,
+            "get_agent_session",
+            &json!({"session_id": "codex-run-1", "limit": 100}),
+            &mcp,
+        );
+        assert_eq!(broken["summaries"][0]["basis"], "EVIDENCE CHANGED");
+        assert_eq!(broken["summaries"][0]["stale"], true);
+        assert_eq!(broken["summaries"][0]["resume_command_offset"], Value::Null);
+
+        // And a new checkpoint cannot be saved against the old revision.
+        let stale = super::super::tools::call_tool(
+            &repo,
+            "save_session_summary",
+            &json!({
+                "session_id": "codex-run-1",
+                "source_revision": session["session"]["revision"],
+                "text": CHECKPOINT,
+                "agent": "claude",
+                "model": "writer",
+                "source_ids": ["command-1"]
+            }),
+            &mcp,
+        )
+        .unwrap_err();
+        assert!(stale.to_lowercase().contains("revision"), "{stale}");
+    }
+
+    #[test]
+    fn incomplete_capture_is_visible_to_agent_b_even_when_every_command_passed() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("paused.jsonl");
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                json!({"timestamp":"2026-09-19T09:00:00Z","type":"session_meta","payload":{"id":"run-3","cwd":PROJECT}}),
+                json!({"timestamp":"2026-09-19T09:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"Fix the flaky parser test"}}),
+            ),
+        )
+        .unwrap();
+        // Recording was paused for the first window, so those records exist
+        // upstream but were never stored.
+        repo.import_codex_session(&path, Some("run-3"), |_| {
+            Ok(crate::ai_sessions::CapturePolicy {
+                enabled: false,
+                paused: true,
+                ..crate::ai_sessions::CapturePolicy::default()
+            })
+        })
+        .unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(
+                (json!({"timestamp":"2026-09-19T09:10:00Z","type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"All done."}})
+                    .to_string()
+                    + "\n")
+                    .as_bytes(),
+            )
+            .unwrap();
+        repo.import_codex_session(&path, Some("run-3"), |_| {
+            Ok(crate::ai_sessions::CapturePolicy::default())
+        })
+        .unwrap();
+
+        let seen = call_json(
+            &repo,
+            "get_agent_session",
+            &json!({"session_id": "codex-run-3", "limit": 100}),
+            &writes_on(),
+        );
+        // A captured final answer and no failing command, yet the capture is
+        // openly incomplete.
+        assert_eq!(seen["session"]["command_count"], 0);
+        assert_eq!(seen["session"]["capture"]["complete"], false);
+        let missing = seen["session"]["capture"]["known_missing"].to_string();
+        assert!(missing.contains("paused"), "{missing}");
     }
 }
