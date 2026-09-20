@@ -70,6 +70,25 @@ fn ai_session_model(data: &AiSessionData, width: u16) -> String {
     }
 }
 
+/// Title for the session panel, carrying capture completeness where the
+/// reader cannot miss it. Derived from the recorded gaps only — never from
+/// how many commands succeeded, which sits on the next line and answers a
+/// different question.
+fn ai_session_title(data: &AiSessionData) -> String {
+    data.summary.capture.as_ref().map_or_else(
+        || " AI Session ".to_string(),
+        |capture| {
+            if capture.complete {
+                " AI Session  ·  capture: full ".to_string()
+            } else {
+                let count = capture.known_missing.len();
+                let plural = if count == 1 { "gap" } else { "gaps" };
+                format!(" AI Session  ·  capture: {count} known {plural} ")
+            }
+        },
+    )
+}
+
 fn ai_session_prompt_count(data: &AiSessionData) -> usize {
     let mut prompts = HashSet::new();
     for item in &data.items {
@@ -1284,7 +1303,7 @@ impl AiSessionApp {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(t.border))
             .title(Span::styled(
-                " AI Session ",
+                ai_session_title(&self.data),
                 Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
             ));
         let inner = block.inner(area);
@@ -2438,6 +2457,49 @@ mod tests {
 
     /// Replaces an older two-second status line: an explanation the user
     /// can read, scroll and copy beats a toast that vanishes.
+    /// Capture completeness belongs on the screen, not only in a panel the
+    /// user might not open — and it must not be read off the command
+    /// success count sitting right next to it.
+    #[test]
+    fn session_title_states_capture_completeness_separately_from_success() {
+        let mut data = make_ai_data();
+        data.summary.capture = Some(crate::models::CaptureStatus {
+            complete: true,
+            known_missing: Vec::new(),
+        });
+        assert!(ai_session_title(&data).contains("capture: full"));
+
+        data.summary.capture = Some(crate::models::CaptureStatus {
+            complete: false,
+            known_missing: vec!["a".into(), "b".into()],
+        });
+        let title = ai_session_title(&data);
+        assert!(title.contains("capture: 2 known gaps"), "{title}");
+
+        data.summary.capture = None;
+        assert!(!ai_session_title(&data).contains("capture"));
+    }
+
+    #[test]
+    fn the_handoff_lists_the_known_capture_gaps_themselves() {
+        let mut data = make_ai_data();
+        data.summary.capture = Some(crate::models::CaptureStatus {
+            complete: false,
+            known_missing: vec!["Records from a paused window were skipped".into()],
+        });
+        let mut app = AiSessionApp::new(data);
+        assert!(app.handle_input(crossterm::event::KeyEvent::new(
+            KeyCode::Char('h'),
+            KeyModifiers::NONE
+        )));
+        assert!(app
+            .text_panel
+            .as_ref()
+            .unwrap()
+            .body
+            .contains("Known capture gap: Records from a paused window were skipped"));
+    }
+
     #[test]
     fn s_with_no_summaries_opens_an_explanation_rather_than_a_toast() {
         let mut app = AiSessionApp::new(make_ai_data());
