@@ -121,6 +121,80 @@ pub fn query_terms(query: &str) -> Vec<&str> {
     query.split_whitespace().collect()
 }
 
+/// How a mode asks the database for candidates.
+///
+/// Every mode narrows in SQL, so a match is found however old it is and
+/// however large the history has grown — the database never hands back "the
+/// newest N rows and hope". The narrowing is always a *superset* of the mode's
+/// true match set; the in-memory pass then applies the exact rule.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct QueryPlan {
+    /// Whole-query clause (`QueryFilter::query`), for literal and prefix.
+    pub query: Option<String>,
+    /// Anchor the whole-query clause at the start (`QueryFilter::prefix_match`).
+    pub prefix: bool,
+    /// Per-token clauses, all ANDed (`QueryFilter::query_tokens`).
+    pub tokens: Vec<String>,
+    /// Whether the in-memory scorer reorders what SQL returned.
+    ///
+    /// `false` for literal and prefix: their match set is exactly what SQL
+    /// returns, so results stay in recency order and the mode is predictable.
+    /// `true` for terms and fuzzy, where relevance ordering is the point.
+    pub rerank: bool,
+    /// Whether the scorer may keep a pure subsequence match (an abbreviation).
+    /// Only `fuzzy` says yes; that is the whole difference between it and the
+    /// default.
+    pub allow_subsequence: bool,
+}
+
+impl MatchMode {
+    /// Turn a typed query into the database request for this mode.
+    pub fn plan(self, query: &str) -> QueryPlan {
+        let q = query.trim();
+        if q.is_empty() {
+            return QueryPlan::default();
+        }
+        match self {
+            Self::Terms => QueryPlan {
+                tokens: query_terms(q).into_iter().map(str::to_string).collect(),
+                rerank: true,
+                ..QueryPlan::default()
+            },
+            Self::Literal => QueryPlan {
+                query: Some(q.to_string()),
+                ..QueryPlan::default()
+            },
+            Self::Prefix => QueryPlan {
+                query: Some(q.to_string()),
+                prefix: true,
+                ..QueryPlan::default()
+            },
+            // A subsequence match must contain every character of the query,
+            // so "each distinct character appears somewhere" is a sound
+            // superset — narrow enough for SQL to do real work, never so
+            // narrow that it hides a true fuzzy match.
+            Self::Fuzzy => QueryPlan {
+                tokens: distinct_chars(q),
+                rerank: true,
+                allow_subsequence: true,
+                ..QueryPlan::default()
+            },
+        }
+    }
+}
+
+/// The distinct characters of `q` (whitespace dropped), each as its own token.
+fn distinct_chars(q: &str) -> Vec<String> {
+    let mut seen = Vec::new();
+    for c in q.chars().filter(|c| !c.is_whitespace()) {
+        let lower = c.to_lowercase().to_string();
+        if !seen.contains(&lower) {
+            seen.push(lower);
+        }
+    }
+    seen
+}
+
 /// `true` when every char of `needle` appears in `hay`, in order.
 fn is_subsequence(hay: &str, needle: &str) -> bool {
     let mut chars = hay.chars();
@@ -229,6 +303,114 @@ mod tests {
         assert!(MatchMode::Literal.narrows_in_sql());
         assert!(MatchMode::Prefix.narrows_in_sql());
         assert!(!MatchMode::Fuzzy.narrows_in_sql());
+    }
+
+    #[test]
+    fn terms_mode_asks_sql_for_one_clause_per_term() {
+        let plan = MatchMode::Terms.plan("  git   rebase ");
+        assert_eq!(plan.tokens, vec!["git".to_string(), "rebase".to_string()]);
+        assert_eq!(plan.query, None);
+        assert!(!plan.prefix);
+        assert!(plan.rerank);
+        assert!(!plan.allow_subsequence);
+    }
+
+    #[test]
+    fn literal_mode_asks_sql_for_the_whole_query_and_keeps_recency_order() {
+        let plan = MatchMode::Literal.plan(" docker compose up ");
+        assert_eq!(plan.query.as_deref(), Some("docker compose up"));
+        assert!(plan.tokens.is_empty());
+        assert!(!plan.prefix);
+        // Literal is the predictable mode: SQL already returns exactly the
+        // match set, so nothing reorders it.
+        assert!(!plan.rerank);
+    }
+
+    #[test]
+    fn prefix_mode_anchors_the_whole_query() {
+        let plan = MatchMode::Prefix.plan("cargo t");
+        assert_eq!(plan.query.as_deref(), Some("cargo t"));
+        assert!(plan.prefix);
+        assert!(plan.tokens.is_empty());
+        assert!(!plan.rerank);
+    }
+
+    #[test]
+    fn fuzzy_narrows_by_distinct_characters_so_old_matches_are_not_lost() {
+        let plan = MatchMode::Fuzzy.plan("gco");
+        assert_eq!(
+            plan.tokens,
+            vec!["g".to_string(), "c".to_string(), "o".to_string()]
+        );
+        assert!(plan.allow_subsequence);
+        assert!(plan.rerank);
+    }
+
+    #[test]
+    fn fuzzy_character_narrowing_never_excludes_a_real_subsequence_match() {
+        // The SQL superset must admit every entry the mode would accept.
+        let corpus = [
+            "git checkout main",
+            "gcc -o out main.c",
+            "echo going",
+            "ls -la",
+        ];
+        for query in ["gco", "gcm", "gc", "g c o"] {
+            let plan = MatchMode::Fuzzy.plan(query);
+            for cmd in corpus {
+                let lc = cmd.to_ascii_lowercase();
+                let sql_admits = plan.tokens.iter().all(|t| lc.contains(t.as_str()));
+                if MatchMode::Fuzzy.matches(cmd, query) {
+                    assert!(
+                        sql_admits,
+                        "{query:?} matches {cmd:?} but SQL narrowing would drop it"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fuzzy_tokens_are_deduplicated_and_ignore_whitespace() {
+        assert_eq!(
+            MatchMode::Fuzzy.plan("a a  B").tokens,
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_empty_query_narrows_nothing_in_any_mode() {
+        for mode in [
+            MatchMode::Terms,
+            MatchMode::Literal,
+            MatchMode::Prefix,
+            MatchMode::Fuzzy,
+        ] {
+            assert_eq!(mode.plan("   "), QueryPlan::default(), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn only_fuzzy_admits_a_pure_subsequence() {
+        for mode in [MatchMode::Terms, MatchMode::Literal, MatchMode::Prefix] {
+            assert!(!mode.plan("gco").allow_subsequence, "{mode:?}");
+        }
+        assert!(MatchMode::Fuzzy.plan("gco").allow_subsequence);
+    }
+
+    #[test]
+    fn the_default_mode_plans_exactly_the_pre_existing_token_narrowing() {
+        // Before explicit modes, interactive search split the query on
+        // whitespace and required every token as a substring. The default
+        // mode must still do precisely that, or upgrading reinterprets
+        // everyone's queries.
+        let query = "git commit --amend";
+        let plan = MatchMode::default().plan(query);
+        let legacy: Vec<String> = query.split_whitespace().map(str::to_string).collect();
+        assert_eq!(plan.tokens, legacy);
+        assert_eq!(plan.query, None);
+        assert!(!plan.prefix);
+        assert!(!plan.allow_subsequence);
     }
 
     #[test]

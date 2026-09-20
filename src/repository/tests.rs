@@ -2832,3 +2832,95 @@ fn count_entries_by_executor_matches_the_exact_executor_name() {
     assert_eq!(repo.count_entries_by_executor("codex").unwrap(), 0);
     assert_eq!(repo.count_entries_by_executor("cursor").unwrap(), 0);
 }
+
+// ── PROD-09: session scope ─────────────────────────────────────
+
+/// Two sessions, each with its own commands plus one they share.
+fn two_session_repo() -> (tempfile::TempDir, Repository, String, String) {
+    let (temp, repo) = setup_test_db();
+    let a = Session::new("host".to_string(), 1000);
+    let b = Session::new("host".to_string(), 2000);
+    repo.insert_session(&a).unwrap();
+    repo.insert_session(&b).unwrap();
+    for (sid, cmd, at) in [
+        (&a.id, "cargo build", 1_000),
+        (&a.id, "cargo test --offline", 1_100),
+        (&b.id, "cargo build", 2_000),
+        (&b.id, "terraform apply", 2_100),
+    ] {
+        repo.insert_entry(&crate::models::Entry::new(
+            sid.clone(),
+            cmd.to_string(),
+            "/proj".to_string(),
+            Some(0),
+            at,
+            at,
+        ))
+        .unwrap();
+    }
+    (temp, repo, a.id, b.id)
+}
+
+#[test]
+fn session_scope_returns_only_that_sessions_entries() {
+    let (_t, repo, a, _b) = two_session_repo();
+    let scoped = SessionScoped {
+        filter: QueryFilter::default(),
+        session_id: Some(a.as_str()),
+    };
+    let entries = repo.get_entries_filtered(100, 0, &scoped).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert!(entries.iter().all(|e| e.session_id == a));
+    assert_eq!(repo.count_filtered(&scoped).unwrap(), 2);
+}
+
+#[test]
+fn session_scope_composes_with_the_query_and_the_other_filters() {
+    let (_t, repo, _a, b) = two_session_repo();
+    let tokens = vec!["cargo".to_string()];
+    let scoped = SessionScoped {
+        filter: QueryFilter {
+            query_tokens: &tokens,
+            ..Default::default()
+        },
+        session_id: Some(b.as_str()),
+    };
+    let entries = repo.get_entries_filtered(100, 0, &scoped).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].command, "cargo build");
+}
+
+#[test]
+fn a_session_scope_of_none_behaves_exactly_like_the_bare_filter() {
+    let (_t, repo, _a, _b) = two_session_repo();
+    let bare = QueryFilter::default();
+    let scoped = SessionScoped {
+        filter: bare.clone(),
+        session_id: None,
+    };
+    assert_eq!(
+        repo.count_filtered(&scoped).unwrap(),
+        repo.count_filtered(&bare).unwrap()
+    );
+    assert_eq!(repo.count_filtered(&scoped).unwrap(), 4);
+}
+
+#[test]
+fn session_scope_also_narrows_unique_results() {
+    let (_t, repo, a, _b) = two_session_repo();
+    let scoped = SessionScoped {
+        filter: QueryFilter::default(),
+        session_id: Some(a.as_str()),
+    };
+    // "cargo build" exists in both sessions; inside session A it must be
+    // counted once, not twice.
+    let unique = repo
+        .get_unique_entries_filtered(100, 0, &scoped, true)
+        .unwrap();
+    let build = unique
+        .iter()
+        .find(|(e, _)| e.command == "cargo build")
+        .expect("cargo build should be in session A");
+    assert_eq!(build.1, 1);
+    assert_eq!(repo.count_unique_filtered(&scoped).unwrap(), 2);
+}

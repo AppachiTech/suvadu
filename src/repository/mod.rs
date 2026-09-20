@@ -120,6 +120,40 @@ impl QueryFilter<'_> {
     }
 }
 
+/// Anything that can describe which entries a query should return.
+///
+/// Entry queries take this rather than a concrete [`QueryFilter`] so a scope
+/// can add its own clauses without every unrelated caller having to know
+/// about them.
+pub trait EntryQuery {
+    fn entry_filter_builder(&self) -> FilterBuilder;
+}
+
+impl EntryQuery for QueryFilter<'_> {
+    fn entry_filter_builder(&self) -> FilterBuilder {
+        self.to_filter_builder()
+    }
+}
+
+/// A [`QueryFilter`] pinned to one shell session — the `session` recall scope.
+///
+/// `session_id: None` means "do not narrow", so the wrapper is safe to use
+/// unconditionally: it behaves exactly like the inner filter until a session
+/// is actually supplied.
+#[derive(Clone, Default)]
+pub struct SessionScoped<'a> {
+    pub filter: QueryFilter<'a>,
+    pub session_id: Option<&'a str>,
+}
+
+impl EntryQuery for SessionScoped<'_> {
+    fn entry_filter_builder(&self) -> FilterBuilder {
+        self.filter
+            .to_filter_builder()
+            .with_session(self.session_id)
+    }
+}
+
 use crate::models::SearchField;
 
 /// Filter parameters for replay queries.
