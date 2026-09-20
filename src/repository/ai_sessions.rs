@@ -2,7 +2,7 @@
 use super::Repository;
 use crate::ai_sessions::{claude, codex, opencode, AiEvent, CapturePolicy, SummaryInput};
 use crate::db::{DbError, DbResult};
-use crate::models::{AiSummaryRecord, CaptureStatus, SessionKind, SessionSummary};
+use crate::models::{AiSummaryRecord, CaptureStatus, SessionKind, SessionSummary, SummaryBasis};
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -18,6 +18,15 @@ const CAPTURE_UNVERIFIABLE: [&str; 3] = [
     "Non-shell tool calls, file edits and their contents are not captured",
     "Child sessions started from this one are not merged into it",
 ];
+
+/// The stored fingerprint of the evidence one saved summary was written
+/// from, as [`Repository::summary_basis`] needs it.
+struct SummarySource<'a> {
+    revision: &'a str,
+    event_count: i64,
+    command_count: i64,
+    prefix_hash: &'a str,
+}
 
 /// Longest row preview kept, in characters.
 const PREVIEW_MAX_CHARS: usize = 120;
@@ -1032,9 +1041,6 @@ impl Repository {
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        let current_event_count = session["event_count"].as_i64().unwrap_or_default();
-        let current_command_count = session["command_count"].as_i64().unwrap_or_default();
-        let current_revision = session["revision"].as_str().unwrap_or_default();
         let mut summaries = Vec::with_capacity(rows.len());
         for (
             summary_id,
@@ -1050,17 +1056,19 @@ impl Repository {
             created_at,
         ) in rows
         {
-            let current = current_revision == revision;
-            let grew = current_event_count >= source_event_count
-                && current_command_count >= source_command_count
-                && (current_event_count > source_event_count
-                    || current_command_count > source_command_count);
-            let prefix_matches = !source_prefix_hash.is_empty()
-                && self
-                    .ai_session_prefix_hash(id, source_event_count, source_command_count)?
-                    .is_some_and(|hash| hash == source_prefix_hash);
-            let has_new_activity = !current && grew && prefix_matches;
-            let incremental_safe = current || has_new_activity;
+            let basis = self.summary_basis(
+                id,
+                &session,
+                &SummarySource {
+                    revision: &revision,
+                    event_count: source_event_count,
+                    command_count: source_command_count,
+                    prefix_hash: &source_prefix_hash,
+                },
+            )?;
+            let current = basis == SummaryBasis::Current;
+            let has_new_activity = basis == SummaryBasis::NewActivity;
+            let incremental_safe = basis.is_usable();
             summaries.push(json!({
                 "id":summary_id,"source_revision":revision,"text":text,"agent":agent,
                 "model":model,"source_ids":serde_json::from_str::<Value>(&sources).unwrap_or(Value::Null),
@@ -1068,6 +1076,7 @@ impl Repository {
                 "base_summary_id":base_summary_id,"created_at":created_at,"generated":true,
                 "current":current,"has_new_activity":has_new_activity,
                 "incremental_safe":incremental_safe,"stale":!incremental_safe,
+                "basis":basis.label(),"basis_note":basis.note(),
                 "resume_event_offset":incremental_safe.then_some(source_event_count),
                 "resume_command_offset":incremental_safe.then_some(source_command_count)
             }));
@@ -1168,33 +1177,83 @@ impl Repository {
     }
 
     /// Saved summaries for a session, newest first, for the TUI summary
-    /// panel. Unlike [`Self::get_ai_session`]'s `summaries` field, this
-    /// doesn't compute checkpoint-resume eligibility -- it's just what a
-    /// human viewer needs: the text, who/what wrote it, when, and whether
-    /// it's still current.
+    /// panel: the text, who/what wrote it, when, and how it stands against
+    /// the evidence now. Shares [`Self::summary_basis`] with
+    /// [`Self::get_ai_session`] so the viewer and an MCP client can never
+    /// disagree about whether a checkpoint still holds.
     pub fn ai_summaries_for_session(&self, session_id: &str) -> DbResult<Vec<AiSummaryRecord>> {
-        let current_revision = self.ai_session_header(session_id, &[])?["revision"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
+        let session = self.ai_session_header(session_id, &[])?;
         let mut statement = self.conn.prepare(
-            "SELECT id,text,agent,model,source_revision,created_at FROM ai_summaries \
+            "SELECT id,text,agent,model,source_revision,created_at,source_event_count,\
+             source_command_count,source_prefix_hash FROM ai_summaries \
              WHERE session_id=?1 ORDER BY created_at DESC,rowid DESC",
         )?;
-        let records = statement
+        let rows = statement
             .query_map([session_id], |r| {
-                let source_revision: String = r.get(4)?;
-                Ok(AiSummaryRecord {
-                    id: r.get(0)?,
-                    text: r.get(1)?,
-                    agent: r.get(2)?,
-                    model: r.get(3)?,
-                    current: source_revision == current_revision,
-                    created_at: r.get(5)?,
-                })
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, i64>(7)?,
+                    r.get::<_, String>(8)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let mut records = Vec::with_capacity(rows.len());
+        for (id, text, agent, model, revision, created_at, events, commands, prefix_hash) in rows {
+            let basis = self.summary_basis(
+                session_id,
+                &session,
+                &SummarySource {
+                    revision: &revision,
+                    event_count: events,
+                    command_count: commands,
+                    prefix_hash: &prefix_hash,
+                },
+            )?;
+            records.push(AiSummaryRecord {
+                id,
+                text,
+                agent,
+                model,
+                created_at,
+                basis,
+            });
+        }
         Ok(records)
+    }
+
+    /// How one saved summary stands against the session's records now. The
+    /// single place that decision is made: an appended tail leaves the
+    /// summary's own prefix hash intact and only extends it, while any
+    /// change to that prefix invalidates the basis outright.
+    fn summary_basis(
+        &self,
+        session_id: &str,
+        session: &Value,
+        source: &SummarySource<'_>,
+    ) -> DbResult<SummaryBasis> {
+        if session["revision"].as_str() == Some(source.revision) {
+            return Ok(SummaryBasis::Current);
+        }
+        let events = session["event_count"].as_i64().unwrap_or_default();
+        let commands = session["command_count"].as_i64().unwrap_or_default();
+        let grew = events >= source.event_count
+            && commands >= source.command_count
+            && (events > source.event_count || commands > source.command_count);
+        let prefix_matches = !source.prefix_hash.is_empty()
+            && self
+                .ai_session_prefix_hash(session_id, source.event_count, source.command_count)?
+                .is_some_and(|hash| hash == source.prefix_hash);
+        Ok(if grew && prefix_matches {
+            SummaryBasis::NewActivity
+        } else {
+            SummaryBasis::Invalidated
+        })
     }
 
     /// Explicit deletion includes shell evidence and checkpoints, preventing retained summaries.
@@ -1862,9 +1921,10 @@ mod tests {
         assert_eq!(records[0].text, "Second summary");
         assert_eq!(records[0].agent, "codex");
         assert_eq!(records[0].model, "fixture-writer-2");
-        assert!(records[0].current);
+        assert_eq!(records[0].basis, SummaryBasis::Current);
         assert_eq!(records[1].text, "First summary");
-        assert!(!records[1].current);
+        // The earlier summary's own evidence is untouched, only extended.
+        assert_eq!(records[1].basis, SummaryBasis::NewActivity);
     }
 
     #[test]
@@ -2211,5 +2271,54 @@ mod tests {
         let capture = summary.capture.expect("capture status");
         assert!(!capture.complete);
         assert!(!capture.known_missing.is_empty());
+    }
+
+    /// The viewer's summary list must draw the same distinction the MCP
+    /// checkpoint logic does: evidence that only *grew* still supports the
+    /// saved text, while evidence that *changed* destroys its basis. A
+    /// single current/stale flag collapses those into one scary word and
+    /// makes a perfectly usable checkpoint look wrong.
+    #[test]
+    fn saved_summaries_distinguish_new_activity_from_changed_evidence() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("fixture.jsonl");
+        std::fs::write(&path, records()).unwrap();
+        import(&repo, &path);
+        let page = repo.get_ai_session("codex-fixture", 20, 0, &[]).unwrap();
+        let input = SummaryInput {
+            session_id: "codex-fixture".into(),
+            source_revision: page["session"]["revision"].as_str().unwrap().into(),
+            text: "The user asked for a synthetic fix.".into(),
+            agent: "claude".into(),
+            model: "fixture-writer".into(),
+            source_ids: vec![page["events"][1]["id"].as_str().unwrap().into()],
+            base_summary_id: None,
+        };
+        repo.save_ai_summary(&input, &[]).unwrap();
+
+        let saved = repo.ai_summaries_for_session("codex-fixture").unwrap();
+        assert_eq!(saved[0].basis, crate::models::SummaryBasis::Current);
+        assert!(saved[0].basis.is_usable());
+
+        append(&path, &prompt("new request"));
+        import(&repo, &path);
+        let extended = repo.ai_summaries_for_session("codex-fixture").unwrap();
+        assert_eq!(
+            extended[0].basis,
+            crate::models::SummaryBasis::NewActivity,
+            "appended evidence extends the checkpoint, it does not invalidate it"
+        );
+        assert!(extended[0].basis.is_usable());
+
+        // events[1] is the captured prompt; rewriting it changes evidence
+        // the summary was written from, rather than merely adding to it.
+        mutate_event(&repo, page["events"][1]["id"].as_str().unwrap());
+        let broken = repo.ai_summaries_for_session("codex-fixture").unwrap();
+        assert_eq!(
+            broken[0].basis,
+            crate::models::SummaryBasis::Invalidated,
+            "changed earlier evidence must invalidate the prior basis"
+        );
+        assert!(!broken[0].basis.is_usable());
     }
 }

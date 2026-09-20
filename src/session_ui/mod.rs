@@ -113,7 +113,7 @@ mod session_data_contract_tests {
             agent: "claude".into(),
             model: "sonnet".into(),
             created_at: 5_000,
-            current: true,
+            basis: crate::models::SummaryBasis::Current,
         };
         let data = build_ai_session_data(summary(), vec![], vec![], vec![record.clone()]);
         assert_eq!(data.summaries, vec![record]);

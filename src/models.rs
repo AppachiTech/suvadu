@@ -246,10 +246,56 @@ pub struct SessionSummary {
     pub capture: Option<CaptureStatus>,
 }
 
+/// How a saved summary stands against the evidence it was written from.
+/// Deliberately three states, not a current/stale boolean: evidence that
+/// only grew still supports the saved text and can be extended, while
+/// evidence that changed underneath destroys the basis for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SummaryBasis {
+    /// The session is exactly what this summary was written from.
+    Current,
+    /// Records were appended since; the summary's own prefix is untouched,
+    /// so it still holds and a newer checkpoint can extend it.
+    NewActivity,
+    /// Evidence the summary was written from changed or is gone. The
+    /// summary text is kept, but it must be rebuilt, not extended.
+    Invalidated,
+}
+
+impl SummaryBasis {
+    /// Whether the saved text can still be trusted as a basis — true for
+    /// `Current` and `NewActivity`, false once the evidence changed.
+    pub const fn is_usable(self) -> bool {
+        matches!(self, Self::Current | Self::NewActivity)
+    }
+
+    /// Short badge for a viewer.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Current => "CURRENT",
+            Self::NewActivity => "NEW ACTIVITY",
+            Self::Invalidated => "EVIDENCE CHANGED",
+        }
+    }
+
+    /// One line saying what the reader should do about it.
+    pub const fn note(self) -> &'static str {
+        match self {
+            Self::Current => "Written from exactly the records this session holds now.",
+            Self::NewActivity => {
+                "Records were added after this was written; its own evidence is unchanged, so an agent can extend it instead of rebuilding."
+            }
+            Self::Invalidated => {
+                "Evidence this was written from has changed or is gone — rebuild from the full session rather than trusting or extending it."
+            }
+        }
+    }
+}
+
 /// A saved AI-session summary (generated interpretation, not captured
-/// evidence). `current` is true only when its `source_revision` matches the
-/// session's revision at query time; a saved summary's revision never
-/// changes, so only the newest can ever be current.
+/// evidence). `basis` says how it stands against the session's records now;
+/// a saved summary's own revision never changes, so only the newest can ever
+/// be `Current`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AiSummaryRecord {
     pub id: String,
@@ -257,7 +303,7 @@ pub struct AiSummaryRecord {
     pub agent: String,
     pub model: String,
     pub created_at: i64,
-    pub current: bool,
+    pub basis: SummaryBasis,
 }
 
 /// Aggregated usage statistics

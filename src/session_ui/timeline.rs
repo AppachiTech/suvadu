@@ -1580,27 +1580,22 @@ fn render_summary_panel(
         .constraints([
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Length(2),
             Constraint::Min(1),
             Constraint::Length(1),
         ])
         .split(inner);
 
-    let status_style = if record.current {
-        Style::default().fg(t.success).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(t.warning).add_modifier(Modifier::BOLD)
-    };
-    let status_text = if record.current { "CURRENT" } else { "STALE" };
-    let mode_text = if panel.raw_view { "Raw" } else { "Rendered" };
-    let header = Line::from(vec![
-        Span::styled(format!(" {status_text} "), status_style),
-        Span::styled(
-            format!("  v{} of {}  ", panel.index + 1, summaries.len()),
-            Style::default().fg(t.text_secondary),
-        ),
-        Span::styled(format!("· {mode_text} "), Style::default().fg(t.text_muted)),
-    ]);
-    f.render_widget(Paragraph::new(header), layout[0]);
+    f.render_widget(
+        Paragraph::new(summary_header_line(
+            record,
+            panel.index,
+            summaries.len(),
+            panel.raw_view,
+            t,
+        )),
+        layout[0],
+    );
 
     let meta = Line::from(Span::styled(
         format!(
@@ -1612,6 +1607,10 @@ fn render_summary_panel(
         Style::default().fg(t.text_muted),
     ));
     f.render_widget(Paragraph::new(meta), layout[1]);
+    f.render_widget(
+        Paragraph::new(summary_basis_note_line(record, t)).wrap(Wrap { trim: false }),
+        layout[2],
+    );
 
     let body_text: Text<'static> = if panel.raw_view {
         Text::from(record.text.clone())
@@ -1633,14 +1632,14 @@ fn render_summary_panel(
         .join("\n");
     panel.scroll = clamp_scroll(
         &plain_for_clamp,
-        layout[2].width,
-        layout[2].height,
+        layout[3].width,
+        layout[3].height,
         panel.scroll,
     );
     let body = Paragraph::new(body_text)
         .wrap(Wrap { trim: false })
         .scroll((panel.scroll, 0));
-    f.render_widget(body, layout[2]);
+    f.render_widget(body, layout[3]);
 
     let key = Style::default().bg(t.badge_bg).fg(t.text);
     let label = Style::default().fg(t.text_secondary);
@@ -1658,7 +1657,54 @@ fn render_summary_panel(
         footer.push(Span::styled(" [/] ", key));
         footer.push(Span::styled(" Older/Newer ", label));
     }
-    f.render_widget(Paragraph::new(Line::from(footer)), layout[3]);
+    f.render_widget(Paragraph::new(Line::from(footer)), layout[4]);
+}
+
+/// Badge line for the summary panel: which evidence state this saved
+/// summary is in, which version is open, and the render mode.
+fn summary_header_line(
+    record: &crate::models::AiSummaryRecord,
+    index: usize,
+    total: usize,
+    raw_view: bool,
+    t: &crate::theme::Theme,
+) -> Line<'static> {
+    let color = match record.basis {
+        crate::models::SummaryBasis::Current => t.success,
+        crate::models::SummaryBasis::NewActivity => t.info,
+        crate::models::SummaryBasis::Invalidated => t.warning,
+    };
+    Line::from(vec![
+        Span::styled(
+            format!(" {} ", record.basis.label()),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  v{} of {total}  ", index + 1),
+            Style::default().fg(t.text_secondary),
+        ),
+        Span::styled(
+            format!("· {} ", if raw_view { "Raw" } else { "Rendered" }),
+            Style::default().fg(t.text_muted),
+        ),
+    ])
+}
+
+/// The one line that says what the badge means for the reader — extended
+/// versus rebuilt is the whole difference between a usable checkpoint and a
+/// summary that no longer describes the session.
+fn summary_basis_note_line(
+    record: &crate::models::AiSummaryRecord,
+    t: &crate::theme::Theme,
+) -> Line<'static> {
+    Line::from(Span::styled(
+        format!(" {}", record.basis.note()),
+        Style::default().fg(if record.basis.is_usable() {
+            t.text_muted
+        } else {
+            t.warning
+        }),
+    ))
 }
 
 pub fn run_ai_session_timeline<B: Backend>(
@@ -2105,14 +2151,61 @@ mod tests {
     }
 
     fn summary_record(id: &str, text: &str, current: bool) -> crate::models::AiSummaryRecord {
+        summary_record_with(
+            id,
+            text,
+            if current {
+                crate::models::SummaryBasis::Current
+            } else {
+                crate::models::SummaryBasis::Invalidated
+            },
+        )
+    }
+
+    fn summary_record_with(
+        id: &str,
+        text: &str,
+        basis: crate::models::SummaryBasis,
+    ) -> crate::models::AiSummaryRecord {
         crate::models::AiSummaryRecord {
             id: id.into(),
             text: text.into(),
             agent: "claude".into(),
             model: "sonnet".into(),
             created_at: 1_000,
-            current,
+            basis,
         }
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    }
+
+    /// A checkpoint that new records merely extended is still usable. Badging
+    /// it "STALE" alongside one whose evidence was rewritten tells the reader
+    /// nothing about which of the two they can act on.
+    #[test]
+    fn summary_panel_badges_the_three_evidence_states_apart() {
+        let t = theme();
+        for (basis, expected) in [
+            (crate::models::SummaryBasis::Current, "CURRENT"),
+            (crate::models::SummaryBasis::NewActivity, "NEW ACTIVITY"),
+            (crate::models::SummaryBasis::Invalidated, "EVIDENCE CHANGED"),
+        ] {
+            let record = summary_record_with("s1", "text", basis);
+            let header = line_text(&summary_header_line(&record, 0, 1, false, t));
+            assert!(header.contains(expected), "{basis:?} rendered as {header}");
+        }
+    }
+
+    #[test]
+    fn summary_panel_says_what_to_do_with_an_invalidated_basis() {
+        let record = summary_record_with("s1", "text", crate::models::SummaryBasis::Invalidated);
+        let note = line_text(&summary_basis_note_line(&record, theme()));
+        assert!(note.to_lowercase().contains("rebuild"), "{note}");
     }
 
     #[test]
