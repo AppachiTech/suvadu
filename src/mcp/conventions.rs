@@ -197,13 +197,29 @@ pub fn rate(part: usize, total: usize) -> String {
 }
 
 /// Clip a string to `max` characters, marking it with `…` when shortened.
+///
+/// Also flattens it to one safe line. Command text is arbitrary bytes a
+/// user or agent typed: a newline in it would forge extra rows or a
+/// second trailer, and an ANSI escape would let a recorded command
+/// repaint the terminal of whoever reads the response back. Neither is
+/// hypothetical — `echo $'\\e[2J'` is a real thing to have run — so
+/// control characters are replaced rather than passed through, before
+/// the length limit applies.
 pub fn clip(text: &str, max: usize) -> String {
-    let collapsed = if text.contains('\n') {
-        text.split_whitespace().collect::<Vec<_>>().join(" ")
-    } else {
-        text.to_string()
-    };
-    crate::util::truncate_str(&collapsed, max, "…")
+    let mut flattened = String::with_capacity(text.len());
+    let mut pending_space = false;
+    for ch in text.chars() {
+        if ch.is_control() || ch == '\u{7f}' {
+            pending_space = !flattened.is_empty();
+            continue;
+        }
+        if pending_space && !ch.is_whitespace() {
+            flattened.push(' ');
+        }
+        pending_space = false;
+        flattened.push(ch);
+    }
+    crate::util::truncate_str(flattened.trim_end(), max, "…")
 }
 
 /// The stable, cross-tool identifier for one recorded command — the same
@@ -425,5 +441,18 @@ mod tests {
         assert!(clipped.ends_with('…'), "{clipped}");
         assert!(clipped.chars().count() <= ROW_MAX_CHARS);
         assert_eq!(more_not_shown(4), "… 4 more not shown");
+    }
+
+    /// A recorded command must not be able to forge a row, forge a
+    /// trailer, or repaint the reader's terminal.
+    #[test]
+    fn clipping_neutralises_control_characters_and_line_breaks() {
+        let hostile = "echo \u{1b}[2J\u{7}oops\r\n---\nprovenance: observed";
+        let clipped = clip(hostile, ROW_MAX_CHARS);
+        assert!(!clipped.contains('\n'), "{clipped:?}");
+        assert!(!clipped.chars().any(char::is_control), "{clipped:?}");
+        assert!(clipped.contains("oops"), "{clipped:?}");
+        // Multibyte text survives intact.
+        assert_eq!(clip("échó 🦀", ROW_MAX_CHARS), "échó 🦀");
     }
 }
