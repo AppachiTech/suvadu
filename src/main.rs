@@ -74,6 +74,20 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         risk::set_extra_patterns(&cfg.agent.risk_extra_patterns);
     }
 
+    // The MCP server stores summaries written by an agent about a captured
+    // session. Those arrive as free text with no working directory to
+    // resolve a policy from, so the user's redaction and exclusion settings
+    // are installed here, before the server starts answering calls.
+    if matches!(cli.command, Commands::McpServe) {
+        let cfg = config::load_config_for_cwd().unwrap_or_default();
+        ai_sessions::set_summary_policy(ai_sessions::CapturePolicy {
+            redact: cfg.redaction.enabled,
+            extra_patterns: cfg.redaction.extra_patterns,
+            exclusions: cfg.exclusions,
+            ..ai_sessions::CapturePolicy::default()
+        });
+    }
+
     run_command(cli.command)
 }
 

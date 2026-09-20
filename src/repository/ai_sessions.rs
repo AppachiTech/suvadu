@@ -1197,11 +1197,53 @@ impl Repository {
         Ok(summaries)
     }
 
+    /// Save a summary under a capture policy, so written-up evidence obeys
+    /// the same privacy rules as the evidence it was written from.
+    ///
+    /// A summary is derived text: an agent that read a session can restate
+    /// anything it saw, including a secret the redactor caught on the way in
+    /// but that the agent then paraphrased. Excluded text is refused rather
+    /// than silently trimmed — a caller that is told "saved" must be able to
+    /// believe it.
+    pub fn save_ai_summary_with_policy(
+        &self,
+        input: &SummaryInput,
+        excluded_dirs: &[String],
+        policy: &CapturePolicy,
+    ) -> DbResult<Value> {
+        let exclusions = crate::util::compile_exclusions(&policy.exclusions);
+        if crate::util::is_excluded_compiled(&input.text, &exclusions) {
+            return Err(invalid(
+                "Summary text matches a configured exclusion pattern and was not saved",
+            ));
+        }
+        if !policy.redact {
+            return self.store_ai_summary(input, excluded_dirs);
+        }
+        let redacted = SummaryInput {
+            text: crate::redact::redact_secrets_with_extra(&input.text, &policy.extra_patterns),
+            ..input.clone()
+        };
+        self.store_ai_summary(&redacted, excluded_dirs)
+    }
+
+    /// Save a summary under the policy this process installed (see
+    /// [`crate::ai_sessions::set_summary_policy`]), or as written when no
+    /// policy is installed.
     pub fn save_ai_summary(
         &self,
         input: &SummaryInput,
         excluded_dirs: &[String],
     ) -> DbResult<Value> {
+        crate::ai_sessions::summary_policy().map_or_else(
+            || self.store_ai_summary(input, excluded_dirs),
+            |policy| self.save_ai_summary_with_policy(input, excluded_dirs, policy),
+        )
+    }
+
+    /// Validate and store a summary. Privacy policy is applied by the
+    /// callers above, never here.
+    fn store_ai_summary(&self, input: &SummaryInput, excluded_dirs: &[String]) -> DbResult<Value> {
         if input.text.trim().is_empty()
             || input.text.chars().count() > 16_000
             || input.text.len() > 64_000
@@ -2511,5 +2553,74 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM ai_events", [], |r| r.get(0))
             .unwrap();
         assert_eq!(events, 0);
+    }
+
+    /// A summary is written text derived from captured evidence, so it is
+    /// subject to the same privacy policy as the evidence: secrets redacted,
+    /// excluded text refused outright.
+    #[test]
+    fn a_summary_saved_under_a_policy_is_redacted_and_can_be_excluded() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("fixture.jsonl");
+        std::fs::write(&path, records()).unwrap();
+        import(&repo, &path);
+        let page = repo.get_ai_session("codex-fixture", 20, 0, &[]).unwrap();
+        let revision = page["session"]["revision"].as_str().unwrap().to_owned();
+        let source_ids = vec![page["events"][0]["id"].as_str().unwrap().to_owned()];
+        let input = |text: &str| SummaryInput {
+            session_id: "codex-fixture".into(),
+            source_revision: revision.clone(),
+            text: text.into(),
+            agent: "claude".into(),
+            model: "fixture-writer".into(),
+            source_ids: source_ids.clone(),
+            base_summary_id: None,
+        };
+        let policy = CapturePolicy {
+            redact: true,
+            extra_patterns: vec!["corp-[a-z0-9]{6}".into()],
+            exclusions: vec!["SECRETFILE".into()],
+            ..CapturePolicy::default()
+        };
+
+        repo.save_ai_summary_with_policy(
+            &input("Deployed with GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123 and corp-ab12cd"),
+            &[],
+            &policy,
+        )
+        .unwrap();
+        let saved = &repo.ai_summaries_for_session("codex-fixture").unwrap()[0].text;
+        assert!(
+            !saved.contains("ghp_abcdefghijklmnopqrstuvwxyz0123"),
+            "{saved}"
+        );
+        assert!(!saved.contains("corp-ab12cd"), "{saved}");
+        assert!(saved.contains("Deployed with"), "{saved}");
+
+        // Text the user excluded is refused, not silently stored or silently
+        // dropped: the caller is told its summary was not saved.
+        let excluded = repo.save_ai_summary_with_policy(&input("read SECRETFILE"), &[], &policy);
+        assert!(excluded.is_err(), "excluded summary text must be refused");
+        assert_eq!(
+            repo.ai_summaries_for_session("codex-fixture")
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // With redaction off, the text is stored as written.
+        let plain = CapturePolicy {
+            redact: false,
+            ..CapturePolicy::default()
+        };
+        repo.save_ai_summary_with_policy(
+            &input("token ghp_abcdefghijklmnopqrstuvwxyz0123"),
+            &[],
+            &plain,
+        )
+        .unwrap();
+        assert!(repo.ai_summaries_for_session("codex-fixture").unwrap()[0]
+            .text
+            .contains("ghp_abcdefghijklmnopqrstuvwxyz0123"));
     }
 }
