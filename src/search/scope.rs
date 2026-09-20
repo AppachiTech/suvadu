@@ -188,7 +188,7 @@ impl RecallContext {
     }
 
     /// `true` when `scope` can actually be applied here.
-    pub fn is_available(&self, scope: RecallScope) -> bool {
+    pub const fn is_available(&self, scope: RecallScope) -> bool {
         match scope {
             RecallScope::All => true,
             RecallScope::Directory => self.cwd.is_some(),
@@ -200,7 +200,6 @@ impl RecallContext {
     /// Why `scope` cannot be used, in words a user can act on.
     pub const fn unavailable_reason(&self, scope: RecallScope) -> Option<&'static str> {
         match scope {
-            RecallScope::All => None,
             RecallScope::Directory if self.cwd.is_none() => {
                 Some("the current directory could not be determined")
             }
@@ -210,7 +209,11 @@ impl RecallContext {
             RecallScope::Session if self.session_id.is_none() => {
                 Some("no shell session is recorded (SUVADU_SESSION_ID is unset)")
             }
-            _ => None,
+            // Available scopes, and `All`, have nothing to explain.
+            RecallScope::All
+            | RecallScope::Directory
+            | RecallScope::Workspace
+            | RecallScope::Session => None,
         }
     }
 

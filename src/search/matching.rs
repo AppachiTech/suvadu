@@ -17,7 +17,8 @@
 //!
 //! Shared rules:
 //!
-//! * **Terms are ANDed, never ORed.** Order does not matter in `terms` mode;
+//! * **Terms are combined with AND, never OR.** Order does not matter in
+//!   `terms` mode;
 //!   entries whose terms appear contiguously and in query order rank higher,
 //!   but a scattered match is still a match.
 //! * **Case:** matching is case-insensitive for ASCII. Non-ASCII letters are
@@ -91,12 +92,6 @@ impl MatchMode {
         }
     }
 
-    /// `true` when the database can narrow candidates for this mode, so the
-    /// whole history is searched rather than a recent window.
-    pub const fn narrows_in_sql(self) -> bool {
-        !matches!(self, Self::Fuzzy)
-    }
-
     /// The documented predicate for this mode. Mirrors the SQL exactly,
     /// including ASCII-only case folding.
     pub fn matches(self, haystack: &str, query: &str) -> bool {
@@ -133,7 +128,7 @@ pub struct QueryPlan {
     pub query: Option<String>,
     /// Anchor the whole-query clause at the start (`QueryFilter::prefix_match`).
     pub prefix: bool,
-    /// Per-token clauses, all ANDed (`QueryFilter::query_tokens`).
+    /// Per-token clauses, combined with AND (`QueryFilter::query_tokens`).
     pub tokens: Vec<String>,
     /// Whether the in-memory scorer reorders what SQL returned.
     ///
@@ -295,14 +290,6 @@ mod tests {
             ]
         );
         assert_eq!(m.next(), MatchMode::Terms);
-    }
-
-    #[test]
-    fn only_fuzzy_cannot_be_narrowed_by_the_database() {
-        assert!(MatchMode::Terms.narrows_in_sql());
-        assert!(MatchMode::Literal.narrows_in_sql());
-        assert!(MatchMode::Prefix.narrows_in_sql());
-        assert!(!MatchMode::Fuzzy.narrows_in_sql());
     }
 
     #[test]

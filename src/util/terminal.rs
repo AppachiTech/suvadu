@@ -135,8 +135,38 @@ pub fn teardown_steps(surface: RecallSurface) -> Vec<TerminalStep> {
     steps
 }
 
+/// Apply one [`TerminalStep`] to stderr.
+fn apply_step(step: TerminalStep) -> std::io::Result<()> {
+    use crossterm::{cursor, event, terminal};
+    match step {
+        TerminalStep::EnableRawMode => terminal::enable_raw_mode(),
+        TerminalStep::DisableRawMode => terminal::disable_raw_mode(),
+        TerminalStep::EnterAlternateScreen => {
+            crossterm::execute!(std::io::stderr(), terminal::EnterAlternateScreen)
+        }
+        TerminalStep::LeaveAlternateScreen => {
+            crossterm::execute!(std::io::stderr(), terminal::LeaveAlternateScreen)
+        }
+        TerminalStep::EnableBracketedPaste => {
+            crossterm::execute!(std::io::stderr(), event::EnableBracketedPaste)
+        }
+        TerminalStep::DisableBracketedPaste => {
+            crossterm::execute!(std::io::stderr(), event::DisableBracketedPaste)
+        }
+        // ratatui erases the inline viewport itself; this only makes sure
+        // the cursor is back at the start of the reclaimed rows.
+        TerminalStep::ClearInlineViewport => {
+            crossterm::execute!(std::io::stderr(), cursor::MoveToColumn(0))
+        }
+        TerminalStep::ShowCursor => crossterm::execute!(std::io::stderr(), cursor::Show),
+    }
+}
+
 /// RAII guard for stderr-based TUI (used by search, which needs stdout free for shell integration).
 /// Restores terminal on drop, including panic unwind.
+///
+/// Setup and teardown run [`setup_steps`] and [`teardown_steps`] verbatim, so
+/// the sequence the tests check is the sequence that runs.
 pub struct TerminalGuardStderr {
     surface: RecallSurface,
 }
@@ -150,24 +180,20 @@ impl TerminalGuardStderr {
     /// Enter `surface`. Inline stays in the normal screen buffer so the
     /// commands already on screen remain visible.
     pub fn for_surface(surface: RecallSurface) -> Result<Self, Box<dyn std::error::Error>> {
-        crossterm::terminal::enable_raw_mode()?;
-        if surface == RecallSurface::FullScreen {
-            crossterm::execute!(std::io::stderr(), crossterm::terminal::EnterAlternateScreen)?;
+        for step in setup_steps(surface) {
+            apply_step(step)?;
         }
-        crossterm::execute!(std::io::stderr(), crossterm::event::EnableBracketedPaste)?;
         Ok(Self { surface })
     }
 }
 
 impl Drop for TerminalGuardStderr {
     fn drop(&mut self) {
-        let _ = crossterm::execute!(std::io::stderr(), crossterm::event::DisableBracketedPaste);
-        if self.surface == RecallSurface::FullScreen {
-            let _ =
-                crossterm::execute!(std::io::stderr(), crossterm::terminal::LeaveAlternateScreen);
+        // Every step is attempted even if an earlier one fails: leaving raw
+        // mode on would make the shell unusable.
+        for step in teardown_steps(self.surface) {
+            let _ = apply_step(step);
         }
-        let _ = crossterm::terminal::disable_raw_mode();
-        let _ = crossterm::execute!(std::io::stderr(), crossterm::cursor::Show);
     }
 }
 
@@ -284,6 +310,6 @@ mod tests {
     #[test]
     fn inline_height_is_capped_on_very_tall_terminals() {
         assert_eq!(inline_height(200), INLINE_MAX_HEIGHT);
-        assert!(INLINE_MIN_HEIGHT < INLINE_MAX_HEIGHT);
+        assert_eq!(inline_height(INLINE_MIN_HEIGHT), INLINE_MIN_HEIGHT);
     }
 }

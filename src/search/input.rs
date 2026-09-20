@@ -9,6 +9,44 @@ const MAX_INPUT_LEN: usize = 2000;
 /// Rows to move per `PageUp`/`PageDown` press.
 const PAGE_SCROLL_LINES: usize = 10;
 
+/// Flatten pasted text into a single searchable line.
+///
+/// Newlines, carriage returns and tabs separated words in the source text, so
+/// they become a single space — dropping them outright would silently weld
+/// `cargo test` and `--offline` into `cargo test--offline`, which matches
+/// nothing. Every other control character is removed, runs of whitespace
+/// collapse, and the result is trimmed so a paste ending in a newline does
+/// not leave a trailing space that `literal` mode would then have to match.
+pub(super) fn sanitize_pasted_text(text: &str) -> String {
+    let spaced: String = text
+        .chars()
+        .filter_map(|c| {
+            if c == '\n' || c == '\r' || c == '\t' {
+                Some(' ')
+            } else if c.is_control() {
+                None
+            } else {
+                Some(c)
+            }
+        })
+        .collect();
+
+    let mut out = String::with_capacity(spaced.len());
+    let mut last_was_space = false;
+    for c in spaced.chars() {
+        if c == ' ' {
+            if !last_was_space {
+                out.push(' ');
+            }
+            last_was_space = true;
+        } else {
+            out.push(c);
+            last_was_space = false;
+        }
+    }
+    out.trim().to_string()
+}
+
 impl SearchApp {
     const fn move_result_up(&mut self) -> SearchAction {
         if let Some(selected) = self.table_state.selected() {
@@ -43,11 +81,7 @@ impl SearchApp {
     /// Handle a bracketed-paste event. Returns `true` if the paste modified
     /// the main search query (caller should reload), `false` otherwise.
     pub(super) fn handle_paste(&mut self, text: &str) -> bool {
-        // Strip control characters (keep printable + whitespace except newlines)
-        let sanitized: String = text
-            .chars()
-            .filter(|c| !c.is_control() || *c == ' ')
-            .collect();
+        let sanitized = sanitize_pasted_text(text);
 
         if sanitized.is_empty() {
             return false;

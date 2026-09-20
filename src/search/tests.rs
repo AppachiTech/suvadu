@@ -2404,10 +2404,22 @@ fn test_paste_appends_to_existing_query() {
 fn test_paste_strips_control_characters() {
     let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
 
-    // Paste text with newlines, tabs, and other control chars
+    // Paste text with newlines, tabs, and other control chars. Newlines and
+    // tabs separated words in the source, so they become spaces (PROD-09):
+    // dropping them welded "cargo test" + "--offline" into one unmatchable
+    // token. Genuine control bytes are still removed.
     let needs_reload = app.handle_paste("hello\nworld\t!\x00\x07");
     assert!(needs_reload);
-    assert_eq!(app.query, "helloworld!");
+    assert_eq!(app.query, "hello world !");
+}
+
+#[test]
+fn test_paste_collapses_whitespace_and_trims() {
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    // A trailing newline must not leave a trailing space for `literal` mode
+    // to have to match.
+    assert!(app.handle_paste("  cargo   test \n"));
+    assert_eq!(app.query, "cargo test");
 }
 
 #[test]
@@ -2800,6 +2812,437 @@ fn typed_search_latency_on_a_large_history() {
         );
     }
 }
+// ───────────────────────────────────────────────────────────────────────────
+// PROD-09: the matching modes and the recall scopes, end to end against a
+// real database. These are the behaviour the docs and the website promise.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// A repository holding exactly `commands`, newest last.
+fn repo_with(commands: &[&str]) -> (tempfile::TempDir, crate::repository::Repository) {
+    let (dir, repo) = crate::test_utils::test_repo();
+    repo.insert_session(&crate::models::Session {
+        id: "session123".into(),
+        hostname: "test".into(),
+        created_at: 1000,
+        tag_id: None,
+    })
+    .unwrap();
+    for (i, cmd) in commands.iter().enumerate() {
+        let mut entry = create_test_entry(cmd);
+        entry.started_at = 1000 + i64::try_from(i).unwrap();
+        entry.ended_at = 2000 + i64::try_from(i).unwrap();
+        repo.insert_entry(&entry).unwrap();
+    }
+    (dir, repo)
+}
+
+/// Run `query` in `mode` against `repo` and return the matching commands.
+fn search_in_mode(
+    repo: &crate::repository::Repository,
+    mode: MatchMode,
+    query: &str,
+) -> Vec<String> {
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+    app.recall.match_mode = mode;
+    app.query = query.into();
+    app.reload_entries(repo).unwrap();
+    app.entries.iter().map(|e| e.command.clone()).collect()
+}
+
+const MODE_CORPUS: &[&str] = &[
+    "git checkout main",
+    "git commit --amend",
+    "go container ops",
+    "cargo test --offline",
+    "ls -la",
+];
+
+#[test]
+fn literal_and_fuzzy_disagree_end_to_end_exactly_as_documented() {
+    let (_d, repo) = repo_with(MODE_CORPUS);
+
+    // "gco" is an abbreviation. Only fuzzy is allowed to resolve it.
+    assert!(search_in_mode(&repo, MatchMode::Terms, "gco").is_empty());
+    assert!(search_in_mode(&repo, MatchMode::Literal, "gco").is_empty());
+    assert!(search_in_mode(&repo, MatchMode::Prefix, "gco").is_empty());
+    let fuzzy = search_in_mode(&repo, MatchMode::Fuzzy, "gco");
+    assert!(
+        fuzzy.contains(&"git checkout main".to_string()),
+        "fuzzy should resolve the abbreviation: {fuzzy:?}"
+    );
+}
+
+#[test]
+fn terms_matches_scattered_words_where_literal_demands_the_phrase() {
+    let (_d, repo) = repo_with(MODE_CORPUS);
+
+    // The words are present but not adjacent.
+    assert_eq!(
+        search_in_mode(&repo, MatchMode::Terms, "git main"),
+        vec!["git checkout main".to_string()]
+    );
+    assert!(search_in_mode(&repo, MatchMode::Literal, "git main").is_empty());
+
+    // The phrase itself is found by both.
+    for mode in [MatchMode::Terms, MatchMode::Literal] {
+        assert_eq!(
+            search_in_mode(&repo, mode, "checkout main"),
+            vec!["git checkout main".to_string()],
+            "{mode:?}"
+        );
+    }
+}
+
+#[test]
+fn prefix_anchors_at_the_start_of_the_command_end_to_end() {
+    let (_d, repo) = repo_with(MODE_CORPUS);
+
+    let prefixed = search_in_mode(&repo, MatchMode::Prefix, "git");
+    assert_eq!(prefixed.len(), 2, "{prefixed:?}");
+    assert!(prefixed.iter().all(|c| c.starts_with("git")));
+
+    // "test" appears mid-command, so prefix finds nothing while terms does.
+    assert!(search_in_mode(&repo, MatchMode::Prefix, "test").is_empty());
+    assert_eq!(
+        search_in_mode(&repo, MatchMode::Terms, "test"),
+        vec!["cargo test --offline".to_string()]
+    );
+}
+
+#[test]
+fn case_and_punctuation_behave_as_the_help_describes() {
+    let (_d, repo) = repo_with(MODE_CORPUS);
+    // ASCII case folds.
+    assert_eq!(
+        search_in_mode(&repo, MatchMode::Literal, "GIT CHECKOUT"),
+        vec!["git checkout main".to_string()]
+    );
+    // Punctuation is matched, never stripped.
+    assert_eq!(
+        search_in_mode(&repo, MatchMode::Terms, "--amend"),
+        vec!["git commit --amend".to_string()]
+    );
+    // Quotes are ordinary characters, so this finds nothing.
+    assert!(search_in_mode(&repo, MatchMode::Terms, "\"git checkout\"").is_empty());
+}
+
+#[test]
+fn every_mode_finds_a_match_older_than_any_candidate_window() {
+    // The needle is the oldest of 5,001 entries: older than the in-memory
+    // ranking window, so only real SQL narrowing can find it in every mode.
+    let (_d, repo) = repo_with_old_match(5001, "echo audit_rare_old_command");
+
+    for (mode, query) in [
+        (MatchMode::Terms, "audit_rare_old_command"),
+        (MatchMode::Literal, "audit_rare_old_command"),
+        (MatchMode::Prefix, "echo audit_rare"),
+        (MatchMode::Fuzzy, "audit_rare_old_command"),
+    ] {
+        let found = search_in_mode(&repo, mode, query);
+        assert!(
+            found.contains(&"echo audit_rare_old_command".to_string()),
+            "{mode:?} lost an old match ({} results)",
+            found.len()
+        );
+    }
+}
+
+/// A repository whose entries live in three directories and two sessions.
+fn repo_for_scopes(root: &std::path::Path) -> (tempfile::TempDir, crate::repository::Repository) {
+    let (dir, repo) = crate::test_utils::test_repo();
+    for sid in ["sess-1", "sess-2"] {
+        repo.insert_session(&crate::models::Session {
+            id: sid.into(),
+            hostname: "test".into(),
+            created_at: 1000,
+            tag_id: None,
+        })
+        .unwrap();
+    }
+    let here = root.join("src").to_string_lossy().into_owned();
+    let sibling = root.join("docs").to_string_lossy().into_owned();
+    let elsewhere = "/somewhere/else".to_string();
+    for (i, (cmd, cwd, sid)) in [
+        ("cargo build here", &here, "sess-1"),
+        ("cargo build sibling", &sibling, "sess-1"),
+        ("cargo build elsewhere", &elsewhere, "sess-1"),
+        ("cargo build other session", &here, "sess-2"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut entry = create_test_entry(cmd);
+        entry.cwd = cwd.clone();
+        entry.session_id = sid.to_string();
+        entry.started_at = 1000 + i64::try_from(i).unwrap();
+        entry.ended_at = 2000 + i64::try_from(i).unwrap();
+        repo.insert_entry(&entry).unwrap();
+    }
+    (dir, repo)
+}
+
+/// An app whose context points into `root`'s worktree, session `sess-1`.
+fn scoped_app(root: &std::path::Path, ceiling: &std::path::Path) -> SearchApp {
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+    app.recall.context = RecallContext::resolve_at(
+        Some(&root.join("src")),
+        Some("sess-1".to_string()),
+        Some(ceiling),
+    );
+    app.sync_scope_filters();
+    app
+}
+
+fn results(app: &SearchApp) -> Vec<String> {
+    app.entries.iter().map(|e| e.command.clone()).collect()
+}
+
+#[test]
+fn each_scope_returns_exactly_the_slice_of_history_it_names() {
+    let (fixture, root) = workspace_fixture();
+    let canonical = std::fs::canonicalize(&root).unwrap();
+    let (_d, repo) = repo_for_scopes(&canonical);
+    let mut app = scoped_app(&canonical, fixture.path());
+
+    app.set_scope(RecallScope::All);
+    app.reload_entries(&repo).unwrap();
+    assert_eq!(results(&app).len(), 4, "all history: {:?}", results(&app));
+
+    app.set_scope(RecallScope::Directory);
+    app.reload_entries(&repo).unwrap();
+    let dir_results = results(&app);
+    assert_eq!(dir_results.len(), 2, "this directory: {dir_results:?}");
+    assert!(dir_results.contains(&"cargo build here".to_string()));
+    assert!(dir_results.contains(&"cargo build other session".to_string()));
+
+    // The workspace is the whole project tree, so the sibling directory
+    // joins in but the unrelated path does not.
+    app.set_scope(RecallScope::Workspace);
+    app.reload_entries(&repo).unwrap();
+    let ws_results = results(&app);
+    assert_eq!(ws_results.len(), 3, "workspace: {ws_results:?}");
+    assert!(ws_results.contains(&"cargo build sibling".to_string()));
+    assert!(!ws_results.contains(&"cargo build elsewhere".to_string()));
+
+    app.set_scope(RecallScope::Session);
+    app.reload_entries(&repo).unwrap();
+    let session_results = results(&app);
+    assert_eq!(session_results.len(), 3, "session: {session_results:?}");
+    assert!(!session_results.contains(&"cargo build other session".to_string()));
+}
+
+#[test]
+fn resetting_the_scope_brings_the_whole_history_back_in_one_action() {
+    let (fixture, root) = workspace_fixture();
+    let canonical = std::fs::canonicalize(&root).unwrap();
+    let (_d, repo) = repo_for_scopes(&canonical);
+    let mut app = scoped_app(&canonical, fixture.path());
+
+    app.set_scope(RecallScope::Directory);
+    app.filters.failed_only = true;
+    app.reload_entries(&repo).unwrap();
+    assert!(app.entries.is_empty(), "narrowed away to nothing");
+
+    app.reset_to_all_history();
+    app.reload_entries(&repo).unwrap();
+    assert_eq!(results(&app).len(), 4);
+}
+
+#[test]
+fn a_scope_keeps_its_meaning_even_if_the_repository_moves_underneath() {
+    let (fixture, root) = workspace_fixture();
+    let canonical = std::fs::canonicalize(&root).unwrap();
+    let (_d, repo) = repo_for_scopes(&canonical);
+    let mut app = scoped_app(&canonical, fixture.path());
+    app.set_scope(RecallScope::Workspace);
+    app.reload_entries(&repo).unwrap();
+    let before = results(&app);
+
+    // The boundary was resolved once, at the start. Deleting it must not
+    // silently turn "workspace" into "all history" mid-search.
+    std::fs::remove_dir_all(canonical.join(".git")).unwrap();
+    app.reload_entries(&repo).unwrap();
+    assert_eq!(results(&app), before);
+}
+
+#[test]
+fn a_nested_repository_scopes_to_itself_not_its_parent() {
+    let (fixture, outer) = workspace_fixture();
+    let inner = outer.join("vendor/inner");
+    std::fs::create_dir_all(inner.join(".git")).unwrap();
+    std::fs::create_dir_all(inner.join("src")).unwrap();
+    let canonical_outer = std::fs::canonicalize(&outer).unwrap();
+    let canonical_inner = std::fs::canonicalize(&inner).unwrap();
+
+    let (_d, repo) = crate::test_utils::test_repo();
+    repo.insert_session(&crate::models::Session {
+        id: "session123".into(),
+        hostname: "test".into(),
+        created_at: 1000,
+        tag_id: None,
+    })
+    .unwrap();
+    for (i, (cmd, cwd)) in [
+        ("cargo build outer", canonical_outer.join("src")),
+        ("cargo build inner", canonical_inner.join("src")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut entry = create_test_entry(cmd);
+        entry.cwd = cwd.to_string_lossy().into_owned();
+        entry.started_at = 1000 + i64::try_from(i).unwrap();
+        repo.insert_entry(&entry).unwrap();
+    }
+
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+    app.recall.context = RecallContext::resolve_at(
+        Some(&canonical_inner.join("src")),
+        None,
+        Some(fixture.path()),
+    );
+    app.set_scope(RecallScope::Workspace);
+    app.reload_entries(&repo).unwrap();
+    assert_eq!(results(&app), vec!["cargo build inner".to_string()]);
+}
+
+#[test]
+fn a_linked_worktree_scopes_to_the_worktree_not_the_main_repository() {
+    let (fixture, main) = workspace_fixture();
+    let wt = fixture.path().join("wt-feature");
+    std::fs::create_dir_all(wt.join("src")).unwrap();
+    std::fs::write(
+        wt.join(".git"),
+        format!("gitdir: {}/.git/worktrees/wt-feature\n", main.display()),
+    )
+    .unwrap();
+    let canonical_main = std::fs::canonicalize(&main).unwrap();
+    let canonical_wt = std::fs::canonicalize(&wt).unwrap();
+
+    let (_d, repo) = crate::test_utils::test_repo();
+    repo.insert_session(&crate::models::Session {
+        id: "session123".into(),
+        hostname: "test".into(),
+        created_at: 1000,
+        tag_id: None,
+    })
+    .unwrap();
+    for (i, (cmd, cwd)) in [
+        ("cargo build main", canonical_main.join("src")),
+        ("cargo build worktree", canonical_wt.join("src")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut entry = create_test_entry(cmd);
+        entry.cwd = cwd.to_string_lossy().into_owned();
+        entry.started_at = 1000 + i64::try_from(i).unwrap();
+        repo.insert_entry(&entry).unwrap();
+    }
+
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+    app.recall.context =
+        RecallContext::resolve_at(Some(&canonical_wt.join("src")), None, Some(fixture.path()));
+    app.set_scope(RecallScope::Workspace);
+    app.reload_entries(&repo).unwrap();
+    assert_eq!(results(&app), vec!["cargo build worktree".to_string()]);
+}
+
+#[test]
+fn no_mode_or_scope_ever_reveals_hidden_agent_commands() {
+    let (_d, repo) = crate::test_utils::test_repo();
+    repo.insert_session(&crate::models::Session {
+        id: "session123".into(),
+        hostname: "test".into(),
+        created_at: 1000,
+        tag_id: None,
+    })
+    .unwrap();
+    let mut human = create_test_entry("cargo build human");
+    human.started_at = 1000;
+    repo.insert_entry(&human).unwrap();
+    let mut agent = create_test_entry("cargo build agent");
+    agent.executor_type = Some("agent".to_string());
+    agent.executor = Some("claude-code".to_string());
+    agent.started_at = 1001;
+    repo.insert_entry(&agent).unwrap();
+
+    for mode in [
+        MatchMode::Terms,
+        MatchMode::Literal,
+        MatchMode::Prefix,
+        MatchMode::Fuzzy,
+    ] {
+        let found = search_in_mode(&repo, mode, "cargo build");
+        assert!(
+            !found.contains(&"cargo build agent".to_string()),
+            "{mode:?} leaked an agent command: {found:?}"
+        );
+    }
+
+    // ...and they are one discoverable key away.
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+    app.query = "cargo build".into();
+    app.handle_input(ctrl_key('a'));
+    app.reload_entries(&repo).unwrap();
+    assert_eq!(results(&app).len(), 2, "^A must include them");
+}
+
+#[test]
+fn pasted_multiline_text_becomes_one_searchable_query_line() {
+    let (_d, repo) = repo_with(MODE_CORPUS);
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+
+    // A paste of a wrapped command: the newlines must not end up in the
+    // query, and the search must still run.
+    assert!(app.handle_paste("cargo test\n--offline\n"));
+    assert!(!app.query.contains('\n'), "query: {:?}", app.query);
+    app.reload_entries(&repo).unwrap();
+    assert_eq!(app.recall.match_mode, MatchMode::Terms);
+    assert_eq!(
+        results(&app),
+        vec!["cargo test --offline".to_string()],
+        "query was {:?}",
+        app.query
+    );
+}
+
+#[test]
+fn cancelling_returns_nothing_so_the_shell_keeps_its_buffer() {
+    let (_d, _repo) = repo_with(MODE_CORPUS);
+    let mut app = SearchApp::new(test_search_config(
+        vec![create_test_entry("rm -rf /important")],
+        1,
+    ));
+    // Cycling modes and scopes must never accept anything on the way.
+    for key in ['x', 'p', 'r', 'l', 'a'] {
+        let action = app.handle_input(ctrl_key(key));
+        assert!(
+            !matches!(action, SearchAction::Select(_) | SearchAction::Exit),
+            "^{key} must not accept or quit"
+        );
+    }
+    assert!(matches!(
+        app.handle_input(KeyEvent::from(KeyCode::Esc)),
+        SearchAction::Exit
+    ));
+}
+
+#[test]
+fn accepting_hands_back_the_exact_command_and_nothing_else() {
+    let mut app = SearchApp::new(test_search_config(
+        vec![create_test_entry("rm -rf /important")],
+        1,
+    ));
+    app.table_state.select(Some(0));
+    let SearchAction::Select(cmd) = app.handle_input(KeyEvent::from(KeyCode::Enter)) else {
+        panic!("Enter must select the highlighted command");
+    };
+    // Exactly the recorded text: no added newline, no shell wrapping. The
+    // caller prints it for the shell to place on the line; nothing here runs.
+    assert_eq!(cmd, "rm -rf /important");
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // PROD-03: recall UI hierarchy — footer hint layout, persistent status area,
 // detail-pane placement. These tests render the whole screen into a ratatui

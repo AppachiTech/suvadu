@@ -83,7 +83,6 @@ pub fn handle_search(p: &SearchParams) -> Result<(), Box<dyn std::error::Error>>
             tag: resolved_tag.as_deref(),
             exit_code: p.exit_code,
             executor: p.executor,
-            prefix_match: false,
             cwd: None,
             field: p.field,
             include_agents: show_agents,

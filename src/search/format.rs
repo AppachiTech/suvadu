@@ -303,10 +303,10 @@ pub(super) fn no_results_lines(state: &NoResults) -> Vec<String> {
         state.mode.label(),
         state.mode.describe()
     ));
-    lines.push(match state.scope_detail {
-        Some(detail) => format!("Scope   {} ({detail})", state.scope.status_value()),
-        None => format!("Scope   {}", state.scope.status_value()),
-    });
+    lines.push(state.scope_detail.map_or_else(
+        || format!("Scope   {}", state.scope.status_value()),
+        |detail| format!("Scope   {} ({detail})", state.scope.status_value()),
+    ));
 
     let mut filters: Vec<String> = Vec::new();
     if state.agents_hidden {

@@ -182,6 +182,7 @@ impl SearchApp {
     }
 
     /// Rank with the default (`terms`) rule: a pure subsequence is not a match.
+    #[cfg(test)]
     pub(super) fn fuzzy_score(
         entries: Vec<Entry>,
         query: &str,
@@ -293,8 +294,11 @@ impl SearchApp {
                 // whose characters happen to contain it as a subsequence.
                 // Results always contain what you typed; nucleo still ranks
                 // within the literal matches. `fuzzy` mode opts out of this
-                // guard — surfacing abbreviations is exactly what it is for.
-                if tier == 0 && !allow_subsequence {
+                // guard — surfacing abbreviations is exactly what it is for,
+                // but only for entries the documented subsequence rule
+                // actually accepts, so the mode matches its own help.
+                if tier == 0 && !(allow_subsequence && MatchMode::Fuzzy.matches(field_value, query))
+                {
                     continue;
                 }
 
