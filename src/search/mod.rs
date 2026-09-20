@@ -1,5 +1,7 @@
 mod data;
 mod format;
+pub mod matching;
+pub use matching::MatchMode;
 mod input;
 mod render;
 
