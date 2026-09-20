@@ -2587,7 +2587,7 @@ fn filters_still_exclude_an_old_command_that_matches_the_text() {
 /// `cargo test --release --bin suv typed_search_latency -- --ignored --nocapture`.
 /// PROD-10 replaces this with a proper benchmark suite.
 #[test]
-#[ignore]
+#[ignore = "builds a 100k-entry database; run explicitly with --ignored"]
 fn typed_search_latency_on_a_large_history() {
     let (_dir, repo) = repo_with_old_command("cargo test --workspace rare_old", 100_000);
 

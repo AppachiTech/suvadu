@@ -1,0 +1,65 @@
+{
+  "description": "Judged queries for the search benchmark (PROD-10). Each case names a command planted in the generated corpus and the query a user would realistically type to find it. Keep these stable: changing a case invalidates comparison with earlier runs.",
+  "cases": [
+    {
+      "name": "exact-old-command",
+      "query": "kubectl rollout restart deployment/api-gateway",
+      "expect": "kubectl rollout restart deployment/api-gateway",
+      "intent": "The oldest planted command, typed out in full. This is the case that used to vanish behind the candidate window."
+    },
+    {
+      "name": "partial-phrase",
+      "query": "rollout restart",
+      "expect": "kubectl rollout restart deployment/api-gateway",
+      "intent": "A contiguous fragment of a long command."
+    },
+    {
+      "name": "reordered-words",
+      "query": "api-gateway rollout",
+      "expect": "kubectl rollout restart deployment/api-gateway",
+      "intent": "Tokens typed in a different order from the command."
+    },
+    {
+      "name": "short-query",
+      "query": "psql",
+      "expect": "psql -h analytics.internal -U reporting -c 'vacuum analyze events'",
+      "intent": "A short token that matches many commands; the planted one must still be among the eligible matches."
+    },
+    {
+      "name": "directory-specific",
+      "query": "pnpm build",
+      "expect": "pnpm build --filter @acme/checkout",
+      "intent": "A task a user associates with one project directory."
+    },
+    {
+      "name": "failed-command",
+      "query": "terraform apply",
+      "expect": "terraform apply -var-file=prod.tfvars",
+      "intent": "A command that failed; recall must not drop it."
+    },
+    {
+      "name": "multiline-command",
+      "query": "for host in",
+      "expect": "for host in web01 web02 web03\ndo\n  ssh $host 'systemctl status suvadu'\ndone",
+      "intent": "A multiline command recorded as one entry."
+    },
+    {
+      "name": "unicode-command",
+      "query": "café",
+      "expect": "git commit -m 'café latte parser: handle Émile'",
+      "intent": "Non-ASCII text, which SQLite's LIKE cannot case-fold."
+    },
+    {
+      "name": "unicode-case-folded",
+      "query": "émile",
+      "expect": "git commit -m 'café latte parser: handle Émile'",
+      "intent": "Non-ASCII differing only by case from the stored command."
+    },
+    {
+      "name": "agent-command",
+      "query": "cargo nextest",
+      "expect": "cargo nextest run --workspace --no-fail-fast",
+      "intent": "Run by an agent, so hidden from default recall but findable when agents are shown."
+    }
+  ]
+}
