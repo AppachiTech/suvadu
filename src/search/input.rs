@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::{DialogState, SearchAction, SearchApp, VimMode};
+use super::{DialogState, RecallScope, SearchAction, SearchApp, VimMode};
 use crate::util;
 
 /// Maximum length for any text input field (query, filters, notes, etc.).
@@ -341,15 +341,24 @@ impl SearchApp {
                 ));
                 return Some(SearchAction::Reload);
             }
+            // The long-standing "here" toggle, now expressed as a scope: it
+            // flips between all history and this directory and leaves the
+            // wider scopes to ^P.
             KeyCode::Char('l') => {
-                if self.filters.cwd.is_some() {
-                    self.filters.cwd = None;
-                } else if let Ok(cwd) = std::env::current_dir() {
-                    self.filters.cwd = Some(cwd.to_string_lossy().to_string());
-                }
-                self.pagination.page = 1;
+                let next = if self.recall.scope == RecallScope::Directory {
+                    RecallScope::All
+                } else {
+                    RecallScope::Directory
+                };
+                self.set_scope(next);
                 return Some(SearchAction::Reload);
             }
+            // Cycle the matching mode (terms → literal → prefix → fuzzy).
+            KeyCode::Char('x') => return Some(self.cycle_match_mode()),
+            // Cycle the recall scope, skipping any that cannot apply here.
+            KeyCode::Char('p') => return Some(self.cycle_scope()),
+            // One action back to all of history.
+            KeyCode::Char('r') => return Some(self.reset_to_all_history()),
             KeyCode::Char('a') => {
                 self.filters.show_agents = !self.filters.show_agents;
                 self.status_message = Some((

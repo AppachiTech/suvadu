@@ -1211,6 +1211,202 @@ fn test_unknown_ctrl_key_ignored() {
     );
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// PROD-09: explicit matching modes and predictable scopes
+// ───────────────────────────────────────────────────────────────────────────
+
+use crate::search::scope::RecallContext;
+use crate::search::{MatchMode, RecallScope};
+
+/// A repo-shaped temporary tree, so workspace scope is genuinely available.
+fn workspace_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("proj");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    (dir, root)
+}
+
+/// An app whose context has a directory, a workspace and a session, so every
+/// scope is reachable.
+fn app_with_full_context() -> (tempfile::TempDir, std::path::PathBuf, SearchApp) {
+    let (dir, root) = workspace_fixture();
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    app.recall.context = RecallContext::resolve_at(
+        Some(&root.join("src")),
+        Some("sess-1".to_string()),
+        Some(dir.path()),
+    );
+    app.sync_scope_filters();
+    (dir, root, app)
+}
+
+#[test]
+fn the_default_matching_mode_is_terms() {
+    let app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    assert_eq!(app.recall.match_mode, MatchMode::Terms);
+    assert_eq!(app.recall.scope, RecallScope::All);
+}
+
+#[test]
+fn ctrl_x_cycles_the_matching_mode_and_reloads() {
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    for expected in [
+        MatchMode::Literal,
+        MatchMode::Prefix,
+        MatchMode::Fuzzy,
+        MatchMode::Terms,
+    ] {
+        let action = app.handle_input(ctrl_key('x'));
+        assert!(matches!(action, SearchAction::Reload));
+        assert_eq!(app.recall.match_mode, expected);
+        assert!(app.status_message.is_some(), "the new mode must be named");
+    }
+}
+
+#[test]
+fn ctrl_p_cycles_scope_and_narrows_the_directory_filter() {
+    let (_d, root, mut app) = app_with_full_context();
+    let canonical_root = std::fs::canonicalize(&root).unwrap();
+    let canonical_src = std::fs::canonicalize(root.join("src")).unwrap();
+
+    assert_eq!(app.recall.scope, RecallScope::All);
+    assert!(app.filters.cwd.is_none());
+
+    assert!(matches!(
+        app.handle_input(ctrl_key('p')),
+        SearchAction::Reload
+    ));
+    assert_eq!(app.recall.scope, RecallScope::Directory);
+    assert_eq!(
+        app.filters.cwd.as_deref(),
+        Some(canonical_src.to_string_lossy().as_ref())
+    );
+
+    app.handle_input(ctrl_key('p'));
+    assert_eq!(app.recall.scope, RecallScope::Workspace);
+    assert_eq!(
+        app.filters.cwd.as_deref(),
+        Some(canonical_root.to_string_lossy().as_ref()),
+        "workspace scope must use the repository root, not the subdirectory"
+    );
+
+    app.handle_input(ctrl_key('p'));
+    assert_eq!(app.recall.scope, RecallScope::Session);
+    assert!(
+        app.filters.cwd.is_none(),
+        "session scope is not a directory filter"
+    );
+
+    app.handle_input(ctrl_key('p'));
+    assert_eq!(app.recall.scope, RecallScope::All);
+}
+
+#[test]
+fn ctrl_p_skips_scopes_that_are_unavailable_here() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let plain = dir.path().join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    // A directory, but no repository and no session.
+    app.recall.context = RecallContext::resolve_at(Some(&plain), None, Some(dir.path()));
+
+    app.handle_input(ctrl_key('p'));
+    assert_eq!(app.recall.scope, RecallScope::Directory);
+    // Workspace and session cannot apply here, so the cycle returns to All
+    // rather than landing on a scope that shows nothing.
+    app.handle_input(ctrl_key('p'));
+    assert_eq!(app.recall.scope, RecallScope::All);
+}
+
+#[test]
+fn ctrl_r_resets_every_narrowing_to_all_history_in_one_action() {
+    let (_d, _root, mut app) = app_with_full_context();
+    app.handle_input(ctrl_key('p')); // directory
+    app.handle_input(ctrl_key('p')); // workspace
+    app.handle_input(ctrl_key('x')); // literal
+    app.handle_input(ctrl_key('e')); // failed only
+    app.handle_input(ctrl_key('o')); // bookmarked only
+    app.filters.after = Some(1);
+    app.filters.tag_id = Some(2);
+    app.filters.exit_code = Some(3);
+    app.filters.executor_type = Some("bot".to_string());
+
+    let action = app.handle_input(ctrl_key('r'));
+    assert!(matches!(action, SearchAction::Reload));
+    assert_eq!(app.recall.scope, RecallScope::All);
+    assert_eq!(app.recall.match_mode, MatchMode::Terms);
+    assert!(app.filters.cwd.is_none());
+    assert!(!app.filters.failed_only);
+    assert!(!app.filters.bookmarks_only);
+    assert_eq!(app.active_filter_count(), 0);
+}
+
+#[test]
+fn reset_never_pulls_excluded_agent_commands_into_view() {
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    assert!(!app.filters.show_agents, "agents are hidden by default");
+    app.handle_input(ctrl_key('r'));
+    assert!(
+        !app.filters.show_agents,
+        "resetting the scope must not silently include agent commands"
+    );
+
+    // ...and it equally must not switch them off for someone who opted in.
+    app.handle_input(ctrl_key('a'));
+    assert!(app.filters.show_agents);
+    app.handle_input(ctrl_key('r'));
+    assert!(app.filters.show_agents);
+}
+
+#[test]
+fn matching_mode_and_ranking_mode_are_independent() {
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    let ranking_before = app.view.context_boost;
+
+    // Changing the match mode leaves the ranking alone...
+    app.handle_input(ctrl_key('x'));
+    assert_eq!(app.recall.match_mode, MatchMode::Literal);
+    assert_eq!(app.view.context_boost, ranking_before);
+
+    // ...and changing the ranking leaves the match mode alone.
+    app.handle_input(ctrl_key('s'));
+    assert_ne!(app.view.context_boost, ranking_before);
+    assert_eq!(app.recall.match_mode, MatchMode::Literal);
+
+    // Unique is a display choice, not a matching one.
+    app.handle_input(ctrl_key('u'));
+    assert_eq!(app.recall.match_mode, MatchMode::Literal);
+}
+
+#[test]
+fn changing_the_scope_leaves_the_matching_mode_alone() {
+    let (_d, _root, mut app) = app_with_full_context();
+    app.handle_input(ctrl_key('x'));
+    app.handle_input(ctrl_key('x'));
+    assert_eq!(app.recall.match_mode, MatchMode::Prefix);
+    app.handle_input(ctrl_key('p'));
+    assert_eq!(app.recall.match_mode, MatchMode::Prefix);
+}
+
+#[test]
+fn ctrl_l_still_toggles_between_all_history_and_this_directory() {
+    let (_d, _root, mut app) = app_with_full_context();
+    assert!(matches!(
+        app.handle_input(ctrl_key('l')),
+        SearchAction::Reload
+    ));
+    assert_eq!(app.recall.scope, RecallScope::Directory);
+    assert!(app.filters.cwd.is_some());
+
+    assert!(matches!(
+        app.handle_input(ctrl_key('l')),
+        SearchAction::Reload
+    ));
+    assert_eq!(app.recall.scope, RecallScope::All);
+    assert!(app.filters.cwd.is_none());
+}
+
 // ── handle_delete_dialog_input tests ──
 
 #[test]

@@ -227,6 +227,15 @@ impl SearchApp {
             .ok()
             .map(|p| p.to_string_lossy().to_string());
 
+        // Resolve the scope context once, here, if the caller did not already
+        // do it. Everything downstream reads these values instead of touching
+        // the filesystem again, so a scope keeps meaning one thing for the
+        // whole of a recall session.
+        let mut recall = cfg.recall;
+        if recall.context.cwd.is_none() && recall.context.workspace.is_none() {
+            recall.context = RecallContext::resolve();
+        }
+
         let mut app = Self {
             query,
             entries: cfg.entries,
@@ -260,7 +269,7 @@ impl SearchApp {
 
             dialog: DialogState::None,
             view,
-            recall: cfg.recall,
+            recall,
             show_risk_in_search: cfg.show_risk_in_search,
             vim_enabled: cfg.vim_enabled,
             vim_mode: VimMode::Insert,
@@ -277,6 +286,11 @@ impl SearchApp {
 
             status_message: None,
         };
+        // Derive the directory filter from the scope, unless the caller
+        // supplied an explicit one (`--cwd`), which always wins.
+        if app.filters.cwd.is_none() {
+            app.sync_scope_filters();
+        }
         app.table_state.select(if app.entries.is_empty() {
             None
         } else {
@@ -572,7 +586,10 @@ pub fn run_search(
 
     // An empty *scope* is a normal state the TUI explains in place; only a
     // genuinely empty database is worth refusing to open for.
-    if entries.is_empty() && total_count == 0 && repo.count_filtered(&QueryFilter::default()).unwrap_or(0) == 0 {
+    if entries.is_empty()
+        && total_count == 0
+        && repo.count_filtered(&QueryFilter::default()).unwrap_or(0) == 0
+    {
         eprintln!("No history recorded yet.");
         return Ok(None);
     }
