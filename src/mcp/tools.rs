@@ -1131,7 +1131,12 @@ fn handle_what_changed(
     };
 
     let (limit, offset) = paging(args, 500);
-    let (entries, _) = page_entries(repo, limit, offset, &qf)?;
+    let (entries, next) = page_entries(repo, limit, offset, &qf)?;
+    let matched = usize::try_from(
+        repo.count_filtered(&qf)
+            .map_err(|e| format!("query failed: {e}"))?,
+    )
+    .unwrap_or(entries.len());
 
     // Two lists, never one. `succeeded` holds commands whose recorded exit
     // code was 0 — the only ones whose intended effect is even plausible.
@@ -1161,7 +1166,8 @@ fn handle_what_changed(
     let per_category = if detail { 50 } else { 3 };
     let mut response = conv::Response::new(
         format!(
-            "{} commands recorded in the {}{ctx}; {} looked file-modifying",
+            "{} of {matched} commands recorded in the {}{ctx} on this page; {} of them looked \
+             file-modifying",
             entries.len(),
             conv::window_hours(hours),
             succeeded.values().map(Vec::len).sum::<usize>() + attempted.len()
@@ -1222,7 +1228,11 @@ fn handle_what_changed(
     if !detail {
         response = response.note(conv::DETAIL_HINT);
     }
-    Ok(response.shown(entries.len()).render())
+    Ok(response
+        .shown(entries.len())
+        .matched(matched)
+        .next_offset(next)
+        .render())
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1960,7 +1970,7 @@ fn handle_learn_from_failures(
 
     let mut response = conv::Response::new(
         format!(
-            "{} commands in the {} failed on 40% or more of their recorded runs \
+            "{} command(s) in the {} failed on 40% or more of their recorded runs \
              (3 runs minimum)",
             matched,
             conv::window_days(days)
@@ -2029,9 +2039,8 @@ fn build_test_lint_rows(entries: &[crate::models::Entry], shown: usize) -> Vec<S
         .take(shown)
         .map(|(cmd, (total, success))| {
             format!(
-                "    {} — {} runs, {} ok",
+                "    {} — {total} run(s), {} ok",
                 conv::clip(cmd, conv::ROW_MAX_CHARS),
-                total,
                 conv::rate(success, total)
             )
         })
@@ -2355,10 +2364,22 @@ fn propose_skill_with_repo(repo: &Repository, args: &Value) -> Result<String, St
     let skill = repo
         .create_skill(&new)
         .map_err(|e| format!("failed to save proposal: {e}"))?;
-    Ok(format!(
-        "Proposal saved as pending review: '{}' ({}). A human must approve it from the review queue in `suv skills` (Ctrl+P) before it becomes active.",
-        skill.name, skill.scope
-    ))
+    let mut response = conv::Response::new(
+        format!(
+            "Proposal saved as pending review: '{}' | scope {}",
+            skill.name, skill.scope
+        ),
+        conv::Provenance::CallerReported,
+    );
+    response.line(
+        "  It is NOT active: other agents will not see it via list_skills or get_skill until a \
+         human approves it from the review queue in `suv skills` (Ctrl+P).",
+    );
+    Ok(response
+        .shown(1)
+        .matched(1)
+        .note("the text stored is exactly what you sent; suvadu neither generated nor verified it")
+        .render())
 }
 
 #[cfg(test)]
