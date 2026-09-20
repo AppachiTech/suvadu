@@ -112,7 +112,9 @@ Claude Code commands link to their native prompt turn after transcript reconcili
 
 For agents configured with MCP, ask: *"What commands failed in this project recently?"*
 
-To create a cross-agent session checkpoint, enable `mcp.allow_session_summaries` in `suv settings`, then ask: *"Summarize and save current session."* Suvadu resolves the current Codex or Claude session without guessing when multiple sessions match. Later requests extend a safe append-only checkpoint from its saved event and command offsets; if earlier captured evidence changed, the agent rebuilds the summary from the full session.
+To create a cross-agent session checkpoint, run `suv settings`, go to the **MCP** tab (`Tab` to cycle), and under **Writes** turn on **Allow Saved Session Summaries** with `Enter`. Save with `Ctrl+S`, then restart your MCP client — the MCP server reads its configuration once at startup, so a running client keeps the old settings. Then ask: *"Summarize and save current session."*
+
+The same tab lists every MCP tool and resource with its effective state. A write tool such as `save_session_summary` shows *why* it is off — because its opt-in is off, or because you turned that specific tool off — instead of two switches that can disagree. Turning the opt-in back off stops new writes; summaries already saved are kept. Suvadu resolves the current Codex or Claude session without guessing when multiple sessions match. Later requests extend a safe append-only checkpoint from its saved event and command offsets; if earlier captured evidence changed, the agent rebuilds the summary from the full session.
 
 See the [full integration guide](https://suvadu.sh/blog/track-ai-agent-commands-with-suvadu/) and [MCP server docs](https://suvadu.sh/cli/mcp-server/).
 

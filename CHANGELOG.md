@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **Complete and consistent MCP settings** — the MCP tab in `suv settings` listed only 15 of the 21 default tools and seven of the eight resources, and exposed neither write opt-in, so enabling saved session summaries or skill proposals meant hand-editing `config.toml`. Tool and resource metadata now lives in one shared catalog (`src/mcp/catalog.rs`) that drives both the server's advertisement and the settings controls, with tests asserting the two sets are identical by name rather than by an expected count. `Allow Saved Session Summaries` and `Allow Skill Proposals` are now rows on that tab (still off by default), each tool row shows its *effective* state and the reason it is off instead of two switches that can disagree, and the tab states that the MCP server reads its configuration at startup so the client must be restarted for a change to take effect. Saving from the settings UI also preserves keys the running build does not know about, so a hand-edited or newer-version `config.toml` is no longer silently trimmed.
+
 ## [0.4.1] - 2026-09-13
 
 ### Added
