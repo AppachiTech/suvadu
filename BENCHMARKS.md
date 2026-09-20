@@ -8,6 +8,14 @@ way the table below does.
 Harness: [`tests/search_benchmark.rs`](tests/search_benchmark.rs).
 Judged queries: [`tests/fixtures/search-cases.json`](tests/fixtures/search-cases.json).
 
+The README quotes the 100,000-entry line of the baseline below — the
+151 µs p95 recording overhead and the 10–44 ms p95 query range — and
+nothing else. **This file is the only place a Suvadu performance number may
+originate.** If you re-run the baseline, update the README in the same
+commit; if you quote a figure anywhere else, quote it from here with its
+hardware and corpus attached. There is no measurement at 1,000,000 entries,
+so there is no claim about one.
+
 ## What is measured
 
 **Correctness and speed are reported separately, and only correctness is
