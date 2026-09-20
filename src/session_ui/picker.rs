@@ -150,6 +150,9 @@ impl PickerApp {
                     || s.hostname.to_lowercase().contains(&search)
                     || s.cwd
                         .as_deref()
+                        .is_some_and(|value| value.to_lowercase().contains(&search))
+                    || s.preview
+                        .as_deref()
                         .is_some_and(|value| value.to_lowercase().contains(&search));
 
                 // Tag filter (from popup)
@@ -277,53 +280,182 @@ impl PickerApp {
     }
 }
 
-// ── Rendering ───────────────────────────────────────────────
+// ── Columns ─────────────────────────────────────────────────
 
-impl PickerApp {
+/// One column of the session table. Kept as data rather than inline cells so
+/// the header, the widths and the values can never disagree, and so the
+/// narrow-terminal column set is a testable choice instead of a guess about
+/// what `Table` will squeeze out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionColumn {
+    Id,
+    Project,
+    Preview,
+    Tag,
+    Kind,
+    LastActive,
+    Agent,
+    Model,
+    Tokens,
+    Commands,
+    Capture,
+    Duration,
+}
+
+impl SessionColumn {
+    const fn header(self) -> &'static str {
+        match self {
+            Self::Id => "Session",
+            Self::Project => "Project",
+            Self::Preview => "Preview",
+            Self::Tag => "Tag",
+            Self::Kind => "Type",
+            Self::LastActive => "Last Active",
+            Self::Agent => "Agent / Host",
+            Self::Model => "Model",
+            Self::Tokens => "Tokens",
+            Self::Commands => "Cmds",
+            Self::Capture => "Capture",
+            Self::Duration => "Duration",
+        }
+    }
+
+    const fn constraint(self) -> Constraint {
+        match self {
+            Self::Id => Constraint::Percentage(18),
+            Self::Project | Self::Agent => Constraint::Length(14),
+            Self::Preview => Constraint::Percentage(26),
+            Self::Tag | Self::Model => Constraint::Length(10),
+            Self::Kind | Self::Commands => Constraint::Length(5),
+            Self::LastActive => Constraint::Length(12),
+            Self::Tokens => Constraint::Length(7),
+            Self::Capture => Constraint::Length(9),
+            Self::Duration => Constraint::Min(7),
+        }
+    }
+
+    fn style(self, t: &crate::theme::Theme) -> Style {
+        match self {
+            Self::Id => Style::default().fg(t.info).add_modifier(Modifier::BOLD),
+            Self::Project | Self::Tag => Style::default().fg(t.primary),
+            Self::Preview => Style::default().fg(t.text),
+            Self::Kind | Self::Agent | Self::Commands => Style::default().fg(t.text_secondary),
+            Self::LastActive | Self::Duration => Style::default().fg(t.text_muted),
+            Self::Model => Style::default().fg(t.badge_executor),
+            Self::Tokens => Style::default().fg(t.info),
+            Self::Capture => Style::default().fg(t.warning),
+        }
+    }
+
     #[allow(clippy::cast_precision_loss)]
-    fn build_session_row<'a>(s: &SessionSummary, t: &crate::theme::Theme) -> Row<'a> {
-        let fmt_ts = |ms: i64| -> String {
-            Local
-                .timestamp_millis_opt(crate::util::normalize_display_ms(ms))
+    fn value(self, s: &SessionSummary) -> String {
+        match self {
+            // Display may drop a redundant agent prefix, but the picker
+            // always hands back `s.id` itself — the deterministic ID stays
+            // the session's identity.
+            Self::Id => {
+                s.id.strip_prefix("claude-")
+                    .or_else(|| s.id.strip_prefix("opencode-"))
+                    .or_else(|| s.id.strip_prefix("cursor-"))
+                    .unwrap_or(&s.id)
+                    .to_owned()
+            }
+            Self::Project => s.cwd.as_deref().map_or_else(|| "—".into(), project_name),
+            Self::Preview => s.preview.clone().unwrap_or_else(|| "—".into()),
+            Self::Tag => s.tag_name.clone().unwrap_or_else(|| "—".into()),
+            Self::Kind => s.kind.to_string(),
+            Self::LastActive => Local
+                .timestamp_millis_opt(crate::util::normalize_display_ms(s.last_activity_at))
                 .single()
                 .map_or_else(
                     || "??-?? ??:??".into(),
                     |dt| dt.format("%m-%d %H:%M").to_string(),
-                )
-        };
+                ),
+            Self::Agent => s.agent.as_deref().unwrap_or(&s.hostname).to_owned(),
+            Self::Model => compact_model(s),
+            Self::Tokens => format_tokens(s),
+            Self::Commands => s.cmd_count.to_string(),
+            // Deliberately not derived from success_count: every command can
+            // have succeeded while records are still missing.
+            Self::Capture => s.capture.as_ref().map_or_else(
+                || "—".into(),
+                |capture| {
+                    if capture.complete {
+                        "full".into()
+                    } else {
+                        format!("gaps: {}", capture.known_missing.len())
+                    }
+                },
+            ),
+            Self::Duration => {
+                if s.last_activity_at > s.first_activity_at {
+                    format_duration_ms(s.last_activity_at - s.first_activity_at)
+                } else {
+                    "—".into()
+                }
+            }
+        }
+    }
+}
 
-        let last_cmd = fmt_ts(s.last_activity_at);
+/// Last path component, so a row reads `suvadu` rather than a long home path.
+fn project_name(cwd: &str) -> String {
+    let trimmed = cwd.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return "/".into();
+    }
+    trimmed
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(trimmed)
+        .to_owned()
+}
 
-        let tag_str = s
-            .tag_name
-            .as_deref()
-            .map_or_else(|| "—".to_string(), std::string::ToString::to_string);
+/// Which columns a terminal this wide shows. Project, preview, time and
+/// agent are what actually tell two rows apart, so they survive every width;
+/// token counts and durations are the first to go.
+const fn session_columns(width: u16) -> &'static [SessionColumn] {
+    use SessionColumn::{
+        Agent, Capture, Commands, Duration, Id, Kind, LastActive, Model, Preview, Project, Tag,
+        Tokens,
+    };
+    const NARROW: &[SessionColumn] = &[Id, Project, Preview, LastActive, Agent];
+    const MEDIUM: &[SessionColumn] = &[
+        Id, Project, Preview, Kind, LastActive, Agent, Capture, Commands,
+    ];
+    const WIDE: &[SessionColumn] = &[
+        Id, Project, Preview, Tag, Kind, LastActive, Agent, Model, Tokens, Commands, Capture,
+        Duration,
+    ];
+    if width < 100 {
+        NARROW
+    } else if width < 140 {
+        MEDIUM
+    } else {
+        WIDE
+    }
+}
 
-        let duration = if s.last_activity_at > s.first_activity_at {
-            format_duration_ms(s.last_activity_at - s.first_activity_at)
-        } else {
-            "—".into()
-        };
+/// Header/value pairs for one row at this width — the single place row
+/// content is decided, shared by rendering and tests.
+fn session_row_values(s: &SessionSummary, width: u16) -> Vec<(&'static str, String)> {
+    session_columns(width)
+        .iter()
+        .map(|column| (column.header(), column.value(s)))
+        .collect()
+}
 
-        let id_display: String =
-            s.id.strip_prefix("claude-")
-                .or_else(|| s.id.strip_prefix("opencode-"))
-                .or_else(|| s.id.strip_prefix("cursor-"))
-                .unwrap_or(&s.id)
-                .to_string();
+// ── Rendering ───────────────────────────────────────────────
 
-        Row::new(vec![
-            Cell::from(id_display).style(Style::default().fg(t.info).add_modifier(Modifier::BOLD)),
-            Cell::from(tag_str).style(Style::default().fg(t.primary)),
-            Cell::from(s.kind.to_string()).style(Style::default().fg(t.text_secondary)),
-            Cell::from(last_cmd).style(Style::default().fg(t.text_muted)),
-            Cell::from(s.agent.as_deref().unwrap_or(&s.hostname).to_owned())
-                .style(Style::default().fg(t.text_secondary)),
-            Cell::from(compact_model(s)).style(Style::default().fg(t.badge_executor)),
-            Cell::from(format_tokens(s)).style(Style::default().fg(t.info)),
-            Cell::from(format!("{}", s.cmd_count)).style(Style::default().fg(t.text_secondary)),
-            Cell::from(duration).style(Style::default().fg(t.text_muted)),
-        ])
+impl PickerApp {
+    fn build_session_row<'a>(s: &SessionSummary, t: &crate::theme::Theme, width: u16) -> Row<'a> {
+        Row::new(
+            session_columns(width)
+                .iter()
+                .zip(session_row_values(s, width))
+                .map(|(column, (_, value))| Cell::from(value).style(column.style(t))),
+        )
     }
 
     fn render_picker(&mut self, f: &mut ratatui::Frame) {
@@ -421,43 +553,24 @@ impl PickerApp {
             format!(" Sessions ({range} of {showing} matches, {total} total)  •  {page} ")
         };
 
-        let table_header = Row::new(vec![
-            Cell::from("Session"),
-            Cell::from("Tag"),
-            Cell::from("Type"),
-            Cell::from("Last Active"),
-            Cell::from("Agent / Host"),
-            Cell::from("Model"),
-            Cell::from("Tokens"),
-            Cell::from("Cmds"),
-            Cell::from("Duration"),
-        ])
-        .style(
-            Style::default()
-                .fg(t.text_secondary)
-                .add_modifier(Modifier::BOLD),
-        )
-        .bottom_margin(1);
+        let columns = session_columns(area.width);
+        let table_header = Row::new(columns.iter().map(|column| Cell::from(column.header())))
+            .style(
+                Style::default()
+                    .fg(t.text_secondary)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .bottom_margin(1);
 
         let rows: Vec<Row> = self
             .visible
             .get(start..end)
             .unwrap_or_default()
             .iter()
-            .map(|&idx| Self::build_session_row(&self.sessions[idx], t))
+            .map(|&idx| Self::build_session_row(&self.sessions[idx], t, area.width))
             .collect();
 
-        let widths = [
-            Constraint::Percentage(25),
-            Constraint::Length(10),
-            Constraint::Length(6),
-            Constraint::Length(12),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Length(8),
-            Constraint::Length(6),
-            Constraint::Min(7),
-        ];
+        let widths = columns.iter().map(|column| column.constraint());
 
         let table = Table::new(rows, widths)
             .header(table_header)
@@ -813,6 +926,9 @@ mod tests {
             success_count: cmd_count,
             first_activity_at: 1_700_000_000_000,
             last_activity_at: 1_700_000_060_000,
+            preview: None,
+            capture: None,
+            revision: None,
         }
     }
 
@@ -821,6 +937,83 @@ mod tests {
             tag_name: Some(tag.to_string()),
             ..make_summary(id, 5)
         }
+    }
+
+    /// A row has to answer "which project, which agent, when, and what was
+    /// it about" before an ID is useful, so those four never fall out of the
+    /// column set — not even on a narrow terminal.
+    #[test]
+    fn every_terminal_width_keeps_project_agent_time_and_preview_columns() {
+        for width in [60_u16, 80, 100, 130, 200] {
+            let headers = session_columns(width)
+                .iter()
+                .map(|column| column.header())
+                .collect::<Vec<_>>();
+            for required in ["Project", "Preview", "Last Active", "Agent"] {
+                assert!(
+                    headers.iter().any(|header| header.contains(required)),
+                    "width {width} dropped {required}: {headers:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn session_row_shows_project_and_prompt_preview_not_just_an_id() {
+        let summary = SessionSummary {
+            cwd: Some("/Users/dev/work/suvadu".into()),
+            agent: Some("openai-codex".into()),
+            preview: Some("Fix the flaky parser test".into()),
+            ..make_summary("codex-abc", 3)
+        };
+        let values = session_row_values(&summary, 200);
+        assert_eq!(cell(&values, "Project"), "suvadu");
+        assert_eq!(cell(&values, "Preview"), "Fix the flaky parser test");
+        assert_eq!(cell(&values, "Agent / Host"), "openai-codex");
+    }
+
+    /// Capture completeness is its own column: a session where every command
+    /// succeeded can still be missing records, and the row must not imply
+    /// otherwise.
+    #[test]
+    fn capture_column_reports_gaps_separately_from_command_success() {
+        let clean = SessionSummary {
+            capture: Some(crate::models::CaptureStatus {
+                complete: true,
+                known_missing: Vec::new(),
+            }),
+            ..make_summary("codex-clean", 3)
+        };
+        let gapped = SessionSummary {
+            success_count: 3,
+            capture: Some(crate::models::CaptureStatus {
+                complete: false,
+                known_missing: vec!["Records from a paused window".into()],
+            }),
+            ..make_summary("codex-gapped", 3)
+        };
+        assert_eq!(cell(&session_row_values(&clean, 200), "Capture"), "full");
+        assert_eq!(
+            cell(&session_row_values(&gapped, 200), "Capture"),
+            "gaps: 1"
+        );
+    }
+
+    /// The row may shorten the ID for display, but the value the picker hands
+    /// back has to stay the exact deterministic session ID.
+    #[test]
+    fn selection_returns_the_full_deterministic_id() {
+        let app = PickerApp::new(vec![make_summary("claude-9f3c1d2e", 1)]);
+        assert_eq!(app.selected_session_id(), Some("claude-9f3c1d2e"));
+    }
+
+    fn cell(values: &[(&'static str, String)], header: &str) -> String {
+        values
+            .iter()
+            .find(|(name, _)| *name == header)
+            .unwrap_or_else(|| panic!("no {header} column in {values:?}"))
+            .1
+            .clone()
     }
 
     #[test]

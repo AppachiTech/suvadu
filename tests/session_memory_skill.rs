@@ -108,6 +108,45 @@ fn suv_init_claude_code_installs_the_session_memory_skill_when_summaries_enabled
     assert!(content.contains("save_session_summary"));
 }
 
+/// The materialized skill is what a connected agent actually reads, so the
+/// handoff shape and the write policy have to survive the whole
+/// seed -> sync -> SKILL.md path, not just the in-process body builder.
+#[test]
+fn the_materialized_skill_teaches_the_handoff_shape_and_the_write_policy() {
+    let s = Sandbox::new();
+    s.enable_session_summaries();
+
+    let result = s.run(&["init", "claude-code"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let content = std::fs::read_to_string(skill_md_path(&s)).expect("SKILL.md");
+
+    for section in [
+        "Goal",
+        "Attempted steps",
+        "Relevant failures",
+        "Decisions",
+        "Changed-file evidence",
+        "Verification state",
+        "Open questions",
+        "Next actions",
+        "Source references",
+    ] {
+        assert!(content.contains(section), "SKILL.md is missing {section}");
+    }
+    assert!(content.contains("prepare_session_handoff"));
+    // The policy an agent must not improvise around.
+    assert!(content.contains("the user explicitly asked to save"));
+    assert!(content.contains("never generates the text and never calls a model"));
+    assert!(content.contains("never pick the most recent one"));
+    // And where to send a user whose writes are switched off.
+    assert!(content.contains("Allow Saved"));
+    assert!(content.contains("Session Summaries"));
+}
+
 #[test]
 fn suv_init_claude_code_skips_the_skill_when_summaries_disabled() {
     let s = Sandbox::new();

@@ -31,7 +31,87 @@ mod session_data_contract_tests {
             success_count: 1,
             first_activity_at: 1_000,
             last_activity_at: 4_000,
+            preview: None,
+            capture: None,
+            revision: None,
         }
+    }
+
+    /// The handoff scaffold is built from captured records only: the first
+    /// prompt as the goal, every command with its exit code as evidence, and
+    /// the session's own capture gaps carried through verbatim.
+    #[test]
+    fn handoff_session_is_built_from_captured_records_and_their_ids() {
+        let events = vec![
+            AiEvent {
+                id: "prompt-1".into(),
+                turn_id: Some("turn-1".into()),
+                kind: "prompt".into(),
+                at: 1_000,
+                model: Some("model-a".into()),
+                cwd: "/work".into(),
+                data: json!({"text": "Fix the flaky parser test"}),
+            },
+            AiEvent {
+                id: "response-1".into(),
+                turn_id: Some("turn-1".into()),
+                kind: "response".into(),
+                at: 4_000,
+                model: Some("model-b".into()),
+                cwd: "/work".into(),
+                data: json!({"text": "The parser test passes now."}),
+            },
+        ];
+        let mut failed = Entry::new(
+            "codex-test".into(),
+            "cargo test parser".into(),
+            "/work".into(),
+            Some(101),
+            2_000,
+            2_100,
+        );
+        failed.id = Some(7);
+        let mut passed = Entry::new(
+            "codex-test".into(),
+            "cargo test parser".into(),
+            "/work".into(),
+            Some(0),
+            3_000,
+            3_100,
+        );
+        passed.id = Some(8);
+
+        let mut summary = summary();
+        summary.revision = Some("e2-c2-8".into());
+        summary.capture = Some(crate::models::CaptureStatus {
+            complete: false,
+            known_missing: vec!["Records from a paused window were skipped".into()],
+        });
+        let data = build_ai_session_data(summary, events, vec![failed, passed], vec![], true);
+
+        let handoff = session_data::handoff_session(&data);
+        assert_eq!(handoff.session_id, "codex-test");
+        assert_eq!(handoff.revision, "e2-c2-8");
+        assert_eq!(
+            handoff.goal,
+            Some(("prompt-1".into(), "Fix the flaky parser test".into()))
+        );
+        assert_eq!(
+            handoff.latest_answer,
+            Some(("response-1".into(), "The parser test passes now.".into()))
+        );
+        assert_eq!(handoff.commands.len(), 2);
+        assert_eq!(handoff.commands[0].id, "command-7");
+        assert_eq!(handoff.commands[0].exit_code, Some(101));
+        assert_eq!(handoff.commands[1].id, "command-8");
+        assert_eq!(
+            handoff.capture_known_missing,
+            ["Records from a paused window were skipped"]
+        );
+
+        let text = crate::ai_sessions::handoff::scaffold(&handoff);
+        assert!(text.contains("failed with exit 101 [command-7]"), "{text}");
+        assert!(text.contains("Known capture gap"), "{text}");
     }
 
     #[test]
@@ -66,7 +146,7 @@ mod session_data_contract_tests {
         );
         command.id = Some(42);
 
-        let data = build_ai_session_data(summary(), events, vec![command], vec![]);
+        let data = build_ai_session_data(summary(), events, vec![command], vec![], true);
 
         assert!(matches!(
             data.items[0],
@@ -95,7 +175,7 @@ mod session_data_contract_tests {
             cwd: "/work".into(),
             data: json!({"text":"Explain this"}),
         };
-        let data = build_ai_session_data(summary(), vec![event], vec![], vec![]);
+        let data = build_ai_session_data(summary(), vec![event], vec![], vec![], true);
         assert_eq!(data.items.len(), 1);
         assert!(matches!(
             data.items[0],
@@ -111,9 +191,9 @@ mod session_data_contract_tests {
             agent: "claude".into(),
             model: "sonnet".into(),
             created_at: 5_000,
-            current: true,
+            basis: crate::models::SummaryBasis::Current,
         };
-        let data = build_ai_session_data(summary(), vec![], vec![], vec![record.clone()]);
+        let data = build_ai_session_data(summary(), vec![], vec![], vec![record.clone()], true);
         assert_eq!(data.summaries, vec![record]);
     }
 
@@ -144,6 +224,7 @@ mod session_data_contract_tests {
             ],
             vec![],
             vec![],
+            true,
         );
 
         assert_eq!(data.usage.unwrap().total, Some(250));

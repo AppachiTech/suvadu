@@ -532,6 +532,9 @@ impl Repository {
                 success_count: row.get(5)?,
                 first_activity_at: row.get(6)?,
                 last_activity_at: row.get(7)?,
+                preview: None,
+                capture: None,
+                revision: None,
             })
         })?;
 

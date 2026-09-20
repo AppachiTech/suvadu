@@ -2,13 +2,42 @@
 use super::Repository;
 use crate::ai_sessions::{claude, codex, opencode, AiEvent, CapturePolicy, SummaryInput};
 use crate::db::{DbError, DbResult};
-use crate::models::{AiSummaryRecord, SessionKind, SessionSummary};
+use crate::models::{AiSummaryRecord, CaptureStatus, SessionKind, SessionSummary, SummaryBasis};
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+
+/// What suvadu never observes for any session, however clean the capture
+/// looks. Stated alongside every session so a reader cannot mistake "no
+/// recorded gap" for "everything the agent did is here".
+const CAPTURE_UNVERIFIABLE: [&str; 3] = [
+    "Shell commands appear only when suvadu's shell integration recorded them; commands run another way are not captured",
+    "Non-shell tool calls, file edits and their contents are not captured",
+    "Child sessions started from this one are not merged into it",
+];
+
+/// The stored fingerprint of the evidence one saved summary was written
+/// from, as [`Repository::summary_basis`] needs it.
+struct SummarySource<'a> {
+    revision: &'a str,
+    event_count: i64,
+    command_count: i64,
+    prefix_hash: &'a str,
+}
+
+/// Longest row preview kept, in characters.
+const PREVIEW_MAX_CHARS: usize = 120;
+
+/// Collapse captured text into one bounded line for a session row. Never an
+/// identity: two sessions can legitimately share a preview, which is exactly
+/// why the deterministic ID stays on the row beside it.
+fn row_preview(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    crate::util::truncate_str(&collapsed, PREVIEW_MAX_CHARS, "…")
+}
 
 fn hash_field(hash: &mut Sha256, value: &[u8]) {
     hash.update((value.len() as u64).to_le_bytes());
@@ -60,10 +89,29 @@ fn merge_ai_header(sessions: &mut HashMap<String, SessionSummary>, id: String, h
     let cwd = header["cwd"].as_str().map(str::to_owned);
     let agent = header["agent"].as_str().map(str::to_owned);
     let usage_complete = header["usage_complete"].as_bool().unwrap_or(false);
+    let preview = header["preview"].as_str().map(str::to_owned);
+    let revision = header["revision"].as_str().map(str::to_owned);
+    let capture = Some(CaptureStatus {
+        complete: header["capture"]["complete"].as_bool().unwrap_or(false),
+        known_missing: header["capture"]["known_missing"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+    });
     sessions
         .entry(id.clone())
         .and_modify(|summary| {
             summary.kind = SessionKind::Ai;
+            // The captured prompt beats a first-command preview from the
+            // shell side: it says what the session was *for*.
+            if preview.is_some() {
+                summary.preview.clone_from(&preview);
+            }
+            summary.capture.clone_from(&capture);
+            summary.revision.clone_from(&revision);
             summary.cwd.clone_from(&cwd);
             summary.agent.clone_from(&agent);
             summary.model.clone_from(&model);
@@ -92,6 +140,9 @@ fn merge_ai_header(sessions: &mut HashMap<String, SessionSummary>, id: String, h
             success_count: 0,
             first_activity_at,
             last_activity_at,
+            preview,
+            capture,
+            revision,
         });
 }
 
@@ -642,6 +693,7 @@ impl Repository {
         let mut event_count = 0_i64;
         let mut first_activity_at = None;
         let mut last_activity_at = None;
+        let mut preview = None;
         for data in event_statement.query_map([id], |r| r.get::<_, String>(0))? {
             let event = decode::<AiEvent>(&data?)?;
             event_count += 1;
@@ -649,6 +701,9 @@ impl Repository {
                 Some(first_activity_at.map_or(event.at, |current: i64| current.min(event.at)));
             last_activity_at =
                 Some(last_activity_at.map_or(event.at, |current: i64| current.max(event.at)));
+            if preview.is_none() && event.kind == "prompt" {
+                preview = event.data["text"].as_str().map(row_preview);
+            }
             if let Some(model) = event.model {
                 latest_model = Some(model.clone());
                 if !models.contains(&model) {
@@ -657,9 +712,58 @@ impl Repository {
             }
         }
         let model = latest_model;
+        let capture = self.ai_capture_status(id, row.7)?;
         Ok(
-            json!({"id":id,"native_id":row.0,"agent":row.1,"cwd":row.2,"parent_id":row.3,"created_at":row.4,"updated_at":row.5,"first_activity_at":first_activity_at.unwrap_or(row.4),"last_activity_at":last_activity_at.unwrap_or(row.5),"revision":format!("e{}-c{count}-{max_id}",row.6),"model":model,"models":models,"usage":usage,"coverage":"partial","usage_complete":row.7,"event_count":event_count,"command_count":count,"coverage_note":"Captured native transcript events and locally recorded shell commands only; child sessions, non-shell tools and unavailable records are not combined."}),
+            json!({"id":id,"native_id":row.0,"agent":row.1,"cwd":row.2,"parent_id":row.3,"created_at":row.4,"updated_at":row.5,"first_activity_at":first_activity_at.unwrap_or(row.4),"last_activity_at":last_activity_at.unwrap_or(row.5),"revision":format!("e{}-c{count}-{max_id}",row.6),"model":model,"models":models,"usage":usage,"coverage":"partial","usage_complete":row.7,"event_count":event_count,"command_count":count,"preview":preview,"capture":capture,"coverage_note":"Captured native transcript events and locally recorded shell commands only; child sessions, non-shell tools and unavailable records are not combined."}),
         )
+    }
+
+    /// What is known to be *missing* from this session's capture, kept apart
+    /// from whether the captured commands succeeded. `known_missing` names
+    /// gaps suvadu actually recorded (a paused window, a directory with
+    /// capture switched off, usage counters it could not follow);
+    /// `unverifiable` names what suvadu never observes at all, so a captured
+    /// final answer is never read as proof that every command was recorded.
+    fn ai_capture_status(&self, id: &str, usage_complete: bool) -> DbResult<Value> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT gaps FROM ai_sources WHERE session_id=?1")?;
+        let mut paused_window = false;
+        let mut disabled_dirs = Vec::new();
+        for gaps in statement.query_map([id], |row| row.get::<_, String>(0))? {
+            let gaps = decode::<CaptureGaps>(&gaps?)?;
+            paused_window |= gaps.all_before > 0;
+            for dir in gaps.dirs.keys() {
+                if !disabled_dirs.contains(dir) {
+                    disabled_dirs.push(dir.clone());
+                }
+            }
+        }
+        disabled_dirs.sort();
+        let mut known_missing = Vec::new();
+        if paused_window {
+            known_missing.push(
+                "Records from a window when recording was paused were skipped and never stored"
+                    .to_string(),
+            );
+        }
+        for dir in disabled_dirs {
+            known_missing.push(format!(
+                "Records from {dir} were skipped while capture was off there"
+            ));
+        }
+        if !usage_complete {
+            known_missing.push(
+                "Token usage totals for part of this session were never captured; unknown is not zero"
+                    .to_string(),
+            );
+        }
+        Ok(json!({
+            "complete": known_missing.is_empty(),
+            "known_missing": known_missing,
+            "unverifiable": CAPTURE_UNVERIFIABLE,
+            "note": "complete=true means no gap was recorded, not that every action the agent took was captured."
+        }))
     }
 
     /// Fingerprint the exact ordered event/command prefix covered by a summary.
@@ -730,7 +834,8 @@ impl Repository {
                     SUM(CASE WHEN e.exit_code=0 THEN 1 ELSE 0 END),MIN(e.started_at),
                     MAX(e.ended_at),MIN(e.cwd),
                     MAX(CASE WHEN e.executor_type IS NOT NULL AND e.executor_type NOT IN ('human','unknown') THEN 1 ELSE 0 END),
-                    MAX(CASE WHEN e.executor_type IS NOT NULL AND e.executor_type NOT IN ('human','unknown') THEN e.executor END)
+                    MAX(CASE WHEN e.executor_type IS NOT NULL AND e.executor_type NOT IN ('human','unknown') THEN e.executor END),
+                    (SELECT command FROM entries WHERE session_id=s.id ORDER BY started_at,id LIMIT 1)
              FROM sessions s
              JOIN entries e ON e.session_id=s.id
              LEFT JOIN tags t ON t.id=s.tag_id
@@ -762,6 +867,12 @@ impl Repository {
                 success_count: row.get(5)?,
                 first_activity_at: row.get(6)?,
                 last_activity_at: row.get(7)?,
+                preview: row
+                    .get::<_, Option<String>>(11)?
+                    .as_deref()
+                    .map(row_preview),
+                capture: None,
+                revision: None,
             })
         })?;
         let mut sessions = HashMap::new();
@@ -916,6 +1027,39 @@ impl Repository {
         let more_commands = commands.len() > limit;
         events.truncate(limit);
         commands.truncate(limit);
+        let summaries = self.summary_checkpoints_json(id, &session)?;
+        let event_total = session["event_count"].as_i64().unwrap_or_default();
+        let command_total = session["command_count"].as_i64().unwrap_or_default();
+        snapshot.commit()?;
+        let next_event_offset = more_events.then_some(event_offset.saturating_add(limit));
+        let next_command_offset = more_commands.then_some(command_offset.saturating_add(limit));
+        let next_offset = (event_offset == command_offset && (more_events || more_commands))
+            .then_some(event_offset.saturating_add(limit));
+        // A window is never allowed to read as the whole session: say how
+        // many records exist and whether this response holds all of them.
+        let events_complete = event_offset == 0 && !more_events;
+        let commands_complete = command_offset == 0 && !more_commands;
+        Ok(json!({
+            "session": session,
+            "events": events,
+            "commands": commands,
+            "summaries": summaries,
+            "next_offset": next_offset,
+            "next_event_offset": next_event_offset,
+            "next_command_offset": next_command_offset,
+            "events_total": event_total,
+            "commands_total": command_total,
+            "events_complete": events_complete,
+            "commands_complete": commands_complete,
+            "session_complete": events_complete && commands_complete,
+            "completeness_note": "events_complete/commands_complete describe this response only. Follow next_event_offset and next_command_offset until both are null before treating anything as the whole session."
+        }))
+    }
+
+    /// The newest saved summary checkpoints for a session, as the MCP
+    /// session read reports them: the stored text plus how its basis stands
+    /// against the evidence now, and where a safe incremental read resumes.
+    fn summary_checkpoints_json(&self, id: &str, session: &Value) -> DbResult<Vec<Value>> {
         let mut statement = self.conn.prepare("SELECT id,source_revision,text,agent,model,source_ids,source_event_count,source_command_count,source_prefix_hash,base_summary_id,created_at FROM ai_summaries WHERE session_id=?1 ORDER BY created_at DESC,rowid DESC LIMIT 5")?;
         let rows = statement
             .query_map([id], |r| {
@@ -934,9 +1078,6 @@ impl Repository {
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        let current_event_count = session["event_count"].as_i64().unwrap_or_default();
-        let current_command_count = session["command_count"].as_i64().unwrap_or_default();
-        let current_revision = session["revision"].as_str().unwrap_or_default();
         let mut summaries = Vec::with_capacity(rows.len());
         for (
             summary_id,
@@ -952,17 +1093,19 @@ impl Repository {
             created_at,
         ) in rows
         {
-            let current = current_revision == revision;
-            let grew = current_event_count >= source_event_count
-                && current_command_count >= source_command_count
-                && (current_event_count > source_event_count
-                    || current_command_count > source_command_count);
-            let prefix_matches = !source_prefix_hash.is_empty()
-                && self
-                    .ai_session_prefix_hash(id, source_event_count, source_command_count)?
-                    .is_some_and(|hash| hash == source_prefix_hash);
-            let has_new_activity = !current && grew && prefix_matches;
-            let incremental_safe = current || has_new_activity;
+            let basis = self.summary_basis(
+                id,
+                session,
+                &SummarySource {
+                    revision: &revision,
+                    event_count: source_event_count,
+                    command_count: source_command_count,
+                    prefix_hash: &source_prefix_hash,
+                },
+            )?;
+            let current = basis == SummaryBasis::Current;
+            let has_new_activity = basis == SummaryBasis::NewActivity;
+            let incremental_safe = basis.is_usable();
             summaries.push(json!({
                 "id":summary_id,"source_revision":revision,"text":text,"agent":agent,
                 "model":model,"source_ids":serde_json::from_str::<Value>(&sources).unwrap_or(Value::Null),
@@ -970,18 +1113,12 @@ impl Repository {
                 "base_summary_id":base_summary_id,"created_at":created_at,"generated":true,
                 "current":current,"has_new_activity":has_new_activity,
                 "incremental_safe":incremental_safe,"stale":!incremental_safe,
+                "basis":basis.label(),"basis_note":basis.note(),
                 "resume_event_offset":incremental_safe.then_some(source_event_count),
                 "resume_command_offset":incremental_safe.then_some(source_command_count)
             }));
         }
-        snapshot.commit()?;
-        let next_event_offset = more_events.then_some(event_offset.saturating_add(limit));
-        let next_command_offset = more_commands.then_some(command_offset.saturating_add(limit));
-        let next_offset = (event_offset == command_offset && (more_events || more_commands))
-            .then_some(event_offset.saturating_add(limit));
-        Ok(
-            json!({"session":session,"events":events,"commands":commands,"summaries":summaries,"next_offset":next_offset,"next_event_offset":next_event_offset,"next_command_offset":next_command_offset}),
-        )
+        Ok(summaries)
     }
 
     pub fn save_ai_summary(
@@ -1070,33 +1207,83 @@ impl Repository {
     }
 
     /// Saved summaries for a session, newest first, for the TUI summary
-    /// panel. Unlike [`Self::get_ai_session`]'s `summaries` field, this
-    /// doesn't compute checkpoint-resume eligibility -- it's just what a
-    /// human viewer needs: the text, who/what wrote it, when, and whether
-    /// it's still current.
+    /// panel: the text, who/what wrote it, when, and how it stands against
+    /// the evidence now. Shares [`Self::summary_basis`] with
+    /// [`Self::get_ai_session`] so the viewer and an MCP client can never
+    /// disagree about whether a checkpoint still holds.
     pub fn ai_summaries_for_session(&self, session_id: &str) -> DbResult<Vec<AiSummaryRecord>> {
-        let current_revision = self.ai_session_header(session_id, &[])?["revision"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
+        let session = self.ai_session_header(session_id, &[])?;
         let mut statement = self.conn.prepare(
-            "SELECT id,text,agent,model,source_revision,created_at FROM ai_summaries \
+            "SELECT id,text,agent,model,source_revision,created_at,source_event_count,\
+             source_command_count,source_prefix_hash FROM ai_summaries \
              WHERE session_id=?1 ORDER BY created_at DESC,rowid DESC",
         )?;
-        let records = statement
+        let rows = statement
             .query_map([session_id], |r| {
-                let source_revision: String = r.get(4)?;
-                Ok(AiSummaryRecord {
-                    id: r.get(0)?,
-                    text: r.get(1)?,
-                    agent: r.get(2)?,
-                    model: r.get(3)?,
-                    current: source_revision == current_revision,
-                    created_at: r.get(5)?,
-                })
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, i64>(7)?,
+                    r.get::<_, String>(8)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let mut records = Vec::with_capacity(rows.len());
+        for (id, text, agent, model, revision, created_at, events, commands, prefix_hash) in rows {
+            let basis = self.summary_basis(
+                session_id,
+                &session,
+                &SummarySource {
+                    revision: &revision,
+                    event_count: events,
+                    command_count: commands,
+                    prefix_hash: &prefix_hash,
+                },
+            )?;
+            records.push(AiSummaryRecord {
+                id,
+                text,
+                agent,
+                model,
+                created_at,
+                basis,
+            });
+        }
         Ok(records)
+    }
+
+    /// How one saved summary stands against the session's records now. The
+    /// single place that decision is made: an appended tail leaves the
+    /// summary's own prefix hash intact and only extends it, while any
+    /// change to that prefix invalidates the basis outright.
+    fn summary_basis(
+        &self,
+        session_id: &str,
+        session: &Value,
+        source: &SummarySource<'_>,
+    ) -> DbResult<SummaryBasis> {
+        if session["revision"].as_str() == Some(source.revision) {
+            return Ok(SummaryBasis::Current);
+        }
+        let events = session["event_count"].as_i64().unwrap_or_default();
+        let commands = session["command_count"].as_i64().unwrap_or_default();
+        let grew = events >= source.event_count
+            && commands >= source.command_count
+            && (events > source.event_count || commands > source.command_count);
+        let prefix_matches = !source.prefix_hash.is_empty()
+            && self
+                .ai_session_prefix_hash(session_id, source.event_count, source.command_count)?
+                .is_some_and(|hash| hash == source.prefix_hash);
+        Ok(if grew && prefix_matches {
+            SummaryBasis::NewActivity
+        } else {
+            SummaryBasis::Invalidated
+        })
     }
 
     /// Explicit deletion includes shell evidence and checkpoints, preventing retained summaries.
@@ -1764,9 +1951,10 @@ mod tests {
         assert_eq!(records[0].text, "Second summary");
         assert_eq!(records[0].agent, "codex");
         assert_eq!(records[0].model, "fixture-writer-2");
-        assert!(records[0].current);
+        assert_eq!(records[0].basis, SummaryBasis::Current);
         assert_eq!(records[1].text, "First summary");
-        assert!(!records[1].current);
+        // The earlier summary's own evidence is untouched, only extended.
+        assert_eq!(records[1].basis, SummaryBasis::NewActivity);
     }
 
     #[test]
@@ -1896,5 +2084,271 @@ mod tests {
                 Ok(crate::ai_sessions::CapturePolicy::default())
             })
             .is_err());
+    }
+
+    /// Capture completeness is about what was *recorded*, not about whether
+    /// the recorded commands succeeded. A paused window silently drops
+    /// records, so the header has to name that gap rather than present the
+    /// remaining events as the whole session.
+    #[test]
+    fn session_header_separates_known_capture_gaps_from_command_outcomes() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("fixture.jsonl");
+        std::fs::write(&path, records()).unwrap();
+        repo.import_codex_session(&path, None, |_| {
+            Ok(CapturePolicy {
+                enabled: false,
+                paused: true,
+                ..CapturePolicy::default()
+            })
+        })
+        .unwrap();
+        append(&path, &prompt("after resume"));
+        import(&repo, &path);
+
+        let header = repo.get_ai_session("codex-fixture", 10, 0, &[]).unwrap()["session"].clone();
+        let capture = &header["capture"];
+        assert_eq!(capture["complete"], false, "{header}");
+        let missing = capture["known_missing"]
+            .as_array()
+            .expect("known_missing array")
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>();
+        assert!(
+            missing.iter().any(|note| note.contains("paused")),
+            "{missing:?}"
+        );
+        assert!(
+            missing.iter().any(|note| note.contains("token usage")),
+            "{missing:?}"
+        );
+        // Never inferred from exit codes: this session recorded no commands
+        // at all, and "no failures" must not read as "fully captured".
+        assert_eq!(header["command_count"], 0);
+        let unverifiable = capture["unverifiable"]
+            .as_array()
+            .expect("unverifiable array")
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>();
+        assert!(
+            unverifiable.iter().any(|note| note.contains("command")),
+            "{unverifiable:?}"
+        );
+    }
+
+    #[test]
+    fn fully_captured_session_reports_no_known_gaps_but_still_admits_unverifiable_scope() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("fixture.jsonl");
+        std::fs::write(&path, records()).unwrap();
+        import(&repo, &path);
+
+        let header = repo.get_ai_session("codex-fixture", 10, 0, &[]).unwrap()["session"].clone();
+        assert_eq!(header["capture"]["complete"], true, "{header}");
+        assert_eq!(header["capture"]["known_missing"], json!([]));
+        assert!(!header["capture"]["unverifiable"]
+            .as_array()
+            .expect("unverifiable array")
+            .is_empty());
+    }
+
+    #[test]
+    fn excluded_project_directory_is_named_as_a_known_capture_gap() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("fixture.jsonl");
+        std::fs::write(&path, records()).unwrap();
+        repo.import_codex_session(&path, None, |_| {
+            Ok(CapturePolicy {
+                enabled: false,
+                paused: false,
+                ..CapturePolicy::default()
+            })
+        })
+        .unwrap();
+        append(&path, &prompt("after enabling"));
+        import(&repo, &path);
+
+        let header = repo.get_ai_session("codex-fixture", 10, 0, &[]).unwrap()["session"].clone();
+        assert_eq!(header["capture"]["complete"], false, "{header}");
+        let missing = header["capture"]["known_missing"].to_string();
+        assert!(missing.contains("/work/project"), "{missing}");
+    }
+
+    /// A row in `suv sessions` has to be told apart at a glance: which
+    /// project, which agent, when, and what it was about. The prompt preview
+    /// and capture status therefore travel with the summary, not just with a
+    /// full session read.
+    #[test]
+    fn unified_session_rows_carry_project_prompt_preview_and_capture_status() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("fixture.jsonl");
+        std::fs::write(&path, records()).unwrap();
+        import(&repo, &path);
+        let mut shell = Session::new("host-a".into(), 1_000);
+        shell.id = "shell-1".into();
+        repo.insert_session(&shell).unwrap();
+        for (command, at) in [("cargo build", 2_000), ("cargo test", 3_000)] {
+            repo.insert_entry(&Entry::new(
+                shell.id.clone(),
+                command.into(),
+                "/work/other".into(),
+                Some(0),
+                at,
+                at + 10,
+            ))
+            .unwrap();
+        }
+
+        let sessions = repo.list_unified_sessions(None, None, 10).unwrap();
+        let ai = sessions
+            .iter()
+            .find(|session| session.id == "codex-fixture")
+            .expect("captured AI session");
+        assert_eq!(ai.cwd.as_deref(), Some("/work/project"));
+        assert_eq!(ai.preview.as_deref(), Some("Fix the synthetic test"));
+        let capture = ai
+            .capture
+            .as_ref()
+            .expect("AI session carries capture status");
+        assert!(capture.complete);
+        assert!(capture.known_missing.is_empty());
+
+        let shell = sessions
+            .iter()
+            .find(|session| session.id == "shell-1")
+            .expect("shell session");
+        assert_eq!(shell.preview.as_deref(), Some("cargo build"));
+        assert!(
+            shell.capture.is_none(),
+            "a plain shell session has no transcript capture to be incomplete"
+        );
+    }
+
+    #[test]
+    fn session_row_preview_is_single_lined_and_bounded() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("fixture.jsonl");
+        let long = format!("first line\nsecond line {}", "x".repeat(300));
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                json!({"timestamp":"2026-09-12T12:00:00Z","type":"session_meta","payload":{"id":"fixture","cwd":"/work/project"}}),
+                json!({"timestamp":"2026-09-12T12:00:01Z","type":"event_msg","payload":{"type":"user_message","message":long}}),
+            ),
+        )
+        .unwrap();
+        import(&repo, &path);
+        let preview = repo.get_ai_session("codex-fixture", 5, 0, &[]).unwrap()["session"]
+            ["preview"]
+            .as_str()
+            .expect("preview")
+            .to_owned();
+        assert!(!preview.contains('\n'), "{preview}");
+        assert!(
+            preview.chars().count() <= 120,
+            "{}",
+            preview.chars().count()
+        );
+        assert!(preview.starts_with("first line second line"), "{preview}");
+    }
+
+    /// A capture gap is a property of the recording, not of the commands, so
+    /// a summary with a clean success count still reports the gap.
+    #[test]
+    fn session_row_capture_status_survives_a_clean_command_run() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("fixture.jsonl");
+        std::fs::write(&path, records()).unwrap();
+        repo.import_codex_session(&path, None, |_| {
+            Ok(CapturePolicy {
+                enabled: false,
+                paused: true,
+                ..CapturePolicy::default()
+            })
+        })
+        .unwrap();
+        append(&path, &prompt("after resume"));
+        import(&repo, &path);
+        repo.insert_session(&Session {
+            id: "codex-fixture".into(),
+            hostname: "host".into(),
+            created_at: 1_000,
+            tag_id: None,
+        })
+        .unwrap();
+        repo.insert_entry(&Entry::new(
+            "codex-fixture".into(),
+            "cargo test".into(),
+            "/work/project".into(),
+            Some(0),
+            2_000,
+            2_010,
+        ))
+        .unwrap();
+
+        let summary = repo
+            .list_unified_sessions(None, None, 10)
+            .unwrap()
+            .into_iter()
+            .find(|session| session.id == "codex-fixture")
+            .expect("captured session");
+        assert_eq!(summary.success_count, summary.cmd_count);
+        let capture = summary.capture.expect("capture status");
+        assert!(!capture.complete);
+        assert!(!capture.known_missing.is_empty());
+    }
+
+    /// The viewer's summary list must draw the same distinction the MCP
+    /// checkpoint logic does: evidence that only *grew* still supports the
+    /// saved text, while evidence that *changed* destroys its basis. A
+    /// single current/stale flag collapses those into one scary word and
+    /// makes a perfectly usable checkpoint look wrong.
+    #[test]
+    fn saved_summaries_distinguish_new_activity_from_changed_evidence() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("fixture.jsonl");
+        std::fs::write(&path, records()).unwrap();
+        import(&repo, &path);
+        let page = repo.get_ai_session("codex-fixture", 20, 0, &[]).unwrap();
+        let input = SummaryInput {
+            session_id: "codex-fixture".into(),
+            source_revision: page["session"]["revision"].as_str().unwrap().into(),
+            text: "The user asked for a synthetic fix.".into(),
+            agent: "claude".into(),
+            model: "fixture-writer".into(),
+            source_ids: vec![page["events"][1]["id"].as_str().unwrap().into()],
+            base_summary_id: None,
+        };
+        repo.save_ai_summary(&input, &[]).unwrap();
+
+        let saved = repo.ai_summaries_for_session("codex-fixture").unwrap();
+        assert_eq!(saved[0].basis, crate::models::SummaryBasis::Current);
+        assert!(saved[0].basis.is_usable());
+
+        append(&path, &prompt("new request"));
+        import(&repo, &path);
+        let extended = repo.ai_summaries_for_session("codex-fixture").unwrap();
+        assert_eq!(
+            extended[0].basis,
+            crate::models::SummaryBasis::NewActivity,
+            "appended evidence extends the checkpoint, it does not invalidate it"
+        );
+        assert!(extended[0].basis.is_usable());
+
+        // events[1] is the captured prompt; rewriting it changes evidence
+        // the summary was written from, rather than merely adding to it.
+        mutate_event(&repo, page["events"][1]["id"].as_str().unwrap());
+        let broken = repo.ai_summaries_for_session("codex-fixture").unwrap();
+        assert_eq!(
+            broken[0].basis,
+            crate::models::SummaryBasis::Invalidated,
+            "changed earlier evidence must invalidate the prior basis"
+        );
+        assert!(!broken[0].basis.is_usable());
     }
 }

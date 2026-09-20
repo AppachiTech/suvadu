@@ -37,8 +37,17 @@ fn load_ai_session_data(
     let entries =
         repo.get_replay_entries(Some(&summary.id), &repository::ReplayFilter::default())?;
     let summaries = repo.ai_summaries_for_session(&summary.id)?;
+    // The viewer explains an empty summary list differently depending on
+    // whether an agent is even allowed to save one, so read the opt-in here
+    // rather than guessing in the UI.
+    let summary_writes_enabled =
+        crate::config::load_config_cached().is_ok_and(|config| config.mcp.allow_session_summaries);
     Ok(session_ui::build_ai_session_data(
-        summary, events, entries, summaries,
+        summary,
+        events,
+        entries,
+        summaries,
+        summary_writes_enabled,
     ))
 }
 
