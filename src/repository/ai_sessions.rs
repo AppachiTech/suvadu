@@ -10,6 +10,15 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+/// What suvadu never observes for any session, however clean the capture
+/// looks. Stated alongside every session so a reader cannot mistake "no
+/// recorded gap" for "everything the agent did is here".
+const CAPTURE_UNVERIFIABLE: [&str; 3] = [
+    "Shell commands appear only when suvadu's shell integration recorded them; commands run another way are not captured",
+    "Non-shell tool calls, file edits and their contents are not captured",
+    "Child sessions started from this one are not merged into it",
+];
+
 fn hash_field(hash: &mut Sha256, value: &[u8]) {
     hash.update((value.len() as u64).to_le_bytes());
     hash.update(value);
@@ -657,9 +666,58 @@ impl Repository {
             }
         }
         let model = latest_model;
+        let capture = self.ai_capture_status(id, row.7)?;
         Ok(
-            json!({"id":id,"native_id":row.0,"agent":row.1,"cwd":row.2,"parent_id":row.3,"created_at":row.4,"updated_at":row.5,"first_activity_at":first_activity_at.unwrap_or(row.4),"last_activity_at":last_activity_at.unwrap_or(row.5),"revision":format!("e{}-c{count}-{max_id}",row.6),"model":model,"models":models,"usage":usage,"coverage":"partial","usage_complete":row.7,"event_count":event_count,"command_count":count,"coverage_note":"Captured native transcript events and locally recorded shell commands only; child sessions, non-shell tools and unavailable records are not combined."}),
+            json!({"id":id,"native_id":row.0,"agent":row.1,"cwd":row.2,"parent_id":row.3,"created_at":row.4,"updated_at":row.5,"first_activity_at":first_activity_at.unwrap_or(row.4),"last_activity_at":last_activity_at.unwrap_or(row.5),"revision":format!("e{}-c{count}-{max_id}",row.6),"model":model,"models":models,"usage":usage,"coverage":"partial","usage_complete":row.7,"event_count":event_count,"command_count":count,"capture":capture,"coverage_note":"Captured native transcript events and locally recorded shell commands only; child sessions, non-shell tools and unavailable records are not combined."}),
         )
+    }
+
+    /// What is known to be *missing* from this session's capture, kept apart
+    /// from whether the captured commands succeeded. `known_missing` names
+    /// gaps suvadu actually recorded (a paused window, a directory with
+    /// capture switched off, usage counters it could not follow);
+    /// `unverifiable` names what suvadu never observes at all, so a captured
+    /// final answer is never read as proof that every command was recorded.
+    fn ai_capture_status(&self, id: &str, usage_complete: bool) -> DbResult<Value> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT gaps FROM ai_sources WHERE session_id=?1")?;
+        let mut paused_window = false;
+        let mut disabled_dirs = Vec::new();
+        for gaps in statement.query_map([id], |row| row.get::<_, String>(0))? {
+            let gaps = decode::<CaptureGaps>(&gaps?)?;
+            paused_window |= gaps.all_before > 0;
+            for dir in gaps.dirs.keys() {
+                if !disabled_dirs.contains(dir) {
+                    disabled_dirs.push(dir.clone());
+                }
+            }
+        }
+        disabled_dirs.sort();
+        let mut known_missing = Vec::new();
+        if paused_window {
+            known_missing.push(
+                "Records from a window when recording was paused were skipped and never stored"
+                    .to_string(),
+            );
+        }
+        for dir in disabled_dirs {
+            known_missing.push(format!(
+                "Records from {dir} were skipped while capture was off there"
+            ));
+        }
+        if !usage_complete {
+            known_missing.push(
+                "Token usage totals for part of this session were never captured; unknown is not zero"
+                    .to_string(),
+            );
+        }
+        Ok(json!({
+            "complete": known_missing.is_empty(),
+            "known_missing": known_missing,
+            "unverifiable": CAPTURE_UNVERIFIABLE,
+            "note": "complete=true means no gap was recorded, not that every action the agent took was captured."
+        }))
     }
 
     /// Fingerprint the exact ordered event/command prefix covered by a summary.
@@ -1896,5 +1954,97 @@ mod tests {
                 Ok(crate::ai_sessions::CapturePolicy::default())
             })
             .is_err());
+    }
+
+    /// Capture completeness is about what was *recorded*, not about whether
+    /// the recorded commands succeeded. A paused window silently drops
+    /// records, so the header has to name that gap rather than present the
+    /// remaining events as the whole session.
+    #[test]
+    fn session_header_separates_known_capture_gaps_from_command_outcomes() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("fixture.jsonl");
+        std::fs::write(&path, records()).unwrap();
+        repo.import_codex_session(&path, None, |_| {
+            Ok(CapturePolicy {
+                enabled: false,
+                paused: true,
+                ..CapturePolicy::default()
+            })
+        })
+        .unwrap();
+        append(&path, &prompt("after resume"));
+        import(&repo, &path);
+
+        let header = repo.get_ai_session("codex-fixture", 10, 0, &[]).unwrap()["session"].clone();
+        let capture = &header["capture"];
+        assert_eq!(capture["complete"], false, "{header}");
+        let missing = capture["known_missing"]
+            .as_array()
+            .expect("known_missing array")
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>();
+        assert!(
+            missing.iter().any(|note| note.contains("paused")),
+            "{missing:?}"
+        );
+        assert!(
+            missing.iter().any(|note| note.contains("token usage")),
+            "{missing:?}"
+        );
+        // Never inferred from exit codes: this session recorded no commands
+        // at all, and "no failures" must not read as "fully captured".
+        assert_eq!(header["command_count"], 0);
+        let unverifiable = capture["unverifiable"]
+            .as_array()
+            .expect("unverifiable array")
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>();
+        assert!(
+            unverifiable.iter().any(|note| note.contains("command")),
+            "{unverifiable:?}"
+        );
+    }
+
+    #[test]
+    fn fully_captured_session_reports_no_known_gaps_but_still_admits_unverifiable_scope() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("fixture.jsonl");
+        std::fs::write(&path, records()).unwrap();
+        import(&repo, &path);
+
+        let header = repo.get_ai_session("codex-fixture", 10, 0, &[]).unwrap()["session"].clone();
+        assert_eq!(header["capture"]["complete"], true, "{header}");
+        assert_eq!(header["capture"]["known_missing"], json!([]));
+        assert!(!header["capture"]["unverifiable"]
+            .as_array()
+            .expect("unverifiable array")
+            .is_empty());
+    }
+
+    #[test]
+    fn excluded_project_directory_is_named_as_a_known_capture_gap() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("fixture.jsonl");
+        std::fs::write(&path, records()).unwrap();
+        repo.import_codex_session(&path, None, |_| {
+            Ok(CapturePolicy {
+                enabled: false,
+                paused: false,
+                ..CapturePolicy::default()
+            })
+        })
+        .unwrap();
+        append(&path, &prompt("after enabling"));
+        import(&repo, &path);
+
+        let header = repo.get_ai_session("codex-fixture", 10, 0, &[]).unwrap()["session"].clone();
+        assert_eq!(header["capture"]["complete"], false, "{header}");
+        let missing = header["capture"]["known_missing"].to_string();
+        assert!(missing.contains("/work/project"), "{missing}");
     }
 }
