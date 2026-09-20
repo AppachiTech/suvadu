@@ -86,6 +86,28 @@ suv skills sync             # Materialize skills into Claude Code/Cursor/Codex
 
 ---
 
+## Bring your existing history
+
+```bash
+suv import --from bash-history --dry-run ~/.bash_history   # preview counts, writes nothing
+suv import --from bash-history ~/.bash_history             # import
+suv import --from zsh-history ~/.zsh_history               # zsh equivalent
+```
+
+The input file is only read, never modified, and re-running the same import
+adds nothing while genuinely repeated executions in the file are all kept.
+
+What a Bash history file can and cannot give you:
+
+| Field | Imported |
+|-------|----------|
+| Command text | Yes — redaction and your exclusion patterns apply, exactly as for live recording |
+| Timestamp | Only if `HISTTIMEFORMAT` was set when the command ran (`#<epoch>` lines). Otherwise an explicitly synthetic 1970-01-01 placeholder — never an invented time |
+| Multi-line commands | Reconstructed in timestamped files (the `#<epoch>` line is the record boundary). A plain file has no boundaries, so each line is imported as its own command |
+| Directory, exit code, duration, executor | Not in the file — stored as unknown, never guessed, and never recorded as a successful exit |
+
+---
+
 ## AI Agent Setup
 
 ```bash
