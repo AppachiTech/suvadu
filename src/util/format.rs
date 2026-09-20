@@ -14,6 +14,23 @@ pub fn format_count(n: i64) -> String {
     }
 }
 
+/// Human-readable byte size (e.g. "1.2 MB"). Exact below 1 KB.
+#[allow(clippy::cast_precision_loss)]
+pub fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut size = n as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} B")
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
 /// Format a duration in milliseconds as a human-readable string.
 #[allow(clippy::cast_precision_loss)]
 pub fn format_duration_ms(ms: i64) -> String {

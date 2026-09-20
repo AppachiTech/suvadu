@@ -6,6 +6,7 @@ mod entries;
 mod notes;
 mod skills;
 mod stats;
+mod storage;
 mod tags;
 
 // Re-exported for use as a mockable trait boundary in tests and downstream consumers.

@@ -90,10 +90,22 @@ pub fn handle_doctor() {
     ];
     checks.extend(check_agents(repo.as_ref()));
 
-    print_report(&checks, color);
+    print_report(&checks, &storage_lines(repo.as_ref()), color);
 }
 
-fn print_report(checks: &[CheckResult], color: bool) {
+/// Storage usage by category, or nothing at all when there is no database to
+/// measure. Read-only: it never creates the database or the backup directory.
+fn storage_lines(repo: Option<&Repository>) -> Vec<String> {
+    let Some(repo) = repo else {
+        return Vec::new();
+    };
+    let backups = db::backup_dir_path().ok();
+    repo.storage_usage(backups.as_deref())
+        .map(|usage| usage.report_lines())
+        .unwrap_or_default()
+}
+
+fn print_report(checks: &[CheckResult], storage: &[String], color: bool) {
     let (bold, reset) = if color {
         ("\x1b[1m", "\x1b[0m")
     } else {
@@ -149,6 +161,14 @@ fn print_report(checks: &[CheckResult], color: bool) {
         println!("{bold}Repairs{reset}");
         for repair in repairs {
             println!("  {repair}");
+        }
+        println!();
+    }
+
+    if !storage.is_empty() {
+        println!("{bold}Storage{reset} {dim}(what is stored, and what makes it go away){reset}");
+        for line in storage {
+            println!("  {line}");
         }
         println!();
     }

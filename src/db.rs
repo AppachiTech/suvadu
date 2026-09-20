@@ -39,12 +39,20 @@ pub fn get_db_path() -> DbResult<PathBuf> {
     Ok(data_dir.join("history.db"))
 }
 
+/// Where backups live (`<data_dir>/backups`), without creating anything.
+///
+/// Read-only callers (diagnostics, storage reports) use this so that merely
+/// looking at the backup directory never brings it into existence.
+pub fn backup_dir_path() -> DbResult<PathBuf> {
+    let dirs = crate::util::project_dirs()
+        .ok_or_else(|| DbError::Path("Could not determine data directory".to_string()))?;
+    Ok(dirs.data_dir().join("backups"))
+}
+
 /// Directory where database backups are written (`<data_dir>/backups`),
 /// created with owner-only permissions if missing.
 pub fn get_backup_dir() -> DbResult<PathBuf> {
-    let dirs = crate::util::project_dirs()
-        .ok_or_else(|| DbError::Path("Could not determine data directory".to_string()))?;
-    let dir = dirs.data_dir().join("backups");
+    let dir = backup_dir_path()?;
     if !dir.exists() {
         std::fs::create_dir_all(&dir)?;
     }

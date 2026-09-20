@@ -365,22 +365,7 @@ pub fn timestamped_backup_path(
     Ok(dir.join(format!("{prefix}-{stamp}.db")))
 }
 
-/// Human-readable byte size (e.g. "1.2 MB").
-#[allow(clippy::cast_precision_loss)]
-fn human_bytes(n: u64) -> String {
-    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
-    let mut size = n as f64;
-    let mut unit = 0;
-    while size >= 1024.0 && unit < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{n} B")
-    } else {
-        format!("{size:.1} {}", UNITS[unit])
-    }
-}
+use crate::util::human_bytes;
 
 /// `suv backup [--out PATH]` — write a consistent copy of the database.
 pub fn handle_backup(out: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
