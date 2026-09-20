@@ -1,13 +1,28 @@
+//! The MCP tool surface. Every handler here renders its answer through
+//! [`crate::mcp::conventions`] — one timestamp format, one token for a
+//! missing value, one pagination contract, one way to say a row was
+//! elided, and one line declaring whether the content is a record suvadu
+//! stored or something it worked out. See that module for the rules and
+//! [`crate::mcp::contract`] for the fixtures that hold them in place.
+
 use std::fmt::Write;
 
 use serde_json::{json, Value};
 
+use super::conventions as conv;
 use crate::models::SearchField;
 use crate::repository::{QueryFilter, Repository};
 use crate::util;
 
 /// Maximum number of replay entries to fetch when grouping prompts.
 const MAX_PROMPT_ENTRIES: usize = 5000;
+
+/// Bounded samples the aggregating tools rank over. Each response states
+/// the sample it used, per rule 5: a top-10 over 200 rows must never read
+/// as a top-10 over the whole history.
+const STATS_SAMPLE: usize = 200;
+const FRECENCY_SAMPLE: usize = 2000;
+const ANALYSIS_SAMPLE: usize = 5000;
 
 /// The JSON-RPC definition of one catalog tool.
 ///
@@ -88,7 +103,7 @@ pub fn call_tool(
         "get_prompts" => handle_get_prompts(repo, args, mcp),
         "session_history" => handle_session_history(repo, args, mcp),
         "get_stats" => handle_get_stats(repo, args, mcp),
-        "list_sessions" => handle_list_sessions(repo, args),
+        "list_sessions" => handle_list_sessions(repo, args, mcp),
         "what_changed" => handle_what_changed(repo, args, mcp),
         "what_failed" => handle_what_failed(repo, args, mcp),
         "suggest_next" => handle_suggest_next(repo, args, mcp),
@@ -97,9 +112,9 @@ pub fn call_tool(
         "replay_agent_session" => handle_replay_agent_session(repo, args, mcp),
         "learn_from_failures" => handle_learn_from_failures(repo, args, mcp),
         "project_context" => handle_project_context(repo, args, mcp),
-        "list_skills" => handle_list_skills(repo, args),
-        "get_skill" => handle_get_skill(repo, args),
-        "search_skills" => handle_search_skills(repo, args),
+        "list_skills" => handle_list_skills(repo, args, mcp),
+        "get_skill" => handle_get_skill(repo, args, mcp),
+        "search_skills" => handle_search_skills(repo, args, mcp),
         "propose_skill" => handle_propose_skill(args, mcp),
         _ => Err(format!("Unknown tool: {name}")),
     }
@@ -110,18 +125,17 @@ pub fn call_tool(
 fn search_commands_def() -> Value {
     json!({
         "name": "search_commands",
-        "description": "Search shell command history by text pattern. Returns matching commands with directory, exit code, duration, and timestamp.",
+        "description": "Search recorded shell commands by text. One row per command: stable ID, exit code, timestamp, directory. Use this when you want individual commands — 'did I ever run X', 'what broke here', 'how is this project built'. When the question is about a whole piece of work rather than one command ('what did the last agent do', 'what was I working on'), start with find_agent_session or list_agent_sessions instead and drill in from there. Suvadu recorded the command and its exit code, never its output.",
         "inputSchema": {
             "type": "object",
-            "properties": {
+            "properties": with_paging(json!({
                 "query": { "type": "string", "description": "Text to search for in commands" },
                 "directory": { "type": "string", "description": "Filter to commands run in this directory" },
                 "executor": { "type": "string", "description": "Filter by executor (e.g. claude-code, cursor, human)" },
                 "exit_code": { "type": "integer", "description": "Filter by exit code (0 = success)" },
                 "after": { "type": "string", "description": "Start date (e.g. today, yesterday, 7 days ago, 2026-01-01)" },
-                "before": { "type": "string", "description": "End date (e.g. today, yesterday, 7 days ago, 2026-01-01)" },
-                "limit": { "type": "integer", "description": "Max results to return (default: 20)", "default": 20 }
-            },
+                "before": { "type": "string", "description": "End date (e.g. today, yesterday, 7 days ago, 2026-01-01)" }
+            }), 20),
             "required": ["query"]
         }
     })
@@ -130,15 +144,14 @@ fn search_commands_def() -> Value {
 fn recent_commands_def() -> Value {
     json!({
         "name": "recent_commands",
-        "description": "Get the most recent commands, optionally filtered by directory. Use this to understand what happened recently in a project.",
+        "description": "The most recently recorded commands, newest first, optionally scoped to a directory or executor. Good for 'what just happened here'. For 'what is this session doing' call resolve_current_agent_session first — recent_commands has no notion of which session is yours and will happily return another project's work.",
         "inputSchema": {
             "type": "object",
-            "properties": {
+            "properties": with_paging(json!({
                 "directory": { "type": "string", "description": "Filter to commands run in this directory" },
                 "executor": { "type": "string", "description": "Filter by executor (e.g. claude-code, cursor)" },
-                "after": { "type": "string", "description": "Start date (e.g. today, yesterday, 7 days ago, 2026-01-01)" },
-                "limit": { "type": "integer", "description": "Max results (default: 20)", "default": 20 }
-            }
+                "after": { "type": "string", "description": "Start date (e.g. today, yesterday, 7 days ago, 2026-01-01)" }
+            }), 20)
         }
     })
 }
@@ -146,14 +159,13 @@ fn recent_commands_def() -> Value {
 fn command_status_def() -> Value {
     json!({
         "name": "command_status",
-        "description": "Check if a specific command has been run before and what happened. Returns previous runs with exit codes and timestamps. Useful to check if a command typically succeeds or fails.",
+        "description": "Whether a specific command has been run before and how those runs ended. Returns previous runs with exit codes and timestamps, so you can see whether it usually succeeds. The exit code is all suvadu has: it never captured what the command printed.",
         "inputSchema": {
             "type": "object",
-            "properties": {
+            "properties": with_paging(json!({
                 "command": { "type": "string", "description": "Command text to search for (prefix match)" },
-                "directory": { "type": "string", "description": "Filter to this directory" },
-                "limit": { "type": "integer", "description": "Max previous runs (default: 5)", "default": 5 }
-            },
+                "directory": { "type": "string", "description": "Filter to this directory" }
+            }), 5),
             "required": ["command"]
         }
     })
@@ -162,15 +174,14 @@ fn command_status_def() -> Value {
 fn get_prompts_def() -> Value {
     json!({
         "name": "get_prompts",
-        "description": "Browse AI agent prompts and the commands they triggered. Shows what prompt led to which commands, with exit codes. Useful to understand what a previous agent session did.",
+        "description": "Agent prompts recorded alongside the commands they were running under, grouped prompt by prompt. Use it to see which instruction led to which commands. This reads the prompt text stored on each command record, not an agent's transcript — for the transcript of a captured session use get_agent_session.",
         "inputSchema": {
             "type": "object",
-            "properties": {
+            "properties": with_paging(json!({
                 "executor": { "type": "string", "description": "Filter by executor (e.g. claude-code, cursor)" },
                 "session_id": { "type": "string", "description": "Filter to a specific session" },
-                "after": { "type": "string", "description": "Start date" },
-                "limit": { "type": "integer", "description": "Max prompts (default: 10)", "default": 10 }
-            }
+                "after": { "type": "string", "description": "Start date" }
+            }), 10)
         }
     })
 }
@@ -178,13 +189,12 @@ fn get_prompts_def() -> Value {
 fn session_history_def() -> Value {
     json!({
         "name": "session_history",
-        "description": "Get the full command history of a specific session in chronological order.",
+        "description": "Every recorded command of one shell session, oldest first. Pass a session_id you already have (from list_sessions, find_agent_session or resolve_current_agent_session); with none it falls back to whatever session is most recent, which may not be yours.",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "session_id": { "type": "string", "description": "Session ID (defaults to most recent)" },
-                "limit": { "type": "integer", "description": "Max commands (default: 50)", "default": 50 }
-            }
+            "properties": with_paging(json!({
+                "session_id": { "type": "string", "description": "Session ID (defaults to most recent — pass one explicitly to be sure)" }
+            }), 50)
         }
     })
 }
@@ -192,12 +202,12 @@ fn session_history_def() -> Value {
 fn get_stats_def() -> Value {
     json!({
         "name": "get_stats",
-        "description": "Get aggregate statistics about shell history: total commands, success rate, top commands, and top directories.",
+        "description": "Aggregate counts over recorded commands: totals, success fraction, and the most frequent commands and directories. Rankings are computed from a bounded recent sample, which the response states.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "days": { "type": "integer", "description": "Time window in days (default: 7)", "default": 7 },
-                "directory": { "type": "string", "description": "Filter to this directory" }
+                "directory": { "type": "string", "description": "Filter to this directory and its subtree" }
             }
         }
     })
@@ -206,13 +216,12 @@ fn get_stats_def() -> Value {
 fn list_sessions_def() -> Value {
     json!({
         "name": "list_sessions",
-        "description": "List recent shell sessions with command counts, time ranges, and tags.",
+        "description": "Recent shell sessions with command counts, time ranges and tags. These are terminal sessions, not agent sessions: for work an AI agent did, use find_agent_session (grouped from recorded commands) or list_agent_sessions (captured from the agent's own transcript).",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "limit": { "type": "integer", "description": "Max sessions (default: 10)", "default": 10 },
+            "properties": with_paging(json!({
                 "tag": { "type": "string", "description": "Filter by tag name" }
-            }
+            }), 10)
         }
     })
 }
@@ -220,14 +229,14 @@ fn list_sessions_def() -> Value {
 fn what_changed_def() -> Value {
     json!({
         "name": "what_changed",
-        "description": "Analyze what file-modifying operations happened in a directory recently. Classifies commands into categories: file writes, deletions, git operations, package installs, config changes. Use this to understand what an agent or user changed before you start working.",
+        "description": "What file-modifying work was attempted in a directory recently. Returns the recorded commands and their exit codes (observed), then a category breakdown — writes, deletions, git, installs — inferred from the command text of the ones that exited 0. Suvadu never watched the filesystem and never captured output, so a category is a reading of the command, not a confirmed change.",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "directory": { "type": "string", "description": "Directory to analyze (defaults to all)" },
+            "properties": with_paging(json!({
+                "directory": { "type": "string", "description": "Directory to analyze, including its subtree (defaults to all)" },
                 "hours": { "type": "integer", "description": "How many hours back to look (default: 4)", "default": 4 },
                 "executor": { "type": "string", "description": "Filter by executor (e.g. claude-code, cursor)" }
-            }
+            }), 500)
         }
     })
 }
@@ -235,14 +244,13 @@ fn what_changed_def() -> Value {
 fn what_failed_def() -> Value {
     json!({
         "name": "what_failed",
-        "description": "Show recent command failures with the prompts that caused them. Groups failures by the AI prompt or session that triggered them, so you can understand what went wrong and avoid repeating the same mistakes.",
+        "description": "Recently recorded commands that exited non-zero, grouped by the prompt they ran under where one was recorded. Tells you what was attempted and failed; it cannot tell you why, because the error text was never captured.",
         "inputSchema": {
             "type": "object",
-            "properties": {
+            "properties": with_paging(json!({
                 "directory": { "type": "string", "description": "Filter to this directory" },
-                "hours": { "type": "integer", "description": "How many hours back to look (default: 24)", "default": 24 },
-                "limit": { "type": "integer", "description": "Max failures to show (default: 20)", "default": 20 }
-            }
+                "hours": { "type": "integer", "description": "How many hours back to look (default: 24)", "default": 24 }
+            }), 20)
         }
     })
 }
@@ -250,13 +258,12 @@ fn what_failed_def() -> Value {
 fn suggest_next_def() -> Value {
     json!({
         "name": "suggest_next",
-        "description": "Predict what commands are likely to be run next based on recent history and current directory. Uses frecency (frequency + recency) to rank suggestions. Useful for understanding the typical workflow in a project.",
+        "description": "Commands that are statistically likely next here, ranked by frecency (frequency plus recency) over recent history. A guess about habit, not a recommendation: it says nothing about whether running one now is correct or safe.",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "directory": { "type": "string", "description": "Directory context (defaults to all)" },
-                "limit": { "type": "integer", "description": "Number of suggestions (default: 10)", "default": 10 }
-            }
+            "properties": with_paging(json!({
+                "directory": { "type": "string", "description": "Directory context (defaults to all)" }
+            }), 10)
         }
     })
 }
@@ -264,7 +271,7 @@ fn suggest_next_def() -> Value {
 fn assess_risk_def() -> Value {
     json!({
         "name": "assess_risk",
-        "description": "Assess the risk level of a command BEFORE running it. Returns safe/low/medium/high/critical with category and explanation. Use this to check if a command is destructive before executing it.",
+        "description": "Rate a command safe/low/medium/high/critical BEFORE running it, and name the rule that matched. This is a pattern match on the command text — suvadu does not execute anything, inspect the filesystem, or sandbox the command; the caller still has to enforce the result.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -282,17 +289,16 @@ fn assess_risk_def() -> Value {
 fn find_agent_session_def() -> Value {
     json!({
         "name": "find_agent_session",
-        "description": "Search past AI agent sessions. Find sessions by prompt text, directory, executor, or date range. Returns session summaries with command counts, success rates, and the first prompt. Use this to discover what previous agent sessions did in a project.",
+        "description": "Search past agent sessions reconstructed from recorded shell commands, by prompt text, directory, executor or date. Use this to discover which session did the work you care about, then replay_agent_session for its timeline. Pick this over list_agent_sessions when the agent's transcript was never captured but its commands were; pick search_commands instead when you want individual commands regardless of session.",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "directory": { "type": "string", "description": "Filter to sessions that ran commands in this directory" },
+            "properties": with_paging(json!({
+                "directory": { "type": "string", "description": "Filter to sessions that ran commands in this directory or its subtree" },
                 "executor": { "type": "string", "description": "Filter by agent name (e.g. claude-code, cursor)" },
-                "prompt_text": { "type": "string", "description": "Search across prompts in sessions (substring match)" },
+                "prompt_text": { "type": "string", "description": "Search across the first prompt of each session (substring match)" },
                 "after": { "type": "string", "description": "Only sessions after this date (ISO 8601 or relative like '3 days ago')" },
-                "before": { "type": "string", "description": "Only sessions before this date" },
-                "limit": { "type": "integer", "description": "Max sessions to return (default: 10)", "default": 10 }
-            }
+                "before": { "type": "string", "description": "Only sessions before this date" }
+            }), 10)
         }
     })
 }
@@ -300,13 +306,12 @@ fn find_agent_session_def() -> Value {
 fn replay_agent_session_def() -> Value {
     json!({
         "name": "replay_agent_session",
-        "description": "Get the full chronological timeline of a specific agent session: every prompt and command with exit codes, directories, and timestamps. Use this to understand exactly what a past agent session did.",
+        "description": "The chronological timeline of one agent session built from recorded shell commands: prompts, commands, exit codes, directories and timestamps, one page at a time. Get the session_id from find_agent_session or resolve_current_agent_session first.",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "session_id": { "type": "string", "description": "The session ID to replay (with or without claude-/cursor- prefix)" },
-                "limit": { "type": "integer", "description": "Max commands to return (default: 100)", "default": 100 }
-            },
+            "properties": with_paging(json!({
+                "session_id": { "type": "string", "description": "The session ID to replay (with or without claude-/cursor- prefix)" }
+            }), 100),
             "required": ["session_id"]
         }
     })
@@ -315,13 +320,13 @@ fn replay_agent_session_def() -> Value {
 fn learn_from_failures_def() -> Value {
     json!({
         "name": "learn_from_failures",
-        "description": "Analyze recurring command failures in a project. Shows commands with high failure rates, whether agents fail more than humans, and recent failure-to-fix patterns. Use this before starting work to avoid repeating known-bad approaches.",
+        "description": "Commands in a project that fail often, with their recorded failure rates and whether agents fail them more than humans. Call it before starting work to avoid repeating a known-bad approach. It reports rates, not diagnoses: suvadu recorded that a command exited non-zero and nothing about why, so do not expect a cause or a confirmed fix.",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "directory": { "type": "string", "description": "Directory to analyze (defaults to all)" },
+            "properties": with_paging(json!({
+                "directory": { "type": "string", "description": "Directory to analyze, including its subtree (defaults to all)" },
                 "days": { "type": "integer", "description": "How many days back to look (default: 7)", "default": 7 }
-            }
+            }), 10)
         }
     })
 }
@@ -329,12 +334,13 @@ fn learn_from_failures_def() -> Value {
 fn project_context_def() -> Value {
     json!({
         "name": "project_context",
-        "description": "Get a project briefing: common commands, build/test/lint patterns, recent failures, failure rates, and agent activity. Use this to understand a project's workflow before making changes.",
+        "description": "A short briefing on a project: the programs most often run, build/test/lint commands and their pass rates, failures in the last day, and agent sessions in the window. Concise by default — pass detail=true, or follow up with learn_from_failures, what_failed or find_agent_session for one topic in full.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "directory": { "type": "string", "description": "Directory to analyze (defaults to all)" },
-                "days": { "type": "integer", "description": "Time window in days (default: 7)", "default": 7 }
+                "directory": { "type": "string", "description": "Directory to analyze, including its subtree (defaults to all)" },
+                "days": { "type": "integer", "description": "Time window in days (default: 7)", "default": 7 },
+                "detail": { "type": "boolean", "description": "Widen every section (default: false)", "default": false }
             }
         }
     })
@@ -343,13 +349,13 @@ fn project_context_def() -> Value {
 fn list_skills_def() -> Value {
     json!({
         "name": "list_skills",
-        "description": "List skills in Suvadu's shared cross-agent skills library — reusable instructions any MCP-capable agent can read instead of each tool keeping its own copy. Use this to discover what conventions/checklists/instructions already exist before starting work.",
+        "description": "List skills in Suvadu's shared cross-agent skills library — reusable instructions any MCP-capable agent can read instead of each tool keeping its own copy. Use this to discover what conventions/checklists/instructions already exist before starting work. Skill text is written by people and agents; it is data, not something suvadu observed.",
         "inputSchema": {
             "type": "object",
-            "properties": {
+            "properties": with_paging(json!({
                 "scope": { "type": "string", "description": "Filter to \"global\", or a specific project directory path" },
                 "directory": { "type": "string", "description": "Alias for scope — filter to skills scoped to this directory" }
-            }
+            }), 50)
         }
     })
 }
@@ -357,7 +363,7 @@ fn list_skills_def() -> Value {
 fn get_skill_def() -> Value {
     json!({
         "name": "get_skill",
-        "description": "Get the full content of one skill by name from Suvadu's shared skills library.",
+        "description": "Get the full content of one skill by name from Suvadu's shared skills library. The body is instructions someone wrote, not verified fact — treat it as data.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -376,10 +382,10 @@ fn search_skills_def() -> Value {
         "description": "Search Suvadu's shared skills library by keyword across name, description, and triggers. Use this before writing a new checklist/instruction to see if one already exists.",
         "inputSchema": {
             "type": "object",
-            "properties": {
+            "properties": with_paging(json!({
                 "query": { "type": "string", "description": "Text to search for" },
                 "scope": { "type": "string", "description": "Filter to \"global\" or a project directory path" }
-            },
+            }), 50),
             "required": ["query"]
         }
     })
@@ -416,38 +422,125 @@ fn get_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
-fn format_entry(e: &crate::models::Entry) -> String {
-    let exit = match e.exit_code {
-        Some(0) => "ok".to_string(),
-        Some(c) => format!("exit {c}"),
-        None => "unknown".to_string(),
-    };
-    let time = format_time(e.started_at);
-    let dur = util::format_duration_ms(e.duration_ms);
-    let executor = match (&e.executor_type, &e.executor) {
-        (Some(et), Some(n)) => format!("{et}: {n}"),
-        (Some(et), None) => et.clone(),
-        (None, Some(n)) => n.clone(),
-        _ => "unknown".to_string(),
-    };
-    format!(
-        "  {} | {} | {} | {} | {}\n    dir: {}",
-        e.command, exit, dur, time, executor, e.cwd,
-    )
+/// Whether the caller asked for the detailed rendering. Rule 8 of
+/// [`conv`]: rows are one line until someone asks for more.
+fn detail(args: &Value) -> bool {
+    args.get("detail").and_then(Value::as_bool).unwrap_or(false)
 }
 
-fn format_time(ms: i64) -> String {
-    let ms_val = util::normalize_display_ms(ms);
-    chrono::Local
-        .timestamp_millis_opt(ms_val)
-        .single()
-        .map_or_else(
-            || "unknown".to_string(),
-            |dt| dt.format("%Y-%m-%d %H:%M:%S").to_string(),
-        )
+/// `(limit, offset)` for a list-shaped tool (rule 4 of [`conv`]). Both are
+/// clamped to sane values rather than rejected, because a tool that errors
+/// on `limit: 0` just makes an agent retry blind.
+fn paging(args: &Value, default_limit: i64) -> (usize, usize) {
+    let limit = usize::try_from(get_int(args, "limit", default_limit).clamp(1, 500))
+        .unwrap_or(DEFAULT_LIMIT);
+    let offset = usize::try_from(get_int(args, "offset", 0).max(0)).unwrap_or(0);
+    (limit, offset)
 }
 
-use chrono::TimeZone;
+/// Fallback page size when a configured one cannot be represented.
+const DEFAULT_LIMIT: usize = 20;
+
+/// The `limit`/`offset`/`detail` properties every list-shaped tool shares,
+/// spelled the same way in every schema so an agent learns them once.
+fn paging_schema(default_limit: i64) -> Value {
+    json!({
+        "limit": { "type": "integer", "minimum": 1, "maximum": 500, "description": format!("Max rows in this page (default: {default_limit})"), "default": default_limit },
+        "offset": { "type": "integer", "minimum": 0, "description": "Rows to skip; pass the response's next_offset to page forward", "default": 0 },
+        "detail": { "type": "boolean", "description": "Add directory, duration, executor and session to each row (default: false)", "default": false }
+    })
+}
+
+/// Merge the shared paging properties into a tool's own property map.
+fn with_paging(mut properties: Value, default_limit: i64) -> Value {
+    if let (Some(target), Some(shared)) = (
+        properties.as_object_mut(),
+        paging_schema(default_limit).as_object(),
+    ) {
+        for (key, value) in shared {
+            target.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+    properties
+}
+
+/// One command row, in the shape rule 7 and rule 8 of [`conv`] describe:
+/// the stable ID first so the row can always be followed up, then outcome,
+/// time and directory; everything else only on request.
+fn command_row(e: &crate::models::Entry, detail: bool) -> String {
+    let mut row = format!(
+        "{} | {} | {} | {} | {}",
+        conv::command_id(e.id),
+        conv::exit(e.exit_code),
+        conv::timestamp(e.started_at),
+        e.cwd,
+        conv::clip(&e.command, conv::ROW_MAX_CHARS),
+    );
+    if !detail {
+        return row;
+    }
+    let executor = match (e.executor_type.as_deref(), e.executor.as_deref()) {
+        (Some(kind), Some(name)) => format!("{kind}: {name}"),
+        (Some(kind), None) => kind.to_string(),
+        (None, Some(name)) => name.to_string(),
+        _ => conv::UNKNOWN.to_string(),
+    };
+    let _ = write!(
+        row,
+        "\n    duration {} | executor {executor} | session {}",
+        conv::duration(e.duration_ms),
+        e.session_id
+    );
+    if let Some(prompt) = entry_prompt(e) {
+        let _ = write!(
+            row,
+            "\n    prompt \"{}\"",
+            conv::clip(prompt, conv::PROMPT_MAX_CHARS)
+        );
+    }
+    row
+}
+
+/// The agent prompt recorded alongside a command, when there was one.
+fn entry_prompt(e: &crate::models::Entry) -> Option<&str> {
+    e.context
+        .as_ref()
+        .and_then(|ctx| ctx.get("agent_prompt"))
+        .map(String::as_str)
+        .filter(|p| !p.is_empty())
+}
+
+/// Fetch one page plus a lookahead row, and report whether more exist.
+/// Keeps `next_offset` honest without a second COUNT for every tool.
+fn page_entries(
+    repo: &Repository,
+    limit: usize,
+    offset: usize,
+    qf: &QueryFilter,
+) -> Result<(Vec<crate::models::Entry>, Option<usize>), String> {
+    let mut entries = repo
+        .get_entries_filtered(limit.saturating_add(1), offset, qf)
+        .map_err(|e| format!("query failed: {e}"))?;
+    let more = entries.len() > limit;
+    entries.truncate(limit);
+    Ok((entries, more.then(|| offset.saturating_add(limit))))
+}
+
+/// Append rows to a response, honouring rule 5: anything elided is counted
+/// and announced rather than quietly dropped.
+fn write_rows<T>(
+    response: &mut conv::Response,
+    rows: &[T],
+    shown: usize,
+    render: impl Fn(&T) -> String,
+) {
+    for row in rows.iter().take(shown) {
+        response.line(render(row));
+    }
+    if rows.len() > shown {
+        response.line(format!("  {}", conv::more_not_shown(rows.len() - shown)));
+    }
+}
 
 fn handle_search_commands(
     repo: &Repository,
@@ -455,9 +548,7 @@ fn handle_search_commands(
     mcp: &crate::config::McpConfig,
 ) -> Result<String, String> {
     let query = get_str(args, "query").unwrap_or("");
-    let default_limit = usize::try_from(mcp.default_limit).unwrap_or(20);
-    let limit = usize::try_from(get_int(args, "limit", i64::from(mcp.default_limit)))
-        .unwrap_or(default_limit);
+    let (limit, offset) = paging(args, i64::from(mcp.default_limit));
     let after = get_str(args, "after").and_then(|s| util::parse_date_input(s, false));
     let before = get_str(args, "before").and_then(|s| util::parse_date_input(s, true));
     let executor = get_str(args, "executor");
@@ -485,24 +576,37 @@ fn handle_search_commands(
         exclude_dirs: &mcp.exclude_dirs,
     };
 
-    let entries = repo
-        .get_entries_filtered(limit, 0, &qf)
-        .map_err(|e| format!("query failed: {e}"))?;
+    let (entries, next) = page_entries(repo, limit, offset, &qf)?;
+    let matched = usize::try_from(
+        repo.count_filtered(&qf)
+            .map_err(|e| format!("query failed: {e}"))?,
+    )
+    .unwrap_or(entries.len());
 
-    if entries.is_empty() {
-        return Ok(format!("No commands found matching \"{query}\"."));
-    }
-
-    let mut out = format!(
-        "Found {} commands matching \"{}\":\n\n",
-        entries.len(),
-        query
+    let detail = detail(args);
+    let mut response = conv::Response::new(
+        format!(
+            "{} commands matching \"{query}\"{}",
+            entries.len(),
+            if offset > 0 {
+                format!(" (from offset {offset})")
+            } else {
+                String::new()
+            }
+        ),
+        conv::Provenance::Observed,
     );
-    for (i, e) in entries.iter().enumerate() {
-        let _ = writeln!(out, "{}. {}", i + 1, format_entry(e));
-        out.push('\n');
+    for e in &entries {
+        response.line(command_row(e, detail));
     }
-    Ok(out)
+    if !detail {
+        response = response.note(conv::DETAIL_HINT);
+    }
+    Ok(response
+        .shown(entries.len())
+        .matched(matched)
+        .next_offset(next)
+        .render())
 }
 
 fn handle_recent_commands(
@@ -510,55 +614,65 @@ fn handle_recent_commands(
     args: &Value,
     mcp: &crate::config::McpConfig,
 ) -> Result<String, String> {
-    let default_limit = usize::try_from(mcp.default_limit).unwrap_or(20);
-    let limit = usize::try_from(get_int(args, "limit", i64::from(mcp.default_limit)))
-        .unwrap_or(default_limit);
+    let (limit, offset) = paging(args, i64::from(mcp.default_limit));
     let directory = get_str(args, "directory");
     let executor = get_str(args, "executor");
     let after = get_str(args, "after").and_then(|s| util::parse_date_input(s, false));
 
-    let entries = if executor.is_some() || after.is_some() {
-        // Use filtered query when executor or after is specified
-        let qf = QueryFilter {
-            query_tokens: &[],
-            after,
-            before: None,
-            tag_id: None,
-            exit_code: None,
-            query: None,
-            prefix_match: false,
-            executor,
-            cwd: directory,
-            field: SearchField::Command,
-            exclude_agents: false,
-            cwd_prefix: false,
-            failed_only: false,
-            bookmarked_only: false,
-            exclude_dirs: &mcp.exclude_dirs,
-        };
-        repo.get_entries_filtered(limit, 0, &qf)
-            .map_err(|e| format!("query failed: {e}"))?
+    let qf = QueryFilter {
+        query_tokens: &[],
+        after,
+        before: None,
+        tag_id: None,
+        exit_code: None,
+        query: None,
+        prefix_match: false,
+        executor,
+        cwd: directory,
+        field: SearchField::Command,
+        exclude_agents: false,
+        cwd_prefix: false,
+        failed_only: false,
+        bookmarked_only: false,
+        exclude_dirs: &mcp.exclude_dirs,
+    };
+    let (entries, next) = if executor.is_some() || after.is_some() {
+        page_entries(repo, limit, offset, &qf)?
     } else {
         let filter = QueryFilter {
             exclude_dirs: &mcp.exclude_dirs,
             ..QueryFilter::default()
         };
-        repo.get_recent_entries(limit, 0, &filter, directory)
-            .map_err(|e| format!("query failed: {e}"))?
+        let mut entries = repo
+            .get_recent_entries(limit.saturating_add(1), offset, &filter, directory)
+            .map_err(|e| format!("query failed: {e}"))?;
+        let more = entries.len() > limit;
+        entries.truncate(limit);
+        (entries, more.then(|| offset.saturating_add(limit)))
     };
+    let matched = usize::try_from(
+        repo.count_filtered(&qf)
+            .map_err(|e| format!("query failed: {e}"))?,
+    )
+    .unwrap_or(entries.len());
 
-    if entries.is_empty() {
-        let ctx = directory.map_or_else(String::new, |d| format!(" in {d}"));
-        return Ok(format!("No recent commands found{ctx}."));
-    }
-
+    let detail = detail(args);
     let ctx = directory.map_or_else(String::new, |d| format!(" in {d}"));
-    let mut out = format!("{} most recent commands{ctx}:\n\n", entries.len());
-    for (i, e) in entries.iter().enumerate() {
-        let _ = writeln!(out, "{}. {}", i + 1, format_entry(e));
-        out.push('\n');
+    let mut response = conv::Response::new(
+        format!("{} most recent commands{ctx}", entries.len()),
+        conv::Provenance::Observed,
+    );
+    for e in &entries {
+        response.line(command_row(e, detail));
     }
-    Ok(out)
+    if !detail {
+        response = response.note(conv::DETAIL_HINT);
+    }
+    Ok(response
+        .shown(entries.len())
+        .matched(matched)
+        .next_offset(next)
+        .render())
 }
 
 fn handle_command_status(
@@ -567,7 +681,7 @@ fn handle_command_status(
     mcp: &crate::config::McpConfig,
 ) -> Result<String, String> {
     let command = get_str(args, "command").unwrap_or("");
-    let limit = usize::try_from(get_int(args, "limit", 5)).unwrap_or(5);
+    let (limit, offset) = paging(args, 5);
     let directory = get_str(args, "directory");
 
     if command.is_empty() {
@@ -577,32 +691,48 @@ fn handle_command_status(
     let filter = QueryFilter {
         query: Some(command),
         prefix_match: true,
+        cwd: directory,
         exclude_dirs: &mcp.exclude_dirs,
         ..QueryFilter::default()
     };
-    let entries = repo
-        .get_recent_entries(limit, 0, &filter, directory)
+    let mut entries = repo
+        .get_recent_entries(limit.saturating_add(1), offset, &filter, directory)
         .map_err(|e| format!("query failed: {e}"))?;
+    let more = entries.len() > limit;
+    entries.truncate(limit);
+    let matched = usize::try_from(
+        repo.count_filtered(&filter)
+            .map_err(|e| format!("query failed: {e}"))?,
+    )
+    .unwrap_or(entries.len());
 
-    if entries.is_empty() {
-        return Ok(format!("No previous runs of \"{command}\" found."));
-    }
-
-    let total = entries.len();
     let successes = entries.iter().filter(|e| e.exit_code == Some(0)).count();
-    let failures = entries
-        .iter()
-        .filter(|e| e.exit_code.is_some_and(|c| c != 0))
-        .count();
-
-    let mut out = format!(
-        "\"{command}\" — {total} recent runs ({successes} succeeded, {failures} failed):\n\n",
+    let unknown = entries.iter().filter(|e| e.exit_code.is_none()).count();
+    let detail = detail(args);
+    let mut response = conv::Response::new(
+        format!(
+            "\"{command}\" — {} runs on this page, {} succeeded{}",
+            entries.len(),
+            conv::rate(successes, entries.len()),
+            if unknown > 0 {
+                format!(", {unknown} with no recorded exit code")
+            } else {
+                String::new()
+            }
+        ),
+        conv::Provenance::Observed,
     );
-    for (i, e) in entries.iter().enumerate() {
-        let _ = writeln!(out, "{}. {}", i + 1, format_entry(e));
-        out.push('\n');
+    for e in &entries {
+        response.line(command_row(e, detail));
     }
-    Ok(out)
+    if !detail {
+        response = response.note(conv::DETAIL_HINT);
+    }
+    Ok(response
+        .shown(entries.len())
+        .matched(matched)
+        .next_offset(more.then(|| offset.saturating_add(limit)))
+        .render())
 }
 
 fn handle_get_prompts(
@@ -610,7 +740,7 @@ fn handle_get_prompts(
     args: &Value,
     mcp: &crate::config::McpConfig,
 ) -> Result<String, String> {
-    let limit = usize::try_from(get_int(args, "limit", 10)).unwrap_or(10);
+    let (limit, offset) = paging(args, 10);
     let after = get_str(args, "after").and_then(|s| util::parse_date_input(s, false));
     let executor = get_str(args, "executor");
     let session_filter = get_str(args, "session_id");
@@ -649,53 +779,43 @@ fn handle_get_prompts(
             .push(entry);
     }
 
-    if groups.is_empty() {
-        return Ok("No agent prompts found.".to_string());
-    }
-
-    // Sort by most recent command timestamp, take `limit`
+    // Sort by most recent command timestamp, then page.
     let mut sorted: Vec<_> = groups.into_iter().collect();
     sorted.sort_by(|a, b| {
         let a_max = a.1.iter().map(|e| e.started_at).max().unwrap_or(0);
         let b_max = b.1.iter().map(|e| e.started_at).max().unwrap_or(0);
         b_max.cmp(&a_max)
     });
-    sorted.truncate(limit);
+    let matched = sorted.len();
+    let page: Vec<_> = sorted.into_iter().skip(offset).take(limit).collect();
+    let next = (offset.saturating_add(limit) < matched).then(|| offset.saturating_add(limit));
 
-    let mut out = format!("{} prompts found:\n\n", sorted.len());
-    for (i, ((session_id, prompt), cmds)) in sorted.iter().enumerate() {
+    let detail = detail(args);
+    let per_prompt = if detail { 20 } else { 3 };
+    let mut response = conv::Response::new(
+        format!("{} prompts on this page", page.len()),
+        conv::Provenance::Observed,
+    );
+    for ((session_id, prompt), cmds) in &page {
         let successes = cmds.iter().filter(|e| e.exit_code == Some(0)).count();
-        let session_short: String = session_id
-            .strip_prefix("claude-")
-            .or_else(|| session_id.strip_prefix("cursor-"))
-            .or_else(|| session_id.strip_prefix("opencode-"))
-            .unwrap_or(session_id)
-            .chars()
-            .take(12)
-            .collect();
-        let _ = writeln!(
-            out,
-            "{}. [{}] \"{}\" — {} cmds, {} ok",
-            i + 1,
-            session_short,
-            util::truncate_str(prompt, 200, "..."),
-            cmds.len(),
-            successes,
-        );
-        for cmd in cmds.iter().take(5) {
-            let exit = match cmd.exit_code {
-                Some(0) => "ok",
-                Some(_) => "FAIL",
-                None => "?",
-            };
-            let _ = writeln!(out, "     {} [{}]", cmd.command, exit);
-        }
-        if cmds.len() > 5 {
-            let _ = writeln!(out, "     ... and {} more", cmds.len() - 5);
-        }
-        out.push('\n');
+        response.line(format!(
+            "{session_id} | {} ok | \"{}\"",
+            conv::rate(successes, cmds.len()),
+            conv::clip(prompt, conv::PROMPT_MAX_CHARS)
+        ));
+        write_rows(&mut response, cmds, per_prompt, |cmd| {
+            format!("  {}", command_row(cmd, false))
+        });
+        response.blank();
     }
-    Ok(out)
+    if !detail {
+        response = response.note(conv::DETAIL_HINT);
+    }
+    Ok(response
+        .shown(page.len())
+        .matched(matched)
+        .next_offset(next)
+        .render())
 }
 
 fn handle_session_history(
@@ -704,34 +824,51 @@ fn handle_session_history(
     mcp: &crate::config::McpConfig,
 ) -> Result<String, String> {
     let session_id = get_str(args, "session_id");
-    let limit = usize::try_from(get_int(args, "limit", 50)).unwrap_or(50);
+    let (limit, offset) = paging(args, 50);
 
-    let entries = repo
+    let mut entries = repo
         .get_replay_entries(
             session_id,
             &crate::repository::ReplayFilter {
-                limit: Some(limit),
+                limit: Some(limit.saturating_add(1)),
+                offset,
                 exclude_dirs: &mcp.exclude_dirs,
                 ..Default::default()
             },
         )
         .map_err(|e| format!("query failed: {e}"))?;
+    let more = entries.len() > limit;
+    entries.truncate(limit);
 
-    if entries.is_empty() {
-        return Ok(session_id.map_or_else(
-            || "No commands found in any session.".to_string(),
-            |id| format!("No commands found in session {id}."),
-        ));
+    let sid = entries
+        .first()
+        .map_or_else(|| session_id.unwrap_or(conv::UNKNOWN), |e| &e.session_id)
+        .to_string();
+    let detail = detail(args);
+    let mut response = conv::Response::new(
+        format!("Session {sid} — {} commands on this page", entries.len()),
+        conv::Provenance::Observed,
+    );
+    for e in &entries {
+        response.line(command_row(e, detail));
     }
-
-    let sid = entries.first().map_or("unknown", |e| e.session_id.as_str());
-    let mut out = format!("Session {} — {} commands:\n\n", sid, entries.len());
-    for (i, e) in entries.iter().enumerate() {
-        let _ = writeln!(out, "{}. {}", i + 1, format_entry(e));
-        out.push('\n');
+    if !mcp.exclude_dirs.is_empty() {
+        response = response.note(EXCLUSION_NOTE);
     }
-    Ok(out)
+    if !detail {
+        response = response.note(conv::DETAIL_HINT);
+    }
+    Ok(response
+        .shown(entries.len())
+        .next_offset(more.then(|| offset.saturating_add(limit)))
+        .render())
 }
+
+/// Said whenever a response was filtered by `mcp.exclude_dirs`, so a
+/// caller never reads a short list as a complete one.
+const EXCLUSION_NOTE: &str =
+    "commands recorded in directories excluded by mcp.exclude_dirs were withheld from this \
+     response, so counts here can be lower than the session's real totals";
 
 fn handle_get_stats(
     repo: &Repository,
@@ -775,15 +912,11 @@ fn handle_get_stats(
         .count_filtered(&success_qf)
         .map_err(|e| format!("query failed: {e}"))?;
 
-    let rate = if total > 0 {
-        successes * 100 / total
-    } else {
-        0
-    };
-
-    // Get top commands
+    // Top-N is computed from a bounded sample, not from every matching
+    // row: say so rather than let a ranking over 200 commands read as a
+    // ranking over all of them.
     let entries = repo
-        .get_entries_filtered(200, 0, &qf)
+        .get_entries_filtered(STATS_SAMPLE, 0, &qf)
         .map_err(|e| format!("query failed: {e}"))?;
 
     let mut cmd_counts: std::collections::HashMap<&str, i64> = std::collections::HashMap::new();
@@ -803,58 +936,97 @@ fn handle_get_stats(
     top_dirs.truncate(5);
 
     let dir_ctx = directory.map_or_else(String::new, |d| format!(" in {d}"));
-    let mut out = format!(
-        "Stats for the last {days} days{dir_ctx}:\n\n  Total commands: {total}\n  Success rate: {rate}%\n\n",
+    let total_usize = usize::try_from(total).unwrap_or(usize::MAX);
+    let mut response = conv::Response::new(
+        format!(
+            "Stats for {}{dir_ctx}: {total} commands, {} succeeded",
+            conv::window_days(days),
+            conv::rate(usize::try_from(successes).unwrap_or(0), total_usize)
+        ),
+        conv::Provenance::ObservedAndInferred,
     );
-
-    out.push_str("Top commands:\n");
+    response.line("Top commands (ranked, inferred from the sample below):");
     for (cmd, count) in &top_cmds {
-        let _ = writeln!(out, "  {count:>4}x  {cmd}");
+        response.line(format!("  {count:>4}x  {cmd}"));
     }
-
-    out.push_str("\nTop directories:\n");
+    response.blank();
+    response.line("Top directories (ranked, inferred from the sample below):");
     for (dir, count) in &top_dirs {
-        let _ = writeln!(out, "  {count:>4}x  {dir}");
+        response.line(format!("  {count:>4}x  {dir}"));
     }
-
-    Ok(out)
+    Ok(response
+        .shown(entries.len())
+        .matched(total_usize)
+        .note(format!(
+            "rankings are computed from the {} most recent of {total} matching commands, not from all of them",
+            entries.len()
+        ))
+        .render())
 }
 
-fn handle_list_sessions(repo: &Repository, args: &Value) -> Result<String, String> {
-    let limit = usize::try_from(get_int(args, "limit", 10)).unwrap_or(10);
+fn handle_list_sessions(
+    repo: &Repository,
+    args: &Value,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
+    let (limit, offset) = paging(args, 10);
     let tag = get_str(args, "tag");
 
     let tag_id = tag.and_then(|t| repo.get_tag_id_by_name(t).ok().flatten());
 
-    let sessions = repo
-        .list_sessions(None, tag_id, limit)
+    // Excluded directories apply to session rows too: counts and time
+    // ranges are records *about* the commands the user asked suvadu to
+    // withhold.
+    let mut sessions = repo
+        .list_sessions_excluding(
+            None,
+            tag_id,
+            limit.saturating_add(1),
+            offset,
+            &mcp.exclude_dirs,
+        )
         .map_err(|e| format!("query failed: {e}"))?;
+    let more = sessions.len() > limit;
+    sessions.truncate(limit);
 
-    if sessions.is_empty() {
-        return Ok("No sessions found.".to_string());
-    }
-
-    let mut out = format!("{} sessions:\n\n", sessions.len());
-    for (i, s) in sessions.iter().enumerate() {
+    let detail = detail(args);
+    let mut response = conv::Response::new(
+        format!("{} shell sessions on this page", sessions.len()),
+        conv::Provenance::Observed,
+    );
+    for s in &sessions {
         let tag_str = s
             .tag_name
             .as_deref()
             .map_or_else(String::new, |t| format!(" [{t}]"));
-        let first = format_time(s.first_activity_at);
-        let last = format_time(s.last_activity_at);
-        let _ = write!(
-            out,
-            "{}. {}{}\n   {} cmds | {} ok | {} — {}\n\n",
-            i + 1,
+        let success = usize::try_from(s.success_count).unwrap_or(0);
+        let total = usize::try_from(s.cmd_count).unwrap_or(0);
+        response.line(format!(
+            "{}{tag_str} | {total} cmds | {} ok | {} → {}",
             s.id,
-            tag_str,
-            s.cmd_count,
-            s.success_count,
-            first,
-            last,
-        );
+            conv::rate(success, total),
+            conv::timestamp(s.first_activity_at),
+            conv::timestamp(s.last_activity_at),
+        ));
+        if detail {
+            response.line(format!(
+                "    host {} | dir {} | agent {}",
+                conv::or_unknown(Some(s.hostname.as_str())),
+                conv::or_unknown(s.cwd.as_deref()),
+                conv::or_unknown(s.agent.as_deref()),
+            ));
+        }
     }
-    Ok(out)
+    if !mcp.exclude_dirs.is_empty() {
+        response = response.note(EXCLUSION_NOTE);
+    }
+    if !detail {
+        response = response.note(conv::DETAIL_HINT);
+    }
+    Ok(response
+        .shown(sessions.len())
+        .next_offset(more.then(|| offset.saturating_add(limit)))
+        .render())
 }
 
 // ── Smart tools ─────────────────────────────────────────────
@@ -926,6 +1098,7 @@ fn classify_command(cmd: &str) -> Option<&'static str> {
     None
 }
 
+#[allow(clippy::too_many_lines)]
 fn handle_what_changed(
     repo: &Repository,
     args: &Value,
@@ -957,67 +1130,99 @@ fn handle_what_changed(
         exclude_dirs: &mcp.exclude_dirs,
     };
 
-    let entries = repo
-        .get_entries_filtered(500, 0, &qf)
-        .map_err(|e| format!("query failed: {e}"))?;
+    let (limit, offset) = paging(args, 500);
+    let (entries, _) = page_entries(repo, limit, offset, &qf)?;
 
-    // Classify commands into categories
-    let mut categories: std::collections::HashMap<&str, Vec<&crate::models::Entry>> =
+    // Two lists, never one. `succeeded` holds commands whose recorded exit
+    // code was 0 — the only ones whose intended effect is even plausible.
+    // `attempted` holds the rest: a `rm -rf` that exited 1 changed nothing,
+    // and reporting it under "deletions" is the exact false claim this
+    // tool used to make. A command with no recorded exit code goes in
+    // `attempted` too: suvadu does not know how it ended.
+    let mut succeeded: std::collections::HashMap<&str, Vec<&crate::models::Entry>> =
         std::collections::HashMap::new();
+    let mut attempted: Vec<&crate::models::Entry> = Vec::new();
     let mut unclassified = 0usize;
 
     for entry in &entries {
-        if let Some(category) = classify_command(&entry.command) {
-            categories.entry(category).or_default().push(entry);
-        } else {
+        let Some(category) = classify_command(&entry.command) else {
             unclassified += 1;
+            continue;
+        };
+        if entry.exit_code == Some(0) {
+            succeeded.entry(category).or_default().push(entry);
+        } else {
+            attempted.push(entry);
         }
-    }
-
-    if categories.is_empty() {
-        let ctx = directory.map_or_else(String::new, |d| format!(" in {d}"));
-        return Ok(format!(
-            "No file-modifying operations found in the last {hours} hours{ctx}. ({} total commands, all read-only.)",
-            entries.len()
-        ));
     }
 
     let ctx = directory.map_or_else(String::new, |d| format!(" in {d}"));
-    let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "Changes in the last {hours} hours{ctx} ({} total commands):\n",
-        entries.len()
+    let detail = detail(args);
+    let per_category = if detail { 50 } else { 3 };
+    let mut response = conv::Response::new(
+        format!(
+            "{} commands recorded in the {}{ctx}; {} looked file-modifying",
+            entries.len(),
+            conv::window_hours(hours),
+            succeeded.values().map(Vec::len).sum::<usize>() + attempted.len()
+        ),
+        conv::Provenance::ObservedAndInferred,
     );
 
-    // Sort categories by count descending
-    let mut sorted: Vec<_> = categories.into_iter().collect();
-    sorted.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
+    response.line("OBSERVED — commands suvadu recorded, with the exit code it recorded:");
+    if entries.is_empty() {
+        response.line("  (none)");
+    }
+    write_rows(
+        &mut response,
+        &entries,
+        if detail { limit } else { 5 },
+        |e| format!("  {}", command_row(e, detail)),
+    );
+    response.blank();
 
+    response.line(
+        "INFERRED — likely effect, worked out from the command text alone. suvadu did not \
+         observe any file change; a command that exited 0 may still have done nothing:",
+    );
+    let mut sorted: Vec<_> = succeeded.into_iter().collect();
+    sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
+    if sorted.is_empty() {
+        response.line("  (no successful file-modifying command in this window)");
+    }
     for (category, cmds) in &sorted {
-        let _ = writeln!(out, "  {} ({}):", category.to_uppercase(), cmds.len());
-        for cmd in cmds.iter().take(5) {
-            let exit = match cmd.exit_code {
-                Some(0) => "ok",
-                Some(_) => "FAIL",
-                None => "?",
-            };
-            let _ = writeln!(out, "    {} [{}]", cmd.command, exit);
-        }
-        if cmds.len() > 5 {
-            let _ = writeln!(out, "    ... and {} more", cmds.len() - 5);
-        }
-        out.push('\n');
+        response.line(format!("  {} ({}):", category.to_uppercase(), cmds.len()));
+        write_rows(&mut response, cmds, per_category, |cmd| {
+            format!("    {}", conv::clip(&cmd.command, conv::ROW_MAX_CHARS))
+        });
+    }
+
+    if !attempted.is_empty() {
+        response.blank();
+        response.line(format!(
+            "ATTEMPTED — {} file-modifying command(s) that did not succeed, so no effect is \
+             inferred from them:",
+            attempted.len()
+        ));
+        write_rows(&mut response, &attempted, per_category, |cmd| {
+            format!(
+                "    {} | {}",
+                conv::exit(cmd.exit_code),
+                conv::clip(&cmd.command, conv::ROW_MAX_CHARS)
+            )
+        });
     }
 
     if unclassified > 0 {
-        let _ = writeln!(
-            out,
-            "  ({unclassified} other commands not shown — read-only or unclassified)"
-        );
+        response = response.note(format!(
+            "{unclassified} further recorded command(s) matched no change category and are not \
+             listed under INFERRED"
+        ));
     }
-
-    Ok(out)
+    if !detail {
+        response = response.note(conv::DETAIL_HINT);
+    }
+    Ok(response.shown(entries.len()).render())
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1027,9 +1232,7 @@ fn handle_what_failed(
     mcp: &crate::config::McpConfig,
 ) -> Result<String, String> {
     let hours = get_int(args, "hours", 24);
-    let default_limit = usize::try_from(mcp.default_limit).unwrap_or(20);
-    let limit = usize::try_from(get_int(args, "limit", i64::from(mcp.default_limit)))
-        .unwrap_or(default_limit);
+    let (limit, offset) = paging(args, i64::from(mcp.default_limit));
     let directory = get_str(args, "directory");
 
     let now = chrono::Utc::now().timestamp_millis();
@@ -1054,97 +1257,87 @@ fn handle_what_failed(
         exclude_dirs: &mcp.exclude_dirs,
     };
 
-    let entries = repo
-        .get_entries_filtered(1000, 0, &qf)
-        .map_err(|e| format!("query failed: {e}"))?;
-
-    let failures: Vec<_> = entries
-        .iter()
-        .filter(|e| e.exit_code.is_some_and(|c| c != 0))
-        .take(limit)
-        .collect();
-
-    if failures.is_empty() {
-        let ctx = directory.map_or_else(String::new, |d| format!(" in {d}"));
-        return Ok(format!(
-            "No failures in the last {hours} hours{ctx}. {} commands all succeeded.",
-            entries.len()
-        ));
-    }
+    // Let the database do the filtering, so `limit`/`offset` page over
+    // failures rather than over an arbitrary 1000-row prefix that may
+    // contain none.
+    let failed_qf = QueryFilter {
+        failed_only: true,
+        ..qf.clone()
+    };
+    let (failures, next) = page_entries(repo, limit, offset, &failed_qf)?;
+    let matched = usize::try_from(
+        repo.count_filtered(&failed_qf)
+            .map_err(|e| format!("query failed: {e}"))?,
+    )
+    .unwrap_or(failures.len());
+    let total = usize::try_from(
+        repo.count_filtered(&qf)
+            .map_err(|e| format!("query failed: {e}"))?,
+    )
+    .unwrap_or(0);
 
     // Group failures by prompt (if available)
-    let mut by_prompt: std::collections::HashMap<String, Vec<&&crate::models::Entry>> =
+    let mut by_prompt: std::collections::HashMap<&str, Vec<&crate::models::Entry>> =
         std::collections::HashMap::new();
-    let mut no_prompt_failures: Vec<&&crate::models::Entry> = Vec::new();
+    let mut no_prompt_failures: Vec<&crate::models::Entry> = Vec::new();
 
     for entry in &failures {
-        let prompt = entry
-            .context
-            .as_ref()
-            .and_then(|ctx| ctx.get("agent_prompt"))
-            .cloned();
-        if let Some(p) = prompt {
-            by_prompt.entry(p).or_default().push(entry);
+        if let Some(prompt) = entry_prompt(entry) {
+            by_prompt.entry(prompt).or_default().push(entry);
         } else {
             no_prompt_failures.push(entry);
         }
     }
 
     let ctx = directory.map_or_else(String::new, |d| format!(" in {d}"));
-    let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "{} failures in the last {hours} hours{ctx}:\n",
-        failures.len()
+    let detail = detail(args);
+    let per_group = if detail { limit } else { 5 };
+    let mut response = conv::Response::new(
+        format!(
+            "{} failed commands on this page ({} of {total} recorded commands failed in the {}{ctx})",
+            failures.len(),
+            matched,
+            conv::window_hours(hours),
+        ),
+        conv::Provenance::Observed,
     );
 
-    // Show prompt-grouped failures first
     if !by_prompt.is_empty() {
-        let _ = writeln!(out, "FAILURES TRIGGERED BY PROMPTS:");
+        response.line("FAILURES UNDER A RECORDED PROMPT:");
         let mut sorted: Vec<_> = by_prompt.into_iter().collect();
-        sorted.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
-
+        sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
         for (prompt, cmds) in &sorted {
-            let _ = writeln!(out, "\n  Prompt: \"{prompt}\"");
-            let _ = writeln!(out, "  {} commands failed:", cmds.len());
-            for cmd in cmds.iter().take(5) {
-                let code = cmd.exit_code.unwrap_or(-1);
-                let _ = writeln!(
-                    out,
-                    "    exit {} | {} | {}",
-                    code,
-                    cmd.command,
-                    format_time(cmd.started_at)
-                );
-            }
-            if cmds.len() > 5 {
-                let _ = writeln!(out, "    ... and {} more", cmds.len() - 5);
-            }
+            response.line(format!(
+                "  prompt \"{}\" — {} failed",
+                conv::clip(prompt, conv::PROMPT_MAX_CHARS),
+                cmds.len()
+            ));
+            write_rows(&mut response, cmds, per_group, |cmd| {
+                format!("    {}", command_row(cmd, detail))
+            });
         }
-        out.push('\n');
+        response.blank();
     }
 
-    // Show non-prompt failures
     if !no_prompt_failures.is_empty() {
-        let _ = writeln!(out, "OTHER FAILURES (no prompt captured):");
-        for cmd in no_prompt_failures.iter().take(10) {
-            let code = cmd.exit_code.unwrap_or(-1);
-            let executor = cmd.executor.as_deref().unwrap_or("unknown");
-            let _ = writeln!(
-                out,
-                "  exit {} | {} | {} | {}",
-                code,
-                cmd.command,
-                executor,
-                format_time(cmd.started_at)
-            );
-        }
-        if no_prompt_failures.len() > 10 {
-            let _ = writeln!(out, "  ... and {} more", no_prompt_failures.len() - 10);
-        }
+        response.line("FAILURES WITH NO PROMPT RECORDED:");
+        write_rows(&mut response, &no_prompt_failures, per_group, |cmd| {
+            format!("  {}", command_row(cmd, detail))
+        });
     }
 
-    Ok(out)
+    response = response.note(
+        "the exit code is all suvadu recorded; the error text these commands printed was never \
+         captured, so why each one failed is not available here",
+    );
+    if !detail {
+        response = response.note(conv::DETAIL_HINT);
+    }
+    Ok(response
+        .shown(failures.len())
+        .matched(matched)
+        .next_offset(next)
+        .render())
 }
 
 fn handle_suggest_next(
@@ -1152,7 +1345,7 @@ fn handle_suggest_next(
     args: &Value,
     mcp: &crate::config::McpConfig,
 ) -> Result<String, String> {
-    let limit = usize::try_from(get_int(args, "limit", 10)).unwrap_or(10);
+    let (limit, offset) = paging(args, 10);
     let directory = get_str(args, "directory");
 
     // Get recent commands (last 7 days) to build frecency scores
@@ -1178,15 +1371,8 @@ fn handle_suggest_next(
     };
 
     let entries = repo
-        .get_entries_filtered(2000, 0, &qf)
+        .get_entries_filtered(FRECENCY_SAMPLE, 0, &qf)
         .map_err(|e| format!("query failed: {e}"))?;
-
-    if entries.is_empty() {
-        let ctx = directory.map_or_else(String::new, |d| format!(" in {d}"));
-        return Ok(format!(
-            "No recent commands found{ctx} to base suggestions on."
-        ));
-    }
 
     // Score each unique command by frecency
     // Score = sum(weight) where weight depends on recency tier
@@ -1214,36 +1400,40 @@ fn handle_suggest_next(
         }
     }
 
-    // Sort by score descending
+    // Sort by score descending, then page.
     let mut sorted: Vec<_> = scores.into_iter().collect();
     sorted.sort_by(|a, b| {
         b.1 .0
             .partial_cmp(&a.1 .0)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(b.0))
     });
-    sorted.truncate(limit);
+    let matched = sorted.len();
+    let page: Vec<_> = sorted.into_iter().skip(offset).take(limit).collect();
 
     let ctx = directory.map_or_else(String::new, |d| format!(" in {d}"));
-    let mut out = String::new();
-    let _ = writeln!(out, "Suggested next commands{ctx} (based on frecency):\n");
-    for (i, (cmd, (score, count, last_exit))) in sorted.iter().enumerate() {
-        let exit_display = match last_exit {
-            Some(0) => "last: ok".to_string(),
-            Some(c) => format!("last: exit {c}"),
-            None => "last: ?".to_string(),
-        };
-        let _ = writeln!(
-            out,
-            "  {}. {} ({}x, score: {:.0}, {})",
-            i + 1,
-            cmd,
-            count,
-            score,
-            exit_display,
-        );
+    let mut response = conv::Response::new(
+        format!("{} suggested next commands{ctx}", page.len()),
+        conv::Provenance::Inferred,
+    );
+    for (cmd, (score, count, last_exit)) in &page {
+        response.line(format!(
+            "  {} | ran {count}x | frecency score {score:.0} | last {}",
+            conv::clip(cmd, conv::ROW_MAX_CHARS),
+            conv::exit(*last_exit),
+        ));
     }
-
-    Ok(out)
+    Ok(response
+        .shown(page.len())
+        .matched(matched)
+        .next_offset((offset.saturating_add(limit) < matched).then(|| offset.saturating_add(limit)))
+        .note(format!(
+            "ranked by frecency (frequency plus recency) over the {} most recent commands in the \
+             last 7d; a suggestion is a guess about what you might run, never a recommendation \
+             that it is safe or correct",
+            entries.len()
+        ))
+        .render())
 }
 
 fn handle_assess_risk(args: &Value) -> Result<String, String> {
@@ -1262,69 +1452,54 @@ fn handle_assess_risk(args: &Value) -> Result<String, String> {
         return Err("No commands provided".to_string());
     }
 
-    let mut out = String::new();
+    let mut critical = 0usize;
+    let mut high = 0usize;
+    let mut medium = 0usize;
+    let mut response = conv::Response::new(
+        format!("Risk assessment for {} command(s)", commands.len()),
+        conv::Provenance::Inferred,
+    );
 
-    if commands.len() == 1 {
-        let cmd = commands[0];
-        let assessment = risk::assess_risk(cmd);
+    for cmd in &commands {
         let level = risk::risk_level(cmd);
-
-        let _ = writeln!(out, "Risk assessment for: {cmd}\n");
-        let _ = writeln!(out, "  Level: {}", level.label().to_uppercase());
-
-        if let Some(a) = assessment {
-            let _ = writeln!(out, "  Category: {}", a.category);
-            let _ = writeln!(out, "  Reason: {}", a.description);
-        } else {
-            let _ = writeln!(out, "  No known risk patterns detected.");
+        let assessment = risk::assess_risk(cmd);
+        match level {
+            risk::RiskLevel::Critical => critical += 1,
+            risk::RiskLevel::High => high += 1,
+            risk::RiskLevel::Medium => medium += 1,
+            _ => {}
         }
-    } else {
-        let _ = writeln!(out, "Risk assessment for {} commands:\n", commands.len());
-
-        let mut critical = 0usize;
-        let mut high = 0usize;
-        let mut medium = 0usize;
-
-        for cmd in &commands {
-            let level = risk::risk_level(cmd);
-            let assessment = risk::assess_risk(cmd);
-            let label = level.label().to_uppercase();
-
-            match level {
-                risk::RiskLevel::Critical => critical += 1,
-                risk::RiskLevel::High => high += 1,
-                risk::RiskLevel::Medium => medium += 1,
-                _ => {}
-            }
-
-            if level >= risk::RiskLevel::Medium {
-                let reason = assessment.as_ref().map_or("", |a| a.description.as_ref());
-                let _ = writeln!(out, "  {label}: {cmd}");
-                if !reason.is_empty() {
-                    let _ = writeln!(out, "    → {reason}");
-                }
-            } else {
-                let _ = writeln!(out, "  {label}: {cmd}");
-            }
-        }
-
-        out.push('\n');
-        if critical > 0 || high > 0 {
-            let _ = writeln!(
-                out,
-                "⚠ WARNING: {critical} critical, {high} high-risk commands detected."
-            );
-        } else if medium > 0 {
-            let _ = writeln!(
-                out,
-                "⚡ {medium} medium-risk commands detected. Review before executing."
-            );
-        } else {
-            let _ = writeln!(out, "All commands appear safe.");
-        }
+        response.line(format!(
+            "{} | {} | {}",
+            level.label().to_uppercase(),
+            assessment
+                .as_ref()
+                .map_or_else(|| conv::UNKNOWN.to_string(), |a| a.category.to_string()),
+            conv::clip(cmd, conv::ROW_MAX_CHARS),
+        ));
+        response.line(format!(
+            "    matched rule: {}",
+            assessment
+                .as_ref()
+                .map_or("none — no known risk pattern matched", |a| a
+                    .description
+                    .as_ref())
+        ));
     }
 
-    Ok(out)
+    response.blank();
+    response.line(format!(
+        "{critical} critical, {high} high, {medium} medium of {} assessed",
+        commands.len()
+    ));
+    Ok(response
+        .shown(commands.len())
+        .matched(commands.len())
+        .note(
+            "a rating is a pattern match on the command text, not an execution or a sandbox; \
+             suvadu did not run the command and cannot know what it would touch",
+        )
+        .render())
 }
 
 // ── Agent session tools ─────────────────────────────────────
@@ -1448,36 +1623,12 @@ fn resume_id(session_id: &str) -> &str {
         .unwrap_or(session_id)
 }
 
-/// Format a relative time description like "3 hours ago" from millisecond timestamps.
-fn format_relative_time(ms: i64) -> String {
-    let now = chrono::Utc::now().timestamp_millis();
-    let diff = now - ms;
-    if diff < 0 {
-        return "just now".to_string();
-    }
-    let minutes = diff / 60_000;
-    let hours = minutes / 60;
-    let days = hours / 24;
-    if days > 0 {
-        format!("{days} day{} ago", if days == 1 { "" } else { "s" })
-    } else if hours > 0 {
-        format!("{hours} hour{} ago", if hours == 1 { "" } else { "s" })
-    } else if minutes > 0 {
-        format!(
-            "{minutes} minute{} ago",
-            if minutes == 1 { "" } else { "s" }
-        )
-    } else {
-        "just now".to_string()
-    }
-}
-
 fn handle_find_agent_session(
     repo: &Repository,
     args: &Value,
     mcp: &crate::config::McpConfig,
 ) -> Result<String, String> {
-    let limit = usize::try_from(get_int(args, "limit", 10)).unwrap_or(10);
+    let (limit, offset) = paging(args, 10);
     let directory = get_str(args, "directory");
     let executor = get_str(args, "executor");
     let prompt_text = get_str(args, "prompt_text");
@@ -1515,47 +1666,63 @@ fn handle_find_agent_session(
         sessions.retain(|s| s.first_prompt.to_lowercase().contains(&lower));
     }
 
-    sessions.truncate(limit);
+    let matched = sessions.len();
+    let page: Vec<_> = sessions.into_iter().skip(offset).take(limit).collect();
+    let detail = detail(args);
 
-    if sessions.is_empty() {
-        return Ok("No agent sessions found.".to_string());
-    }
-
-    let mut out = format!(
-        "{} agent session{}:\n\n",
-        sessions.len(),
-        if sessions.len() == 1 { "" } else { "s" }
+    let mut response = conv::Response::new(
+        format!("{} agent sessions on this page", page.len()),
+        conv::Provenance::ObservedAndInferred,
     );
-    for (i, s) in sessions.iter().enumerate() {
-        let rel = format_relative_time(s.last_command_at);
-        let duration_mins = (s.last_command_at - s.first_command_at) / 60_000;
-        let dur_str = if duration_mins < 1 {
-            "< 1 min".to_string()
-        } else {
-            format!("{duration_mins} min")
-        };
-        let _ = writeln!(out, "{}. {} ({})", i + 1, s.session_id, s.executor);
-        let _ = writeln!(
-            out,
-            "   {} | {} | {} commands | {} ok, {} failed",
-            rel, dur_str, s.command_count, s.success_count, s.failure_count,
-        );
-        if !s.directories.is_empty() {
-            let _ = writeln!(out, "   Directories: {}", s.directories.join(", "));
-        }
+    for s in &page {
+        response.line(format!(
+            "{} | {} | {} commands, {} ok | last activity {}",
+            s.session_id,
+            s.executor,
+            s.command_count,
+            conv::rate(s.success_count, s.command_count),
+            conv::when(s.last_command_at),
+        ));
         if !s.first_prompt.is_empty() {
-            let prompt_display = util::truncate_str(&s.first_prompt, 80, "...");
-            let _ = writeln!(out, "   First prompt: \"{prompt_display}\"");
+            response.line(format!(
+                "    first prompt \"{}\"",
+                conv::clip(&s.first_prompt, conv::PROMPT_MAX_CHARS)
+            ));
         }
-        let _ = writeln!(out, "   Risk: {}", s.risk_summary);
-
-        let rid = resume_id(&s.session_id);
-        if s.session_id.starts_with("claude-") {
-            let _ = writeln!(out, "   Resume: claude --resume {rid}");
+        if detail {
+            response.line(format!(
+                "    started {} | ran {} | directories {} | failed {}",
+                conv::timestamp(s.first_command_at),
+                conv::duration(s.last_command_at - s.first_command_at),
+                if s.directories.is_empty() {
+                    conv::UNKNOWN.to_string()
+                } else {
+                    s.directories.join(", ")
+                },
+                s.failure_count,
+            ));
+            response.line(format!("    risk (inferred): {}", s.risk_summary));
+            if s.session_id.starts_with("claude-") {
+                response.line(format!(
+                    "    resume: claude --resume {}",
+                    resume_id(&s.session_id)
+                ));
+            }
         }
-        out.push('\n');
     }
-    Ok(out)
+    if !detail {
+        response = response.note(conv::DETAIL_HINT);
+    }
+    Ok(response
+        .shown(page.len())
+        .matched(matched)
+        .next_offset((offset.saturating_add(limit) < matched).then(|| offset.saturating_add(limit)))
+        .note(
+            "sessions here are grouped from recorded shell commands; the risk summary is a rule \
+             match on command text, not an observed outcome. For sessions captured from an \
+             agent's own transcript use list_agent_sessions",
+        )
+        .render())
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1565,7 +1732,7 @@ fn handle_replay_agent_session(
     mcp: &crate::config::McpConfig,
 ) -> Result<String, String> {
     let raw_id = get_str(args, "session_id").ok_or("session_id is required")?;
-    let limit = usize::try_from(get_int(args, "limit", 100)).unwrap_or(100);
+    let (limit, offset) = paging(args, 100);
 
     // Normalize: try as-is, then with prefixes
     let session_id = {
@@ -1592,129 +1759,127 @@ fn handle_replay_agent_session(
         found.ok_or_else(|| format!("No session found for '{raw_id}'"))?
     };
 
-    let entries = repo
+    let mut entries = repo
         .get_replay_entries(
             Some(&session_id),
             &crate::repository::ReplayFilter {
-                limit: Some(limit),
+                limit: Some(limit.saturating_add(1)),
+                offset,
                 exclude_dirs: &mcp.exclude_dirs,
                 ..Default::default()
             },
         )
         .map_err(|e| format!("query failed: {e}"))?;
+    let more = entries.len() > limit;
+    entries.truncate(limit);
 
-    if entries.is_empty() {
+    if entries.is_empty() && offset == 0 {
         return Err(format!("No commands found for session '{session_id}'"));
     }
 
     let executor = entries
         .first()
-        .and_then(|e| e.executor.clone())
-        .unwrap_or_else(|| "unknown".to_string());
+        .and_then(|e| e.executor.as_deref())
+        .unwrap_or(conv::UNKNOWN)
+        .to_string();
     let total = entries.len();
     let success = entries.iter().filter(|e| e.exit_code == Some(0)).count();
-    let rate = (success * 100).checked_div(total).unwrap_or(0);
-
-    let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "Session {session_id} ({executor}) — {total} commands, {rate}% success\n",
-    );
-    let _ = writeln!(out, "Timeline:\n");
-
-    let mut last_prompt = String::new();
-    for entry in &entries {
-        // Show prompt if it changed
-        let prompt = entry
-            .context
-            .as_ref()
-            .and_then(|ctx| ctx.get("agent_prompt"))
-            .cloned()
-            .unwrap_or_default();
-        if !prompt.is_empty() && prompt != last_prompt {
-            let _ = writeln!(
-                out,
-                "  [PROMPT] \"{}\"",
-                util::truncate_str(&prompt, 200, "...")
-            );
-            let _ = writeln!(out, "           {}\n", format_time(entry.started_at));
-            last_prompt = prompt;
-        }
-
-        let exit = match entry.exit_code {
-            Some(0) => "ok".to_string(),
-            Some(c) => format!("exit {c}"),
-            None => "?".to_string(),
-        };
-        let dur = util::format_duration_ms(entry.duration_ms);
-        let _ = writeln!(out, "  [{exit:<7}] {}", entry.command);
-        let _ = writeln!(
-            out,
-            "           {} | {} | {}\n",
-            entry.cwd,
-            dur,
-            format_time(entry.started_at),
-        );
-    }
-
-    // Summary
     let failure = entries
         .iter()
         .filter(|e| e.exit_code.is_some_and(|c| c != 0))
         .count();
-    let mut dirs: Vec<String> = entries
+
+    let detail = detail(args);
+    let mut response = conv::Response::new(
+        format!(
+            "Session {session_id} ({executor}) — {total} commands on this page, {} ok, {failure} failed",
+            conv::rate(success, total)
+        ),
+        conv::Provenance::ObservedAndInferred,
+    );
+    response.line("TIMELINE (observed records, chronological):");
+
+    let mut last_prompt = String::new();
+    for entry in &entries {
+        if let Some(prompt) = entry_prompt(entry) {
+            if prompt != last_prompt {
+                response.line(format!(
+                    "  [prompt] \"{}\" — {}",
+                    conv::clip(prompt, conv::PROMPT_MAX_CHARS),
+                    conv::timestamp(entry.started_at)
+                ));
+                last_prompt = prompt.to_string();
+            }
+        }
+        response.line(format!("  {}", command_row(entry, detail)));
+    }
+
+    let mut dirs: Vec<&str> = entries
         .iter()
-        .map(|e| e.cwd.clone())
-        .collect::<std::collections::HashSet<_>>()
+        .map(|e| e.cwd.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
-    dirs.sort();
+    dirs.sort_unstable();
 
     let risk_data = crate::risk::session_risk(&entries);
     let mut risk_parts = Vec::new();
-    if risk_data.critical_count > 0 {
-        risk_parts.push(format!("{} critical", risk_data.critical_count));
+    for (count, label) in [
+        (risk_data.critical_count, "critical"),
+        (risk_data.high_count, "high"),
+        (risk_data.medium_count, "medium"),
+        (risk_data.safe_count + risk_data.low_count, "safe/low"),
+    ] {
+        if count > 0 {
+            risk_parts.push(format!("{count} {label}"));
+        }
     }
-    if risk_data.high_count > 0 {
-        risk_parts.push(format!("{} high", risk_data.high_count));
-    }
-    if risk_data.medium_count > 0 {
-        risk_parts.push(format!("{} medium", risk_data.medium_count));
-    }
-    let safe = risk_data.safe_count + risk_data.low_count;
-    if safe > 0 {
-        risk_parts.push(format!("{safe} safe"));
-    }
-    let risk_str = if risk_parts.is_empty() {
-        "all safe".to_string()
-    } else {
-        risk_parts.join(", ")
-    };
 
     let first_at = entries.iter().map(|e| e.started_at).min().unwrap_or(0);
     let last_at = entries.iter().map(|e| e.ended_at).max().unwrap_or(0);
-    let duration_mins = (last_at - first_at) / 60_000;
-    let duration_str = if duration_mins < 1 {
-        "< 1 minute".to_string()
-    } else {
-        format!(
-            "{duration_mins} minute{}",
-            if duration_mins == 1 { "" } else { "s" }
-        )
-    };
 
-    let _ = writeln!(out, "Summary:");
-    let _ = writeln!(out, "  Commands: {total} ({success} ok, {failure} failed)");
-    let _ = writeln!(out, "  Duration: {duration_str}");
-    let _ = writeln!(out, "  Directories: {}", dirs.join(", "));
-    let _ = writeln!(out, "  Risk: {risk_str}");
-
-    let rid = resume_id(&session_id);
+    response.blank();
+    response.line("SUMMARY of this page:");
+    response.line(format!(
+        "  commands: {total} ({} ok, {failure} failed)",
+        conv::rate(success, total)
+    ));
+    response.line(format!(
+        "  span: {} → {} ({})",
+        conv::timestamp(first_at),
+        conv::timestamp(last_at),
+        conv::duration(last_at - first_at)
+    ));
+    response.line(format!("  directories: {}", dirs.join(", ")));
+    response.line(format!(
+        "  risk (inferred from command text): {}",
+        if risk_parts.is_empty() {
+            conv::UNKNOWN.to_string()
+        } else {
+            risk_parts.join(", ")
+        }
+    ));
     if session_id.starts_with("claude-") {
-        let _ = writeln!(out, "  Resume: claude --resume {rid}");
+        response.line(format!(
+            "  resume: claude --resume {}",
+            resume_id(&session_id)
+        ));
     }
 
-    Ok(out)
+    if !mcp.exclude_dirs.is_empty() {
+        response = response.note(EXCLUSION_NOTE);
+    }
+    if !detail {
+        response = response.note(conv::DETAIL_HINT);
+    }
+    Ok(response
+        .shown(total)
+        .next_offset(more.then(|| offset.saturating_add(limit)))
+        .note(
+            "the summary describes this page only; follow next_offset until it is none before \
+             treating it as the whole session",
+        )
+        .render())
 }
 
 struct CmdFailStats {
@@ -1748,12 +1913,8 @@ fn handle_learn_from_failures(
     };
 
     let entries = repo
-        .get_entries_filtered(5000, 0, &qf)
+        .get_entries_filtered(ANALYSIS_SAMPLE, 0, &qf)
         .map_err(|e| format!("query failed: {e}"))?;
-
-    if entries.is_empty() {
-        return Ok(format!("No command history in the last {days} days."));
-    }
 
     // Group by command and compute failure stats
     let mut stats: std::collections::HashMap<&str, CmdFailStats> = std::collections::HashMap::new();
@@ -1793,42 +1954,50 @@ fn handle_learn_from_failures(
         rate_b.cmp(&rate_a).then(b.1.fails.cmp(&a.1.fails))
     });
 
-    if problem_cmds.is_empty() {
-        return Ok(format!(
-            "No recurring failures in the last {days} days. All frequently-run commands have acceptable success rates."
-        ));
-    }
+    let matched = problem_cmds.len();
+    let (limit, offset) = paging(args, 10);
+    let page: Vec<_> = problem_cmds.into_iter().skip(offset).take(limit).collect();
 
-    let mut out = format!(
-        "Recurring failures (last {days} days, {} problem commands):\n\n",
-        problem_cmds.len()
+    let mut response = conv::Response::new(
+        format!(
+            "{} commands in the {} failed on 40% or more of their recorded runs \
+             (3 runs minimum)",
+            matched,
+            conv::window_days(days)
+        ),
+        conv::Provenance::ObservedAndInferred,
     );
-
-    for (cmd, s) in problem_cmds.iter().take(10) {
-        let rate = s.fails * 100 / s.total;
-        let display = util::truncate_str(cmd, 60, "...");
-        let rel = format_relative_time(s.last_fail_at);
-        let _ = writeln!(
-            out,
-            "  {display}\n    Failed {}/{} runs ({rate}%) — last failure {rel}",
-            s.fails, s.total,
-        );
+    for (cmd, s) in &page {
+        response.line(format!(
+            "{} | failed {} | last failure {}",
+            conv::clip(cmd, conv::ROW_MAX_CHARS),
+            conv::rate(s.fails, s.total),
+            conv::when(s.last_fail_at),
+        ));
         if s.agent_total > 0 && s.total > s.agent_total {
-            let agent_rate = (s.agent_fails * 100)
-                .checked_div(s.agent_total)
-                .unwrap_or(0);
             let human_total = s.total - s.agent_total;
             let human_fails = s.fails - s.agent_fails;
-            let human_rate = (human_fails * 100).checked_div(human_total).unwrap_or(0);
-            let _ = writeln!(
-                out,
-                "    Agents: {agent_rate}% fail rate — Humans: {human_rate}% fail rate"
-            );
+            response.line(format!(
+                "    agents failed {} | humans failed {}",
+                conv::rate(s.agent_fails, s.agent_total),
+                conv::rate(human_fails, human_total),
+            ));
         }
-        out.push('\n');
     }
-
-    Ok(out)
+    Ok(response
+        .shown(page.len())
+        .matched(matched)
+        .next_offset((offset.saturating_add(limit) < matched).then(|| offset.saturating_add(limit)))
+        .note(format!(
+            "computed over the {} most recent commands in this window",
+            entries.len()
+        ))
+        .note(
+            "these are failure rates, not explanations: suvadu recorded that the command exited \
+             non-zero and nothing about why. Whether a later run fixed anything is not something \
+             suvadu observed either",
+        )
+        .render())
 }
 
 fn is_build_test_lint(cmd: &str) -> bool {
@@ -1842,17 +2011,11 @@ fn is_build_test_lint(cmd: &str) -> bool {
         || cmd.starts_with("make")
 }
 
-fn format_build_test_lint(entries: &[crate::models::Entry], out: &mut String) {
-    let btl: Vec<_> = entries
-        .iter()
-        .filter(|e| is_build_test_lint(&e.command))
-        .collect();
-    if btl.is_empty() {
-        return;
-    }
+/// Build/test/lint commands with their recorded pass rate.
+fn build_test_lint_rows(entries: &[crate::models::Entry], shown: usize) -> Vec<String> {
     let mut counts: std::collections::HashMap<&str, (usize, usize)> =
         std::collections::HashMap::new();
-    for e in &btl {
+    for e in entries.iter().filter(|e| is_build_test_lint(&e.command)) {
         let entry = counts.entry(e.command.as_str()).or_insert((0, 0));
         entry.0 += 1;
         if e.exit_code == Some(0) {
@@ -1860,15 +2023,19 @@ fn format_build_test_lint(entries: &[crate::models::Entry], out: &mut String) {
         }
     }
     let mut sorted: Vec<_> = counts.into_iter().collect();
-    sorted.sort_by_key(|b| std::cmp::Reverse((b.1).0));
-
-    let _ = writeln!(out, "  Build/test/lint commands:");
-    for (cmd, (total, success)) in sorted.iter().take(5) {
-        let rate = if *total > 0 { success * 100 / total } else { 0 };
-        let display = util::truncate_str(cmd, 50, "...");
-        let _ = writeln!(out, "    {display} — {total} runs, {rate}% success");
-    }
-    out.push('\n');
+    sorted.sort_by(|a, b| (b.1).0.cmp(&(a.1).0).then(a.0.cmp(b.0)));
+    sorted
+        .into_iter()
+        .take(shown)
+        .map(|(cmd, (total, success))| {
+            format!(
+                "    {} — {} runs, {} ok",
+                conv::clip(cmd, conv::ROW_MAX_CHARS),
+                total,
+                conv::rate(success, total)
+            )
+        })
+        .collect()
 }
 
 fn handle_project_context(
@@ -1878,6 +2045,7 @@ fn handle_project_context(
 ) -> Result<String, String> {
     let days = get_int(args, "days", i64::from(mcp.default_days));
     let directory = get_str(args, "directory");
+    let detail = detail(args);
 
     let now = chrono::Utc::now().timestamp_millis();
     let after = now - days * 24 * 60 * 60 * 1000;
@@ -1895,147 +2063,231 @@ fn handle_project_context(
     };
 
     let entries = repo
-        .get_entries_filtered(5000, 0, &qf)
+        .get_entries_filtered(ANALYSIS_SAMPLE, 0, &qf)
         .map_err(|e| format!("query failed: {e}"))?;
 
-    if entries.is_empty() {
-        return Ok(format!("No command history in the last {days} days."));
-    }
-
+    // A briefing is the worst place for an undifferentiated dump: the
+    // caller has not asked a question yet, so the default is a handful of
+    // named rows per section with the IDs to follow up on, and `detail`
+    // opens each section up.
+    let per_section = if detail { 10 } else { 3 };
     let dir_label = directory.unwrap_or("all directories");
-    let mut out = format!(
-        "Project context for {dir_label} (last {days} days, {} commands):\n\n",
-        entries.len()
-    );
 
-    // Top commands by frequency
     let mut cmd_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for e in &entries {
         let program = e.command.split_whitespace().next().unwrap_or(&e.command);
         *cmd_counts.entry(program).or_default() += 1;
     }
     let mut top_cmds: Vec<_> = cmd_counts.into_iter().collect();
-    top_cmds.sort_by_key(|b| std::cmp::Reverse(b.1));
-    top_cmds.truncate(10);
+    top_cmds.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
 
-    let _ = writeln!(out, "  Common commands:");
-    for (cmd, count) in &top_cmds {
-        let _ = writeln!(out, "    {count:>4}x  {cmd}");
+    let mut response = conv::Response::new(
+        format!(
+            "Project context for {dir_label} — {} commands recorded in the {}",
+            entries.len(),
+            conv::window_days(days)
+        ),
+        conv::Provenance::ObservedAndInferred,
+    );
+
+    response.line("Common programs (inferred, ranked by frequency):");
+    write_rows(&mut response, &top_cmds, per_section * 2, |(cmd, count)| {
+        format!("    {count:>4}x  {cmd}")
+    });
+
+    let btl = build_test_lint_rows(&entries, per_section);
+    if !btl.is_empty() {
+        response.blank();
+        response.line("Build/test/lint commands (observed runs and exit codes):");
+        for row in &btl {
+            response.line(row);
+        }
     }
-    out.push('\n');
 
-    format_build_test_lint(&entries, &mut out);
-
-    // Recent failures (last 24h)
     let recent_failures: Vec<_> = entries
         .iter()
         .filter(|e| e.started_at >= day_ago && e.exit_code.is_some_and(|c| c != 0))
         .collect();
     if !recent_failures.is_empty() {
-        let _ = writeln!(out, "  Recent failures (last 24h):");
-        for e in recent_failures.iter().take(5) {
-            let code = e.exit_code.unwrap_or(-1);
-            let display = util::truncate_str(&e.command, 50, "...");
-            let rel = format_relative_time(e.started_at);
-            let _ = writeln!(out, "    exit {code} | {display} — {rel}");
-        }
-        out.push('\n');
+        response.blank();
+        response.line(format!(
+            "Failures in the last 24h ({} recorded):",
+            recent_failures.len()
+        ));
+        write_rows(&mut response, &recent_failures, per_section, |e| {
+            format!("    {}", command_row(e, false))
+        });
     }
 
-    // Agent activity
     let agent_sessions = build_session_groups(&entries);
     if !agent_sessions.is_empty() {
-        let _ = writeln!(
-            out,
-            "  Agent sessions ({} this week):",
+        response.blank();
+        response.line(format!(
+            "Agent sessions in this window ({}):",
             agent_sessions.len()
-        );
-        for s in agent_sessions.iter().take(3) {
-            let rel = format_relative_time(s.last_command_at);
-            let _ = writeln!(
-                out,
-                "    {} ({}, {}) — {} cmds, {} failed",
-                s.session_id, s.executor, rel, s.command_count, s.failure_count,
-            );
-            if !s.first_prompt.is_empty() {
-                let display = util::truncate_str(&s.first_prompt, 60, "...");
-                let _ = writeln!(out, "      \"{display}\"");
-            }
-        }
+        ));
+        write_rows(&mut response, &agent_sessions, per_section, |s| {
+            format!(
+                "    {} | {} | {} cmds, {} failed | last activity {}",
+                s.session_id,
+                s.executor,
+                s.command_count,
+                s.failure_count,
+                conv::timestamp(s.last_command_at)
+            )
+        });
     }
 
-    Ok(out)
+    if !detail {
+        response = response.note(
+            "concise briefing: pass detail=true to widen every section, or use \
+             learn_from_failures / what_failed / find_agent_session for one topic in full",
+        );
+    }
+    Ok(response
+        .shown(entries.len())
+        .note(format!(
+            "computed over the {} most recent commands in this window",
+            entries.len()
+        ))
+        .render())
 }
 
 // ── Skills tools ─────────────────────────────────────────────
 
 fn format_skill_summary(s: &crate::models::Skill) -> String {
     let triggers = if s.triggers.is_empty() {
-        String::new()
+        conv::UNKNOWN.to_string()
     } else {
-        format!(" [{}]", s.triggers.join(", "))
+        s.triggers.join(", ")
     };
-    format!("- {} ({}) — {}{}", s.name, s.scope, s.description, triggers)
+    format!(
+        "{} | scope {} | triggers {triggers} | {}",
+        s.name,
+        s.scope,
+        conv::clip(&s.description, conv::PROMPT_MAX_CHARS)
+    )
 }
 
-fn handle_list_skills(repo: &Repository, args: &Value) -> Result<String, String> {
+/// A skill scoped to a directory the user asked suvadu to keep quiet about
+/// discloses that directory's path just by being listed, so exclusions
+/// apply to skills as well as to commands.
+fn skill_visible(skill: &crate::models::Skill, mcp: &crate::config::McpConfig) -> bool {
+    skill.scope == crate::models::SKILL_SCOPE_GLOBAL
+        || !mcp.exclude_dirs.iter().any(|dir| {
+            let root = crate::repository::expand_tilde(dir);
+            let root = root.trim_end_matches('/');
+            !root.is_empty()
+                && (skill.scope == root
+                    || skill
+                        .scope
+                        .strip_prefix(root)
+                        .is_some_and(|rest| rest.starts_with('/')))
+        })
+}
+
+fn handle_list_skills(
+    repo: &Repository,
+    args: &Value,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
     let scope = get_str(args, "scope").or_else(|| get_str(args, "directory"));
-    let skills = repo
+    let (limit, offset) = paging(args, 50);
+    let all = repo
         .list_skills(scope, Some(crate::models::SKILL_STATUS_ACTIVE))
         .map_err(|e| format!("query failed: {e}"))?;
+    let visible: Vec<_> = all.into_iter().filter(|s| skill_visible(s, mcp)).collect();
+    let matched = visible.len();
+    let page: Vec<_> = visible.into_iter().skip(offset).take(limit).collect();
 
-    if skills.is_empty() {
-        return Ok(
-            "No skills in the shared library yet. Add one with `suv skills add <name>`."
-                .to_string(),
-        );
+    let mut response = conv::Response::new(
+        format!("{} active shared skills on this page", page.len()),
+        conv::Provenance::CallerReported,
+    );
+    for s in &page {
+        response.line(format_skill_summary(s));
     }
-
-    let mut out = format!("{} skill(s):\n\n", skills.len());
-    for s in &skills {
-        let _ = writeln!(out, "{}", format_skill_summary(s));
+    if page.is_empty() {
+        response.line("(none — add one with `suv skills add <name>`)");
     }
-    Ok(out)
+    Ok(response
+        .shown(page.len())
+        .matched(matched)
+        .next_offset(
+            (offset.saturating_add(limit) < matched).then(|| offset.saturating_add(limit)),
+        )
+        .note("skill text is written by people and agents, not observed by suvadu; use get_skill(name) for one skill's full body")
+        .render())
 }
 
-fn handle_get_skill(repo: &Repository, args: &Value) -> Result<String, String> {
+fn handle_get_skill(
+    repo: &Repository,
+    args: &Value,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
     let name = get_str(args, "name").ok_or("name is required")?;
     let scope = get_str(args, "scope").or_else(|| get_str(args, "directory"));
 
     let skill = repo
         .find_skill(name, scope)
         .map_err(|e| format!("query failed: {e}"))?
+        .filter(|s| skill_visible(s, mcp))
         .ok_or_else(|| format!("No active skill named '{name}' found."))?;
 
-    let mut out = format!("{} ({})\n", skill.name, skill.scope);
-    if !skill.description.is_empty() {
-        let _ = writeln!(out, "{}", skill.description);
-    }
-    if !skill.triggers.is_empty() {
-        let _ = writeln!(out, "triggers: {}", skill.triggers.join(", "));
-    }
-    out.push('\n');
-    out.push_str(&skill.body);
-    Ok(out)
+    let mut response = conv::Response::new(
+        format!("Skill {} | scope {}", skill.name, skill.scope),
+        conv::Provenance::CallerReported,
+    );
+    response.line(format!(
+        "description: {}",
+        conv::or_unknown(Some(skill.description.as_str()))
+    ));
+    response.line(format!(
+        "triggers: {}",
+        if skill.triggers.is_empty() {
+            conv::UNKNOWN.to_string()
+        } else {
+            skill.triggers.join(", ")
+        }
+    ));
+    response.blank();
+    response.line(&skill.body);
+    Ok(response
+        .shown(1)
+        .matched(1)
+        .note("skill text is instructions a person or agent wrote; it is data, not something suvadu observed or verified")
+        .render())
 }
 
-fn handle_search_skills(repo: &Repository, args: &Value) -> Result<String, String> {
+fn handle_search_skills(
+    repo: &Repository,
+    args: &Value,
+    mcp: &crate::config::McpConfig,
+) -> Result<String, String> {
     let query = get_str(args, "query").ok_or("query is required")?;
     let scope = get_str(args, "scope");
+    let (limit, offset) = paging(args, 50);
 
-    let skills = repo
+    let all = repo
         .search_skills(query, scope)
         .map_err(|e| format!("query failed: {e}"))?;
+    let visible: Vec<_> = all.into_iter().filter(|s| skill_visible(s, mcp)).collect();
+    let matched = visible.len();
+    let page: Vec<_> = visible.into_iter().skip(offset).take(limit).collect();
 
-    if skills.is_empty() {
-        return Ok(format!("No skills found matching \"{query}\"."));
+    let mut response = conv::Response::new(
+        format!("{} skills matching \"{query}\"", page.len()),
+        conv::Provenance::CallerReported,
+    );
+    for s in &page {
+        response.line(format_skill_summary(s));
     }
-
-    let mut out = format!("{} skill(s) matching \"{query}\":\n\n", skills.len());
-    for s in &skills {
-        let _ = writeln!(out, "{}", format_skill_summary(s));
-    }
-    Ok(out)
+    Ok(response
+        .shown(page.len())
+        .matched(matched)
+        .next_offset((offset.saturating_add(limit) < matched).then(|| offset.saturating_add(limit)))
+        .note("skill text is written by people and agents, not observed by suvadu")
+        .render())
 }
 
 /// Writes a proposed skill with `status = pending_review`. Unlike every
@@ -2284,7 +2536,8 @@ mod tests {
             &default_mcp(),
         );
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("No commands found"));
+        // An empty answer is still a conventions-shaped answer.
+        assert!(result.unwrap().contains("shown: 0 of 0"));
     }
 
     #[test]
@@ -2292,7 +2545,7 @@ mod tests {
         let (_dir, repo) = crate::test_utils::test_repo();
         let result = call_tool(&repo, "recent_commands", &json!({}), &default_mcp());
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("No recent commands"));
+        assert!(result.unwrap().contains("shown: 0 of 0"));
     }
 
     #[test]
@@ -2307,7 +2560,7 @@ mod tests {
         let (_dir, repo) = crate::test_utils::test_repo();
         let result = call_tool(&repo, "list_sessions", &json!({}), &default_mcp());
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("No sessions found"));
+        assert!(result.unwrap().contains("shown: 0"));
     }
 
     #[test]
@@ -2315,7 +2568,7 @@ mod tests {
         let (_dir, repo) = crate::test_utils::test_repo();
         let result = call_tool(&repo, "get_prompts", &json!({}), &default_mcp());
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("No agent prompts"));
+        assert!(result.unwrap().contains("shown: 0 of 0"));
     }
 
     #[test]
@@ -2459,10 +2712,13 @@ mod tests {
         assert!(result.is_ok());
         let text = result.unwrap();
         assert!(
-            text.contains("1 succeeded"),
-            "should report 1 success: {text}"
+            text.contains("1/2 (50%) succeeded"),
+            "should report 1 success out of 2: {text}"
         );
-        assert!(text.contains("1 failed"), "should report 1 failure: {text}");
+        assert!(
+            text.contains("exit 2"),
+            "should show the failed run's exit code: {text}"
+        );
         assert!(text.contains("make test"), "should contain the command");
     }
 
@@ -2515,7 +2771,9 @@ mod tests {
         let (_dir, repo) = crate::test_utils::test_repo();
         let result = call_tool(&repo, "what_changed", &json!({}), &default_mcp());
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("No file-modifying operations"));
+        assert!(result
+            .unwrap()
+            .contains("no successful file-modifying command"));
     }
 
     #[test]
@@ -2564,7 +2822,7 @@ mod tests {
         let (_dir, repo) = crate::test_utils::test_repo();
         let result = call_tool(&repo, "what_failed", &json!({}), &default_mcp());
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("No failures"));
+        assert!(result.unwrap().contains("shown: 0 of 0"));
     }
 
     #[test]
@@ -2597,7 +2855,10 @@ mod tests {
         let result = call_tool(&repo, "what_failed", &json!({}), &default_mcp());
         assert!(result.is_ok());
         let text = result.unwrap();
-        assert!(text.contains("1 failure"), "should count failure: {text}");
+        assert!(
+            text.contains("1 failed commands on this page"),
+            "should count failure: {text}"
+        );
         assert!(text.contains("run the tests"), "should show prompt: {text}");
         assert!(text.contains("cargo test"), "should show command: {text}");
     }
@@ -2607,7 +2868,7 @@ mod tests {
         let (_dir, repo) = crate::test_utils::test_repo();
         let result = call_tool(&repo, "suggest_next", &json!({}), &default_mcp());
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("No recent commands"));
+        assert!(result.unwrap().contains("shown: 0 of 0"));
     }
 
     #[test]
@@ -2719,7 +2980,7 @@ mod tests {
         assert!(result.is_ok());
         let text = result.unwrap();
         assert!(
-            text.contains("3 commands"),
+            text.contains("3 command(s)"),
             "should assess 3 commands: {text}"
         );
         assert!(
@@ -2849,7 +3110,7 @@ mod tests {
         let result = call_tool(&repo, "find_agent_session", &json!({}), &default_mcp());
         assert!(result.is_ok());
         assert!(
-            result.unwrap().contains("No agent sessions found"),
+            result.unwrap().contains("shown: 0 of 0"),
             "should report no sessions"
         );
     }
@@ -2958,7 +3219,8 @@ mod tests {
         let result = call_tool(
             &repo,
             "find_agent_session",
-            &json!({"executor": "claude-code"}),
+            // The resume hint is detail, not part of the concise row.
+            &json!({"executor": "claude-code", "detail": true}),
             &default_mcp(),
         );
         assert!(result.is_ok());
@@ -3002,14 +3264,17 @@ mod tests {
             text.contains("3 commands"),
             "should show command count: {text}"
         );
-        assert!(text.contains("[PROMPT]"), "should show prompts: {text}");
+        assert!(text.contains("[prompt]"), "should show prompts: {text}");
         assert!(
             text.contains("refactor auth module"),
             "should show prompt text: {text}"
         );
         assert!(text.contains("grep"), "should show commands: {text}");
         assert!(text.contains("npm test"), "should show commands: {text}");
-        assert!(text.contains("Summary:"), "should show summary: {text}");
+        assert!(
+            text.contains("SUMMARY of this page:"),
+            "should show summary: {text}"
+        );
     }
 
     #[test]
@@ -3063,7 +3328,7 @@ mod tests {
         let (_dir, repo) = crate::test_utils::test_repo();
         let result = call_tool(&repo, "learn_from_failures", &json!({}), &default_mcp());
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("No command history"));
+        assert!(result.unwrap().contains("shown: 0 of 0"));
     }
 
     #[test]
@@ -3137,7 +3402,7 @@ mod tests {
         let result = call_tool(&repo, "learn_from_failures", &json!({}), &default_mcp());
         assert!(result.is_ok());
         assert!(
-            result.unwrap().contains("No recurring failures"),
+            result.unwrap().contains("shown: 0 of 0"),
             "should report no problems"
         );
     }
@@ -3149,7 +3414,7 @@ mod tests {
         let (_dir, repo) = crate::test_utils::test_repo();
         let result = call_tool(&repo, "project_context", &json!({}), &default_mcp());
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("No command history"));
+        assert!(result.unwrap().contains("0 commands recorded"));
     }
 
     #[test]
@@ -3161,7 +3426,7 @@ mod tests {
         assert!(result.is_ok());
         let text = result.unwrap();
         assert!(
-            text.contains("Common commands"),
+            text.contains("Common programs"),
             "should show common commands: {text}"
         );
         assert!(
@@ -3184,8 +3449,12 @@ mod tests {
         assert!(result.is_ok());
         let text = result.unwrap();
         assert!(
-            text.contains("git status") || text.contains("git add"),
+            text.contains("git"),
             "should show cursor commands from /other-project: {text}"
+        );
+        assert!(
+            text.contains("cursor-def456"),
+            "should show the cursor session from /other-project: {text}"
         );
         assert!(
             !text.contains("grep"),
@@ -3211,11 +3480,9 @@ mod tests {
     #[test]
     fn test_list_skills_empty() {
         let (_dir, repo) = crate::test_utils::test_repo();
-        let result = call_tool(&repo, "list_skills", &json!({}), &default_mcp());
-        assert_eq!(
-            result.unwrap(),
-            "No skills in the shared library yet. Add one with `suv skills add <name>`."
-        );
+        let result = call_tool(&repo, "list_skills", &json!({}), &default_mcp()).unwrap();
+        assert!(result.contains("suv skills add"), "{result}");
+        assert!(result.contains("shown: 0 of 0"), "{result}");
     }
 
     #[test]
@@ -3461,7 +3728,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            result.contains("No previous runs"),
+            result.contains("shown: 0 of 0"),
             "excluded dir's command should be invisible: {result}"
         );
     }
@@ -3494,13 +3761,16 @@ mod tests {
         seed_two_dirs(&repo);
 
         let without_exclusion = call_tool(&repo, "get_stats", &json!({}), &default_mcp()).unwrap();
-        assert!(without_exclusion.contains("Total commands: 2"));
+        assert!(
+            without_exclusion.contains("2 commands"),
+            "{without_exclusion}"
+        );
 
         let mut mcp = default_mcp();
         mcp.exclude_dirs = vec!["/Users/test/.ssh".to_string()];
         let with_exclusion = call_tool(&repo, "get_stats", &json!({}), &mcp).unwrap();
         assert!(
-            with_exclusion.contains("Total commands: 1"),
+            with_exclusion.contains("1 commands"),
             "excluded dir's entry should not count: {with_exclusion}"
         );
     }

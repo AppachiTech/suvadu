@@ -31,6 +31,34 @@ struct SummarySource<'a> {
 /// Longest row preview kept, in characters.
 const PREVIEW_MAX_CHARS: usize = 120;
 
+/// The highest `ai_sources.adapter_version` any adapter in this build
+/// writes. A stored source above it came from a newer suvadu, so reads
+/// say so instead of presenting possibly-misread records as complete.
+const MAX_SUPPORTED_ADAPTER_VERSION: u32 = {
+    let mut max = codex::ADAPTER_VERSION;
+    if claude::ADAPTER_VERSION > max {
+        max = claude::ADAPTER_VERSION;
+    }
+    if opencode::ADAPTER_VERSION > max {
+        max = opencode::ADAPTER_VERSION;
+    }
+    max
+};
+
+/// Decode a stored record, or count it as unreadable and move on.
+///
+/// A single corrupt row used to make the whole session fail to load — and
+/// worse, vanish from `list_agent_sessions` entirely, because the list
+/// treats a validation error as "not visible". Silently disappearing is
+/// the one behaviour a trust-focused read must not have, so a bad row is
+/// skipped, counted, and named in `capture.known_missing`.
+fn decode_or_skip<T: serde::de::DeserializeOwned>(text: &str, unreadable: &mut usize) -> Option<T> {
+    serde_json::from_str(text).ok().or_else(|| {
+        *unreadable += 1;
+        None
+    })
+}
+
 /// Collapse captured text into one bounded line for a session row. Never an
 /// identity: two sessions can legitimately share a preview, which is exactly
 /// why the deterministic ID stays on the row beside it.
@@ -681,10 +709,10 @@ impl Repository {
         } else {
             None
         };
+        let mut unreadable = 0_usize;
         let usage = usage
-            .map(|data| decode::<AiEvent>(&data).map(|event| event.data["total"].clone()))
-            .transpose()?
-            .unwrap_or(Value::Null);
+            .and_then(|data| decode_or_skip::<AiEvent>(&data, &mut unreadable))
+            .map_or(Value::Null, |event| event.data["total"].clone());
         let mut event_statement = self
             .conn
             .prepare("SELECT data FROM ai_events WHERE session_id=?1 ORDER BY rowid")?;
@@ -695,7 +723,9 @@ impl Repository {
         let mut last_activity_at = None;
         let mut preview = None;
         for data in event_statement.query_map([id], |r| r.get::<_, String>(0))? {
-            let event = decode::<AiEvent>(&data?)?;
+            let Some(event) = decode_or_skip::<AiEvent>(&data?, &mut unreadable) else {
+                continue;
+            };
             event_count += 1;
             first_activity_at =
                 Some(first_activity_at.map_or(event.at, |current: i64| current.min(event.at)));
@@ -712,7 +742,7 @@ impl Repository {
             }
         }
         let model = latest_model;
-        let capture = self.ai_capture_status(id, row.7)?;
+        let capture = self.ai_capture_status(id, row.7, unreadable)?;
         Ok(
             json!({"id":id,"native_id":row.0,"agent":row.1,"cwd":row.2,"parent_id":row.3,"created_at":row.4,"updated_at":row.5,"first_activity_at":first_activity_at.unwrap_or(row.4),"last_activity_at":last_activity_at.unwrap_or(row.5),"revision":format!("e{}-c{count}-{max_id}",row.6),"model":model,"models":models,"usage":usage,"coverage":"partial","usage_complete":row.7,"event_count":event_count,"command_count":count,"preview":preview,"capture":capture,"coverage_note":"Captured native transcript events and locally recorded shell commands only; child sessions, non-shell tools and unavailable records are not combined."}),
         )
@@ -724,14 +754,31 @@ impl Repository {
     /// capture switched off, usage counters it could not follow);
     /// `unverifiable` names what suvadu never observes at all, so a captured
     /// final answer is never read as proof that every command was recorded.
-    fn ai_capture_status(&self, id: &str, usage_complete: bool) -> DbResult<Value> {
+    fn ai_capture_status(
+        &self,
+        id: &str,
+        usage_complete: bool,
+        unreadable_records: usize,
+    ) -> DbResult<Value> {
         let mut statement = self
             .conn
-            .prepare("SELECT gaps FROM ai_sources WHERE session_id=?1")?;
+            .prepare("SELECT gaps,adapter_version FROM ai_sources WHERE session_id=?1")?;
         let mut paused_window = false;
         let mut disabled_dirs = Vec::new();
-        for gaps in statement.query_map([id], |row| row.get::<_, String>(0))? {
-            let gaps = decode::<CaptureGaps>(&gaps?)?;
+        let mut future_versions: Vec<u32> = Vec::new();
+        for row in statement.query_map([id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+        })? {
+            let (gaps, adapter_version) = row?;
+            // A source written by a newer suvadu may hold records this
+            // build's adapters cannot read the same way. Say so rather
+            // than present a possibly-misread session as complete.
+            if adapter_version > MAX_SUPPORTED_ADAPTER_VERSION
+                && !future_versions.contains(&adapter_version)
+            {
+                future_versions.push(adapter_version);
+            }
+            let gaps = decode::<CaptureGaps>(&gaps)?;
             paused_window |= gaps.all_before > 0;
             for dir in gaps.dirs.keys() {
                 if !disabled_dirs.contains(dir) {
@@ -740,6 +787,7 @@ impl Repository {
             }
         }
         disabled_dirs.sort();
+        future_versions.sort_unstable();
         let mut known_missing = Vec::new();
         if paused_window {
             known_missing.push(
@@ -758,9 +806,23 @@ impl Repository {
                     .to_string(),
             );
         }
+        for version in &future_versions {
+            known_missing.push(format!(
+                "Part of this session was stored by transcript adapter version {version}, newer \
+                 than the version {MAX_SUPPORTED_ADAPTER_VERSION} this build understands; those \
+                 records may be incomplete or misread until suvadu is upgraded"
+            ));
+        }
+        if unreadable_records > 0 {
+            known_missing.push(format!(
+                "{unreadable_records} stored record(s) could not be decoded and were skipped"
+            ));
+        }
         Ok(json!({
             "complete": known_missing.is_empty(),
             "known_missing": known_missing,
+            "unreadable_records": unreadable_records,
+            "unsupported_adapter_versions": future_versions,
             "unverifiable": CAPTURE_UNVERIFIABLE,
             "note": "complete=true means no gap was recorded, not that every action the agent took was captured."
         }))
@@ -1006,12 +1068,18 @@ impl Repository {
         let mut statement = self.conn.prepare(
             "SELECT data FROM ai_events WHERE session_id=?1 ORDER BY rowid LIMIT ?2 OFFSET ?3",
         )?;
+        // Rule: a record suvadu cannot read is reported, never fatal and
+        // never silent — the session's `capture.unreadable_records` and
+        // `capture.known_missing` already say how many were skipped.
+        let mut skipped = 0_usize;
         let mut events = statement
             .query_map(params![id, sql_limit + 1, sql_event_offset], |r| {
                 r.get::<_, String>(0)
             })?
-            .map(|row| decode::<AiEvent>(&row?))
-            .collect::<DbResult<Vec<_>>>()?;
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter_map(|row| decode_or_skip::<AiEvent>(&row, &mut skipped))
+            .collect::<Vec<_>>();
         let mut statement = self.conn.prepare("SELECT id,command,cwd,exit_code,started_at,duration_ms,context FROM entries WHERE session_id=?1 ORDER BY id LIMIT ?2 OFFSET ?3")?;
         let mut commands = statement.query_map(params![id,sql_limit+1,sql_command_offset], |r| {
             let context: Option<String> = r.get(6)?;

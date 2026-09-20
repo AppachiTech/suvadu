@@ -102,10 +102,14 @@ impl ToolEntry {
 
 /// One MCP resource.
 ///
-/// Resources are read-only, so every one of them is available by default —
-/// there is no write opt-in to record — and the only thing that can take one
-/// away is an explicit `mcp.disabled_resources` entry. Enforced by
-/// `resources_are_available_until_disabled` below.
+/// Resources are read-only, so there is no write opt-in to record. Two
+/// things can take one away: an explicit `mcp.disabled_resources` entry,
+/// and — for a resource that serves the same records as a tool — that
+/// tool being disabled. Turning `what_failed` off and still serving
+/// `suvadu://failures/recent` would make the setting a decoration, so
+/// `mirrors_tool` ties the two together in the one place both the server
+/// and the settings UI read. Enforced by `resource_available` and by
+/// `disabling_a_tool_also_disables_the_resource_that_mirrors_it`.
 #[derive(Debug, Clone, Copy)]
 pub struct ResourceEntry {
     /// URI suffix after `suvadu://`, which is also what
@@ -115,6 +119,9 @@ pub struct ResourceEntry {
     pub title: &'static str,
     /// Description advertised over the wire and shown in settings.
     pub description: &'static str,
+    /// The tool this resource serves the same records as, if any.
+    /// Disabling that tool also withdraws this resource.
+    pub mirrors_tool: Option<&'static str>,
 }
 
 impl ResourceEntry {
@@ -249,43 +256,51 @@ pub const RESOURCES: &[ResourceEntry] = &[
         uri_suffix: "history/recent",
         title: "Recent Commands",
         description: "Last 20 commands with exit codes, directories, and executors",
+        mirrors_tool: Some("recent_commands"),
     },
     ResourceEntry {
         uri_suffix: "failures/recent",
         title: "Recent Failures",
         description: "Commands that failed in the last 24 hours, grouped by prompt",
+        mirrors_tool: Some("what_failed"),
     },
     ResourceEntry {
         uri_suffix: "stats/today",
         title: "Today's Stats",
         description: "Command count, success rate, top commands, and top directories for today",
+        mirrors_tool: Some("get_stats"),
     },
     ResourceEntry {
         uri_suffix: "risk/summary",
         title: "Risk Summary",
         description: "Risk assessment summary of recent agent commands",
+        mirrors_tool: Some("assess_risk"),
     },
     ResourceEntry {
         uri_suffix: "agents/activity",
         title: "Agent Activity",
         description:
             "Overview of AI agent activity: which agents, how many commands, success rates",
+        mirrors_tool: Some("find_agent_session"),
     },
     ResourceEntry {
         uri_suffix: "agents/sessions",
         title: "Recent Agent Sessions",
         description:
             "Summary of the 5 most recent AI agent sessions, with prompts and command counts",
+        mirrors_tool: Some("find_agent_session"),
     },
     ResourceEntry {
         uri_suffix: "context/project",
         title: "Project Context",
         description: "Project briefing for the current directory: common commands, recent failures, agent activity, and workflow tips",
+        mirrors_tool: Some("project_context"),
     },
     ResourceEntry {
         uri_suffix: "skills/index",
         title: "Skills Index",
         description: "Active skills in the shared cross-agent skills library — reusable instructions any MCP-capable agent can read instead of keeping its own copy",
+        mirrors_tool: Some("list_skills"),
     },
 ];
 
@@ -361,7 +376,26 @@ pub fn find_tool(name: &str) -> Option<&'static ToolEntry> {
 
 /// Whether the resource is advertised and readable.
 pub fn resource_available(entry: &ResourceEntry, mcp: &McpConfig) -> bool {
-    !mcp.disabled_resources.iter().any(|d| d == entry.uri_suffix)
+    resource_block(entry, mcp).is_none()
+}
+
+/// Why the resource is unavailable, phrased for the settings row and for
+/// the error a disabled resource read returns.
+pub fn resource_block(entry: &ResourceEntry, mcp: &McpConfig) -> Option<String> {
+    if mcp.disabled_resources.iter().any(|d| d == entry.uri_suffix) {
+        return Some("turned off in Settings → MCP → Resources".to_string());
+    }
+    // A resource that serves the same records as a tool cannot outlive
+    // that tool being switched off, or the switch means nothing.
+    let mirrored = entry.mirrors_tool?;
+    (!tool_state_by_name(mirrored, mcp).is_available()).then(|| {
+        format!(
+            "it serves the same records as '{mirrored}', which is {}",
+            tool_state_by_name(mirrored, mcp)
+                .reason()
+                .unwrap_or_else(|| "disabled".to_string())
+        )
+    })
 }
 
 /// Make `entry` effectively available (or not) by reconciling *both* keys

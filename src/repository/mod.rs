@@ -133,6 +133,9 @@ pub struct ReplayFilter<'a> {
     pub cwd: Option<&'a str>,
     /// Maximum number of entries to return (None = unlimited).
     pub limit: Option<usize>,
+    /// Rows to skip before the first returned entry, so a long session can
+    /// be walked one page at a time instead of re-reading its head.
+    pub offset: usize,
     /// Directories (and their subtrees) to exclude from results, i.e.
     /// `mcp.exclude_dirs`. Empty for every non-MCP caller.
     pub exclude_dirs: &'a [String],
@@ -148,7 +151,7 @@ fn escape_like(s: &str) -> String {
 /// Expand a leading `~` to `$HOME`, matching how `mcp.exclude_dirs` entries
 /// like `"~/.ssh"` are meant to be written in `config.toml` — recorded
 /// `cwd` values are always absolute, so this must run before comparing.
-fn expand_tilde(dir: &str) -> String {
+pub fn expand_tilde(dir: &str) -> String {
     let Some(home) = std::env::var_os("HOME") else {
         return dir.to_string();
     };
@@ -492,6 +495,15 @@ impl Repository {
     /// Create a new repository with the given connection
     pub const fn new(conn: Connection) -> Self {
         Self { conn }
+    }
+
+    /// Corrupt or hand-edit stored rows from a test, so contract fixtures
+    /// can reproduce a malformed or future-versioned record without a
+    /// second copy of the schema. Test-only on purpose: production code
+    /// must go through a typed repository method.
+    #[cfg(test)]
+    pub fn raw_execute_for_test(&self, sql: &str) -> DbResult<usize> {
+        Ok(self.conn.execute(sql, [])?)
     }
 
     /// Open the database and return a ready-to-use repository.

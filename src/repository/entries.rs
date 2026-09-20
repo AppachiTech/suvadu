@@ -162,21 +162,24 @@ impl Repository {
             .with_cwd(filter.cwd)
             .with_excluded_dirs(filter.exclude_dirs);
 
-        let limit_clause = if filter.limit.is_some() {
-            " LIMIT ?"
-        } else {
-            ""
-        };
+        // SQLite has no bare OFFSET, so an offset without a limit still
+        // needs a `LIMIT -1` (unbounded) in front of it.
+        let paged = filter.limit.is_some() || filter.offset > 0;
+        let limit_clause = if paged { " LIMIT ? OFFSET ?" } else { "" };
 
         let sql = format!(
             "SELECT {ENTRY_COLUMNS} {ENTRY_JOINS}{} ORDER BY e.started_at ASC{limit_clause}",
             fb.build_where()
         );
 
-        let limit_val = filter.limit.map(|n| i64::try_from(n).unwrap_or(i64::MAX));
+        let limit_val = filter
+            .limit
+            .map_or(-1, |n| i64::try_from(n).unwrap_or(i64::MAX));
+        let offset_val = i64::try_from(filter.offset).unwrap_or(i64::MAX);
         let mut params = fb.params_refs();
-        if let Some(ref val) = limit_val {
-            params.push(val);
+        if paged {
+            params.push(&limit_val);
+            params.push(&offset_val);
         }
 
         let mut stmt = self.conn.prepare(&sql)?;
@@ -475,16 +478,37 @@ impl Repository {
     }
 
     /// List recent sessions with summary stats (only sessions that have entries).
-    #[allow(clippy::cast_possible_wrap)]
     pub fn list_sessions(
         &self,
         after: Option<i64>,
         tag_id: Option<i64>,
         limit: usize,
     ) -> DbResult<Vec<SessionSummary>> {
+        self.list_sessions_excluding(after, tag_id, limit, 0, &[])
+    }
+
+    /// [`Self::list_sessions`], but with `mcp.exclude_dirs` applied and a
+    /// page offset.
+    ///
+    /// The exclusion lands on the joined entries, not on the session row,
+    /// so a session's counts describe only the commands the caller is
+    /// allowed to see — and a session whose every command was excluded
+    /// drops out entirely via `HAVING cmd_count > 0`, rather than
+    /// surviving as an empty row that still discloses that *something*
+    /// happened in a directory the user asked suvadu to keep quiet about.
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn list_sessions_excluding(
+        &self,
+        after: Option<i64>,
+        tag_id: Option<i64>,
+        limit: usize,
+        offset: usize,
+        exclude_dirs: &[String],
+    ) -> DbResult<Vec<SessionSummary>> {
         let mut fb = super::FilterBuilder::new()
             .with_session_created_after(after)
-            .with_session_tag(tag_id);
+            .with_session_tag(tag_id)
+            .with_excluded_dirs(exclude_dirs);
 
         let where_clause = fb.build_where();
 
@@ -503,9 +527,10 @@ impl Repository {
              GROUP BY s.id
              HAVING cmd_count > 0
              ORDER BY s.created_at DESC
-             LIMIT ?"
+             LIMIT ? OFFSET ?"
         );
         fb.push_param(Box::new(limit as i64));
+        fb.push_param(Box::new(offset as i64));
 
         let param_refs = fb.params_refs();
         let mut stmt = self.conn.prepare(&sql)?;

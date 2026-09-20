@@ -244,7 +244,7 @@ mod tests {
         assert!(resp["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("No commands found"));
+            .contains("shown: 0 of 0"));
     }
 
     #[test]

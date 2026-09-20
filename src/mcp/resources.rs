@@ -58,10 +58,23 @@ pub fn read_resource(
     mcp: &crate::config::McpConfig,
 ) -> Result<Value, String> {
     let suffix = uri.strip_prefix("suvadu://").unwrap_or(uri);
-    if mcp.disabled_resources.iter().any(|d| d == suffix) {
-        return Err(format!(
-            "Resource '{uri}' is disabled via MCP configuration"
-        ));
+    // One gate, shared with `resources/list` and the settings UI, so a
+    // resource can never be unadvertised yet still readable by URI.
+    // Templated session URIs have no catalog entry; they mirror
+    // `session_history` and follow that tool's state.
+    let block = super::catalog::RESOURCES
+        .iter()
+        .find(|entry| entry.uri_suffix == suffix)
+        .and_then(|entry| super::catalog::resource_block(entry, mcp))
+        .or_else(|| {
+            (suffix.starts_with("history/session/")
+                && !super::catalog::tool_state_by_name("session_history", mcp).is_available())
+            .then(|| {
+                "it serves the same records as 'session_history', which is disabled".to_string()
+            })
+        });
+    if let Some(reason) = block {
+        return Err(format!("Resource '{uri}' is disabled: {reason}"));
     }
     let content = match uri {
         "suvadu://history/recent" => read_recent_history(repo, mcp)?,
