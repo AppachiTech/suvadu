@@ -106,6 +106,40 @@ What a Bash history file can and cannot give you:
 | Multi-line commands | Reconstructed in timestamped files (the `#<epoch>` line is the record boundary). A plain file has no boundaries, so each line is imported as its own command |
 | Directory, exit code, duration, executor | Not in the file — stored as unknown, never guessed, and never recorded as a successful exit |
 
+### Coming from Atuin
+
+```bash
+suv import --from atuin-db --dry-run ~/.local/share/atuin/history.db   # preview, writes nothing
+suv import --from atuin-db ~/.local/share/atuin/history.db             # import
+```
+
+The Atuin database is opened **read-only** — Suvadu never writes to it, never
+copies the file behind SQLite's back, and reads the whole history inside one
+transaction so a running Atuin can keep recording. Before writing, Suvadu takes
+a consistent backup of *its own* database and prints the `cp` command that
+restores it, then verifies afterwards that the Atuin file is byte-identical and
+that the entries it claims to have written are really there. Re-running the
+import adds nothing.
+
+Tested against Atuin 18.0.0 – 18.22.0 (history schema `20210422143411` –
+`20260818000000`). A database carrying a migration this release has not been
+tested against is rejected with the migration id rather than guessed at — run
+`suv update` and try again.
+
+| Atuin field | Imported as |
+|-------------|-------------|
+| `command` | Command text, verbatim (multi-line and Unicode preserved). Redaction and your exclusion patterns apply, exactly as for live recording |
+| `timestamp` (nanoseconds) | `started_at`, truncated to milliseconds. Two runs of the same command inside one millisecond are kept apart by 1 ms so neither is lost |
+| `duration` (nanoseconds) | `duration_ms` / `ended_at`, truncated to milliseconds. Atuin's `-1` ("never finished") is stored as unknown, not as zero work |
+| `exit` | `exit_code`. Atuin's `-1` becomes `NULL` — never a fabricated success |
+| `cwd` | Directory. Empty or Atuin's literal `"unknown"` becomes unknown |
+| `session` | A Suvadu session per Atuin session, id `atuin-<session>` |
+| `hostname` (`host:user`) | Session hostname, plus `atuin_user` in the entry's context |
+| `author`, `author_kind` | `executor` and `executor_type` (`1`→human, `2`→agent). An unstated kind stays `unknown`: Atuin guesses "agent" from known author names, Suvadu records only what was stated |
+| `id`, `intent`, `shell` | Kept in the entry's `context` (`atuin_id`, `atuin_intent`, `atuin_shell`) — Suvadu has no columns for them |
+| `deleted_at` | Rows you deleted in Atuin are skipped and counted, never resurrected |
+| — | Sub-millisecond precision is lost. Atuin has no tags, notes or command output to carry over, and Suvadu keeps no Atuin sync/record-store state |
+
 ---
 
 ## AI Agent Setup

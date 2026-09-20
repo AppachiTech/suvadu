@@ -106,6 +106,7 @@ pub enum ImportFormat {
     Jsonl,
     ZshHistory,
     BashHistory,
+    AtuinDb,
 }
 
 /// Agent report output format
@@ -571,14 +572,14 @@ pub enum Commands {
         before: Option<String>,
     },
 
-    /// Import history from a file (JSONL, Zsh history, or Bash history format)
+    /// Import history from a file (JSONL, Zsh history, Bash history, or an Atuin database)
     #[command(
-        after_help = "Examples:\n  suv import history.jsonl\n  suv import --from zsh-history ~/.zsh_history\n  suv import --from zsh-history --dry-run ~/.zsh_history\n  suv import --from bash-history ~/.bash_history\n  suv import --from bash-history --dry-run ~/.bash_history\n\nBash history stores only the command text, plus a timestamp when\nHISTTIMEFORMAT was set. Directory, exit code, duration and executor are\nimported as unknown, and a plain (untimestamped) file cannot preserve\nmulti-line command boundaries."
+        after_help = "Examples:\n  suv import history.jsonl\n  suv import --from zsh-history ~/.zsh_history\n  suv import --from zsh-history --dry-run ~/.zsh_history\n  suv import --from bash-history ~/.bash_history\n  suv import --from bash-history --dry-run ~/.bash_history\n  suv import --from atuin-db --dry-run ~/.local/share/atuin/history.db\n  suv import --from atuin-db ~/.local/share/atuin/history.db\n\nBash history stores only the command text, plus a timestamp when\nHISTTIMEFORMAT was set. Directory, exit code, duration and executor are\nimported as unknown, and a plain (untimestamped) file cannot preserve\nmulti-line command boundaries.\n\n--from atuin-db reads an Atuin history database (Atuin 18.0.0-18.22.0)\nread-only and never writes to it; an untested schema is rejected rather\nthan guessed at. It keeps time, directory, exit code, duration, session,\nhost and author, and records Atuin's row id, intent and shell as context.\nA backup of the Suvadu database is taken first unless --no-backup."
     )]
     Import {
         /// Path to the file to import
         file: String,
-        /// Source format: jsonl (default), zsh-history, or bash-history
+        /// Source format: jsonl (default), zsh-history, bash-history, or atuin-db
         #[arg(long, value_enum, default_value_t = ImportFormat::Jsonl)]
         from: ImportFormat,
         /// Preview import without writing to database
@@ -587,6 +588,9 @@ pub enum Commands {
         /// Keep entries that already exist instead of skipping duplicates (jsonl only)
         #[arg(long)]
         allow_duplicates: bool,
+        /// Skip the backup of the Suvadu database taken before writing (atuin-db only)
+        #[arg(long)]
+        no_backup: bool,
     },
 
     /// Monitor and audit AI agent command activity

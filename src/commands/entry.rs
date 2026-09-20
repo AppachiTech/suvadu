@@ -357,7 +357,9 @@ fn handle_delete_with_repo(
 
 /// Build a timestamped backup path in the backups dir, e.g.
 /// `<data>/backups/history-20260620-181500.db`.
-fn timestamped_backup_path(prefix: &str) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+pub fn timestamped_backup_path(
+    prefix: &str,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     let dir = crate::db::get_backup_dir()?;
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     Ok(dir.join(format!("{prefix}-{stamp}.db")))
