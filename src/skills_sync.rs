@@ -80,26 +80,26 @@ impl ChangeKind {
                 if dry_run {
                     "would create"
                 } else {
-                    "created  "
+                    "created"
                 }
             }
             Self::Update => {
                 if dry_run {
                     "would update"
                 } else {
-                    "updated  "
+                    "updated"
                 }
             }
-            Self::Unchanged => "unchanged   ",
-            Self::Conflict => "CONFLICT    ",
+            Self::Unchanged => "unchanged",
+            Self::Conflict => "CONFLICT",
             Self::Removed => {
                 if dry_run {
                     "would remove"
                 } else {
-                    "removed  "
+                    "removed"
                 }
             }
-            Self::Skipped => "left alone  ",
+            Self::Skipped => "left alone",
         }
     }
 }
@@ -168,7 +168,7 @@ impl SyncReport {
                 format!("  ({})", change.skills.join(", "))
             };
             out.push(format!(
-                "  {}  {}{}",
+                "  {:<12}  {}{}",
                 change.kind.label(self.dry_run),
                 change.path.display(),
                 skills
@@ -1091,10 +1091,12 @@ fn cleanup_codex_file(
 
 /// A minimal line diff: trim the common prefix/suffix and show what is left
 /// as `-`/`+` lines. Enough to answer "exactly what will change in this
-/// file?" without pulling in a diff crate.
+/// file?" without pulling in a diff crate. Trailing blank lines are
+/// bookkeeping (the separator above suvadu's marker), not a change anyone
+/// made, so they never appear as diff entries.
 fn diff_lines(old: &str, new: &str) -> Vec<String> {
-    let old_lines: Vec<&str> = old.lines().collect();
-    let new_lines: Vec<&str> = new.lines().collect();
+    let old_lines: Vec<&str> = old.trim_end_matches('\n').lines().collect();
+    let new_lines: Vec<&str> = new.trim_end_matches('\n').lines().collect();
 
     let mut prefix = 0;
     while prefix < old_lines.len()
@@ -1298,6 +1300,15 @@ mod tests {
         assert_eq!(change.kind, ChangeKind::Create);
         assert_eq!(change.skills, vec!["deploy".to_string()]);
         assert!(change.diff.contains(&"+ Body for deploy.".to_string()));
+        // The blank separator line above suvadu's own marker is bookkeeping;
+        // it must not show up as a change. (An interior blank line, like the
+        // one under the frontmatter, is real content and does.)
+        assert_ne!(
+            change.diff.last().map(String::as_str),
+            Some("+ "),
+            "trailing blank line leaked into the preview: {:?}",
+            change.diff
+        );
 
         let rendered = report.lines(true).join("\n");
         assert!(rendered.contains(&expected.display().to_string()));

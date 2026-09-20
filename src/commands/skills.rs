@@ -303,13 +303,8 @@ fn resolve_target(
 pub fn format_skill_details(s: &Skill, destinations: &[Destination]) -> String {
     let mut out = format!("{}\n", s.name);
     let _ = writeln!(out, "  scope:    {}", s.scope);
-    let _ = writeln!(out, "  state:    {} ({})", state_label(&s.status), s.status);
-    let _ = writeln!(
-        out,
-        "  origin:   {} ({})",
-        origin_label(&s.source),
-        s.source
-    );
+    let _ = writeln!(out, "  state:    {}", state_label(&s.status));
+    let _ = writeln!(out, "  origin:   {}", origin_label(&s.source));
     let _ = writeln!(out, "  version:  {}", s.version);
     if !s.triggers.is_empty() {
         let _ = writeln!(out, "  triggers: {}", s.triggers.join(", "));
@@ -593,8 +588,12 @@ fn handle_sync(
 /// The closing line of a sync run: what happened, and what to do next when
 /// something was left untouched.
 pub fn sync_summary(written: usize, conflicts: usize, dry_run: bool) -> String {
-    let mut out = if written == 0 {
+    let mut out = if written == 0 && conflicts == 0 {
         "\nNothing to sync — no active skills, or everything already up to date.".to_string()
+    } else if written == 0 {
+        // A blocked write is not an up-to-date file; saying so would hide
+        // the one thing the user has to act on.
+        String::new()
     } else if dry_run {
         format!("\n{written} file(s) would be written. Re-run without --dry-run to apply.")
     } else {
@@ -898,6 +897,22 @@ mod tests {
         let skill = resolve_for_display(&repo, "proposed", None).unwrap();
         assert_eq!(skill.status, SKILL_STATUS_PENDING);
         assert!(resolve_target(&repo, "proposed", None).is_err());
+    }
+
+    #[test]
+    fn sync_summary_does_not_claim_everything_is_up_to_date_when_a_conflict_blocked_it() {
+        let out = sync_summary(0, 1, false);
+        assert!(
+            !out.contains("Nothing to sync"),
+            "a conflict is not 'up to date': {out}"
+        );
+        assert!(out.contains("CONFLICT"), "{out}");
+        assert!(out.contains("--force"), "{out}");
+    }
+
+    #[test]
+    fn sync_summary_reports_a_clean_no_op() {
+        assert!(sync_summary(0, 0, false).contains("Nothing to sync"));
     }
 
     #[test]
