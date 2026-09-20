@@ -15,10 +15,10 @@
 
 **Suvadu** replaces your shell history with a SQLite-backed store. Every command gets structured context — exit code, duration, directory, executor, session. AI agents can query it via MCP. 100% local.
 
-- **<2ms** recording overhead, **<10ms** search across 1M+ entries
-- **AI agent tracking** — auto-detects Claude Code, Cursor, OpenCode, Antigravity, Windsurf, pi.dev, Codex, Aider
-- **Prompt Explorer** — trace every command back to the prompt that triggered it
-- **MCP Server** — 21 read-only tools + 8 resources + 5 prompts, plus opt-in write tools. Agent session discovery, project context, failure learning, risk assessment, a shared skills library. Configurable via `suv settings`
+- **Measured, not asserted** — at 100,000 entries on one M4 Max: **151 µs** p95 to record a command, **10–44 ms** p95 for a judged search that scans the whole history. One machine, one run — the harness, the corpus and what is still unmeasured are in [BENCHMARKS.md](BENCHMARKS.md)
+- **AI agent tracking** — full session capture for Claude Code, Codex and OpenCode; commands and prompts for Cursor and pi.dev; command tagging alone for Antigravity, Windsurf, Aider, Continue and Copilot ([what each tier means](#what-each-agent-actually-gives-you))
+- **Prompt Explorer** — trace every recorded command back to the prompt that triggered it
+- **MCP Server** — **21 read-only tools, 8 resources and 6 prompts, all read-only by default.** The two write tools stay off until you turn their opt-in on. Agent session discovery, project context, failure learning, risk assessment, a shared skills library. Configurable via `suv settings`
 - **100% local** — no cloud, no telemetry, no account. MIT licensed.
 
 > **Website & Docs:** [suvadu.sh](https://suvadu.sh) &middot; **CLI Reference:** [suvadu.sh/cli](https://suvadu.sh/cli/) &middot; **Blog:** [suvadu.sh/blog](https://suvadu.sh/blog/) &middot; **What's new:** [CHANGELOG](CHANGELOG.md)
@@ -86,6 +86,61 @@ suv skills sync             # Materialize skills into Claude Code/Cursor/Codex
 
 ---
 
+## How recall matches and ranks
+
+Matching decides **which** commands are eligible, scope decides **where** to
+look, and ranking decides only the **order**. They are three separate
+controls, and changing one never changes what another does.
+
+**Matching** — `--match`, or `^X` in the search UI:
+
+| Mode | Rule |
+|---|---|
+| `terms` (default) | every whitespace-separated word must appear as a substring, in any order |
+| `literal` | the whole query must appear exactly as typed, spaces and punctuation included |
+| `prefix` | the command must start with the query |
+| `fuzzy` | the query's letters must appear in order, gaps allowed (`gco` finds `git checkout`) |
+
+Words are ANDed, never ORed. There is no quoting syntax and punctuation is
+never stripped, so `git-push` is one word. Matching is case-insensitive;
+`terms` and `fuzzy` fold non-ASCII case too, while `literal` and `prefix` are
+answered by SQLite's `LIKE`, which folds ASCII only. **Every mode narrows in
+the database, so how old a match is never decides whether it is found.**
+
+**Scope** — `--scope`, `^P` to cycle, `^R` to reset:
+
+| Scope | Looks at |
+|---|---|
+| `all` (default) | everything recorded |
+| `directory` | commands run in **exactly** the current directory — not its subdirectories. `--here` is the same thing |
+| `workspace` | commands run anywhere under the nearest enclosing Git repository. A linked worktree is its own workspace, and a nested repository wins over its parent |
+| `session` | commands from the current shell session |
+
+A scope that cannot apply here (no repository, no session) says so on stderr
+and falls back explicitly; it never silently widens.
+
+**Ranking** — `terms` and `fuzzy` order matches by how well they match:
+whole-query prefix first, then a contiguous substring, then your words in
+query order, then in any order. Within a tier a fuzzy score decides, adjusted
+for command length, for having been typed by you rather than by an agent, and
+— in Smart rank (`^S`, `search.context_boost`) — for having run in *exactly*
+this directory. **Nothing is boosted for having been run often, or for having
+exited 0.** There is no frecency in interactive search. `literal`, `prefix`
+and an empty query are not re-ranked at all: those come back newest first.
+
+At most 5,000 matches are ordered. That caps the ranking work, not how much
+history was searched — the database has already narrowed to real matches by
+then.
+
+Up/Down arrow recall is a different, simpler path: prefix match, newest
+first, no deduplication, with the current directory used only to break ties
+between commands recorded at the same millisecond.
+
+`suv search --compact` draws the same UI inline under your prompt instead of
+taking over the screen, so the output you were reading stays visible.
+
+---
+
 ## Bring your existing history
 
 ```bash
@@ -96,6 +151,10 @@ suv import --from zsh-history ~/.zsh_history               # zsh equivalent
 
 The input file is only read, never modified, and re-running the same import
 adds nothing while genuinely repeated executions in the file are all kept.
+Both importers apply your redaction and exclusion patterns exactly as live
+recording does, and report excluded/redacted counts without echoing any
+command text. Neither takes a backup of your Suvadu database first — only
+the Atuin importer does that; run `suv backup` yourself if you want one.
 
 What a Bash history file can and cannot give you:
 
@@ -155,6 +214,58 @@ suv init antigravity    # Antigravity — auto-detect
 
 After setup, relaunch the configured agent. For either VS Code extension, fully quit and reopen VS Code. Codex also requires reviewing/trusting the Suvadu hooks when prompted (or through `/hooks`). Both installers preserve unrelated hooks and configure the Suvadu MCP server; Codex backs up an existing `hooks.json` before changing it and uses `CODEX_HOME` when set.
 
+### What each agent actually gives you
+
+Three different things get called "AI agent support". Here is which one you get:
+
+| Agent | `suv init` | Commands | Prompts | Native session timeline | Tested against |
+|---|---|---|---|---|---|
+| Claude Code | `claude-code` | yes (hooks) | yes | **yes** | not pinned to a version — see the caveat below |
+| Codex | `codex` | yes (hooks) | yes | **yes** | CLI 0.153.4 |
+| OpenCode | `opencode` | yes (plugin) | yes | **yes** | CLI 1.18.30 |
+| Cursor | `cursor` | yes (hooks) | yes | no | not pinned |
+| pi.dev | `pi` | yes (extension) | yes (capped at 500 characters by the extension) | no | not pinned |
+| Antigravity | `antigravity` | via the shell hook | no | no | — |
+| Windsurf, Aider, Continue, Copilot | — | via the shell hook | no | no | — |
+
+The last two rows are **command tagging, not an integration**: the shell hook
+recognises the environment variable those tools set and labels commands with
+the right executor. There is nothing to install and no prompt is captured.
+
+Only the Codex and OpenCode figures above are versions Suvadu has actually
+been exercised against; nothing enforces them at runtime except for Atuin
+imports, where the schema really is checked. If an agent changes its hook or
+plugin contract, capture can degrade silently — `suv doctor` reports per
+agent whether its process was detected, its integration is installed, and
+commands, native sessions and MCP registration have been seen.
+
+### What is never captured
+
+- **Command output and file contents.** Suvadu records that a command ran,
+  how it exited, how long it took and where — never what it printed or what
+  it changed. Every inferred MCP answer repeats this.
+- **From native transcripts:** thinking blocks, attachments, images, file
+  contents and raw tool results. Codex commentary and reasoning, injected
+  AGENTS/environment context and developer instructions are excluded too.
+- **Non-shell tool calls and file edits**, and child sessions started from a
+  session — stated on every session header as `capture.unverifiable`.
+- **Size limits:** hook input is capped (1 MiB, 16 MiB for OpenCode) and a
+  single native transcript record at 16 MiB; an oversize record is rejected
+  with a named error rather than silently truncated. Prompt text is capped at
+  `agent.prompt_capture_max_chars` (default 4000).
+- **Timing and exit codes are not equally trustworthy per agent.** Codex and
+  Claude Code hook timestamps are *receipt* time, not execution time (Codex
+  records `timing_source = hook_received`). Codex leaves the exit code
+  unknown when it does not supply a structured one; Claude Code and Cursor
+  infer 0 from a success hook; pi.dev's bash tool does not expose one, so its
+  extension guesses.
+
+A session header therefore reports what Suvadu *knows* it missed
+(`known_missing`: a paused window, a directory where capture was switched
+off, token counters it could not follow) separately from what it never
+observes at all. `complete` means no gap was recorded — never that
+everything the agent did is here.
+
 ```bash
 suv history --executor openai-codex
 suv agent prompts --executor openai-codex
@@ -168,9 +279,75 @@ Claude Code commands link to their native prompt turn after transcript reconcili
 
 For agents configured with MCP, ask: *"What commands failed in this project recently?"*
 
-To create a cross-agent session checkpoint, run `suv settings`, go to the **MCP** tab (`Tab` to cycle), and under **Writes** turn on **Allow Saved Session Summaries** with `Enter`. Save with `Ctrl+S`, then restart your MCP client — the MCP server reads its configuration once at startup, so a running client keeps the old settings. Then ask: *"Summarize and save current session."*
+### Prompt Explorer or session timeline?
 
-The same tab lists every MCP tool and resource with its effective state. A write tool such as `save_session_summary` shows *why* it is off — because its opt-in is off, or because you turned that specific tool off — instead of two switches that can disagree. Turning the opt-in back off stops new writes; summaries already saved are kept. Suvadu resolves the current Codex or Claude session without guessing when multiple sessions match. Later requests extend a safe append-only checkpoint from its saved event and command offsets; if earlier captured evidence changed, the agent rebuilds the summary from the full session.
+Both show "what the agent did", from two different stores, and neither
+subsumes the other.
+
+- **Prompt Explorer** (`suv agent prompts`) is built from **recorded shell
+  commands**. It groups them by the prompt that was live when they ran and
+  reports that turn's command count, successes, failures and total time. A
+  prompt that produced no recorded command never appears — there is nothing
+  to group. It works for every agent whose prompt is captured, including
+  Cursor and pi.dev, which have no session timeline, and it browses across
+  sessions with a time window and an executor filter.
+- **Session timelines** (`suv sessions`, and `suv agent sessions` for the
+  non-interactive view) are built from the agent's **own transcript**,
+  imported incrementally. They show prompts, assistant responses,
+  interrupted turns, every observed model and provider-reported token
+  totals — including sessions with no commands at all — plus capture
+  completeness, saved summaries (`s`) and the handoff scaffold (`h`). Only
+  Claude Code, Codex and OpenCode have one.
+
+### MCP: read-only by default
+
+The server advertises **21 read-only tools, 8 resources and 6 prompts**.
+Every one of them reads. There are exactly two write tools, and both are off
+until you turn their opt-in on:
+
+| Write tool | Opt-in | What it can do |
+|---|---|---|
+| `save_session_summary` | `mcp.allow_session_summaries` | store a summary the calling agent generated, when you ask it to |
+| `propose_skill` | `mcp.allow_skill_proposals` | propose a skill, always as **pending review**, never active until you approve it in `suv skills` (`Ctrl+P`) |
+
+To turn one on: run `suv settings`, go to the **MCP** tab (`Tab` to cycle),
+and under **Writes** press `Enter` on the row. Save with `Ctrl+S`, **then
+restart your MCP client** — the server reads its configuration once at
+startup, so a running client keeps the old settings until it reconnects.
+Then ask: *"Summarize and save current session."*
+
+The same tab lists every tool and resource with its *effective* state. A
+write tool shows **why** it is off — because its opt-in is off, because you
+turned that tool off, or both — instead of two switches that can disagree.
+Turning an opt-in back off stops new writes; summaries already saved are
+kept.
+
+**Which config the server reads.** Tool and resource availability, the two
+write opt-ins, `mcp.exclude_dirs` and the MCP defaults come from the
+**global `config.toml` only** — a project `.suvadu.toml` overlay does not
+change which MCP capabilities are on. Redaction, exclusions and your custom
+risk rules *are* resolved through the overlay, but from the directory the
+MCP server process was started in, once, at startup. Both are another reason
+a change needs a client restart.
+
+Every response follows one convention, so a caller can calibrate its trust:
+RFC 3339 timestamps, `unknown` as the only missing-value token, percentages
+that always carry their fraction, `limit`/`offset` with `next_offset`,
+visible truncation, a stable `command-<id>` on every row, and a
+`provenance:` line saying **observed** (records Suvadu stored), **inferred**
+(anything derived from them) or **caller-reported** (text an agent wrote).
+Anything inferred also repeats that Suvadu records commands, exit codes and
+timings — never command output or file contents.
+
+A saved summary is the agent's own text, stored back. Suvadu invokes no
+model and generates no prose. The writing agent and model are recorded as
+**caller-declared metadata, not verified identity**, and the summary's cited
+evidence IDs are checked to exist in that session. Suvadu resolves the
+current Codex, Claude Code or OpenCode session without guessing: no working
+directory means no resolution, and more than one match is always your
+choice. A later request extends an append-only checkpoint from its saved
+event and command offsets; if the evidence it was written from changed, the
+agent rebuilds from the full session.
 
 See the [full integration guide](https://suvadu.sh/blog/track-ai-agent-commands-with-suvadu/) and [MCP server docs](https://suvadu.sh/cli/mcp-server/).
 
@@ -180,18 +357,18 @@ See the [full integration guide](https://suvadu.sh/blog/track-ai-agent-commands-
 
 | Feature | Details |
 |---------|---------|
-| **Search** | Substring search TUI (your own commands by default; `Ctrl+A` shows agents, `Ctrl+E` shows failures only) with filters, Smart mode, detail pane, bookmarks |
+| **Search** | Full-history search TUI with four [matching modes](#how-recall-matches-and-ranks) (`^X`) and four scopes (`^P`), your own commands by default (`Ctrl+A` shows agents, `Ctrl+E` failures only), filters, Smart rank, detail pane, bookmarks, and `--compact` inline recall |
 | **History** | Non-interactive `suv history` with filters, `--json`, pipeable to other tools |
 | **Agent Dashboard** | Timeline, risk assessment, per-agent analytics, exportable reports; `suv agent report --fail-on <low\|medium\|high\|critical>` for local CI / git-hook gating |
-| **MCP Server** | 21 read-only tools + 8 resources + 5 prompts, plus opt-in writes — agent session replay and incremental cross-agent summary checkpoints, project context, failure learning, configurable |
-| **Skills Library** | `suv skills` — interactive TUI to browse, add, edit, delete, sync, and review shared skills any MCP-capable agent can read instead of each tool keeping its own copy; `add/list/show/edit/rm/sync` also work as scriptable subcommands |
-| **Prompt Explorer** | Trace commands back to the prompt that triggered them |
-| **Unified Sessions** | `suv sessions` browses human and AI sessions together; native Codex, Claude Code, and OpenCode sessions show prompts, responses, commands, every observed model, and provider-reported token totals — press `s` on an AI session to view its saved summaries in a scrollable overlay (`Tab` toggles rendered/raw, `Ctrl+Y` copies) |
+| **MCP Server** | 21 read-only tools, 8 resources and 6 prompts, plus two opt-in write tools that are off by default — agent session replay and incremental cross-agent summary checkpoints, project context, failure learning; one response convention with explicit provenance |
+| **Skills Library** | `suv skills` — interactive TUI to browse, add, edit, delete, sync, and review shared skills any MCP-capable agent can read instead of each tool keeping its own copy. `sync --dry-run` diffs the managed region of each generated file; a region edited outside Suvadu is reported as a conflict and skipped, not overwritten (`--force` overrides). `add/list/show/edit/rm/disable/enable/sync/cleanup` also work as scriptable subcommands |
+| **Prompt Explorer** | `suv agent prompts` groups **recorded commands** by the prompt that triggered them, with that turn's successes, failures and duration. A prompt that ran no recorded command does not appear — for the agent's own transcript, use a session timeline |
+| **Unified Sessions** | `suv sessions` browses human and AI sessions together, with a **Capture** column that reports `full` or `gaps: N` from recorded gaps alone — never inferred from exit codes. Native Codex, Claude Code and OpenCode sessions show prompts, responses, commands, every observed model and provider-reported token totals; `s` opens saved summaries (badged CURRENT / NEW ACTIVITY / EVIDENCE CHANGED; `Tab` toggles rendered/raw, `Ctrl+Y` copies) and `h` builds a handoff scaffold from captured records only |
 | **Stats** | Heatmap, hourly distribution, top commands, executor breakdown; `--human` (or `Ctrl+H` in the TUI) excludes AI-agent activity |
-| **Doctor** | `suv doctor` checks shell, hooks, config, database, MCP, and agent hooks health |
+| **Doctor** | `suv doctor` separates what blocks shell-history capture from optional integrations, gives each check its own repair, reports what the stored data actually proves, and lists storage by category next to the retention rule that changes it |
 | **Organization** | Tags, bookmarks (`suv bookmarks` opens an interactive picker that recalls one into your prompt), notes, and `suv aliases` — an interactive manager (add/edit/delete) for shell aliases, plus suggestions for your frequently-typed long commands |
-| **Privacy & Safety** | Space-prefix exclusion, regex patterns, secret redaction (extend via `redaction.extra_patterns`), local-only. `suv backup` + an automatic snapshot before any `suv delete`. |
-| **Arrow Keys** | Recency-first Up/Down recall — your most recent commands surface first, with the current directory as a tiebreaker. Agent commands are hidden by default; reveal them with `Alt+A` (per shell) or `--include-agents`. |
+| **Privacy & Safety** | Space-prefix exclusion, regex patterns, secret redaction (extend via `redaction.extra_patterns`), local-only — applied to every ingestion path, imports and saved summaries included. `suv backup`, an automatic snapshot before any `suv delete`, and `suv delete --dry-run` to see the matched commands and what a delete leaves behind. See [SECURITY.md](SECURITY.md). |
+| **Arrow Keys** | Recency-first Up/Down recall — your most recent commands surface first, prefix-matched, with the current directory used only to separate commands recorded at the same millisecond. Agent commands are hidden by default; reveal them with `Alt+A` (per shell) or `--include-agents`. |
 | **Vim Bindings** | Optional vim-style `j`/`k`/`Ctrl+U`/`Ctrl+D` navigation in search TUI |
 
 Full feature documentation at [suvadu.sh/cli](https://suvadu.sh/cli/).
@@ -200,6 +377,10 @@ Full feature documentation at [suvadu.sh/cli](https://suvadu.sh/cli/).
 
 <details>
 <summary><strong>More demos</strong></summary>
+
+<p><em>These recordings predate the current search footer, status row and
+session picker columns. They still show the shape of each screen, not its
+exact chrome.</em></p>
 
 <p align="center">
   <img src="demo/suvadu-search.gif" alt="Suvadu search TUI" width="700">
@@ -233,7 +414,8 @@ make test     # Run tests
 make lint     # Run clippy + format check
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and the release
+checklist, and [BENCHMARKS.md](BENCHMARKS.md) for how search is measured.
 
 ## Security
 
