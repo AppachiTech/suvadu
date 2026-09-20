@@ -333,7 +333,7 @@ pub enum Commands {
         #[arg(long)]
         executor: Option<String>,
 
-        /// Filter to commands run in the current directory
+        /// Filter to commands run in the current directory (same as --scope directory)
         #[arg(long)]
         here: bool,
 
