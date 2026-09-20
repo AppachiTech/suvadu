@@ -1,6 +1,47 @@
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
 pub use crate::models::SearchField;
+pub use crate::search::{MatchMode, RecallScope};
+
+/// `suv search --help`. Matching, scope and ranking are three separate
+/// controls, so the help spells out which is which and exactly how a query
+/// is interpreted — the semantics are a promise, not an implementation
+/// detail.
+const SEARCH_AFTER_HELP: &str = "\
+Matching modes (--match, or ^X in the UI) decide WHICH entries match:
+  terms     every whitespace-separated word must appear, in any order (default)
+  literal   the whole query must appear exactly as typed, spaces included
+  prefix    the command must start with the query
+  fuzzy     the query's letters must appear in order, gaps allowed (gco -> git checkout)
+
+How a query is read, in every mode:
+  - Words are ANDed, never ORed. A missing word means no match.
+  - Matching is case-insensitive for ASCII. Non-ASCII letters compare
+    case-sensitively (README finds readme; ECHO does not find echo's accented form).
+  - There is no quoting syntax: \" and ' are ordinary characters to find.
+    Use --match literal for a phrase with spaces or punctuation.
+  - Punctuation is never stripped. git-push is one word and matches only git-push.
+
+Scopes (--scope, or ^P in the UI) decide WHERE to look:
+  all         everything recorded (default; ^R resets to this)
+  directory   commands run in exactly the current directory
+  workspace   commands run anywhere in the current repository or worktree
+  session     commands from the current shell session
+An unavailable scope (no repository, no session) says so and falls back explicitly.
+
+Ranking is separate again: ^S switches smart/recent, ^U unique/all. Changing
+the ranking never changes which entries match.
+
+Agent, bot, CI and script commands stay hidden unless --include-agents is
+given or ^A is pressed. Nothing ever includes them silently.
+
+Examples:
+  suv search --query \"git\"
+  suv search --query \"cargo test\" --match literal
+  suv search --query gco --match fuzzy
+  suv search --scope workspace
+  suv search --compact
+  suv search --query \"/home\" --field cwd";
 
 /// Hand-grouped replacement for clap's flat, alphabetical-ish `suv --help`
 /// command list — 29 commands in one column got hard to scan. Only the
@@ -262,9 +303,7 @@ pub enum Commands {
     Settings,
 
     /// Interactive search through history (Ctrl+R replacement)
-    #[command(
-        after_help = "Examples:\n  suv search --query \"git\"\n  suv search --unique\n  suv search --executor bot\n  suv search --after today\n  suv search --query \"/home\" --field cwd"
-    )]
+    #[command(after_help = SEARCH_AFTER_HELP)]
     Search {
         /// Optional initial query
         #[arg(short, long)]
@@ -309,6 +348,18 @@ pub enum Commands {
         /// Search field: command (default), cwd, session, or executor
         #[arg(long, value_enum, default_value_t = SearchField::Command)]
         field: SearchField,
+
+        /// How the query is matched (default: terms)
+        #[arg(long = "match", value_enum, value_name = "MODE")]
+        match_mode: Option<MatchMode>,
+
+        /// Which history to search (default: all)
+        #[arg(long, value_enum, value_name = "SCOPE")]
+        scope: Option<RecallScope>,
+
+        /// Draw inline under the prompt instead of full screen
+        #[arg(long)]
+        compact: bool,
     },
 
     /// Show usage analytics and trends

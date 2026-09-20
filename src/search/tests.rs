@@ -57,6 +57,7 @@ fn test_search_config(entries: Vec<Entry>, total_items: usize) -> SearchConfig {
             human_boost_percent: 33,
             cwd_boost_percent: 50,
         },
+        recall: RecallState::default(),
     }
 }
 

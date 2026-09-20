@@ -1,7 +1,7 @@
 use crate::models::{Entry, SearchField};
-use crate::repository::{QueryFilter, Repository};
+use crate::repository::{QueryFilter, Repository, SessionScoped};
 
-use super::SearchApp;
+use super::{MatchMode, RecallScope, SearchAction, SearchApp};
 
 /// Textual match-quality tier used as the primary search-ranking key, so a
 /// closer textual match always beats a looser one regardless of cwd/recency
@@ -75,39 +75,113 @@ impl SearchApp {
         count
     }
 
-    /// Build a `QueryFilter` from the current search state.
+    /// Point `filters.cwd` at whatever the active scope means, so the query,
+    /// the status row and the filter badges can never disagree about it.
     ///
-    /// `tokens` narrows candidates in SQL to rows the in-memory scorer could
-    /// accept; see `reload_entries`.
+    /// The directory values come from the already-resolved
+    /// [`RecallContext`](super::RecallContext) rather than from the
+    /// filesystem, so a scope keeps meaning the same thing for as long as the
+    /// user is looking at it.
+    pub(super) fn sync_scope_filters(&mut self) {
+        self.filters.cwd = match self.recall.scope {
+            RecallScope::Directory => self.recall.context.cwd.clone(),
+            RecallScope::Workspace => self.recall.context.workspace_root(),
+            RecallScope::All | RecallScope::Session => None,
+        };
+    }
+
+    /// Switch to `scope`, keeping the derived filters in step.
+    pub(super) fn set_scope(&mut self, scope: RecallScope) {
+        self.recall.scope = scope;
+        self.recall.scope_note = None;
+        self.sync_scope_filters();
+        self.pagination.page = 1;
+    }
+
+    /// Move to the next scope that is actually usable here (`^P`).
+    pub(super) fn cycle_scope(&mut self) -> SearchAction {
+        let next = self.recall.context.next_available_scope(self.recall.scope);
+        self.set_scope(next);
+        self.status_message = Some((
+            format!("Scope: {}", next.status_value()),
+            std::time::Instant::now(),
+        ));
+        SearchAction::Reload
+    }
+
+    /// Move to the next matching mode (`^X`).
+    pub(super) fn cycle_match_mode(&mut self) -> SearchAction {
+        let next = self.recall.match_mode.next();
+        self.recall.match_mode = next;
+        self.pagination.page = 1;
+        self.status_message = Some((
+            format!("Match: {} ({})", next.label(), next.describe()),
+            std::time::Instant::now(),
+        ));
+        SearchAction::Reload
+    }
+
+    /// One action back to all of history (`^R`).
+    ///
+    /// Clears every narrowing the user can have accumulated and returns the
+    /// matching mode to the default. Agent visibility is deliberately *not*
+    /// touched: a reset must never quietly pull excluded agent commands into
+    /// view. The no-results state names `^A` separately for that.
+    pub(super) fn reset_to_all_history(&mut self) -> SearchAction {
+        self.recall.match_mode = MatchMode::default();
+        self.filters.after = None;
+        self.filters.before = None;
+        self.filters.tag_id = None;
+        self.filters.exit_code = None;
+        self.filters.executor_type = None;
+        self.filters.executor_sel = 0;
+        self.filters.failed_only = false;
+        self.filters.bookmarks_only = false;
+        self.set_scope(RecallScope::All);
+        self.status_message = Some(("Reset to all history".into(), std::time::Instant::now()));
+        SearchAction::Reload
+    }
+
+    /// Build the entry query for the current state.
+    ///
+    /// `query`/`prefix`/`tokens` come from [`MatchMode::plan`]: the matching
+    /// mode decides *what* SQL is asked for, the scope decides *where* it
+    /// looks, and the two never interfere.
     fn build_query_filter<'a>(
         &'a self,
         query: Option<&'a str>,
         tokens: &'a [String],
-    ) -> QueryFilter<'a> {
-        QueryFilter {
-            query_tokens: tokens,
-            after: self.filters.after,
-            before: self.filters.before,
-            tag_id: self.filters.tag_id,
-            exit_code: self.filters.exit_code,
-            query,
-            prefix_match: false,
-            executor: self.filters.executor_type.as_deref(),
-            cwd: self.filters.cwd.as_deref(),
-            field: self.view.search_field,
-            exclude_agents: !self.filters.show_agents,
-            cwd_prefix: false,
-            failed_only: self.filters.failed_only,
-            bookmarked_only: self.filters.bookmarks_only,
-            exclude_dirs: &[],
+        prefix: bool,
+    ) -> SessionScoped<'a> {
+        SessionScoped {
+            filter: QueryFilter {
+                query_tokens: tokens,
+                after: self.filters.after,
+                before: self.filters.before,
+                tag_id: self.filters.tag_id,
+                exit_code: self.filters.exit_code,
+                query,
+                prefix_match: prefix,
+                executor: self.filters.executor_type.as_deref(),
+                cwd: self.filters.cwd.as_deref(),
+                field: self.view.search_field,
+                exclude_agents: !self.filters.show_agents,
+                // "Workspace" means the whole project tree, not just its root
+                // directory; every other scope matches the directory exactly.
+                cwd_prefix: self.recall.scope == RecallScope::Workspace,
+                failed_only: self.filters.failed_only,
+                bookmarked_only: self.filters.bookmarks_only,
+                exclude_dirs: &[],
+            },
+            session_id: if self.recall.scope == RecallScope::Session {
+                self.recall.context.session_id.as_deref()
+            } else {
+                None
+            },
         }
     }
 
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
+    /// Rank with the default (`terms`) rule: a pure subsequence is not a match.
     pub(super) fn fuzzy_score(
         entries: Vec<Entry>,
         query: &str,
@@ -116,6 +190,38 @@ impl SearchApp {
         length_threshold: usize,
         human_boost_percent: u32,
         cwd_boost_percent: u32,
+    ) -> Vec<Entry> {
+        Self::fuzzy_score_mode(
+            entries,
+            query,
+            boost_cwd,
+            field,
+            length_threshold,
+            human_boost_percent,
+            cwd_boost_percent,
+            false,
+        )
+    }
+
+    /// As `fuzzy_score`, but `allow_subsequence` decides whether an
+    /// abbreviation that shares no literal token (`gco` → `git checkout`)
+    /// counts as a match. Only `MatchMode::Fuzzy` passes `true`; that single
+    /// flag is the whole behavioural difference between the two modes.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::too_many_arguments
+    )]
+    pub(super) fn fuzzy_score_mode(
+        entries: Vec<Entry>,
+        query: &str,
+        boost_cwd: Option<&str>,
+        field: SearchField,
+        length_threshold: usize,
+        human_boost_percent: u32,
+        cwd_boost_percent: u32,
+        allow_subsequence: bool,
     ) -> Vec<Entry> {
         use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
         use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
@@ -186,8 +292,9 @@ impl SearchApp {
                 // "git rev-parse", or random gibberish matching long commands
                 // whose characters happen to contain it as a subsequence.
                 // Results always contain what you typed; nucleo still ranks
-                // within the literal matches.
-                if tier == 0 {
+                // within the literal matches. `fuzzy` mode opts out of this
+                // guard — surfacing abbreviations is exactly what it is for.
+                if tier == 0 && !allow_subsequence {
                     continue;
                 }
 
@@ -233,10 +340,16 @@ impl SearchApp {
         &mut self,
         repo: &Repository,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let use_fuzzy = !self.query.is_empty();
+        // The matching mode decides how the query becomes SQL; see
+        // `MatchMode::plan`. Every mode narrows in the database, so how far
+        // back a match lives never decides whether it is found.
+        let plan = self.recall.match_mode.plan(&self.query);
 
-        if use_fuzzy {
-            // Fuzzy path: narrow candidates in SQL, then score + rank them.
+        // `literal` and `prefix` are exactly what SQL returns, so they keep
+        // the database's recency order and paginate in the database. `terms`
+        // and `fuzzy` rank in memory, which is what `plan.rerank` marks.
+        if plan.rerank {
+            // Narrow candidates in SQL, then score + rank them.
             //
             // The scorer only keeps entries where every typed token appears as
             // a literal substring (see `match_tier`), so asking SQL for the
@@ -245,8 +358,7 @@ impl SearchApp {
             // silently hid any older match. The limit now bounds how many
             // matches are ranked, not how much history is searched.
             const MAX_RANKED_MATCHES: usize = 5_000;
-            let tokens: Vec<String> = self.query.split_whitespace().map(str::to_string).collect();
-            let qf = self.build_query_filter(None, &tokens); // Ranking still happens in memory
+            let qf = self.build_query_filter(None, &plan.tokens, false);
 
             if self.view.unique_mode {
                 let unique_res =
@@ -265,7 +377,7 @@ impl SearchApp {
                 } else {
                     None
                 };
-                let scored = Self::fuzzy_score(
+                let scored = Self::fuzzy_score_mode(
                     entries,
                     &self.query,
                     boost_cwd,
@@ -273,6 +385,7 @@ impl SearchApp {
                     self.view.length_threshold,
                     self.view.human_boost_percent,
                     self.view.cwd_boost_percent,
+                    plan.allow_subsequence,
                 );
                 self.unique_counts = count_map;
                 self.fuzzy_results = scored;
@@ -284,7 +397,7 @@ impl SearchApp {
                 } else {
                     None
                 };
-                self.fuzzy_results = Self::fuzzy_score(
+                self.fuzzy_results = Self::fuzzy_score_mode(
                     entries,
                     &self.query,
                     boost_cwd,
@@ -292,6 +405,7 @@ impl SearchApp {
                     self.view.length_threshold,
                     self.view.human_boost_percent,
                     self.view.cwd_boost_percent,
+                    plan.allow_subsequence,
                 );
             }
 
@@ -300,14 +414,11 @@ impl SearchApp {
             let end = self.pagination.page_size.min(self.fuzzy_results.len());
             self.entries = self.fuzzy_results[..end].to_vec();
         } else {
-            // Non-fuzzy path: use DB-level LIKE filtering + pagination
+            // Exact path: SQL does the whole match and the pagination, and
+            // results stay in recency order — that predictability is the
+            // point of the literal and prefix modes.
             self.fuzzy_results.clear();
-            let query_param = if self.query.is_empty() {
-                None
-            } else {
-                Some(self.query.as_str())
-            };
-            let qf = self.build_query_filter(query_param, &[]);
+            let qf = self.build_query_filter(plan.query.as_deref(), &[], plan.prefix);
 
             if self.view.unique_mode {
                 let new_count = repo.count_unique_filtered(&qf)?;
@@ -351,13 +462,11 @@ impl SearchApp {
         let offset = (self.pagination.page - 1) * self.pagination.page_size;
 
         if self.fuzzy_results.is_empty() {
-            // Standard DB-level pagination
-            let query_param = if self.query.is_empty() {
-                None
-            } else {
-                Some(self.query.as_str())
-            };
-            let qf = self.build_query_filter(query_param, &[]);
+            // Standard DB-level pagination. The plan must match the one
+            // `reload_entries` used, or page 2 would answer a different
+            // question from page 1.
+            let plan = self.recall.match_mode.plan(&self.query);
+            let qf = self.build_query_filter(plan.query.as_deref(), &plan.tokens, plan.prefix);
 
             if self.view.unique_mode {
                 let unique_res =

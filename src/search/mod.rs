@@ -11,7 +11,7 @@ mod render;
 mod tests;
 
 use crate::models::{Entry, SearchField, Tag};
-use crate::repository::{QueryFilter, Repository};
+use crate::repository::{QueryFilter, Repository, SessionScoped};
 use crate::util;
 use arboard::Clipboard;
 use chrono::Local;
@@ -81,6 +81,34 @@ pub struct ViewOptions {
     pub cwd_boost_percent: u32,
 }
 
+/// Matching mode plus recall scope: *how* a query is interpreted and *which*
+/// slice of history it runs against.
+///
+/// These are deliberately separate from [`ViewOptions`], which only affects
+/// ordering and presentation. Changing the ranking never changes the match
+/// set, and changing the match set never reorders within a mode.
+pub struct RecallState {
+    pub match_mode: MatchMode,
+    pub scope: RecallScope,
+    /// Current directory, Git workspace root and session id, resolved once
+    /// when recall starts (see [`RecallContext`]).
+    pub context: RecallContext,
+    /// Explanation shown when the requested scope was not available and an
+    /// explicit fallback was used instead.
+    pub scope_note: Option<String>,
+}
+
+impl Default for RecallState {
+    fn default() -> Self {
+        Self {
+            match_mode: MatchMode::default(),
+            scope: RecallScope::default(),
+            context: RecallContext::default(),
+            scope_note: None,
+        }
+    }
+}
+
 /// Active filter values and filter-dialog text inputs.
 pub struct FilterState {
     // Applied filter values
@@ -148,6 +176,7 @@ pub struct SearchConfig {
     pub show_risk_in_search: bool,
     pub vim_enabled: bool,
     pub view: ViewOptions,
+    pub recall: RecallState,
 }
 
 pub struct SearchApp {
@@ -159,6 +188,7 @@ pub struct SearchApp {
     pub filters: FilterState,
     dialog: DialogState,
     pub view: ViewOptions,
+    pub recall: RecallState,
     show_risk_in_search: bool,
     pub vim_enabled: bool,
     pub vim_mode: VimMode,
@@ -230,6 +260,7 @@ impl SearchApp {
 
             dialog: DialogState::None,
             view,
+            recall: cfg.recall,
             show_risk_in_search: cfg.show_risk_in_search,
             vim_enabled: cfg.vim_enabled,
             vim_mode: VimMode::Insert,
@@ -420,7 +451,7 @@ type SearchEntries = (Vec<Entry>, usize, std::collections::HashMap<i64, i64>);
 
 fn load_search_entries(
     repo: &Repository,
-    qf: &QueryFilter,
+    qf: &impl crate::repository::EntryQuery,
     page_size: usize,
     unique: bool,
 ) -> Result<SearchEntries, Box<dyn std::error::Error>> {
@@ -448,6 +479,15 @@ fn load_search_entries(
 pub struct SearchArgs<'a> {
     pub initial_query: Option<&'a str>,
     pub unique_mode: bool,
+    /// How the query text is interpreted. Defaults to `MatchMode::Terms`,
+    /// which is what recall has always done.
+    pub match_mode: MatchMode,
+    /// Which slice of history to search. Defaults to `RecallScope::All`.
+    /// Resolved against the real context before use, so an unavailable scope
+    /// explains itself instead of silently doing something else.
+    pub scope: RecallScope,
+    /// Draw inline under the prompt instead of taking over the screen.
+    pub compact: bool,
     pub after: Option<&'a str>,
     pub before: Option<&'a str>,
     pub tag: Option<&'a str>,
@@ -486,29 +526,54 @@ pub fn run_search(
     let filter_after = args.after.and_then(|s| util::parse_date_input(s, false));
     let filter_before = args.before.and_then(|s| util::parse_date_input(s, true));
 
-    let qf = QueryFilter {
-        query_tokens: &[],
-        after: filter_after,
-        before: filter_before,
-        tag_id,
-        exit_code: args.exit_code,
-        query: args.initial_query,
-        prefix_match: args.prefix_match,
-        executor: args.executor,
-        cwd: args.cwd,
-        field: args.field,
-        exclude_agents: !args.include_agents,
-        cwd_prefix: false,
-        failed_only: args.failed_only,
-        bookmarked_only: false,
-        exclude_dirs: &[],
+    // Resolve "here" once: current directory, workspace root and session id.
+    // An unavailable scope is reported, never silently swapped.
+    let context = RecallContext::resolve();
+    let (scope, scope_note) = context.resolve_scope(args.scope);
+    if let Some(note) = &scope_note {
+        eprintln!("suvadu: {note}");
+    }
+    let scope_cwd = match scope {
+        RecallScope::Directory => context.cwd.clone(),
+        RecallScope::Workspace => context.workspace_root(),
+        RecallScope::All | RecallScope::Session => None,
+    };
+    // An explicit --cwd always wins over the scope's directory.
+    let cwd_filter = args.cwd.map(String::from).or(scope_cwd);
+
+    let plan = args.match_mode.plan(args.initial_query.unwrap_or_default());
+    let qf = SessionScoped {
+        filter: QueryFilter {
+            query_tokens: &plan.tokens,
+            after: filter_after,
+            before: filter_before,
+            tag_id,
+            exit_code: args.exit_code,
+            query: plan.query.as_deref(),
+            prefix_match: plan.prefix,
+            executor: args.executor,
+            cwd: cwd_filter.as_deref(),
+            field: args.field,
+            exclude_agents: !args.include_agents,
+            cwd_prefix: scope == RecallScope::Workspace,
+            failed_only: args.failed_only,
+            bookmarked_only: false,
+            exclude_dirs: &[],
+        },
+        session_id: if scope == RecallScope::Session {
+            context.session_id.as_deref()
+        } else {
+            None
+        },
     };
 
     let (entries, total_count, unique_counts) =
         load_search_entries(repo, &qf, page_size, effective_unique)?;
 
-    if entries.is_empty() && total_count == 0 {
-        eprintln!("No history entries found matching filters.");
+    // An empty *scope* is a normal state the TUI explains in place; only a
+    // genuinely empty database is worth refusing to open for.
+    if entries.is_empty() && total_count == 0 && repo.count_filtered(&QueryFilter::default()).unwrap_or(0) == 0 {
+        eprintln!("No history recorded yet.");
         return Ok(None);
     }
 
@@ -542,7 +607,7 @@ pub fn run_search(
         exit_code_input: args.exit_code.map(|ec| ec.to_string()),
         executor_filter_input: args.executor.map(String::from),
         bookmarked_commands,
-        filter_cwd: args.cwd.map(String::from),
+        filter_cwd: cwd_filter,
         noted_entry_ids,
         show_risk_in_search: config.agent.show_risk_in_search,
         vim_enabled: config.search.vim_mode,
@@ -555,6 +620,12 @@ pub fn run_search(
             length_threshold: config.search.length_threshold,
             human_boost_percent: config.search.human_boost_percent,
             cwd_boost_percent: config.search.cwd_boost_percent,
+        },
+        recall: RecallState {
+            match_mode: args.match_mode,
+            scope,
+            context,
+            scope_note,
         },
     });
 

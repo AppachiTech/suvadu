@@ -91,6 +91,22 @@ pub struct SearchConfig {
     pub human_boost_percent: u32,
     #[serde(default = "default_cwd_boost_percent")]
     pub cwd_boost_percent: u32,
+    /// How a typed query is interpreted: `terms` (default), `literal`,
+    /// `prefix` or `fuzzy`. `terms` is what recall has always done, so an
+    /// upgrade never reinterprets an existing query. Override per run with
+    /// `--match`, or cycle with Ctrl+X in the search TUI.
+    #[serde(default)]
+    pub match_mode: crate::search::MatchMode,
+    /// Which slice of history recall starts on: `all` (default),
+    /// `directory`, `workspace` or `session`. Override with `--scope`,
+    /// cycle with Ctrl+P, reset to `all` with Ctrl+R.
+    #[serde(default)]
+    pub scope: crate::search::RecallScope,
+    /// When `true`, recall opens inline under the prompt instead of taking
+    /// over the screen. Off by default: the full-screen inspector stays the
+    /// default experience. Also available per run as `--compact`.
+    #[serde(default = "default_false")]
+    pub compact: bool,
 }
 
 impl Default for SearchConfig {
@@ -106,6 +122,11 @@ impl Default for SearchConfig {
             length_threshold: 80,
             human_boost_percent: 33,
             cwd_boost_percent: 50,
+            // The pre-PROD-09 behaviour, kept as the default on purpose:
+            // upgrading must not change how anyone's queries are read.
+            match_mode: crate::search::MatchMode::Terms,
+            scope: crate::search::RecallScope::All,
+            compact: false,
         }
     }
 }

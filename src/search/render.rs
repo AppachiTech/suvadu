@@ -1630,6 +1630,7 @@ mod tests {
                 human_boost_percent: 33,
                 cwd_boost_percent: 50,
             },
+            recall: super::super::RecallState::default(),
         };
 
         (super::SearchApp::new(config), entry)
@@ -1716,6 +1717,7 @@ mod tests {
                 human_boost_percent: 33,
                 cwd_boost_percent: 50,
             },
+            recall: super::super::RecallState::default(),
         };
         let app = super::SearchApp::new(config);
         let title = app.build_table_title();
@@ -1761,6 +1763,7 @@ mod tests {
                 human_boost_percent: 33,
                 cwd_boost_percent: 50,
             },
+            recall: super::super::RecallState::default(),
         };
         let app = super::SearchApp::new(config);
         let title = app.build_table_title();
@@ -1816,6 +1819,7 @@ mod tests {
                 human_boost_percent: 33,
                 cwd_boost_percent: 50,
             },
+            recall: super::super::RecallState::default(),
         };
         super::SearchApp::new(config)
     }
@@ -1938,6 +1942,7 @@ mod tests {
                 human_boost_percent: 33,
                 cwd_boost_percent: 50,
             },
+            recall: super::super::RecallState::default(),
         };
         let app = super::SearchApp::new(config);
         let title = app.build_table_title();
@@ -1986,6 +1991,7 @@ mod tests {
                 human_boost_percent: 33,
                 cwd_boost_percent: 50,
             },
+            recall: super::super::RecallState::default(),
         };
         let app = super::SearchApp::new(config);
         let title = app.build_table_title();
@@ -2034,6 +2040,7 @@ mod tests {
                 human_boost_percent: 33,
                 cwd_boost_percent: 50,
             },
+            recall: super::super::RecallState::default(),
         };
         let app = super::SearchApp::new(config);
         let title = app.build_table_title();
@@ -2308,6 +2315,7 @@ mod tests {
                 human_boost_percent: 33,
                 cwd_boost_percent: 50,
             },
+            recall: super::super::RecallState::default(),
         };
         let app = super::SearchApp::new(config);
         let text = build_command_text(&app, &entry);
@@ -2371,6 +2379,7 @@ mod tests {
                 human_boost_percent: 33,
                 cwd_boost_percent: 50,
             },
+            recall: super::super::RecallState::default(),
         };
         let app = super::SearchApp::new(config);
         let text = build_command_text(&app, &entry);
@@ -2521,6 +2530,7 @@ mod tests {
                 human_boost_percent: 33,
                 cwd_boost_percent: 50,
             },
+            recall: super::super::RecallState::default(),
         }
     }
 
