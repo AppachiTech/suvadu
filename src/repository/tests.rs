@@ -2923,6 +2923,7 @@ fn session_scope_also_narrows_unique_results() {
         .expect("cargo build should be in session A");
     assert_eq!(build.1, 1);
     assert_eq!(repo.count_unique_filtered(&scoped).unwrap(), 2);
+}
 
 #[test]
 fn preview_entries_by_pattern_returns_the_matching_commands() {
@@ -2986,5 +2987,4 @@ fn deleting_entries_removes_their_notes_and_leaves_the_session_row_behind() {
         repo.get_session(&session.id).unwrap().is_some(),
         "the session row stays behind and is only cleaned up on request"
     );
-}
 }
