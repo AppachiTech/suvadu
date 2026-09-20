@@ -189,3 +189,193 @@ pub(super) fn build_command_text(app: &super::SearchApp, entry: &crate::models::
         note_prefix, bookmark_prefix, count_display, entry.command
     )
 }
+
+// ── Footer hint layout (PROD-03) ───────────────────────────────
+
+/// A single footer shortcut hint, rendered as a key badge followed by its
+/// label (`" ^F "` + `" Filter  "`).
+///
+/// Hints are laid out by width in priority order: a hint that does not fit
+/// entirely is dropped, never clipped mid-badge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Hint {
+    pub key: &'static str,
+    pub label: &'static str,
+}
+
+impl Hint {
+    pub const fn new(key: &'static str, label: &'static str) -> Self {
+        Self { key, label }
+    }
+
+    /// Rendered width in terminal cells: `" {key} "` + `" {label}  "`.
+    pub fn width(&self) -> usize {
+        display_width(self.key) + display_width(self.label) + 5
+    }
+}
+
+/// Display width of `s` in terminal cells.
+pub(super) fn display_width(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
+}
+
+/// Number of leading items of `items` whose total width fits in `available`.
+///
+/// Stops at the first item that does not fit, so the visible set always stays
+/// a priority-ordered prefix and no item is ever partially rendered.
+pub(super) fn fit_prefix<T>(
+    items: &[T],
+    available: usize,
+    width_of: impl Fn(&T) -> usize,
+) -> usize {
+    let mut used = 0usize;
+    let mut count = 0usize;
+    for item in items {
+        let w = width_of(item);
+        if used + w > available {
+            break;
+        }
+        used += w;
+        count += 1;
+    }
+    count
+}
+
+/// Number of leading hints that fit in `available` cells.
+pub(super) fn fit_hints(hints: &[Hint], available: usize) -> usize {
+    fit_prefix(hints, available, Hint::width)
+}
+
+// ── Persistent status area (PROD-03) ───────────────────────────
+
+/// One `label: value` pair in the persistent status row, rendered as
+/// `" Scope "` + `" All dirs "` + a trailing separator space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct StatusSegment {
+    pub label: &'static str,
+    pub value: &'static str,
+}
+
+impl StatusSegment {
+    pub const fn new(label: &'static str, value: &'static str) -> Self {
+        Self { label, value }
+    }
+
+    pub fn width(&self) -> usize {
+        display_width(self.label) + display_width(self.value) + 5
+    }
+}
+
+// ── Detail pane placement (PROD-03) ────────────────────────────
+
+/// Minimum content width before the detail pane may sit beside the results.
+///
+/// Below this the 30% side pane squeezes the command column hard enough that
+/// results become unreadable, so the pane moves under the results instead.
+pub(super) const DETAIL_SIDE_MIN_WIDTH: u16 = 120;
+/// Minimum content height for the stacked (below-results) detail pane.
+pub(super) const DETAIL_BOTTOM_MIN_HEIGHT: u16 = 14;
+/// Height of the stacked detail pane.
+pub(super) const DETAIL_BOTTOM_HEIGHT: u16 = 7;
+
+/// Where the detail pane is drawn for a given content area.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DetailPlacement {
+    /// Not drawn: either toggled off, or there is no room for a usable pane.
+    Hidden,
+    /// Beside the results table (wide terminals).
+    Right,
+    /// Full width under the results table (narrow terminals): keeps the
+    /// command column readable and wraps multiline commands over more cells.
+    Bottom,
+}
+
+/// Decide where the detail pane goes for a content area of `width` x `height`.
+pub(super) const fn detail_placement(open: bool, width: u16, height: u16) -> DetailPlacement {
+    if !open {
+        return DetailPlacement::Hidden;
+    }
+    if width >= DETAIL_SIDE_MIN_WIDTH {
+        return DetailPlacement::Right;
+    }
+    if height >= DETAIL_BOTTOM_MIN_HEIGHT {
+        return DetailPlacement::Bottom;
+    }
+    DetailPlacement::Hidden
+}
+
+#[cfg(test)]
+mod prod03_layout_tests {
+    use super::{
+        detail_placement, display_width, fit_hints, fit_prefix, DetailPlacement, Hint,
+        StatusSegment, DETAIL_BOTTOM_MIN_HEIGHT, DETAIL_SIDE_MIN_WIDTH,
+    };
+
+    #[test]
+    fn hint_width_counts_badge_padding() {
+        // " ^F " + " Filter  "
+        assert_eq!(Hint::new("^F", "Filter").width(), 13);
+        // Multi-byte keys are measured in display cells, not bytes.
+        assert_eq!(Hint::new("\u{21b5}", "Run").width(), 9);
+        assert_eq!(Hint::new("\u{2191}\u{2193}", "Nav").width(), 10);
+    }
+
+    #[test]
+    fn fit_hints_drops_whole_hints_never_clips() {
+        let hints = [
+            Hint::new("Esc", "Quit"),   // 12
+            Hint::new("^F", "Filter"),  // 13
+            Hint::new("Tab", "Detail"), // 14
+        ];
+        assert_eq!(fit_hints(&hints, 0), 0);
+        assert_eq!(fit_hints(&hints, 11), 0);
+        assert_eq!(fit_hints(&hints, 12), 1);
+        assert_eq!(fit_hints(&hints, 24), 1);
+        assert_eq!(fit_hints(&hints, 25), 2);
+        assert_eq!(fit_hints(&hints, 38), 2);
+        assert_eq!(fit_hints(&hints, 39), 3);
+        assert_eq!(fit_hints(&hints, 500), 3);
+    }
+
+    #[test]
+    fn fit_prefix_stops_at_the_first_item_that_does_not_fit() {
+        // A later, narrower item must not jump ahead of a dropped one.
+        let widths = [10usize, 40, 5];
+        assert_eq!(fit_prefix(&widths, 20, |w| *w), 1);
+    }
+
+    #[test]
+    fn status_segment_width_counts_label_and_value_padding() {
+        // " Scope " + " All dirs " + separator
+        assert_eq!(StatusSegment::new("Scope", "All dirs").width(), 18);
+        assert_eq!(StatusSegment::new("Agents", "Shown").width(), 16);
+    }
+
+    #[test]
+    fn display_width_measures_cells() {
+        assert_eq!(display_width("^F"), 2);
+        assert_eq!(display_width("\u{2191}\u{2193}"), 2);
+        assert_eq!(display_width("caf\u{e9}"), 4);
+    }
+
+    #[test]
+    fn detail_placement_follows_terminal_size() {
+        assert_eq!(detail_placement(false, 200, 60), DetailPlacement::Hidden);
+        assert_eq!(
+            detail_placement(true, DETAIL_SIDE_MIN_WIDTH, 40),
+            DetailPlacement::Right
+        );
+        assert_eq!(
+            detail_placement(true, DETAIL_SIDE_MIN_WIDTH - 1, 40),
+            DetailPlacement::Bottom
+        );
+        // 80x24 and 100x30 (content area = full height minus 7 chrome rows).
+        assert_eq!(detail_placement(true, 80, 17), DetailPlacement::Bottom);
+        assert_eq!(detail_placement(true, 100, 23), DetailPlacement::Bottom);
+        // Too short for a usable stacked pane: results keep the whole area.
+        assert_eq!(
+            detail_placement(true, 100, DETAIL_BOTTOM_MIN_HEIGHT - 1),
+            DetailPlacement::Hidden
+        );
+    }
+}

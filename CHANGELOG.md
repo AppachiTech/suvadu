@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- **`suv search` control hierarchy** — the shortcut footer is now laid out to the terminal width: accept (`Enter`), cancel (`Esc`), navigation, `Ctrl+F` filters, `Tab` detail and `?` help are reserved first, secondary actions fill whatever space is left, and a hint that does not fit is dropped whole instead of being clipped mid-badge (at 100x30 the footer previously ended in a partial `^`). Every dropped shortcut is still listed in the help overlay, which is now two columns so the full list fits an 80x24 terminal; help stays visible in the footer at every width. A new always-on status row under the search box states the active scope, matching mode, unique/all results, whether AI-agent commands are included, and any other active filters. The detail pane moves below the results (instead of taking 30% of the width) on terminals narrower than 120 columns, keeping command text readable and giving multiline commands the full width. No keybindings changed.
+
 ## [0.4.1] - 2026-09-13
 
 ### Added

@@ -2394,3 +2394,462 @@ fn test_paste_unicode() {
     assert!(needs_reload);
     assert_eq!(app.query, "git log --author=\"\u{00e9}mile\"");
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// PROD-03: recall UI hierarchy — footer hint layout, persistent status area,
+// detail-pane placement. These tests render the whole screen into a ratatui
+// `TestBackend` and inspect the resulting character grid.
+// ───────────────────────────────────────────────────────────────────────────
+
+use ratatui::{backend::TestBackend, Terminal};
+
+/// Serializes tests that mutate the process-global theme.
+static THEME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Every key badge the search footer is allowed to render.
+const FOOTER_KEY_TOKENS: &[&str] = &[
+    "Esc",
+    "\u{21b5}",
+    "\u{2191}\u{2193}",
+    "^F",
+    "Tab",
+    "?",
+    "^Y",
+    "^B",
+    "^U",
+    "^A",
+    "^L",
+    "^E",
+    "^O",
+    "^N",
+    "^T",
+    "^D",
+    "^G",
+    "^S",
+    "j/k",
+    "^U/^D",
+    "/",
+    "q",
+    "NORMAL",
+    "INSERT",
+];
+
+/// Every hint label word the search footer is allowed to render.
+const FOOTER_LABEL_TOKENS: &[&str] = &[
+    "Quit", "Run", "Nav", "Filter", "Detail", "Help", "Copy", "Bookmark", "Unique", "Agents",
+    "Scope", "Failed", "Marked", "Note", "Tag", "Delete", "Goto", "Match", "Scroll", "Search",
+    "Normal",
+];
+
+fn render_lines(app: &mut SearchApp, width: u16, height: u16) -> Vec<String> {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|f| app.draw(f)).unwrap();
+    buffer_lines(terminal.backend().buffer())
+}
+
+fn buffer_lines(buf: &ratatui::buffer::Buffer) -> Vec<String> {
+    let area = buf.area();
+    (0..area.height)
+        .map(|y| {
+            (0..area.width)
+                .map(|x| {
+                    buf.cell((x, y))
+                        .map_or(" ", ratatui::buffer::Cell::symbol)
+                        .to_string()
+                })
+                .collect::<String>()
+        })
+        .collect()
+}
+
+fn footer_text(lines: &[String]) -> String {
+    lines.last().cloned().unwrap_or_default()
+}
+
+fn is_page_token(token: &str) -> bool {
+    // " 1/3 (33%) "
+    token.ends_with("%)")
+        || token
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '/' || c == '(' || c == ')' || c == '%')
+}
+
+/// A clipped badge shows up either as an unknown token (`"^"`, `"Bookmar"`) or
+/// as a trailing key badge whose label never made it onto the screen.
+fn assert_no_partial_hint(footer: &str, ctx: &str) {
+    let trimmed = footer.trim_end();
+    for token in trimmed.split_whitespace() {
+        assert!(
+            FOOTER_KEY_TOKENS.contains(&token)
+                || FOOTER_LABEL_TOKENS.contains(&token)
+                || is_page_token(token),
+            "{ctx}: clipped/unknown footer token {token:?} in {footer:?}"
+        );
+    }
+    if let Some(last) = trimmed.split_whitespace().next_back() {
+        assert!(
+            FOOTER_LABEL_TOKENS.contains(&last) || is_page_token(last),
+            "{ctx}: footer ends mid-badge with {last:?} in {footer:?}"
+        );
+    }
+}
+
+fn assert_essential_hints(footer: &str, ctx: &str) {
+    for expected in ["Esc", "Quit", "Run", "Nav", "Filter", "Detail", "Help"] {
+        assert!(
+            footer.contains(expected),
+            "{ctx}: essential hint {expected:?} missing from footer {footer:?}"
+        );
+    }
+}
+
+/// The persistent status area must state scope, matching mode, result mode and
+/// whether agent commands are included.
+fn assert_status_area(lines: &[String], ctx: &str) {
+    let screen = lines.join("\n");
+    for expected in ["Scope", "Match", "Agents"] {
+        assert!(
+            screen.contains(expected),
+            "{ctx}: status indicator {expected:?} not visible on screen:\n{screen}"
+        );
+    }
+}
+
+fn render_app() -> SearchApp {
+    let entries = vec![
+        create_test_entry("cargo build --release"),
+        create_test_entry("git status"),
+        create_test_entry("kubectl get pods --all-namespaces"),
+    ];
+    SearchApp::new(test_search_config(entries, 3))
+}
+
+#[test]
+fn prod03_footer_has_no_partial_hint_at_80x24() {
+    let mut app = render_app();
+    let lines = render_lines(&mut app, 80, 24);
+    assert_no_partial_hint(&footer_text(&lines), "80x24");
+}
+
+#[test]
+fn prod03_footer_has_no_partial_hint_at_100x30() {
+    let mut app = render_app();
+    let lines = render_lines(&mut app, 100, 30);
+    assert_no_partial_hint(&footer_text(&lines), "100x30");
+}
+
+#[test]
+fn prod03_essential_hints_visible_at_80x24() {
+    let mut app = render_app();
+    let lines = render_lines(&mut app, 80, 24);
+    assert_essential_hints(&footer_text(&lines), "80x24");
+}
+
+#[test]
+fn prod03_essential_hints_visible_at_100x30() {
+    let mut app = render_app();
+    let lines = render_lines(&mut app, 100, 30);
+    assert_essential_hints(&footer_text(&lines), "100x30");
+}
+
+#[test]
+fn prod03_status_area_visible_at_80x24() {
+    let mut app = render_app();
+    let lines = render_lines(&mut app, 80, 24);
+    assert_status_area(&lines, "80x24");
+}
+
+#[test]
+fn prod03_status_area_visible_at_100x30() {
+    let mut app = render_app();
+    let lines = render_lines(&mut app, 100, 30);
+    assert_status_area(&lines, "100x30");
+}
+
+#[test]
+fn prod03_status_area_reports_agent_visibility_and_scope() {
+    let mut app = render_app();
+    app.filters.show_agents = true;
+    app.filters.cwd = Some("/tmp".to_string());
+    app.view.unique_mode = true;
+    let lines = render_lines(&mut app, 100, 30);
+    let screen = lines.join("\n");
+    assert!(screen.contains("Shown"), "agents shown state:\n{screen}");
+    assert!(screen.contains("Here"), "cwd scope state:\n{screen}");
+    assert!(screen.contains("Unique"), "unique mode state:\n{screen}");
+
+    app.filters.show_agents = false;
+    app.filters.cwd = None;
+    app.view.unique_mode = false;
+    let lines = render_lines(&mut app, 100, 30);
+    let screen = lines.join("\n");
+    assert!(screen.contains("Hidden"), "agents hidden state:\n{screen}");
+    assert!(screen.contains("All dirs"), "all-dirs scope:\n{screen}");
+}
+
+#[test]
+fn prod03_very_wide_terminal_shows_secondary_hints() {
+    let mut app = render_app();
+    let lines = render_lines(&mut app, 300, 40);
+    let footer = footer_text(&lines);
+    assert_no_partial_hint(&footer, "300x40");
+    assert_essential_hints(&footer, "300x40");
+    for expected in ["Copy", "Bookmark", "Note", "Tag", "Delete", "Goto"] {
+        assert!(
+            footer.contains(expected),
+            "300x40: secondary hint {expected:?} missing from {footer:?}"
+        );
+    }
+}
+
+#[test]
+fn prod03_narrow_terminal_keeps_help_discoverable() {
+    let mut app = render_app();
+    for width in [30_u16, 40, 50, 60, 70] {
+        let lines = render_lines(&mut app, width, 24);
+        let footer = footer_text(&lines);
+        assert_no_partial_hint(&footer, &format!("{width}x24"));
+        assert!(
+            footer.contains("Help"),
+            "{width}x24: help hint must always stay discoverable, got {footer:?}"
+        );
+    }
+}
+
+#[test]
+fn prod03_resize_during_search_never_clips_hints() {
+    let mut app = render_app();
+    app.query = "cargo".to_string();
+    for (w, h) in [
+        (80_u16, 24_u16),
+        (100, 30),
+        (140, 40),
+        (72, 20),
+        (100, 30),
+        (46, 16),
+        (200, 50),
+    ] {
+        let lines = render_lines(&mut app, w, h);
+        let footer = footer_text(&lines);
+        assert_no_partial_hint(&footer, &format!("{w}x{h}"));
+        assert!(
+            footer.contains("Help"),
+            "{w}x{h}: help hint missing after resize: {footer:?}"
+        );
+    }
+}
+
+#[test]
+fn prod03_unicode_command_does_not_clip_hints_or_status() {
+    let mut app = SearchApp::new(test_search_config(
+        vec![
+            create_test_entry("echo '\u{4f60}\u{597d}\u{4e16}\u{754c} \u{2014} caf\u{e9}'"),
+            create_test_entry("grep -r '\u{1f680}' ."),
+        ],
+        2,
+    ));
+    for (w, h) in [(80_u16, 24_u16), (100, 30)] {
+        let lines = render_lines(&mut app, w, h);
+        assert_no_partial_hint(&footer_text(&lines), &format!("unicode {w}x{h}"));
+        assert_status_area(&lines, &format!("unicode {w}x{h}"));
+    }
+}
+
+#[test]
+fn prod03_all_three_themes_render_without_clipped_hints() {
+    let _guard = THEME_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for name in [
+        crate::theme::ThemeName::Dark,
+        crate::theme::ThemeName::Light,
+        crate::theme::ThemeName::Terminal,
+    ] {
+        crate::theme::init_theme(name);
+        let mut app = render_app();
+        for (w, h) in [(80_u16, 24_u16), (100, 30)] {
+            let lines = render_lines(&mut app, w, h);
+            let ctx = format!("{name} {w}x{h}");
+            assert_no_partial_hint(&footer_text(&lines), &ctx);
+            assert_essential_hints(&footer_text(&lines), &ctx);
+            assert_status_area(&lines, &ctx);
+        }
+    }
+    crate::theme::init_theme(crate::theme::ThemeName::Dark);
+}
+
+#[test]
+fn prod03_help_overlay_holds_advanced_hints_and_takes_focus() {
+    let mut app = render_app();
+    app.dialog = DialogState::Help;
+    let lines = render_lines(&mut app, 100, 30);
+    let screen = lines.join("\n");
+
+    // Advanced/secondary shortcuts live in the overlay, not the footer.
+    for expected in ["^G", "^T", "^S", "^N", "^D", "^O"] {
+        assert!(
+            screen.contains(expected),
+            "help overlay missing {expected:?}:\n{screen}"
+        );
+    }
+    // The search box must show it no longer has focus while the overlay is up.
+    assert!(
+        !screen.contains("Search (Typing)"),
+        "search box must be dimmed while the help overlay has focus:\n{screen}"
+    );
+}
+
+#[test]
+fn prod03_detail_pane_moves_below_results_when_side_by_side_would_clip() {
+    let long = "kubectl get pods --all-namespaces -o wide | grep suvadu";
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry(long)], 1));
+    app.view.detail_pane_open = true;
+    app.table_state.select(Some(0));
+
+    for (w, h) in [(80_u16, 24_u16), (100, 30)] {
+        let lines = render_lines(&mut app, w, h);
+        let screen = lines.join("\n");
+        assert!(
+            lines.iter().any(|l| l.contains(long)),
+            "{w}x{h}: full command must stay readable in the results list:\n{screen}"
+        );
+        let detail_row = lines
+            .iter()
+            .position(|l| l.contains("Detail"))
+            .unwrap_or_else(|| panic!("{w}x{h}: detail pane must still be reachable:\n{screen}"));
+        assert!(
+            !lines[detail_row].contains("History"),
+            "{w}x{h}: detail pane must move below the results instead of squeezing them, row was {:?}",
+            lines[detail_row]
+        );
+    }
+}
+
+#[test]
+fn prod03_detail_pane_stays_beside_results_on_wide_terminals() {
+    let mut app = render_app();
+    app.view.detail_pane_open = true;
+    app.table_state.select(Some(0));
+    let lines = render_lines(&mut app, 160, 40);
+    // Side-by-side: the detail pane border shares rows with the results table.
+    let detail_row = lines
+        .iter()
+        .position(|l| l.contains("Detail"))
+        .expect("detail pane rendered");
+    assert!(
+        lines[detail_row].contains("History"),
+        "160x40: detail pane should sit beside the results table, row was {:?}",
+        lines[detail_row]
+    );
+}
+
+#[test]
+fn prod03_multiline_command_is_fully_inspectable() {
+    let cmd = "for f in *.rs; do\n  rustfmt \"$f\"\ndone";
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry(cmd)], 1));
+    app.view.detail_pane_open = true;
+    app.table_state.select(Some(0));
+
+    let lines = render_lines(&mut app, 100, 30);
+    let screen = lines.join("\n");
+    for part in ["for f in *.rs; do", "rustfmt", "done"] {
+        assert!(
+            screen.contains(part),
+            "multiline command part {part:?} not inspectable:\n{screen}"
+        );
+    }
+    assert_no_partial_hint(&footer_text(&lines), "multiline 100x30");
+}
+
+#[test]
+fn prod03_vim_mode_footer_is_not_clipped() {
+    let mut app = render_app();
+    app.vim_enabled = true;
+    app.vim_mode = VimMode::Normal;
+    let lines = render_lines(&mut app, 80, 24);
+    let footer = footer_text(&lines);
+    assert_no_partial_hint(&footer, "vim normal 80x24");
+    assert!(footer.contains("Help"), "vim normal: {footer:?}");
+
+    app.vim_mode = VimMode::Insert;
+    let lines = render_lines(&mut app, 80, 24);
+    let footer = footer_text(&lines);
+    assert_no_partial_hint(&footer, "vim insert 80x24");
+    assert!(footer.contains("Help"), "vim insert: {footer:?}");
+}
+
+#[test]
+fn prod03_footer_snapshot_at_80x24() {
+    let mut app = render_app();
+    let lines = render_lines(&mut app, 80, 24);
+    assert_eq!(
+        footer_text(&lines),
+        " Esc  Quit   \u{21b5}  Run   \u{2191}\u{2193}  Nav   ^F  Filter   Tab  Detail   ^Y  Copy   ?  Help   "
+    );
+    assert_eq!(
+        lines[4],
+        " Scope  All dirs   Match  Smart   Agents  Hidden   Show  All                    "
+    );
+}
+
+#[test]
+fn prod03_footer_snapshot_at_100x30() {
+    let mut app = render_app();
+    let lines = render_lines(&mut app, 100, 30);
+    assert_eq!(
+        footer_text(&lines),
+        " Esc  Quit   \u{21b5}  Run   \u{2191}\u{2193}  Nav   ^F  Filter   Tab  Detail   ^Y  Copy   ^B  Bookmark   ?  Help        "
+    );
+}
+
+#[test]
+fn prod03_status_message_never_pushes_out_essential_hints() {
+    let mut app = render_app();
+    app.status_message = Some(("Copied to clipboard".to_string(), std::time::Instant::now()));
+    for (w, h) in [(80_u16, 24_u16), (100, 30)] {
+        let lines = render_lines(&mut app, w, h);
+        let footer = footer_text(&lines);
+        assert!(
+            footer.contains("Copied to clipboard"),
+            "{w}x{h}: status message missing: {footer:?}"
+        );
+        for expected in ["Esc", "Quit", "Filter", "Help"] {
+            assert!(
+                footer.contains(expected),
+                "{w}x{h}: essential hint {expected:?} lost to the status message: {footer:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn prod03_help_overlay_fits_an_80x24_terminal() {
+    let mut app = render_app();
+    app.dialog = DialogState::Help;
+    let lines = render_lines(&mut app, 80, 24);
+    let screen = lines.join("\n");
+    for expected in [
+        "Bookmarked only",
+        "Match smart/recent",
+        "Go to page...",
+        "Press any key to close",
+    ] {
+        assert!(
+            screen.contains(expected),
+            "help overlay clipped {expected:?} at 80x24:\n{screen}"
+        );
+    }
+}
+
+#[test]
+fn prod03_active_filters_shown_in_status_row() {
+    let mut app = render_app();
+    app.filters.after = Some(1);
+    app.filters.failed_only = true;
+    let lines = render_lines(&mut app, 100, 30);
+    assert!(
+        lines[4].contains("date") && lines[4].contains("failed"),
+        "status row should list active filters, got {:?}",
+        lines[4]
+    );
+}
