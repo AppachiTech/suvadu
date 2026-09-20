@@ -2,30 +2,37 @@
 set -e
 
 # Suvadu installer — handles both fresh installs and updates.
-# Usage: curl -fsSL https://downloads.appachi.tech/install.sh | bash
+# Usage: curl -fsSL https://downloads.appachi.tech/suvadu/install.sh | bash
 
 BIN_NAME="suv"
 SYMLINK_NAME="suvadu"
 INSTALL_DIR="/usr/local/bin"
 
-# Detect platform
-OS="$(uname -s)"
-ARCH="$(uname -m)"
+# Detect platform.
+#
+# The release workflow names each OS's primary target with no arch suffix and
+# the secondary one with a suffix, and the primary target differs per OS:
+#   linux  -> x86_64 is "suv-linux-latest",  aarch64 is "suv-linux-aarch64-latest"
+#   macos  -> arm64  is "suv-macos-latest",  x86_64  is "suv-macos-x86_64-latest"
+# Resolve OS and architecture together so these stay in step; a single
+# arch-only mapping previously requested a macOS file that is never published.
+# SUVADU_INSTALL_OS/ARCH exist so scripts/test-install-urls.sh can check every
+# combination from one machine.
+OS="${SUVADU_INSTALL_OS:-$(uname -s)}"
+ARCH="${SUVADU_INSTALL_ARCH:-$(uname -m)}"
 
-case "$OS" in
-    Linux)  PLATFORM="linux" ;;
-    Darwin) PLATFORM="macos" ;;
-    *)
-        echo "Error: Unsupported OS '$OS'. Only Linux and macOS are supported."
+case "$OS/$ARCH" in
+    Linux/x86_64)                 PLATFORM="linux"; ARCH_SUFFIX="" ;;
+    Linux/aarch64|Linux/arm64)    PLATFORM="linux"; ARCH_SUFFIX="-aarch64" ;;
+    Darwin/arm64|Darwin/aarch64)  PLATFORM="macos"; ARCH_SUFFIX="" ;;
+    Darwin/x86_64)                PLATFORM="macos"; ARCH_SUFFIX="-x86_64" ;;
+    Linux/*|Darwin/*)
+        echo "Error: Unsupported architecture '$ARCH' on $OS."
+        echo "Build from source instead: cargo install suvadu"
         exit 1
         ;;
-esac
-
-case "$ARCH" in
-    aarch64|arm64) ARCH_SUFFIX="-aarch64" ;;
-    x86_64)        ARCH_SUFFIX="" ;;
     *)
-        echo "Error: Unsupported architecture '$ARCH'."
+        echo "Error: Unsupported OS '$OS'. Only Linux and macOS are supported."
         exit 1
         ;;
 esac
@@ -35,6 +42,12 @@ URL="https://downloads.appachi.tech/${PLATFORM}/${ARCHIVE}"
 CHECKSUM_URL="${URL}.sha256"
 
 VERSION_URL="https://downloads.appachi.tech/version.txt"
+
+# Used by scripts/test-install-urls.sh to check the resolved URL without installing.
+if [ -n "${SUVADU_INSTALL_PRINT_URL:-}" ]; then
+    echo "$URL"
+    exit 0
+fi
 
 echo "Suvadu installer"
 echo ""
@@ -69,7 +82,15 @@ TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
 echo "Downloading from: $URL"
-curl --proto '=https' -fsSL -m 300 -o "$TMPDIR/$ARCHIVE" "$URL"
+if ! curl --proto '=https' -fsSL -m 300 -o "$TMPDIR/$ARCHIVE" "$URL"; then
+    echo ""
+    echo "Error: could not download $ARCHIVE for ${PLATFORM} ${ARCH}."
+    echo "Install another way, or report this build as missing:"
+    echo "  brew tap AppachiTech/suvadu && brew install suvadu"
+    echo "  cargo install suvadu"
+    echo "  https://github.com/AppachiTech/suvadu/issues"
+    exit 1
+fi
 
 # Verify checksum
 EXPECTED=$(curl --proto '=https' -fsSL -m 30 "$CHECKSUM_URL" | awk '{print $1}')
@@ -136,4 +157,4 @@ echo 'After updating agent integrations:'
 echo '  Codex: run suv init codex, then review/trust Suvadu hooks with /hooks in the Codex terminal CLI.'
 echo '  Relaunch Codex; for its VS Code extension, fully quit and reopen VS Code.'
 echo '  Claude Code: after suv init claude-code, relaunch Claude Code (or its VS Code host).'
-echo '  Native session/token capture currently supports Codex; Claude capture is planned.'
+echo '  Native session and token capture supports Claude Code, Codex, and OpenCode.'

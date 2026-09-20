@@ -145,6 +145,44 @@ jobs:
             artifacts/${{ matrix.os }}/archive/suv-${{ matrix.os }}${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.sha256
             artifacts/${{ matrix.os }}/archive/suv-${{ matrix.os }}${{ matrix.suffix }}-${{ github.ref_name }}.tar.gz.minisig
 
+  publish-installer:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # The installer was uploaded by hand, so the published copy drifted behind
+      # the repository: the fix for a wrong download URL only reaches users when
+      # this file is republished. Ship it with the release instead.
+      - name: Stage installer
+        run: |
+          mkdir -p installer/suvadu
+          cp scripts/install.sh installer/suvadu/install.sh
+
+      - name: Upload installer to Cloudflare R2
+        uses: ryand56/r2-upload-action@b801a390acbdeb034c5e684ff5e1361c06639e7c # v1.4
+        with:
+          r2-account-id: ${{ secrets.R2_ACCOUNT_ID }}
+          r2-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          r2-bucket: ${{ secrets.R2_BUCKET }}
+          source-dir: installer
+          destination-dir: ./
+
+      - name: Purge installer from the CDN cache
+        run: |
+          curl -s -X POST \
+            "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/purge_cache" \
+            -H "Authorization: Bearer ${{ secrets.CF_PURGE_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"files": ["https://downloads.appachi.tech/suvadu/install.sh"]}'
+
+      # Guards the mismatch that broke macOS installs: every URL the installer
+      # can resolve must be a file this release actually published.
+      - name: Verify every platform download resolves
+        run: scripts/test-install-urls.sh
+
   update-homebrew-tap:
     needs: build
     runs-on: ubuntu-latest
