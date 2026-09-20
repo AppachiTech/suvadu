@@ -15,19 +15,44 @@ We aim to acknowledge reports within 48 hours and provide a fix timeline within 
 ### Data Storage
 
 - All history is stored **locally** in a SQLite database (WAL mode)
-- Default locations:
-  - macOS: `~/Library/Application Support/tech.appachi.suvadu/history.db`
-  - Linux: `~/.local/share/suvadu/history.db`
 - **No data is transmitted to external servers**
 - **No telemetry or analytics** are collected
+
+Every path below is resolved at runtime from the `tech.appachi.suvadu`
+application identifier, except the agent hook scripts, which are written to
+`~/.config/suvadu/hooks/` on **every** platform, macOS included.
+
+| What | macOS | Linux |
+|---|---|---|
+| Data directory | `~/Library/Application Support/tech.appachi.suvadu/` | `$XDG_DATA_HOME/suvadu/` (default `~/.local/share/suvadu/`) |
+| Config directory | the same directory as the data directory | `$XDG_CONFIG_HOME/suvadu/` (default `~/.config/suvadu/`) |
+| Agent hook scripts | `~/.config/suvadu/hooks/` | `~/.config/suvadu/hooks/` |
+
+Inside the data directory:
+
+| File | Holds |
+|---|---|
+| `history.db` (+ `-wal`, `-shm`) | everything in the table below |
+| `backups/` | full database copies — see *What is stored, and how long* |
+| `prompts/` | the live prompt cache pairing an agent prompt with the commands run for it, as `<session>.prompt` files. The only thing anything prunes: `suv gc` deletes cache files older than 7 days |
+| `aliases.sh` | the managed alias file your shell sources |
+| `reconcile.key` | 32 random bytes, used to key the HMAC that links a command to its prompt without storing a bare hash of the prompt text |
+
+`config.toml` lives in the config directory, and a per-project
+`.suvadu.toml` lives wherever you put it in your own repositories.
+
+`suv uninstall` prints the real config and data directories it did not
+remove, resolved the same way — never a hardcoded guess.
 
 #### Data at rest
 
 - Command history is stored **unencrypted** in the SQLite file. Secret
   redaction (below) is applied before writing, but the database itself is
   plaintext — treat it like your shell history file.
-- On Unix the data directory is `0o700` and the database, config, prompt
-  cache, alias file, and backups are written `0o600` (owner-only).
+- On Unix the data directory and `backups/` are `0o700`, and `history.db`,
+  the prompt cache, `aliases.sh` and `reconcile.key` are written `0o600`
+  (owner-only). On Linux the config directory is a separate directory and is
+  created with no explicit mode, so it follows your umask.
 - `suv backup` and the automatic snapshot taken before `suv delete` write
   copies into `<data_dir>/backups/`. These copies are **also unencrypted**,
   and nothing prunes them — they accumulate until you delete them yourself;
@@ -56,11 +81,17 @@ governs it.
 
 | Category | Holds | Goes away when |
 |---|---|---|
-| Commands | command text, directory, exit code, timings, plus their notes, bookmarks, tags and the search index | you run `suv delete <pattern>` |
-| Sessions | shell sessions, and agent sessions with their captured events and adapter checkpoints | an agent session is removed with `suv agent delete-session <id>`; a shell session row stays behind after its commands are deleted |
-| Summaries | session summaries written over MCP | their agent session is deleted — editing or deleting commands only marks a summary *stale*, it does not remove it |
+| Commands | command text, directory, exit code, start/end times, duration, executor type and name, an optional tag, and a `context` JSON blob; plus their notes, bookmarks, aliases, tags and the trigram search index | you run `suv delete <pattern>` |
+| Sessions | shell sessions (id, **machine hostname**, creation time, tag), and agent sessions with their captured transcript events and the adapter checkpoints that record which transcript files were read and how far | an agent session is removed with `suv agent delete-session <id>`; a shell session row stays behind after its commands are deleted |
+| Summaries | session summaries written over MCP, with their cited evidence IDs, the session revision they were written from, and the caller-declared agent and model | their agent session is deleted — editing or deleting commands only marks a summary *stale*, it does not remove it |
 | Skills | shared skill documents | you run `suv skills remove`; a sync rewrites agent-side copies, not the stored row |
-| Backups | full database copies from `suv backup` and the automatic pre-delete snapshot | **you delete the files yourself** |
+| Backups | full database copies from `suv backup`, the automatic pre-delete snapshot, and the pre-import snapshot taken by `suv import --from atuin-db` | **you delete the files yourself** |
+
+The `context` blob is empty for an ordinary typed command. It carries the
+captured agent prompt and turn id for an agent-run command (re-redacted with
+that command's own directory policy before it is stored), and import
+provenance — source, import time, whether the timestamp was real or
+synthetic, and which fields the source did not have — for an imported one.
 
 How these interact:
 
@@ -72,7 +103,8 @@ How these interact:
 - Every `suv delete` writes a pre-delete backup first (unless `--no-backup`),
   so a delete that reduces the live database **adds** a full copy of the
   database as it was moments earlier. Backups accumulate until you remove
-  them.
+  them. `suv import --from atuin-db` takes one too; the JSONL, Bash and Zsh
+  importers do not.
 
 ### Deleting data
 
@@ -115,6 +147,17 @@ in `~/.zsh_history` is redacted on the way in rather than copied verbatim. It
 is still worth removing secrets at the source: redaction recognises known
 patterns and your configured `redaction.extra_patterns`, and cannot promise to
 catch a format it has never seen.
+
+**One gap, in the prompt cache rather than the database.** Before an agent
+prompt is attached to a command it is written to `<data_dir>/prompts/`. The
+Claude Code, Codex and OpenCode prompt hooks redact and truncate it there.
+The **Cursor** hook truncates but does not redact at cache time, and the
+**pi.dev** extension truncates to 500 characters in JavaScript, bypassing
+both `agent.prompt_capture_max_chars` and redaction. In both cases the
+prompt is redacted again, with that command's own directory policy, before
+it reaches the database — so what is *stored* is redacted, but the cache
+file on disk may briefly hold the original text. Those files are `0o600` in
+a `0o700` directory, and `suv gc` deletes cache files older than 7 days.
 
 ### Secret Redaction
 
@@ -208,10 +251,54 @@ Precedence and scope:
 3. An invalid regex or an unknown level is skipped with a warning; the rest
    of the list still loads.
 4. The lists are read from the configuration once per process, from the
-   global config and any project `.suvadu.toml` that applies to the current
-   directory. They affect `suv guard`, the risk columns in the TUI and the
-   `assess_risk` MCP tool. They do not rewrite risk levels already shown in
-   an earlier session, and they never change what is recorded.
+   global config merged with any project `.suvadu.toml` that applies to the
+   process's working directory. They affect `suv guard`, the risk columns in
+   the TUI and the `assess_risk` MCP tool. For the MCP server "working
+   directory" means the directory the server process was started in, fixed
+   for its whole lifetime — so a rule you add for one project does not
+   follow a command the tool is asked about from another. They do not
+   rewrite risk levels already shown in an earlier session, and they never
+   change what is recorded.
+
+### What an MCP client can reach
+
+The MCP server opens the database **read-only**. Every one of its 21 tools,
+8 resources and 6 prompts reads; a short-lived writable connection is opened
+only for an explicitly enabled write.
+
+There are exactly two write capabilities, both **off by default**:
+
+| Tool | Opt-in | Effect when on |
+|---|---|---|
+| `save_session_summary` | `mcp.allow_session_summaries` | stores a summary the calling agent generated |
+| `propose_skill` | `mcp.allow_skill_proposals` | stores a proposed skill as `pending_review` — never active, and never synced to an agent, until a human approves it in `suv skills` (`Ctrl+P`) |
+
+A skill store agents can both read and write is a shared-memory poisoning
+target, which is why the proposal gate is checked before any database
+connection is opened at all. Turning an opt-in back off stops new writes; it
+does not delete what was already stored.
+
+**Summaries are caller-reported text.** Suvadu invokes no model and
+generates no prose — a summary is whatever the connected agent wrote, stored
+back and labelled `provenance: caller-reported`. The writing agent and model
+are **caller-declared metadata, not verified identity**. Suvadu does check
+what it can: the summary must cite evidence IDs that exist in that session,
+must declare the session revision it was written from, and is rejected if
+that revision has moved. Text matching one of your exclusion patterns is
+refused outright rather than trimmed, and everything else goes through the
+same secret redactor as a command — because an agent that read a session can
+restate a secret the redactor caught on the way in.
+
+**Configuration scope and restart.** Which tools and resources are
+available, the two write opt-ins, `mcp.exclude_dirs` and the MCP query
+defaults are read from the **global `config.toml` only**; a project
+`.suvadu.toml` does not change them. All of it is read **once, at server
+startup**, so a change does not reach a running client until you restart it.
+
+`mcp.exclude_dirs` is enforced at the query level by every tool and resource
+that reads history, so it reduces aggregate counts too, not just listed
+commands. `~`-prefixed entries are expanded and matched against the whole
+subtree.
 
 ### Self-Update
 
@@ -220,15 +307,76 @@ Precedence and scope:
 - Update files are written to a unique temporary directory to prevent TOCTOU attacks
 - Homebrew installs are handled through the official Homebrew tap
 
-### Shell Hooks
+### Shell Hooks — what a recorded command contains
 
-- Shell hooks are installed via `eval "$(suv init zsh)"` or `eval "$(suv init bash)"`
-- Hooks only capture: command text, working directory, exit code, timestamps, and executor type
-- No environment variables, arguments to other programs, or file contents are recorded
+Shell hooks are installed with `eval "$(suv init zsh)"` or
+`eval "$(suv init bash)"`. For each command the hook sends Suvadu:
+
+| Sent | From |
+|---|---|
+| The **whole command line as you typed it, arguments included** | zsh's `preexec` argument / bash's `$BASH_COMMAND` |
+| Working directory | `$PWD` |
+| Exit code | `$?` — left unrecorded rather than guessed when it is unknown |
+| Start and end time (and the duration computed from them) | `$EPOCHREALTIME` at the prompt |
+| Session id | `$SUVADU_SESSION_ID`, a UUID the hook generates per shell |
+| Executor type and name | derived from the environment, see below |
+
+**Commands contain arguments, and arguments contain secrets.** `git commit
+-m "…"`, `curl -H 'Authorization: …'` and `psql postgres://user:pw@host` are
+all stored as typed unless a redaction rule catches them. Redaction (below)
+is on by default and rewrites recognised secrets before anything is written,
+but it is pattern matching, not a guarantee. For a command you never want
+stored at all, prefix it with a space or add an exclusion pattern.
+
+**Environment variables.** The hook *reads* a fixed list of variables on
+every command — `$CI`, `$GITHUB_ACTIONS`, `$CLAUDE_CODE`, `$CODEX_THREAD_ID`,
+`$CURSOR_AGENT`, `$WINDSURF`, `$AIDER`, `$TERM_PROGRAM` and others, plus any
+name you configure under `[agents]` — to work out who ran the command. Only
+their *presence* is tested; none of their values is stored. What is stored
+is the conclusion: an executor type (`human`, `agent`, `ide`, `ci`,
+`programmatic`, `unknown`) and a name (`claude-code`, `openai-codex`,
+`terminal`, …). The only environment values that reach the database are
+`$PWD` and `$SUVADU_SESSION_ID`. An environment assignment typed on the
+command line is part of the command text and *is* stored, subject to
+redaction.
+
+Also stored, once per shell session rather than per command: the **machine's
+hostname**.
+
+**Never captured:** command output, file contents, and anything another
+program read or wrote. Suvadu records that a command ran, how it exited and
+how long it took — nothing about what it did.
+
+**Nothing is recorded at all when** the command starts with a space, matches
+one of your exclusion patterns, `SUVADU_PAUSED` is set in that shell,
+recording is disabled in the config, or the command exceeds 64 KB (or its
+directory 4096 characters). Bash additionally ignores `PROMPT_COMMAND`
+itself, tab completion, and lines sourced before the first interactive
+prompt.
 
 ## Supported Versions
 
-| Version | Supported          |
-|---------|--------------------|
-| Latest  | Yes                |
-| < Latest | Best-effort       |
+Security fixes go into the latest release. Older releases are best-effort;
+there is no long-term support branch.
+
+| Version | Supported |
+|---------|-----------|
+| Latest | Yes |
+| < Latest | Best-effort |
+
+### What this release has been tested against
+
+| Surface | Tested against | Enforced at runtime |
+|---|---|---|
+| Shells | Zsh and Bash — the only two `suv init` generates hooks for | yes: `suv init` accepts no other shell |
+| Atuin database import | Atuin 18.0.0 – 18.22.0 (history schema `20210422143411` – `20260818000000`) | **yes** — an untested migration is rejected by id with a next step, never guessed at |
+| Codex | CLI 0.153.4, for `UserPromptSubmit`, `PostToolUse`, `Stop` and `SessionEnd` hooks | no |
+| OpenCode | CLI 1.18.30, matching the published `@opencode-ai/plugin@1.18.30` types | no |
+| Claude Code, Cursor, pi.dev, Antigravity | not pinned to a version | no |
+
+Only the Atuin importer verifies the version of what it is reading. For the
+agent integrations, if a tool changes its hook or plugin contract, capture
+can degrade without an error — `suv doctor` reports, per agent, whether its
+process was detected, its integration is installed, and whether commands,
+native sessions and MCP registration have actually been seen. Re-run
+`suv init <agent>` after upgrading either side.
