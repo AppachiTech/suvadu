@@ -535,10 +535,48 @@ fn validate_config(config: &Config) -> ConfigResult<()> {
     Ok(())
 }
 
+/// Serializes the tests that read or write the shared (temp-dir) config
+/// file, which every test in the process points at.
+#[cfg(test)]
+static CONFIG_FILE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Guard for tests that touch the on-disk config file.
+#[cfg(test)]
+pub fn config_file_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    CONFIG_FILE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Serialize `config` for writing, keeping any key the running build does
+/// not know about that is already in `existing`.
+///
+/// `suv settings` edits one field at a time but re-serializes the whole
+/// `Config`, so without this a save would silently drop anything the struct
+/// has no field for — a hand-added comment-free key, or a key belonging to a
+/// different suvadu version. Known keys are always taken from `config`
+/// (including removals: an emptied list is written as empty, never merged
+/// with the old entries), so this only ever *adds back* what would otherwise
+/// be lost.
+fn render_config_toml(config: &Config, existing: Option<&str>) -> ConfigResult<String> {
+    let rendered = toml::Value::try_from(config)?;
+    let Some(existing) = existing else {
+        return Ok(toml::to_string_pretty(&rendered)?);
+    };
+    // An unparseable existing file is replaced rather than merged: there is
+    // nothing trustworthy to preserve, and refusing to save would strand the
+    // user in the settings UI.
+    let Ok(mut merged) = toml::from_str::<toml::Value>(existing) else {
+        return Ok(toml::to_string_pretty(&rendered)?);
+    };
+    merge_toml_value(&mut merged, rendered);
+    Ok(toml::to_string_pretty(&merged)?)
+}
+
 /// Save configuration to file atomically (temp file + rename).
 pub fn save_config(config: &Config) -> ConfigResult<()> {
     let path = get_config_path()?;
-    let contents = toml::to_string_pretty(config)?;
+    let contents = render_config_toml(config, std::fs::read_to_string(&path).ok().as_deref())?;
     let dir = path
         .parent()
         .ok_or_else(|| ConfigError::Path("config path has no parent directory".into()))?;
@@ -586,6 +624,94 @@ pub fn should_record() -> ConfigResult<bool> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Run `body` against the (temp-dir) config file, restoring whatever was
+    /// there afterwards so parallel tests keep seeing a stable file.
+    fn with_config_file<F: FnOnce(&std::path::Path)>(initial: &str, body: F) {
+        let _guard = config_file_test_lock();
+        let path = get_config_path().unwrap();
+        let restore = std::fs::read_to_string(&path).ok();
+        std::fs::write(&path, initial).unwrap();
+        invalidate_cache();
+
+        body(&path);
+
+        match restore {
+            Some(contents) => std::fs::write(&path, contents).unwrap(),
+            None => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+        invalidate_cache();
+    }
+
+    const EXISTING_CONFIG: &str = r#"
+enabled = true
+# A key this build does not know about (older/newer suvadu, hand-edited).
+future_option = "keep me"
+
+[search]
+page_limit = 123
+
+[redaction]
+extra_patterns = ["AKIA[0-9A-Z]{16}"]
+
+[mcp]
+disabled_tools = ["assess_risk"]
+exclude_dirs = ["/tmp/secret"]
+unknown_mcp_key = 7
+"#;
+
+    #[test]
+    fn save_keeps_unrelated_and_unknown_config_keys() {
+        with_config_file(EXISTING_CONFIG, |path| {
+            let mut config = load_config().expect("existing config must still load");
+            // The one thing the settings UI changed.
+            config.mcp.allow_session_summaries = true;
+            save_config(&config).unwrap();
+
+            let value: toml::Value = toml::from_str(&std::fs::read_to_string(path).unwrap())
+                .expect("saved config must be valid TOML");
+            assert_eq!(
+                value["future_option"].as_str(),
+                Some("keep me"),
+                "an unknown top-level key must survive a save"
+            );
+            assert_eq!(
+                value["mcp"]["unknown_mcp_key"].as_integer(),
+                Some(7),
+                "an unknown key inside a known table must survive a save"
+            );
+
+            let reloaded = load_config().unwrap();
+            assert!(reloaded.mcp.allow_session_summaries);
+            assert_eq!(reloaded.search.page_limit, 123);
+            assert_eq!(reloaded.mcp.disabled_tools, vec!["assess_risk".to_string()]);
+            assert_eq!(reloaded.mcp.exclude_dirs, vec!["/tmp/secret".to_string()]);
+            assert_eq!(
+                reloaded.redaction.extra_patterns,
+                vec!["AKIA[0-9A-Z]{16}".to_string()]
+            );
+        });
+    }
+
+    #[test]
+    fn save_still_applies_removals() {
+        with_config_file(EXISTING_CONFIG, |path| {
+            let mut config = load_config().unwrap();
+            config.mcp.disabled_tools.clear();
+            config.mcp.exclude_dirs.clear();
+            save_config(&config).unwrap();
+
+            let reloaded = load_config().unwrap();
+            assert!(reloaded.mcp.disabled_tools.is_empty());
+            assert!(reloaded.mcp.exclude_dirs.is_empty());
+            // …without losing the keys nobody touched.
+            let value: toml::Value =
+                toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert_eq!(value["future_option"].as_str(), Some("keep me"));
+        });
+    }
 
     #[test]
     fn test_default_config() {
