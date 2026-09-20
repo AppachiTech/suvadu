@@ -135,7 +135,7 @@ impl ResourceEntry {
 pub const TOOLS: &[ToolEntry] = &[
     ToolEntry {
         name: "list_agent_sessions",
-        summary: "List locally captured AI agent sessions with coverage and recorded usage.",
+        summary: "List AI sessions captured from an agent's own transcript, with coverage and recorded usage.",
         write_opt_in: None,
     },
     ToolEntry {
@@ -185,7 +185,7 @@ pub const TOOLS: &[ToolEntry] = &[
     },
     ToolEntry {
         name: "what_changed",
-        summary: "Classify recent file-modifying operations in a directory (writes, deletions, git, installs).",
+        summary: "Recorded commands in a directory, plus the change categories inferred from the ones that succeeded.",
         write_opt_in: None,
     },
     ToolEntry {
@@ -195,17 +195,17 @@ pub const TOOLS: &[ToolEntry] = &[
     },
     ToolEntry {
         name: "suggest_next",
-        summary: "Predict likely next commands for a directory from frecency-ranked history.",
+        summary: "Guess likely next commands for a directory from frecency-ranked history.",
         write_opt_in: None,
     },
     ToolEntry {
         name: "assess_risk",
-        summary: "Rate a command safe/low/medium/high/critical before it runs.",
+        summary: "Rate a command safe/low/medium/high/critical by rule match before it runs; not a sandbox.",
         write_opt_in: None,
     },
     ToolEntry {
         name: "find_agent_session",
-        summary: "Search past agent sessions by prompt text, directory, executor, or date.",
+        summary: "Search past agent sessions reconstructed from recorded shell commands.",
         write_opt_in: None,
     },
     ToolEntry {
@@ -215,7 +215,7 @@ pub const TOOLS: &[ToolEntry] = &[
     },
     ToolEntry {
         name: "learn_from_failures",
-        summary: "Recurring failures in a project and the fixes that followed them.",
+        summary: "Commands in a project that fail often, with recorded failure rates — not causes.",
         write_opt_in: None,
     },
     ToolEntry {
@@ -398,6 +398,26 @@ pub fn resource_block(entry: &ResourceEntry, mcp: &McpConfig) -> Option<String> 
     })
 }
 
+/// Make `entry` effectively available (or not) by reconciling both gates
+/// that can hold a resource down, the same way [`set_tool_available`]
+/// does for tools: enabling clears the `disabled_resources` entry *and*
+/// re-enables the tool the resource mirrors; disabling only adds the
+/// `disabled_resources` entry, leaving the tool itself callable (other
+/// resources and direct calls may still want it). Returns `true` if
+/// anything changed.
+pub fn set_resource_available(entry: &ResourceEntry, mcp: &mut McpConfig, available: bool) -> bool {
+    let before = resource_available(entry, mcp);
+    if available {
+        mcp.disabled_resources.retain(|d| d != entry.uri_suffix);
+        if let Some(tool) = entry.mirrors_tool.and_then(find_tool) {
+            set_tool_available(tool, mcp, true);
+        }
+    } else if !mcp.disabled_resources.iter().any(|d| d == entry.uri_suffix) {
+        mcp.disabled_resources.push(entry.uri_suffix.to_string());
+    }
+    before != resource_available(entry, mcp)
+}
+
 /// Make `entry` effectively available (or not) by reconciling *both* keys
 /// that gate it, so the two can never end up contradicting each other:
 /// enabling clears any `disabled_tools` entry and turns the write opt-in on;
@@ -526,6 +546,35 @@ mod tests {
     fn unknown_tool_is_never_available() {
         assert!(!tool_state_by_name("definitely_not_a_tool", &mcp()).is_available());
         assert!(find_tool("definitely_not_a_tool").is_none());
+    }
+
+    /// A resource that serves the same records as a tool must not outlive
+    /// that tool being switched off, and turning the resource back on must
+    /// reconcile both gates rather than leave it stuck off.
+    #[test]
+    fn a_mirrored_resource_follows_its_tool_and_can_be_reconciled() {
+        let history = RESOURCES
+            .iter()
+            .find(|r| r.uri_suffix == "history/recent")
+            .unwrap();
+        assert_eq!(history.mirrors_tool, Some("recent_commands"));
+
+        let mut cfg = mcp();
+        assert!(resource_available(history, &cfg));
+        cfg.disabled_tools = vec!["recent_commands".to_string()];
+        assert!(!resource_available(history, &cfg));
+        assert!(resource_block(history, &cfg)
+            .unwrap()
+            .contains("recent_commands"));
+
+        assert!(set_resource_available(history, &mut cfg, true));
+        assert!(cfg.disabled_tools.is_empty());
+        assert!(resource_available(history, &cfg));
+
+        // Turning the resource off leaves the tool itself callable.
+        assert!(set_resource_available(history, &mut cfg, false));
+        assert_eq!(cfg.disabled_resources, vec!["history/recent".to_string()]);
+        assert!(tool_state_by_name("recent_commands", &cfg).is_available());
     }
 
     #[test]

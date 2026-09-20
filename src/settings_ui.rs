@@ -562,22 +562,20 @@ impl AppState {
                     (SettingsTab::Mcp, idx)
                         if (MCP_RESOURCES_START..MCP_DIRS_START).contains(&idx) =>
                     {
-                        let res = MCP_RESOURCES[idx - MCP_RESOURCES_START]
-                            .uri_suffix
-                            .to_string();
-                        if let Some(pos) = self
-                            .config
-                            .mcp
-                            .disabled_resources
-                            .iter()
-                            .position(|d| d == &res)
-                        {
-                            self.config.mcp.disabled_resources.remove(pos);
-                            self.save_status = Some(format!("Enabled: {res}"));
-                        } else {
-                            self.config.mcp.disabled_resources.push(res.clone());
-                            self.save_status = Some(format!("Disabled: {res}"));
-                        }
+                        let entry = &MCP_RESOURCES[idx - MCP_RESOURCES_START];
+                        // Enter means "flip what this row shows", and the
+                        // row shows effective availability — which a
+                        // disabled mirrored tool can hold down just as an
+                        // explicit disable can. Reconcile both, or Enter
+                        // on an off row would add a redundant disable and
+                        // leave it just as off.
+                        let want = !catalog::resource_available(entry, &self.config.mcp);
+                        catalog::set_resource_available(entry, &mut self.config.mcp, want);
+                        self.save_status = Some(format!(
+                            "{}: {}",
+                            if want { "Enabled" } else { "Disabled" },
+                            entry.uri_suffix
+                        ));
                         self.mark_mcp_dirty();
                     }
                     _ => self.toggle_bool(),
@@ -1020,6 +1018,13 @@ fn render_sidebar(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     f.render_widget(list, area);
 }
 
+/// The catalog resource the cursor is on, if it is on one at all.
+fn mcp_resource_row(app: &AppState) -> Option<&'static ResourceEntry> {
+    (app.current_tab == SettingsTab::Mcp
+        && (MCP_RESOURCES_START..MCP_DIRS_START).contains(&app.selected_item))
+    .then(|| &MCP_RESOURCES[app.selected_item - MCP_RESOURCES_START])
+}
+
 fn render_content_panel(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
     // Split content area: Main content (90%) + Description (10%)
     let content_chunks = Layout::default()
@@ -1039,7 +1044,10 @@ fn render_content_panel(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) 
 
     // Render description pane
     let t = theme();
-    let description = get_setting_description(app.current_tab.index(), app.selected_item);
+    let description = mcp_resource_row(app).map_or_else(
+        || get_setting_description(app.current_tab.index(), app.selected_item).to_string(),
+        |res| mcp_resource_detail(res, &app.config.mcp),
+    );
     let desc_paragraph = Paragraph::new(description)
         .wrap(Wrap { trim: true })
         .style(Style::default().fg(t.text_secondary))
@@ -1526,8 +1534,19 @@ fn push_mcp_tool_items(
     }
 }
 
-/// One row per catalog resource. Resources are read-only, so the only thing
-/// that can turn one off is an explicit `mcp.disabled_resources` entry.
+/// The description-pane text for one resource row: what it serves, plus
+/// why it is currently unavailable when it is. Without the second half a
+/// user cannot tell a resource they switched off from one a disabled tool
+/// took away.
+fn mcp_resource_detail(entry: &ResourceEntry, mcp: &crate::config::McpConfig) -> String {
+    catalog::resource_block(entry, mcp).map_or_else(
+        || entry.description.to_string(),
+        |reason| format!("{} — currently unavailable: {reason}.", entry.description),
+    )
+}
+
+/// One row per catalog resource. A resource is off when it is listed in
+/// `mcp.disabled_resources`, or when the tool it mirrors is disabled.
 fn push_mcp_resource_items(
     mcp: &crate::config::McpConfig,
     selected: usize,
@@ -1548,8 +1567,12 @@ fn push_mcp_resource_items(
 
     for (i, res) in MCP_RESOURCES.iter().enumerate() {
         let idx = MCP_RESOURCES_START + i;
-        let enabled = catalog::resource_available(res, mcp);
-        items.push(setting_toggle(res.uri_suffix, enabled, selected == idx));
+        let block = catalog::resource_block(res, mcp);
+        let label = block.as_ref().map_or_else(
+            || res.uri_suffix.to_string(),
+            |reason| format!("{} — {reason}", res.uri_suffix),
+        );
+        items.push(setting_toggle(&label, block.is_none(), selected == idx));
         row_map.push(Some(idx));
     }
 }
@@ -3043,6 +3066,59 @@ mod tests {
         // Toggle back on
         app.handle_input(KeyEvent::from(KeyCode::Enter));
         assert!(app.config.mcp.disabled_resources.is_empty());
+    }
+
+    /// A resource that serves the same records as a disabled tool is
+    /// already off. Pressing Enter on it must turn it *on* — reconciling
+    /// both gates the way the tool rows do — not add a second, redundant
+    /// disable entry and report "Disabled" for a row that was never
+    /// available in the first place.
+    #[test]
+    fn toggling_a_resource_reconciles_the_tool_that_gates_it() {
+        let mut config = Config::default();
+        let gated = MCP_RESOURCES
+            .iter()
+            .position(|r| r.mirrors_tool == Some("recent_commands"))
+            .expect("a resource mirroring recent_commands");
+        config.mcp.disabled_tools = vec!["recent_commands".to_string()];
+        let mut app = AppState::new(config);
+        app.current_tab = SettingsTab::Mcp;
+        app.selected_item = MCP_RESOURCES_START + gated;
+
+        assert!(!catalog::resource_available(
+            &MCP_RESOURCES[gated],
+            &app.config.mcp
+        ));
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert!(
+            catalog::resource_available(&MCP_RESOURCES[gated], &app.config.mcp),
+            "Enter on an unavailable resource must make it available"
+        );
+        assert!(
+            app.config.mcp.disabled_tools.is_empty(),
+            "the tool gating it must have been re-enabled too"
+        );
+        assert!(app.config.mcp.disabled_resources.is_empty());
+
+        // And turning it off again only touches the resource, leaving the
+        // tool itself callable.
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.config.mcp.disabled_resources, vec!["history/recent"]);
+        assert!(app.config.mcp.disabled_tools.is_empty());
+    }
+
+    /// The detail pane must say *why* a row is off, or a user cannot tell
+    /// an explicitly disabled resource from one its tool took away.
+    #[test]
+    fn the_resource_detail_pane_names_the_tool_that_gates_it() {
+        let mut config = Config::default();
+        config.mcp.disabled_tools = vec!["what_failed".to_string()];
+        let gated = MCP_RESOURCES
+            .iter()
+            .position(|r| r.mirrors_tool == Some("what_failed"))
+            .expect("a resource mirroring what_failed");
+        let help = mcp_resource_detail(&MCP_RESOURCES[gated], &config.mcp);
+        assert!(help.contains("what_failed"), "{help}");
     }
 
     #[test]
