@@ -2831,6 +2831,9 @@ const FOOTER_KEY_TOKENS: &[&str] = &[
     "^D",
     "^G",
     "^S",
+    "^X",
+    "^P",
+    "^R",
     "j/k",
     "^U/^D",
     "/",
@@ -2842,8 +2845,10 @@ const FOOTER_KEY_TOKENS: &[&str] = &[
 /// Every hint label word the search footer is allowed to render.
 const FOOTER_LABEL_TOKENS: &[&str] = &[
     "Quit", "Run", "Nav", "Filter", "Detail", "Help", "Copy", "Bookmark", "Unique", "Agents",
-    "Scope", "Failed", "Marked", "Note", "Tag", "Delete", "Goto", "Match", "Scroll", "Search",
-    "Normal",
+    "Scope", "Failed", "Marked", "Note", "Tag", "Delete", "Goto", "Scroll", "Search", "Normal",
+    // PROD-09: "Mode" (^X) and "Scope" (^P) choose what matches; "Rank" (^S,
+    // renamed from "Match") and the rest only reorder it.
+    "Mode", "Reset", "Here", "Rank",
 ];
 
 fn render_lines(app: &mut SearchApp, width: u16, height: u16) -> Vec<String> {
@@ -2912,7 +2917,7 @@ fn assert_essential_hints(footer: &str, ctx: &str) {
 /// whether agent commands are included.
 fn assert_status_area(lines: &[String], ctx: &str) {
     let screen = lines.join("\n");
-    for expected in ["Scope", "Match", "Agents"] {
+    for expected in ["Scope", "Match", "Rank", "Agents"] {
         assert!(
             screen.contains(expected),
             "{ctx}: status indicator {expected:?} not visible on screen:\n{screen}"
@@ -2975,21 +2980,24 @@ fn prod03_status_area_visible_at_100x30() {
 fn prod03_status_area_reports_agent_visibility_and_scope() {
     let mut app = render_app();
     app.filters.show_agents = true;
-    app.filters.cwd = Some("/tmp".to_string());
+    app.set_scope(RecallScope::Directory);
     app.view.unique_mode = true;
     let lines = render_lines(&mut app, 100, 30);
     let screen = lines.join("\n");
     assert!(screen.contains("Shown"), "agents shown state:\n{screen}");
-    assert!(screen.contains("Here"), "cwd scope state:\n{screen}");
+    assert!(screen.contains("This dir"), "cwd scope state:\n{screen}");
     assert!(screen.contains("Unique"), "unique mode state:\n{screen}");
 
     app.filters.show_agents = false;
-    app.filters.cwd = None;
+    app.set_scope(RecallScope::All);
     app.view.unique_mode = false;
     let lines = render_lines(&mut app, 100, 30);
     let screen = lines.join("\n");
     assert!(screen.contains("Hidden"), "agents hidden state:\n{screen}");
-    assert!(screen.contains("All dirs"), "all-dirs scope:\n{screen}");
+    assert!(
+        screen.contains("All history"),
+        "all-history scope:\n{screen}"
+    );
 }
 
 #[test]
@@ -3183,17 +3191,83 @@ fn prod03_vim_mode_footer_is_not_clipped() {
     assert!(footer.contains("Help"), "vim insert: {footer:?}");
 }
 
+/// A rendered app with nothing to show.
+fn empty_render_app() -> SearchApp {
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+    app.query = "kubectl rollout".to_string();
+    app
+}
+
+#[test]
+fn prod09_no_results_state_names_the_mode_and_the_scope_on_screen() {
+    let mut app = empty_render_app();
+    app.recall.match_mode = MatchMode::Literal;
+    app.set_scope(RecallScope::Directory);
+    let screen = render_lines(&mut app, 100, 30).join("\n");
+
+    assert!(screen.contains("No matches for"), "{screen}");
+    assert!(
+        screen.contains("literal"),
+        "the mode must be named:\n{screen}"
+    );
+    assert!(
+        screen.contains("This dir"),
+        "the scope must be named:\n{screen}"
+    );
+    assert!(
+        screen.contains("^R reset to all history"),
+        "the way out must be offered:\n{screen}"
+    );
+}
+
+#[test]
+fn prod09_no_results_state_fits_an_80x24_terminal() {
+    let mut app = empty_render_app();
+    app.filters.failed_only = true;
+    let lines = render_lines(&mut app, 80, 24);
+    let screen = lines.join("\n");
+    assert!(screen.contains("No matches for"), "{screen}");
+    assert!(screen.contains("failed only"), "{screen}");
+    assert!(screen.contains("^R reset"), "{screen}");
+    // The footer is still laid out to the width, with nothing clipped.
+    assert_no_partial_hint(&footer_text(&lines), "no-results 80x24");
+    assert_essential_hints(&footer_text(&lines), "no-results 80x24");
+}
+
+#[test]
+fn prod09_no_results_state_never_widens_the_scope_by_itself() {
+    let mut app = empty_render_app();
+    app.set_scope(RecallScope::Directory);
+    let scope_before = app.recall.scope;
+    let agents_before = app.filters.show_agents;
+    let cwd_before = app.filters.cwd.clone();
+
+    let screen = render_lines(&mut app, 100, 30).join("\n");
+
+    assert_eq!(app.recall.scope, scope_before);
+    assert_eq!(app.filters.show_agents, agents_before);
+    assert_eq!(app.filters.cwd, cwd_before);
+    assert!(
+        screen.contains("^A include agent commands"),
+        "agent inclusion must be offered, not performed:\n{screen}"
+    );
+}
+
 #[test]
 fn prod03_footer_snapshot_at_80x24() {
     let mut app = render_app();
     let lines = render_lines(&mut app, 80, 24);
+    // PROD-09 changed this deliberately: `^X Mode` is now the first
+    // secondary hint (it displaces `^Y Copy` at 80 columns) because the
+    // matching mode decides what is eligible, and the status row renames
+    // the ranking segment to `Rank` so `Match` can mean the matching mode.
     assert_eq!(
         footer_text(&lines),
-        " Esc  Quit   \u{21b5}  Run   \u{2191}\u{2193}  Nav   ^F  Filter   Tab  Detail   ^Y  Copy   ?  Help   "
+        " Esc  Quit   \u{21b5}  Run   \u{2191}\u{2193}  Nav   ^F  Filter   Tab  Detail   ^X  Mode   ?  Help   "
     );
     assert_eq!(
         lines[4],
-        " Scope  All dirs   Match  Smart   Agents  Hidden   Show  All                    "
+        " Scope  All history   Match  terms   Rank  Smart   Agents  Hidden   Show  All   "
     );
 }
 
@@ -3203,7 +3277,7 @@ fn prod03_footer_snapshot_at_100x30() {
     let lines = render_lines(&mut app, 100, 30);
     assert_eq!(
         footer_text(&lines),
-        " Esc  Quit   \u{21b5}  Run   \u{2191}\u{2193}  Nav   ^F  Filter   Tab  Detail   ^Y  Copy   ^B  Bookmark   ?  Help        "
+        " Esc  Quit   \u{21b5}  Run   \u{2191}\u{2193}  Nav   ^F  Filter   Tab  Detail   ^X  Mode   ^P  Scope   ?  Help           "
     );
 }
 
@@ -3235,7 +3309,7 @@ fn prod03_help_overlay_fits_an_80x24_terminal() {
     let screen = lines.join("\n");
     for expected in [
         "Bookmarked only",
-        "Match smart/recent",
+        "Rank smart/recent",
         "Go to page...",
         "Press any key to close",
     ] {

@@ -16,10 +16,10 @@ use std::io;
 
 use super::format::{
     build_command_text, detail_placement, display_width, entry_row_styles, fit_hints, fit_prefix,
-    format_executor, format_exit_code, ColumnLayout, DetailPlacement, Hint, StatusSegment,
-    DETAIL_BOTTOM_HEIGHT,
+    format_executor, format_exit_code, no_results_lines, ColumnLayout, DetailPlacement, Hint,
+    NoResults, StatusSegment, DETAIL_BOTTOM_HEIGHT,
 };
-use super::{centered_rect, fill_text, DialogState, SearchApp};
+use super::{centered_rect, fill_text, DialogState, RecallScope, SearchApp};
 
 /// Cells reserved for the `"+N"` marker that stands in for status-row filter
 /// badges which do not fit.
@@ -218,16 +218,14 @@ impl SearchApp {
     /// when the terminal is too narrow for all of them.
     fn status_segments(&self) -> Vec<StatusSegment> {
         vec![
+            // Scope (^P) and Match (^X) come first: they decide which entries
+            // are eligible at all. Rank and Show only reorder or collapse
+            // what those two already chose, so they are dropped first when
+            // the terminal is narrow.
+            StatusSegment::new("Scope", self.recall.scope.status_value()),
+            StatusSegment::new("Match", self.recall.match_mode.label()),
             StatusSegment::new(
-                "Scope",
-                if self.filters.cwd.is_some() {
-                    "Here"
-                } else {
-                    "All dirs"
-                },
-            ),
-            StatusSegment::new(
-                "Match",
+                "Rank",
                 if self.view.context_boost {
                     "Smart"
                 } else {
@@ -438,19 +436,24 @@ impl SearchApp {
                 Hint::new("Tab", "Detail"),
             ]
         };
+        // The two controls that decide what matches rank above the ones that
+        // only reorder it, so they survive on a narrow terminal.
         hints.extend_from_slice(&[
+            Hint::new("^X", "Mode"),
+            Hint::new("^P", "Scope"),
+            Hint::new("^R", "Reset"),
+            Hint::new("^A", "Agents"),
             Hint::new("^Y", "Copy"),
             Hint::new("^B", "Bookmark"),
             Hint::new("^U", "Unique"),
-            Hint::new("^A", "Agents"),
-            Hint::new("^L", "Scope"),
+            Hint::new("^L", "Here"),
             Hint::new("^E", "Failed"),
             Hint::new("^O", "Marked"),
             Hint::new("^N", "Note"),
             Hint::new("^T", "Tag"),
             Hint::new("^D", "Delete"),
             Hint::new("^G", "Goto"),
-            Hint::new("^S", "Match"),
+            Hint::new("^S", "Rank"),
         ]);
         hints
     }
@@ -512,6 +515,11 @@ impl SearchApp {
         let header_row = layout.header_row();
         let title = self.build_table_title();
 
+        if self.entries.is_empty() {
+            self.render_no_results(f, area, &title);
+            return;
+        }
+
         let table = Table::new(rows, widths)
             .header(
                 header_row
@@ -545,6 +553,70 @@ impl SearchApp {
             .thumb_style(Style::default().fg(t.primary_dim))
             .track_style(Style::default().fg(t.border));
         f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+    }
+
+    /// The empty state: what was searched, how, where, and which key undoes
+    /// each narrowing. Never a silently widened retry.
+    fn render_no_results(&self, f: &mut ratatui::Frame, area: Rect, title: &str) {
+        let t = theme();
+        let scope_detail = match self.recall.scope {
+            RecallScope::Directory | RecallScope::Workspace => self.filters.cwd.as_deref(),
+            RecallScope::Session => self.recall.context.session_id.as_deref(),
+            RecallScope::All => None,
+        };
+        let state = NoResults {
+            query: &self.query,
+            mode: self.recall.match_mode,
+            scope: self.recall.scope,
+            scope_detail,
+            agents_hidden: !self.filters.show_agents,
+            failed_only: self.filters.failed_only,
+            bookmarks_only: self.filters.bookmarks_only,
+            other_filters: self.dialog_filter_count(),
+        };
+
+        let lines: Vec<Line<'static>> = no_results_lines(&state)
+            .into_iter()
+            .enumerate()
+            .map(|(i, text)| {
+                let style = if i == 0 {
+                    Style::default().fg(t.text).add_modifier(Modifier::BOLD)
+                } else if text.starts_with('^') {
+                    Style::default().fg(t.primary)
+                } else {
+                    Style::default().fg(t.text_secondary)
+                };
+                Line::from(Span::styled(format!("  {text}"), style))
+            })
+            .collect();
+
+        let panel = Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(t.border))
+                .title(title.to_string()),
+        );
+        f.render_widget(panel, area);
+    }
+
+    /// Narrowings that come from the filter dialog rather than a scope or a
+    /// toggle with its own key.
+    const fn dialog_filter_count(&self) -> usize {
+        let mut count = 0;
+        if self.filters.after.is_some() || self.filters.before.is_some() {
+            count += 1;
+        }
+        if self.filters.tag_id.is_some() {
+            count += 1;
+        }
+        if self.filters.exit_code.is_some() {
+            count += 1;
+        }
+        if self.filters.executor_type.is_some() {
+            count += 1;
+        }
+        count
     }
 
     #[allow(clippy::cast_precision_loss)]
@@ -1384,24 +1456,36 @@ fn build_help_columns(
         help_row("  ^T        ", "Tag session", t),
         help_row("  Paste     ", "Paste into query", t),
     ]);
+    // `?/F1` moves here so the right column has room for the recall
+    // controls; both columns must still fit 18 rows at 80x24.
+    if !vim_enabled {
+        left.push(Line::from(""));
+    }
+    left.push(help_row("  ?/F1      ", "This help", t));
 
+    // Matching mode and scope lead: they decide what is eligible. Ranking
+    // and display only reorder what they chose.
     let mut right = vec![
         Line::from(""),
-        help_section("\u{2500}\u{2500} Filters \u{2500}\u{2500}", t),
-        help_row("  ^F        ", "Filter dialog", t),
+        help_section("\u{2500}\u{2500} Recall \u{2500}\u{2500}", t),
+        help_row("  ^X        ", "Matching mode", t),
+        help_row("  ^P        ", "Scope: all/dir/repo", t),
+        help_row("  ^R        ", "Reset to all history", t),
         help_row("  ^L        ", "Scope: this dir", t),
         help_row("  ^A        ", "AI-agent commands", t),
+        help_row("  ^F        ", "Filter dialog", t),
         help_row("  ^E        ", "Failed only", t),
         help_row("  ^O        ", "Bookmarked only", t),
-        Line::from(""),
+    ];
+    if !vim_enabled {
+        right.push(Line::from(""));
+    }
+    right.extend([
         help_section("\u{2500}\u{2500} Display \u{2500}\u{2500}", t),
         help_row("  ^U        ", "Unique/all results", t),
-        help_row("  ^S        ", "Match smart/recent", t),
+        help_row("  ^S        ", "Rank smart/recent", t),
         help_row("  Tab       ", "Detail pane", t),
-        Line::from(""),
-        help_section("\u{2500}\u{2500} Other \u{2500}\u{2500}", t),
-        help_row("  ?/F1      ", "This help", t),
-    ];
+    ]);
     if vim_enabled {
         right.extend([
             help_row("  i or /    ", "Insert (type query)", t),
@@ -1410,14 +1494,12 @@ fn build_help_columns(
         ]);
     } else {
         right.push(help_row("  Esc       ", "Exit", t));
+        right.push(Line::from(""));
     }
-    right.extend([
-        Line::from(""),
-        Line::from(Span::styled(
-            "Press any key to close",
-            Style::default().fg(t.text_muted),
-        )),
-    ]);
+    right.push(Line::from(Span::styled(
+        "Press any key to close",
+        Style::default().fg(t.text_muted),
+    )));
 
     (left, right)
 }
