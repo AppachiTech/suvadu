@@ -131,7 +131,8 @@ fn check_jsonl_shape(file: &str) -> Result<(), Box<dyn std::error::Error>> {
         if !trimmed.starts_with('{') {
             return Err(format!(
                 "{file} does not look like JSONL — its first non-empty line is not a JSON object.\n\
-                 `suv import` accepts JSONL only (use `--from zsh-history` for zsh history files).\n\
+                 `suv import` accepts JSONL only (use `--from zsh-history` or\n\
+                 `--from bash-history` for shell history files).\n\
                  If you exported as CSV, re-export with: suv export > history.jsonl"
             )
             .into());
@@ -565,6 +566,523 @@ fn import_entries_batch(
     }
 
     Ok((imported, skipped))
+}
+
+// ── Bash history import ─────────────────────────────────────────────────
+//
+// Bash writes its history file in one of two shapes:
+//
+// * **plain** — one physical line per recorded command, no metadata at all.
+//   A multi-line command is written as several consecutive lines with *no*
+//   marker separating it from the next command, so the boundaries simply are
+//   not in the file. We therefore import one record per line and say so,
+//   rather than guessing where a multi-line command started and ended.
+// * **timestamped** — with `HISTTIMEFORMAT` set, bash writes a `#<epoch>`
+//   comment line before each command. That header *is* a record boundary, so
+//   multi-line commands are reconstructed exactly, and the epoch is preserved.
+//
+// Nothing else is in the file: no directory, no exit code, no duration, no
+// executor. Those are stored as unknown (NULL/empty), never invented.
+
+/// Smallest epoch (seconds) accepted in a `#<epoch>` header.
+const BASH_EPOCH_MIN_SECS: i64 = 1;
+/// Largest epoch (seconds) accepted in a `#<epoch>` header — 2100-01-01Z.
+/// Anything beyond this is a corrupt header, not a timestamp.
+const BASH_EPOCH_MAX_SECS: i64 = 4_102_444_800;
+
+/// Records whose source file carried no timestamp are stored in a sentinel
+/// window that starts one millisecond after the Unix epoch. The value is
+/// explicitly synthetic: it sorts before every real record and is obviously
+/// not a real execution time, instead of a plausible-looking lie such as
+/// "the moment you happened to run the import".
+const SYNTHETIC_TS_BASE_MS: i64 = 1;
+
+/// End of the synthetic-timestamp sentinel window (1970-01-02). Every
+/// synthetic `started_at` is below this; every real bash timestamp is above it.
+pub const SYNTHETIC_TS_CEILING_MS: i64 = 86_400_000;
+
+/// One record recovered from a Bash history file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BashRecord {
+    /// Command text exactly as the file contained it (multi-line commands keep
+    /// their embedded newlines).
+    pub command: String,
+    /// Unix milliseconds from a `#<epoch>` header, or `None` when the file
+    /// carried no timestamp for this record.
+    pub timestamp_ms: Option<i64>,
+}
+
+/// What the parser saw in the file.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct BashParseStats {
+    /// Records handed to the callback.
+    pub records: u64,
+    /// Corrupt `#<epoch>` headers and headers with no command after them.
+    pub malformed: u64,
+    /// Lines that contained invalid UTF-8 (replaced with U+FFFD, never fatal).
+    pub lossy_lines: u64,
+    /// `true` once a valid `#<epoch>` header is seen.
+    pub timestamped: bool,
+}
+
+/// Outcome of a Bash history import (or of a dry run).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct BashImportStats {
+    /// Records recovered from the file (before policy filtering).
+    pub parsed: u64,
+    /// Entries written (or, in a dry run, that would be written).
+    pub imported: u64,
+    /// Records already present in the database.
+    pub duplicates: u64,
+    /// Records dropped by the configured exclusion patterns.
+    pub excluded: u64,
+    /// Records whose text was changed by redaction before storage.
+    pub redacted: u64,
+    /// Blank or space-prefixed records (`HISTCONTROL=ignorespace` style).
+    pub ignored: u64,
+    /// Malformed records reported by the parser.
+    pub malformed: u64,
+    /// Lines with invalid UTF-8 bytes.
+    pub lossy_lines: u64,
+    /// Records that carried a real timestamp.
+    pub with_timestamp: u64,
+    /// Records stored with a synthetic sentinel timestamp.
+    pub without_timestamp: u64,
+    /// `true` when the file used the `#<epoch>` timestamped format.
+    pub timestamped: bool,
+    /// Up to ten redacted samples for the dry-run preview.
+    pub samples: Vec<(String, Option<i64>)>,
+}
+
+/// Inputs for [`import_bash_history`] that don't come from the file itself.
+pub struct BashImportOptions<'a> {
+    /// Session the imported entries are attached to. Created lazily — a file
+    /// with nothing to import leaves no empty session behind.
+    pub session_id: &'a str,
+    pub hostname: &'a str,
+    /// Wall-clock time of this import run, recorded as provenance.
+    pub imported_at_ms: i64,
+    /// Count everything, write nothing.
+    pub dry_run: bool,
+}
+
+/// One classified line of a Bash history file.
+enum BashLine<'a> {
+    /// `#<epoch>` record boundary.
+    Header(i64),
+    /// `#<digits>` that cannot be a real epoch (overflow / out of range).
+    MalformedHeader,
+    /// Anything else — command text, including genuine `# comment` commands.
+    Command(&'a str),
+}
+
+fn classify_bash_line(line: &str) -> BashLine<'_> {
+    if let Some(rest) = line.strip_prefix('#') {
+        let digits = rest.trim_end();
+        if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+            return match digits.parse::<i64>() {
+                Ok(secs) if (BASH_EPOCH_MIN_SECS..=BASH_EPOCH_MAX_SECS).contains(&secs) => {
+                    BashLine::Header(secs)
+                }
+                _ => BashLine::MalformedHeader,
+            };
+        }
+    }
+    BashLine::Command(line)
+}
+
+/// A timestamped record being accumulated across lines.
+struct PendingBashRecord {
+    timestamp_ms: i64,
+    lines: Vec<String>,
+}
+
+/// Emit the record under construction, if any. A header with no command after
+/// it is counted as malformed rather than stored as an empty command.
+fn flush_pending_bash_record<F>(
+    pending: Option<PendingBashRecord>,
+    stats: &mut BashParseStats,
+    on_record: &mut F,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: FnMut(BashRecord) -> Result<(), Box<dyn std::error::Error>>,
+{
+    let Some(mut pending) = pending else {
+        return Ok(());
+    };
+    while pending.lines.last().is_some_and(|l| l.trim().is_empty()) {
+        pending.lines.pop();
+    }
+    if pending.lines.is_empty() {
+        stats.malformed += 1;
+        return Ok(());
+    }
+    stats.records += 1;
+    on_record(BashRecord {
+        command: pending.lines.join("\n"),
+        timestamp_ms: Some(pending.timestamp_ms),
+    })
+}
+
+/// Stream a Bash history file, handing one [`BashRecord`] at a time to
+/// `on_record`. Reads line by line so a multi-gigabyte history file never
+/// lands in memory, and decodes lossily so a few stray bytes (bash writes the
+/// file in the terminal's encoding, whatever that was) don't abort the import.
+pub fn stream_bash_history<R: BufRead, F>(
+    mut reader: R,
+    mut on_record: F,
+) -> Result<BashParseStats, Box<dyn std::error::Error>>
+where
+    F: FnMut(BashRecord) -> Result<(), Box<dyn std::error::Error>>,
+{
+    let mut stats = BashParseStats::default();
+    let mut pending: Option<PendingBashRecord> = None;
+    let mut buf: Vec<u8> = Vec::new();
+
+    loop {
+        buf.clear();
+        if reader.read_until(b'\n', &mut buf)? == 0 {
+            break;
+        }
+        while matches!(buf.last(), Some(b'\n' | b'\r')) {
+            buf.pop();
+        }
+        let line = match String::from_utf8_lossy(&buf) {
+            std::borrow::Cow::Borrowed(s) => s.to_string(),
+            std::borrow::Cow::Owned(s) => {
+                stats.lossy_lines += 1;
+                s
+            }
+        };
+
+        match classify_bash_line(&line) {
+            BashLine::Header(secs) => {
+                stats.timestamped = true;
+                flush_pending_bash_record(pending.take(), &mut stats, &mut on_record)?;
+                pending = Some(PendingBashRecord {
+                    timestamp_ms: secs * 1000,
+                    lines: Vec::new(),
+                });
+            }
+            BashLine::MalformedHeader => {
+                stats.malformed += 1;
+                // The record before the broken header is still complete.
+                flush_pending_bash_record(pending.take(), &mut stats, &mut on_record)?;
+            }
+            BashLine::Command(text) => {
+                if let Some(p) = pending.as_mut() {
+                    // Inside a timestamped record: the next header ends it, so
+                    // this line belongs to the current (possibly multi-line)
+                    // command.
+                    p.lines.push(text.to_string());
+                } else if !text.trim().is_empty() {
+                    // No boundary information available — one line, one record.
+                    stats.records += 1;
+                    on_record(BashRecord {
+                        command: text.to_string(),
+                        timestamp_ms: None,
+                    })?;
+                }
+            }
+        }
+    }
+
+    flush_pending_bash_record(pending.take(), &mut stats, &mut on_record)?;
+    Ok(stats)
+}
+
+/// Build the stored entry for one imported Bash command. Everything bash
+/// history does not record is written as unknown — empty directory, `NULL`
+/// exit code, zero duration, `"unknown"` executor — and the provenance
+/// context marks the row (and its timestamp) as imported rather than observed.
+fn bash_entry(
+    opts: &BashImportOptions<'_>,
+    command: String,
+    started_at: i64,
+    timestamp_from_file: bool,
+) -> Entry {
+    let mut entry = Entry::new(
+        opts.session_id.to_string(),
+        command,
+        String::new(), // directory is not in a bash history file
+        None,          // exit code unknown — never assume success
+        started_at,
+        started_at, // no duration information exists
+    );
+    entry.executor_type = Some("unknown".to_string());
+
+    let mut context = HashMap::new();
+    context.insert("import_source".to_string(), "bash-history".to_string());
+    context.insert("imported_at".to_string(), opts.imported_at_ms.to_string());
+    context.insert(
+        "timestamp_source".to_string(),
+        if timestamp_from_file {
+            "file".to_string()
+        } else {
+            "synthetic".to_string()
+        },
+    );
+    context.insert(
+        "unknown_fields".to_string(),
+        "cwd,exit_code,duration_ms,executor".to_string(),
+    );
+    entry.context = Some(context);
+    entry
+}
+
+/// Import a Bash history stream into `repo`.
+///
+/// Storage contract for the fields bash history does not contain:
+///
+/// | field | stored as |
+/// |---|---|
+/// | `cwd` | empty string (unknown) |
+/// | `exit_code` | `NULL` — never a fabricated `0` |
+/// | `duration_ms` | `0` (`ended_at == started_at`; unknown, not measured) |
+/// | `executor_type` | `"unknown"` |
+/// | `started_at` (plain files) | synthetic sentinel below [`SYNTHETIC_TS_CEILING_MS`] |
+///
+/// Every entry also carries an `import_source` / `timestamp_source` /
+/// `unknown_fields` provenance context so a row can never be mistaken for a
+/// natively recorded one.
+///
+/// **Idempotency.** Each record's `started_at` is derived deterministically
+/// from the file: a real epoch, or the sentinel base, plus the number of times
+/// that exact (redacted) command has already appeared with that same
+/// timestamp. Repeated executions therefore keep distinct timestamps and are
+/// all imported, while re-running the import over the same file produces the
+/// same timestamps and skips every record as a duplicate.
+///
+/// Work is done in a transaction that re-commits every `BATCH_SIZE` entries to
+/// bound WAL growth. The input file is only ever read.
+pub fn import_bash_history<R: BufRead>(
+    repo: &Repository,
+    reader: R,
+    config: &crate::config::Config,
+    opts: &BashImportOptions<'_>,
+) -> Result<BashImportStats, Box<dyn std::error::Error>> {
+    const BATCH_SIZE: u64 = 5_000;
+    const MAX_SAMPLES: usize = 10;
+
+    let exclusions = (!config.exclusions.is_empty())
+        .then(|| crate::util::compile_exclusions(&config.exclusions));
+
+    let mut stats = BashImportStats::default();
+    // (command, source timestamp) → occurrences seen so far in this file.
+    let mut occurrences: HashMap<(String, Option<i64>), i64> = HashMap::new();
+    let mut session_created = false;
+    let mut batch_count = 0u64;
+
+    let tx = if opts.dry_run {
+        None
+    } else {
+        Some(repo.transaction()?)
+    };
+
+    let parse_stats = stream_bash_history(reader, |record| {
+        let raw = record.command;
+
+        // Same recording policy as live capture: space-prefixed commands
+        // (HISTCONTROL=ignorespace) and blanks are never stored.
+        if raw.trim().is_empty() || raw.starts_with([' ', '\t']) {
+            stats.ignored += 1;
+            return Ok(());
+        }
+
+        if let Some(patterns) = exclusions.as_ref() {
+            if crate::util::is_excluded_compiled(&raw, patterns) {
+                stats.excluded += 1;
+                return Ok(());
+            }
+        }
+
+        let command = if config.redaction.enabled {
+            crate::redact::redact_secrets_with_extra(&raw, &config.redaction.extra_patterns)
+        } else {
+            raw.clone()
+        };
+        if command != raw {
+            stats.redacted += 1;
+        }
+        drop(raw);
+
+        let occurrence = occurrences
+            .entry((command.clone(), record.timestamp_ms))
+            .or_insert(0);
+        let ordinal = *occurrence;
+        *occurrence += 1;
+
+        let started_at = if let Some(ts) = record.timestamp_ms {
+            stats.with_timestamp += 1;
+            // Bash timestamps have one-second resolution, so two runs of the
+            // same command in the same second would otherwise collide.
+            ts + ordinal
+        } else {
+            stats.without_timestamp += 1;
+            // Clamped so a pathological repeat count can never push a
+            // synthetic time out of the sentinel window and into a range that
+            // would read as a real timestamp.
+            SYNTHETIC_TS_BASE_MS + ordinal.min(SYNTHETIC_TS_CEILING_MS - SYNTHETIC_TS_BASE_MS - 1)
+        };
+
+        if repo.entry_exists(&command, started_at)? {
+            stats.duplicates += 1;
+            return Ok(());
+        }
+
+        if stats.samples.len() < MAX_SAMPLES {
+            stats.samples.push((command.clone(), record.timestamp_ms));
+        }
+
+        if opts.dry_run {
+            stats.imported += 1;
+            return Ok(());
+        }
+
+        if !session_created {
+            repo.insert_session(&Session {
+                id: opts.session_id.to_string(),
+                hostname: opts.hostname.to_string(),
+                created_at: opts.imported_at_ms,
+                tag_id: None,
+            })?;
+            session_created = true;
+        }
+
+        let entry = bash_entry(opts, command, started_at, record.timestamp_ms.is_some());
+        repo.insert_entry(&entry)?;
+        stats.imported += 1;
+        batch_count += 1;
+        if batch_count >= BATCH_SIZE {
+            if let Some(tx) = tx.as_ref() {
+                tx.recommit()?;
+            }
+            batch_count = 0;
+        }
+        Ok(())
+    })?;
+
+    stats.parsed = parse_stats.records;
+    stats.malformed = parse_stats.malformed;
+    stats.lossy_lines = parse_stats.lossy_lines;
+    stats.timestamped = parse_stats.timestamped;
+
+    if let Some(tx) = tx {
+        tx.commit()?;
+    }
+    Ok(stats)
+}
+
+/// `suv import --from bash-history <file>`
+pub fn handle_import_bash_history(
+    file: &str,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let f = std::fs::File::open(file)?;
+    let reader = std::io::BufReader::new(f);
+
+    // The global config only — imported commands have no directory, so a
+    // per-project `.suvadu.toml` overlay cannot be resolved for them.
+    let config = crate::config::load_config()?;
+    let repo = Repository::init()?;
+
+    let session_id = format!("import-bash-{}", uuid::Uuid::new_v4());
+    let hostname = hostname::get()?.to_string_lossy().to_string();
+    let now = chrono::Utc::now().timestamp_millis();
+
+    let stats = import_bash_history(
+        &repo,
+        reader,
+        &config,
+        &BashImportOptions {
+            session_id: &session_id,
+            hostname: &hostname,
+            imported_at_ms: now,
+            dry_run,
+        },
+    )?;
+
+    let shape = if stats.timestamped {
+        "timestamped format — `#<epoch>` headers"
+    } else {
+        "plain format — no timestamps"
+    };
+    println!("Parsed {} command(s) from {file} ({shape})", stats.parsed);
+
+    if !stats.timestamped && stats.parsed > 0 {
+        println!(
+            "Note: plain Bash history has no record boundaries and no times. Each line is\n\
+             \x20     imported as one command — multi-line commands cannot be reconstructed —\n\
+             \x20     and every entry gets an explicitly synthetic placeholder timestamp\n\
+             \x20     (1970-01-01) instead of an invented one. Set HISTTIMEFORMAT in bash to\n\
+             \x20     record real timestamps from now on."
+        );
+    }
+    if stats.lossy_lines > 0 {
+        println!(
+            "  {} line(s) contained invalid UTF-8; those bytes were replaced with \u{FFFD}.",
+            stats.lossy_lines
+        );
+    }
+
+    if dry_run {
+        if !stats.samples.is_empty() {
+            println!("\nDry run — no entries written. Sample:");
+            for (i, (cmd, ts)) in stats.samples.iter().enumerate() {
+                let when = ts.map_or_else(
+                    || "no timestamp".to_string(),
+                    |ms| {
+                        chrono::DateTime::from_timestamp_millis(ms)
+                            .map(|dt| {
+                                dt.with_timezone(&chrono::Local)
+                                    .format("%Y-%m-%d %H:%M")
+                                    .to_string()
+                            })
+                            .unwrap_or_default()
+                    },
+                );
+                let display = cmd.replace('\n', "\\n");
+                let truncated = crate::util::truncate_str(&display, 60, "…");
+                println!("  {:>2}. [{when}] {truncated}", i + 1);
+            }
+            let shown = u64::try_from(stats.samples.len()).unwrap_or(u64::MAX);
+            if stats.imported > shown {
+                println!("  ... and {} more", stats.imported - shown);
+            }
+        }
+        println!(
+            "\nDry run complete. {} entry(ies) would be imported.",
+            stats.imported
+        );
+        print_bash_import_counts(&stats);
+        return Ok(());
+    }
+
+    println!("\n✓ Import complete:");
+    println!("  Imported: {}", stats.imported);
+    print_bash_import_counts(&stats);
+    if stats.imported > 0 {
+        println!("  Session:  {session_id}");
+    }
+    Ok(())
+}
+
+/// Shared tail of the import / dry-run report. Counts only — never the text of
+/// a skipped, redacted or malformed record.
+fn print_bash_import_counts(stats: &BashImportStats) {
+    println!(
+        "  Already present: {} (re-importing the same file adds nothing)",
+        stats.duplicates
+    );
+    println!("  Excluded by config: {}", stats.excluded);
+    println!("  Blank/space-prefixed, not recorded: {}", stats.ignored);
+    println!("  Malformed records skipped: {}", stats.malformed);
+    println!("  Redacted before storage: {}", stats.redacted);
+    println!(
+        "  Timestamps: {} from the file, {} synthetic placeholders",
+        stats.with_timestamp, stats.without_timestamp
+    );
+    println!("  Not in bash history (stored unknown): directory, exit code, duration, executor");
 }
 
 #[cfg(test)]
@@ -1478,5 +1996,393 @@ mod tests {
         // spreadsheet apps; csv_safe prefixes with a single quote.
         let out = csv_safe("\rmalicious");
         assert!(out.starts_with('\''));
+    }
+
+    // ── bash history parsing ────────────────────────────────────────────
+
+    fn parse_bash_bytes(bytes: &[u8]) -> (Vec<BashRecord>, BashParseStats) {
+        let mut out = Vec::new();
+        let stats = stream_bash_history(std::io::BufReader::new(bytes), |rec| {
+            out.push(rec);
+            Ok(())
+        })
+        .unwrap();
+        (out, stats)
+    }
+
+    fn parse_bash(text: &str) -> (Vec<BashRecord>, BashParseStats) {
+        parse_bash_bytes(text.as_bytes())
+    }
+
+    #[test]
+    fn bash_timestamped_history_keeps_epoch_headers() {
+        let (records, stats) = parse_bash("#1700000000\ngit status\n#1700000060\nls -la\n");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].command, "git status");
+        assert_eq!(records[0].timestamp_ms, Some(1_700_000_000_000));
+        assert_eq!(records[1].command, "ls -la");
+        assert_eq!(records[1].timestamp_ms, Some(1_700_000_060_000));
+        assert!(stats.timestamped, "file carries #<epoch> headers");
+        assert_eq!(stats.malformed, 0);
+    }
+
+    #[test]
+    fn bash_plain_history_has_no_timestamps() {
+        let (records, stats) = parse_bash("echo hello\nls\n");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].command, "echo hello");
+        assert_eq!(records[0].timestamp_ms, None);
+        assert_eq!(records[1].timestamp_ms, None);
+        assert!(!stats.timestamped);
+    }
+
+    #[test]
+    fn bash_multiline_record_is_joined_between_epoch_headers() {
+        // With HISTTIMEFORMAT set, the `#<epoch>` line is the record boundary,
+        // so every line until the next header belongs to one command.
+        let text = "#1700000000\nfor i in 1 2 3; do\n  echo $i\ndone\n#1700000060\nls\n";
+        let (records, stats) = parse_bash(text);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].command, "for i in 1 2 3; do\n  echo $i\ndone");
+        assert_eq!(records[0].timestamp_ms, Some(1_700_000_000_000));
+        assert_eq!(records[1].command, "ls");
+        assert_eq!(stats.malformed, 0);
+    }
+
+    #[test]
+    fn bash_plain_history_cannot_reconstruct_multiline_boundaries() {
+        // Documented limitation: a plain file has no record boundaries, so the
+        // three physical lines of one loop become three records. We must not
+        // guess boundaries that the file does not contain.
+        let (records, _) = parse_bash("for i in 1 2 3; do\n  echo $i\ndone\n");
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].command, "for i in 1 2 3; do");
+        assert_eq!(records[2].command, "done");
+    }
+
+    #[test]
+    fn bash_empty_file_yields_no_records() {
+        let (records, stats) = parse_bash("");
+        assert!(records.is_empty());
+        assert_eq!(stats.malformed, 0);
+        assert!(!stats.timestamped);
+    }
+
+    #[test]
+    fn bash_header_without_command_is_malformed() {
+        let (records, stats) = parse_bash("#1700000000\n#1700000060\nls\n");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].command, "ls");
+        assert_eq!(records[0].timestamp_ms, Some(1_700_000_060_000));
+        assert_eq!(stats.malformed, 1, "the empty first record is malformed");
+    }
+
+    #[test]
+    fn bash_trailing_header_at_eof_is_malformed() {
+        let (records, stats) = parse_bash("#1700000000\nls\n#1700000060\n");
+        assert_eq!(records.len(), 1);
+        assert_eq!(stats.malformed, 1);
+    }
+
+    #[test]
+    fn bash_out_of_range_epoch_header_is_malformed_not_a_timestamp() {
+        let (records, stats) = parse_bash("#99999999999999999999\nls\n");
+        assert_eq!(stats.malformed, 1);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].command, "ls");
+        assert_eq!(
+            records[0].timestamp_ms, None,
+            "never invent a timestamp for a broken header"
+        );
+    }
+
+    #[test]
+    fn bash_comment_command_after_a_header_is_not_a_timestamp() {
+        let (records, stats) = parse_bash("#1700000000\n# deploy notes\n");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].command, "# deploy notes");
+        assert_eq!(records[0].timestamp_ms, Some(1_700_000_000_000));
+        assert_eq!(stats.malformed, 0);
+    }
+
+    #[test]
+    fn bash_comment_commands_are_kept_as_commands() {
+        // `# deploy notes` is a real command bash records, not a timestamp.
+        let (records, stats) = parse_bash("# deploy notes\nls\n");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].command, "# deploy notes");
+        assert_eq!(stats.malformed, 0);
+    }
+
+    #[test]
+    fn bash_non_utf8_bytes_are_replaced_and_counted() {
+        let mut bytes = b"#1700000000\necho ".to_vec();
+        bytes.push(0xFF);
+        bytes.extend_from_slice(b"\n");
+        let (records, stats) = parse_bash_bytes(&bytes);
+        assert_eq!(records.len(), 1);
+        assert!(
+            records[0].command.contains('\u{FFFD}'),
+            "invalid bytes become U+FFFD: {:?}",
+            records[0].command
+        );
+        assert_eq!(stats.lossy_lines, 1);
+    }
+
+    // ── bash history import into a repository ───────────────────────────
+
+    fn import_bash(
+        repo: &Repository,
+        text: &str,
+        config: &crate::config::Config,
+        session_id: &str,
+        dry_run: bool,
+    ) -> BashImportStats {
+        import_bash_history(
+            repo,
+            std::io::BufReader::new(text.as_bytes()),
+            config,
+            &BashImportOptions {
+                session_id,
+                hostname: "test-host",
+                imported_at_ms: 1_800_000_000_000,
+                dry_run,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn bash_import_preserves_timestamps_and_marks_unknown_metadata() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config::default();
+        let stats = import_bash(&repo, "#1700000000\ngit status\n", &cfg, "s-ts", false);
+
+        assert_eq!(stats.imported, 1);
+        assert_eq!(stats.with_timestamp, 1);
+        assert_eq!(stats.without_timestamp, 0);
+
+        let entries = repo.get_entries_by_session("s-ts").unwrap();
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.command, "git status");
+        assert_eq!(e.started_at, 1_700_000_000_000, "file timestamp preserved");
+        assert_eq!(e.exit_code, None, "never fabricate a successful exit");
+        assert_eq!(e.cwd, "", "directory is unknown in bash history");
+        assert_eq!(e.duration_ms, 0);
+        assert_eq!(e.executor_type.as_deref(), Some("unknown"));
+        let ctx = e.context.as_ref().expect("provenance context");
+        assert_eq!(
+            ctx.get("import_source").map(String::as_str),
+            Some("bash-history")
+        );
+        assert_eq!(
+            ctx.get("timestamp_source").map(String::as_str),
+            Some("file")
+        );
+    }
+
+    #[test]
+    fn bash_import_marks_missing_timestamps_as_synthetic() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config::default();
+        let stats = import_bash(&repo, "echo hello\nls\n", &cfg, "s-plain", false);
+
+        assert_eq!(stats.imported, 2);
+        assert_eq!(stats.without_timestamp, 2);
+
+        let entries = repo.get_entries_by_session("s-plain").unwrap();
+        assert_eq!(entries.len(), 2);
+        for e in &entries {
+            assert!(
+                e.started_at < SYNTHETIC_TS_CEILING_MS,
+                "synthetic sentinel time, not a fabricated recent time: {}",
+                e.started_at
+            );
+            let ctx = e.context.as_ref().expect("provenance context");
+            assert_eq!(
+                ctx.get("timestamp_source").map(String::as_str),
+                Some("synthetic")
+            );
+        }
+    }
+
+    #[test]
+    fn bash_import_preserves_repeated_executions() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config::default();
+        // Same command three times: twice inside one second, once later.
+        let text = "#1700000000\nls\n#1700000000\nls\n#1700000100\nls\n";
+        let stats = import_bash(&repo, text, &cfg, "s-rep", false);
+        assert_eq!(stats.imported, 3, "repeated executions are not collapsed");
+        assert_eq!(repo.count_entries().unwrap(), 3);
+    }
+
+    #[test]
+    fn bash_import_preserves_repeated_commands_in_plain_files() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config::default();
+        let stats = import_bash(&repo, "ls\ncd /tmp\nls\n", &cfg, "s-rep2", false);
+        assert_eq!(stats.imported, 3);
+    }
+
+    #[test]
+    fn bash_second_identical_import_adds_nothing() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config::default();
+        let text = "#1700000000\ngit status\n#1700000000\ngit status\n#1700000100\nls\n";
+
+        let first = import_bash(&repo, text, &cfg, "s-first", false);
+        assert_eq!(first.imported, 3);
+
+        let second = import_bash(&repo, text, &cfg, "s-second", false);
+        assert_eq!(second.imported, 0, "re-import must be idempotent");
+        assert_eq!(second.duplicates, 3);
+        assert_eq!(repo.count_entries().unwrap(), 3);
+    }
+
+    #[test]
+    fn bash_second_identical_plain_import_adds_nothing() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config::default();
+        let text = "ls\ncd /tmp\nls\n";
+
+        assert_eq!(import_bash(&repo, text, &cfg, "p1", false).imported, 3);
+        let second = import_bash(&repo, text, &cfg, "p2", false);
+        assert_eq!(second.imported, 0);
+        assert_eq!(second.duplicates, 3);
+        assert_eq!(repo.count_entries().unwrap(), 3);
+    }
+
+    #[test]
+    fn bash_import_of_empty_file_writes_nothing() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config::default();
+        let stats = import_bash(&repo, "", &cfg, "s-empty", false);
+        assert_eq!(stats.imported, 0);
+        assert_eq!(repo.count_entries().unwrap(), 0);
+        assert!(
+            repo.get_session("s-empty").unwrap().is_none(),
+            "no import session for a file with nothing to import"
+        );
+    }
+
+    #[test]
+    fn bash_import_counts_malformed_records_without_aborting() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config::default();
+        let text = "#1700000000\n#1700000060\ngit status\n#999999999999999999999\nls\n";
+        let stats = import_bash(&repo, text, &cfg, "s-bad", false);
+        assert_eq!(
+            stats.malformed, 2,
+            "empty first record + unparseable epoch header"
+        );
+        assert_eq!(stats.imported, 2, "the two real commands still land");
+    }
+
+    #[test]
+    fn bash_import_survives_non_utf8_bytes() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config::default();
+        let mut bytes = b"#1700000000\necho ".to_vec();
+        bytes.push(0xFE);
+        bytes.extend_from_slice(b"\n#1700000060\nls\n");
+        let stats = import_bash_history(
+            &repo,
+            std::io::BufReader::new(&bytes[..]),
+            &cfg,
+            &BashImportOptions {
+                session_id: "s-bin",
+                hostname: "test-host",
+                imported_at_ms: 1_800_000_000_000,
+                dry_run: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(stats.imported, 2);
+        assert_eq!(stats.lossy_lines, 1);
+    }
+
+    #[test]
+    fn bash_import_redacts_secrets_and_counts_them() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config::default();
+        let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let text = format!("#1700000000\nexport GITHUB_TOKEN={secret}\n");
+        let stats = import_bash(&repo, &text, &cfg, "s-secret", false);
+
+        assert_eq!(stats.imported, 1);
+        assert_eq!(stats.redacted, 1);
+        let entries = repo.get_entries_by_session("s-secret").unwrap();
+        assert!(
+            !entries[0].command.contains(secret),
+            "secret must never reach storage: {}",
+            entries[0].command
+        );
+        assert!(entries[0].command.contains("REDACTED"));
+    }
+
+    #[test]
+    fn bash_import_honours_configured_exclusions() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config {
+            exclusions: vec!["^vault ".to_string()],
+            ..Default::default()
+        };
+        let text = "#1700000000\nvault login\n#1700000060\nls\n";
+        let stats = import_bash(&repo, text, &cfg, "s-excl", false);
+
+        assert_eq!(stats.excluded, 1);
+        assert_eq!(stats.imported, 1);
+        let entries = repo.get_entries_by_session("s-excl").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].command, "ls");
+    }
+
+    #[test]
+    fn bash_import_ignores_blank_and_space_prefixed_commands() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config::default();
+        let stats = import_bash(&repo, " secret-thing\n\nls\n", &cfg, "s-ign", false);
+        assert_eq!(stats.ignored, 1, "HISTCONTROL=ignorespace style entries");
+        assert_eq!(stats.imported, 1);
+    }
+
+    #[test]
+    fn bash_import_dry_run_writes_nothing_but_counts() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config::default();
+        let text = "#1700000000\ngit status\n#1700000060\nls\n";
+        let stats = import_bash(&repo, text, &cfg, "s-dry", true);
+
+        assert_eq!(stats.imported, 2, "dry run reports what would be imported");
+        assert_eq!(repo.count_entries().unwrap(), 0, "nothing written");
+        assert!(repo.get_session("s-dry").unwrap().is_none());
+        assert!(!stats.samples.is_empty(), "dry run collects a preview");
+    }
+
+    #[test]
+    fn bash_dry_run_samples_are_redacted() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config::default();
+        let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let text = format!("#1700000000\nexport GITHUB_TOKEN={secret}\n");
+        let stats = import_bash(&repo, &text, &cfg, "s-dry2", true);
+        assert!(
+            !stats.samples.iter().any(|(cmd, _)| cmd.contains(secret)),
+            "dry-run preview must not print secrets"
+        );
+    }
+
+    #[test]
+    fn bash_dry_run_reports_duplicates_already_present() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config::default();
+        let text = "#1700000000\ngit status\n";
+        assert_eq!(import_bash(&repo, text, &cfg, "d1", false).imported, 1);
+
+        let dry = import_bash(&repo, text, &cfg, "d2", true);
+        assert_eq!(dry.imported, 0);
+        assert_eq!(dry.duplicates, 1);
     }
 }

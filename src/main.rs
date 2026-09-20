@@ -382,6 +382,7 @@ fn run_import(
     match from {
         cli::ImportFormat::Jsonl => import_export::handle_import(file, dry_run, allow_duplicates),
         cli::ImportFormat::ZshHistory => import_export::handle_import_zsh_history(file, dry_run),
+        cli::ImportFormat::BashHistory => import_export::handle_import_bash_history(file, dry_run),
     }
 }
 

@@ -105,6 +105,7 @@ impl ExportFormat {
 pub enum ImportFormat {
     Jsonl,
     ZshHistory,
+    BashHistory,
 }
 
 /// Agent report output format
@@ -570,14 +571,14 @@ pub enum Commands {
         before: Option<String>,
     },
 
-    /// Import history from a file (JSONL or Zsh history format)
+    /// Import history from a file (JSONL, Zsh history, or Bash history format)
     #[command(
-        after_help = "Examples:\n  suv import history.jsonl\n  suv import --from zsh-history ~/.zsh_history\n  suv import --from zsh-history --dry-run ~/.zsh_history"
+        after_help = "Examples:\n  suv import history.jsonl\n  suv import --from zsh-history ~/.zsh_history\n  suv import --from zsh-history --dry-run ~/.zsh_history\n  suv import --from bash-history ~/.bash_history\n  suv import --from bash-history --dry-run ~/.bash_history\n\nBash history stores only the command text, plus a timestamp when\nHISTTIMEFORMAT was set. Directory, exit code, duration and executor are\nimported as unknown, and a plain (untimestamped) file cannot preserve\nmulti-line command boundaries."
     )]
     Import {
         /// Path to the file to import
         file: String,
-        /// Source format: jsonl (default) or zsh-history
+        /// Source format: jsonl (default), zsh-history, or bash-history
         #[arg(long, value_enum, default_value_t = ImportFormat::Jsonl)]
         from: ImportFormat,
         /// Preview import without writing to database
