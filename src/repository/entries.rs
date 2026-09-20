@@ -93,6 +93,35 @@ impl Repository {
         Ok(count)
     }
 
+    /// Count entries that carry a given import provenance, optionally limited
+    /// to a single import run (`context.imported_at`).
+    ///
+    /// Post-import validation uses this instead of a total row count: another
+    /// shell recording commands at the same moment would move a total, but it
+    /// cannot forge this run's provenance.
+    pub fn count_entries_by_import(
+        &self,
+        source: &str,
+        imported_at_ms: Option<i64>,
+    ) -> DbResult<i64> {
+        let count: i64 = match imported_at_ms {
+            Some(at) => self.conn.query_row(
+                "SELECT COUNT(*) FROM entries
+                 WHERE json_extract(context, '$.import_source') = ?1
+                   AND json_extract(context, '$.imported_at') = ?2",
+                params![source, at.to_string()],
+                |row| row.get(0),
+            )?,
+            None => self.conn.query_row(
+                "SELECT COUNT(*) FROM entries
+                 WHERE json_extract(context, '$.import_source') = ?1",
+                params![source],
+                |row| row.get(0),
+            )?,
+        };
+        Ok(count)
+    }
+
     /// Get entries with optional filters and field-specific search
     #[allow(clippy::cast_possible_wrap)]
     pub fn get_entries_filtered(

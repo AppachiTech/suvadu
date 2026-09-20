@@ -4,6 +4,94 @@ use std::io::{BufRead, Write};
 use crate::models::{Entry, Session};
 use crate::repository::Repository;
 use crate::util;
+use crate::util::CompiledExclusion;
+
+pub mod atuin;
+
+// ── shared importer helpers ─────────────────────────────────────────────
+//
+// Every history importer applies the same recording policy, derives its
+// timestamps the same way, and previews a dry run the same way. These live
+// here so `--from bash-history` and `--from atuin-db` cannot drift apart.
+
+/// What the recording policy says about one imported command.
+pub enum RecordingPolicy {
+    /// Blank, or space/tab-prefixed (`HISTCONTROL=ignorespace` style).
+    Ignored,
+    /// Dropped by a configured exclusion pattern.
+    Excluded,
+    /// Store it — possibly rewritten by redaction first.
+    Keep { command: String, redacted: bool },
+}
+
+/// Apply the same policy live recording applies: never store a blank or
+/// space-prefixed command, honour the configured exclusion patterns, and
+/// redact secrets before the text reaches storage (or a dry-run preview).
+pub fn apply_recording_policy(
+    raw: &str,
+    config: &crate::config::Config,
+    exclusions: Option<&[CompiledExclusion]>,
+) -> RecordingPolicy {
+    if raw.trim().is_empty() || raw.starts_with([' ', '\t']) {
+        return RecordingPolicy::Ignored;
+    }
+    if let Some(patterns) = exclusions {
+        if crate::util::is_excluded_compiled(raw, patterns) {
+            return RecordingPolicy::Excluded;
+        }
+    }
+    let command = if config.redaction.enabled {
+        crate::redact::redact_secrets_with_extra(raw, &config.redaction.extra_patterns)
+    } else {
+        raw.to_string()
+    };
+    let redacted = command != raw;
+    RecordingPolicy::Keep { command, redacted }
+}
+
+/// How many times this (command, source timestamp) pair has already been seen
+/// in this import. Importers add the ordinal to the derived `started_at`, so
+/// repeated executions keep distinct timestamps — deterministically, which is
+/// what makes a second import a no-op instead of a duplicate.
+pub fn next_occurrence(
+    occurrences: &mut HashMap<(String, Option<i64>), i64>,
+    key: (String, Option<i64>),
+) -> i64 {
+    let occurrence = occurrences.entry(key).or_insert(0);
+    let ordinal = *occurrence;
+    *occurrence += 1;
+    ordinal
+}
+
+/// Print the dry-run preview: a handful of (already redacted) samples with the
+/// timestamp the source gave them, and how many more there are.
+pub fn print_dry_run_samples(samples: &[(String, Option<i64>)], imported: u64) {
+    if samples.is_empty() {
+        return;
+    }
+    println!("\nDry run — no entries written. Sample:");
+    for (i, (cmd, ts)) in samples.iter().enumerate() {
+        let when = ts.map_or_else(
+            || "no timestamp".to_string(),
+            |ms| {
+                chrono::DateTime::from_timestamp_millis(ms)
+                    .map(|dt| {
+                        dt.with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d %H:%M")
+                            .to_string()
+                    })
+                    .unwrap_or_default()
+            },
+        );
+        let display = cmd.replace('\n', "\\n");
+        let truncated = crate::util::truncate_str(&display, 60, "…");
+        println!("  {:>2}. [{when}] {truncated}", i + 1);
+    }
+    let shown = u64::try_from(samples.len()).unwrap_or(u64::MAX);
+    if imported > shown {
+        println!("  ... and {} more", imported - shown);
+    }
+}
 
 /// Escape a string for CSV: double internal quotes and prefix with `'` if the
 /// field starts with a formula-triggering character (`=`, `+`, `-`, `@`, tab, CR).
@@ -883,34 +971,25 @@ pub fn import_bash_history<R: BufRead>(
         let raw = record.command;
 
         // Same recording policy as live capture: space-prefixed commands
-        // (HISTCONTROL=ignorespace) and blanks are never stored.
-        if raw.trim().is_empty() || raw.starts_with([' ', '\t']) {
-            stats.ignored += 1;
-            return Ok(());
-        }
-
-        if let Some(patterns) = exclusions.as_ref() {
-            if crate::util::is_excluded_compiled(&raw, patterns) {
+        // (HISTCONTROL=ignorespace), blanks, exclusions and redaction.
+        let command = match apply_recording_policy(&raw, config, exclusions.as_deref()) {
+            RecordingPolicy::Ignored => {
+                stats.ignored += 1;
+                return Ok(());
+            }
+            RecordingPolicy::Excluded => {
                 stats.excluded += 1;
                 return Ok(());
             }
-        }
-
-        let command = if config.redaction.enabled {
-            crate::redact::redact_secrets_with_extra(&raw, &config.redaction.extra_patterns)
-        } else {
-            raw.clone()
+            RecordingPolicy::Keep { command, redacted } => {
+                if redacted {
+                    stats.redacted += 1;
+                }
+                command
+            }
         };
-        if command != raw {
-            stats.redacted += 1;
-        }
-        drop(raw);
 
-        let occurrence = occurrences
-            .entry((command.clone(), record.timestamp_ms))
-            .or_insert(0);
-        let ordinal = *occurrence;
-        *occurrence += 1;
+        let ordinal = next_occurrence(&mut occurrences, (command.clone(), record.timestamp_ms));
 
         let started_at = if let Some(ts) = record.timestamp_ms {
             stats.with_timestamp += 1;
@@ -1026,30 +1105,7 @@ pub fn handle_import_bash_history(
     }
 
     if dry_run {
-        if !stats.samples.is_empty() {
-            println!("\nDry run — no entries written. Sample:");
-            for (i, (cmd, ts)) in stats.samples.iter().enumerate() {
-                let when = ts.map_or_else(
-                    || "no timestamp".to_string(),
-                    |ms| {
-                        chrono::DateTime::from_timestamp_millis(ms)
-                            .map(|dt| {
-                                dt.with_timezone(&chrono::Local)
-                                    .format("%Y-%m-%d %H:%M")
-                                    .to_string()
-                            })
-                            .unwrap_or_default()
-                    },
-                );
-                let display = cmd.replace('\n', "\\n");
-                let truncated = crate::util::truncate_str(&display, 60, "…");
-                println!("  {:>2}. [{when}] {truncated}", i + 1);
-            }
-            let shown = u64::try_from(stats.samples.len()).unwrap_or(u64::MAX);
-            if stats.imported > shown {
-                println!("  ... and {} more", stats.imported - shown);
-            }
-        }
+        print_dry_run_samples(&stats.samples, stats.imported);
         println!(
             "\nDry run complete. {} entry(ies) would be imported.",
             stats.imported
