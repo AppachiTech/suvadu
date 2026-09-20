@@ -825,6 +825,17 @@ impl Repository {
             .collect())
     }
 
+    /// Count stored native sessions for one agent (`ai_sessions.agent`).
+    /// Used by `suv doctor` to tell native-session capture apart from
+    /// command capture.
+    pub fn count_ai_sessions_by_agent(&self, agent: &str) -> DbResult<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM ai_sessions WHERE agent = ?1",
+            [agent],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn list_ai_sessions(
         &self,
         limit: usize,
@@ -1120,6 +1131,20 @@ mod tests {
             json!({"type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"The synthetic check passed."}}),
         ].into_iter().map(|mut v| {v["timestamp"]=json!("2026-09-12T12:00:00Z"); format!("{v}\n")}).collect()
     }
+
+    #[test]
+    fn count_ai_sessions_by_agent_counts_only_that_agents_sessions() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("fixture.jsonl");
+        std::fs::write(&path, records()).unwrap();
+        import(&repo, &path);
+
+        // Codex sessions are stored under the agent name "openai-codex".
+        assert_eq!(repo.count_ai_sessions_by_agent("openai-codex").unwrap(), 1);
+        assert_eq!(repo.count_ai_sessions_by_agent("codex").unwrap(), 0);
+        assert_eq!(repo.count_ai_sessions_by_agent("claude-code").unwrap(), 0);
+    }
+
     fn import(repo: &Repository, path: &Path) -> Value {
         repo.import_codex_session(path, None, |_| Ok(CapturePolicy::default()))
             .unwrap()
