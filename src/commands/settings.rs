@@ -56,6 +56,7 @@ pub fn handle_status() -> Result<(), Box<dyn std::error::Error>> {
             // Total command count
             let total = repo
                 .count_filtered(&crate::repository::QueryFilter {
+                    query_tokens: &[],
                     after: None,
                     before: None,
                     tag_id: None,

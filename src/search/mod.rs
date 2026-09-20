@@ -483,6 +483,7 @@ pub fn run_search(
     let filter_before = args.before.and_then(|s| util::parse_date_input(s, true));
 
     let qf = QueryFilter {
+        query_tokens: &[],
         after: filter_after,
         before: filter_before,
         tag_id,

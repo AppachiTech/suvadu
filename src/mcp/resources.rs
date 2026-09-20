@@ -154,6 +154,7 @@ fn read_recent_failures(
     let day_ago = now - 24 * 60 * 60 * 1000;
 
     let qf = QueryFilter {
+        query_tokens: &[],
         after: Some(day_ago),
         before: None,
         tag_id: None,
@@ -214,6 +215,7 @@ fn read_today_stats(repo: &Repository, mcp: &crate::config::McpConfig) -> Result
     let today_start = now - (now % (24 * 60 * 60 * 1000));
 
     let qf = QueryFilter {
+        query_tokens: &[],
         after: Some(today_start),
         before: None,
         tag_id: None,
@@ -297,6 +299,7 @@ fn read_risk_summary(repo: &Repository, mcp: &crate::config::McpConfig) -> Resul
     let day_ago = now - 24 * 60 * 60 * 1000;
 
     let qf = QueryFilter {
+        query_tokens: &[],
         after: Some(day_ago),
         before: None,
         tag_id: None,
@@ -381,6 +384,7 @@ fn read_agent_activity(
 
     for agent in &agents {
         let qf = QueryFilter {
+            query_tokens: &[],
             after: Some(week_ago),
             before: None,
             tag_id: None,
@@ -436,6 +440,7 @@ fn read_agent_sessions(
     let week_ago = now - 7 * 24 * 60 * 60 * 1000;
 
     let qf = QueryFilter {
+        query_tokens: &[],
         after: Some(week_ago),
         before: None,
         tag_id: None,

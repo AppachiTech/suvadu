@@ -2394,3 +2394,212 @@ fn test_paste_unicode() {
     assert!(needs_reload);
     assert_eq!(app.query, "git log --author=\"\u{00e9}mile\"");
 }
+
+// ── complete-history matching ──────────────────────────────────────
+// Typed search used to fetch the newest 5,000 eligible rows and match in
+// memory, so an exact match older than that simply vanished from the UI
+// while still sitting in the database. Reproduction from the 19 Sep 2026
+// audit, extended to the unique-mode branch that shares the same path.
+
+/// Fills a repository with `total` entries, oldest first, where only the
+/// oldest one contains `needle`.
+fn repo_with_old_match(
+    total: usize,
+    needle: &str,
+) -> (tempfile::TempDir, crate::repository::Repository) {
+    let (dir, repo) = crate::test_utils::test_repo();
+    repo.insert_session(&crate::models::Session {
+        id: "session123".into(),
+        hostname: "test".into(),
+        created_at: 1000,
+        tag_id: None,
+    })
+    .unwrap();
+    for i in 0..i64::try_from(total).unwrap() {
+        let cmd = if i == 0 {
+            needle.to_string()
+        } else {
+            format!("echo recent_{i}")
+        };
+        let mut entry = create_test_entry(&cmd);
+        entry.started_at = 1000 + i;
+        entry.ended_at = 2000 + i;
+        repo.insert_entry(&entry).unwrap();
+    }
+    (dir, repo)
+}
+
+#[test]
+fn typed_search_finds_an_exact_match_older_than_the_candidate_window() {
+    let (_dir, repo) = repo_with_old_match(5001, "echo audit_rare_old_command");
+
+    let mut app = SearchApp::new(test_search_config(vec![], 5001));
+    app.query = "audit_rare_old_command".into();
+    app.reload_entries(&repo).unwrap();
+
+    assert_eq!(
+        app.entries.len(),
+        1,
+        "an exact older command must stay discoverable in interactive search"
+    );
+    assert_eq!(app.entries[0].command, "echo audit_rare_old_command");
+}
+
+#[test]
+fn unique_mode_finds_an_exact_match_older_than_the_candidate_window() {
+    let (_dir, repo) = repo_with_old_match(5001, "echo audit_rare_old_command");
+
+    let mut config = test_search_config(vec![], 5001);
+    config.view.unique_mode = true;
+    let mut app = SearchApp::new(config);
+    app.query = "audit_rare_old_command".into();
+    app.reload_entries(&repo).unwrap();
+
+    assert_eq!(
+        app.entries.len(),
+        1,
+        "unique mode shares the same candidate window"
+    );
+}
+
+/// Fills a repository with `newer` filler entries after one old `needle`.
+fn repo_with_old_command(
+    needle: &str,
+    newer: usize,
+) -> (tempfile::TempDir, crate::repository::Repository) {
+    let (dir, repo) = crate::test_utils::test_repo();
+    repo.insert_session(&crate::models::Session {
+        id: "session123".into(),
+        hostname: "test".into(),
+        created_at: 1000,
+        tag_id: None,
+    })
+    .unwrap();
+    let mut oldest = create_test_entry(needle);
+    oldest.started_at = 1000;
+    oldest.ended_at = 2000;
+    repo.insert_entry(&oldest).unwrap();
+    for i in 1..=i64::try_from(newer).unwrap() {
+        let mut entry = create_test_entry(&format!("echo recent_{i}"));
+        entry.started_at = 1000 + i;
+        entry.ended_at = 2000 + i;
+        repo.insert_entry(&entry).unwrap();
+    }
+    (dir, repo)
+}
+
+fn search_old(repo: &crate::repository::Repository, query: &str) -> Vec<String> {
+    let mut app = SearchApp::new(test_search_config(vec![], 5001));
+    app.query = query.into();
+    app.reload_entries(repo).unwrap();
+    app.entries.iter().map(|e| e.command.clone()).collect()
+}
+
+#[test]
+fn multi_token_queries_match_an_old_command_in_any_order() {
+    let (_dir, repo) = repo_with_old_command("git commit --amend -m wip", 5000);
+
+    assert_eq!(
+        search_old(&repo, "git amend"),
+        vec!["git commit --amend -m wip"]
+    );
+    assert_eq!(
+        search_old(&repo, "amend git"),
+        vec!["git commit --amend -m wip"]
+    );
+    // Every token must still be present: one absent token means no match.
+    assert!(search_old(&repo, "git rebase").is_empty());
+}
+
+#[test]
+fn short_tokens_still_match_an_old_command() {
+    let (_dir, repo) = repo_with_old_command("cd /srv/xy", 5000);
+    assert_eq!(search_old(&repo, "xy"), vec!["cd /srv/xy"]);
+}
+
+#[test]
+fn like_wildcards_in_a_query_are_matched_literally() {
+    let (_dir, repo) = repo_with_old_command("echo 100%_done", 5000);
+
+    assert_eq!(search_old(&repo, "100%_done"), vec!["echo 100%_done"]);
+    // `%` and `_` must not behave as SQL wildcards.
+    assert!(search_old(&repo, "100%ZZ_done").is_empty());
+}
+
+#[test]
+fn an_old_command_matches_case_insensitively() {
+    let (_dir, repo) = repo_with_old_command("echo RARE_OLD_Command", 5000);
+    assert_eq!(
+        search_old(&repo, "rare_old_command"),
+        vec!["echo RARE_OLD_Command"]
+    );
+}
+
+#[test]
+fn an_old_command_matches_case_insensitively_beyond_ascii() {
+    let (_dir, repo) = repo_with_old_command("echo Émile_rare_old", 5000);
+    assert_eq!(
+        search_old(&repo, "émile_rare_old"),
+        vec!["echo Émile_rare_old"]
+    );
+}
+
+#[test]
+fn filters_still_exclude_an_old_command_that_matches_the_text() {
+    let (dir, repo) = crate::test_utils::test_repo();
+    repo.insert_session(&crate::models::Session {
+        id: "session123".into(),
+        hostname: "test".into(),
+        created_at: 1000,
+        tag_id: None,
+    })
+    .unwrap();
+    let mut agent_entry = create_test_entry("echo rare_agent_command");
+    agent_entry.executor_type = Some("agent".into());
+    agent_entry.executor = Some("claude-code".into());
+    agent_entry.started_at = 1000;
+    agent_entry.ended_at = 2000;
+    repo.insert_entry(&agent_entry).unwrap();
+    for i in 1..=5000 {
+        let mut entry = create_test_entry(&format!("echo recent_{i}"));
+        entry.started_at = 1000 + i;
+        entry.ended_at = 2000 + i;
+        repo.insert_entry(&entry).unwrap();
+    }
+
+    // Agent commands are hidden by default, however old the match is.
+    assert!(search_old(&repo, "rare_agent_command").is_empty());
+
+    let mut app = SearchApp::new(test_search_config(vec![], 5001));
+    app.filters.show_agents = true;
+    app.query = "rare_agent_command".into();
+    app.reload_entries(&repo).unwrap();
+    assert_eq!(
+        app.entries.len(),
+        1,
+        "showing agents must reveal the old match"
+    );
+    drop(dir);
+}
+
+/// Rough guard that matching across the whole history stays interactive.
+/// Ignored by default: it builds a 100k-entry database. Run with
+/// `cargo test --release --bin suv typed_search_latency -- --ignored --nocapture`.
+/// PROD-10 replaces this with a proper benchmark suite.
+#[test]
+#[ignore]
+fn typed_search_latency_on_a_large_history() {
+    let (_dir, repo) = repo_with_old_command("cargo test --workspace rare_old", 100_000);
+
+    for query in ["cargo", "cargo test", "rare_old", "workspace rare_old"] {
+        let mut app = SearchApp::new(test_search_config(vec![], 100_001));
+        app.query = query.into();
+        let start = std::time::Instant::now();
+        app.reload_entries(&repo).unwrap();
+        println!(
+            "query {query:?}: {} results in {:?}",
+            app.pagination.total_items,
+            start.elapsed()
+        );
+    }
+}

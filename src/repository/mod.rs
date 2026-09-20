@@ -89,6 +89,12 @@ pub struct QueryFilter<'a> {
     /// exists in the `bookmarks` table). Powers the Ctrl+O "only bookmarks"
     /// filter in the search TUI. Defaults to `false`.
     pub bookmarked_only: bool,
+    /// Every one of these must appear in `field` as a case-insensitive
+    /// substring. This is how interactive search narrows candidates to the
+    /// rows its in-memory scorer could accept, across the whole history,
+    /// rather than scoring only the newest N rows. Empty for other callers,
+    /// which use the single `query` above.
+    pub query_tokens: &'a [String],
     /// Directories (and their subtrees) to exclude from results, i.e.
     /// `mcp.exclude_dirs`. Empty for every non-MCP caller — only MCP tool/
     /// resource handlers populate this, from `McpConfig`.
@@ -103,6 +109,7 @@ impl QueryFilter<'_> {
             .with_tag(self.tag_id)
             .with_exit_code(self.exit_code)
             .with_query_field(self.query, self.prefix_match, self.field)
+            .with_query_tokens(self.query_tokens, self.field)
             .with_executor(self.executor)
             .with_cwd_mode(self.cwd, self.cwd_prefix)
             // An explicit executor filter takes precedence over the agent hide.
@@ -239,6 +246,47 @@ impl FilterBuilder {
         if prefix_match {
             self.params.push(Box::new(format!("{escaped}%")));
         } else {
+            self.params.push(Box::new(format!("%{escaped}%")));
+        }
+        self
+    }
+
+    /// AND together one substring clause per token.
+    ///
+    /// `SQLite`'s LIKE only folds case for ASCII, so a token containing
+    /// non-ASCII characters is deliberately left out of the SQL and matched
+    /// in memory instead; excluding it here could drop a row that differs
+    /// only by the case of a non-ASCII letter. Dropping a token only widens
+    /// the candidate set, which the in-memory scorer then narrows.
+    pub fn with_query_tokens(mut self, tokens: &[String], field: SearchField) -> Self {
+        for token in tokens.iter().filter(|t| !t.is_empty()) {
+            let column = match field {
+                SearchField::Cwd => "e.cwd",
+                SearchField::Session => "e.session_id",
+                SearchField::Executor => "COALESCE(e.executor_type || ' ' || e.executor, '')",
+                SearchField::Command => "e.command",
+            };
+
+            if !token.is_ascii() {
+                // LIKE cannot fold non-ASCII case; suvadu_contains_ci can
+                // (db::register_contains_ci). It cannot use an index, so this
+                // is reserved for the tokens that need it.
+                self.clauses
+                    .push(format!("suvadu_contains_ci({column}, ?)"));
+                self.params.push(Box::new(token.clone()));
+                continue;
+            }
+
+            let escaped = escape_like(token);
+            if field == SearchField::Command {
+                // Same trigram-index route as with_query_field.
+                self.clauses.push(
+                    "e.id IN (SELECT rowid FROM entries_fts WHERE command LIKE ? ESCAPE '\\')"
+                        .into(),
+                );
+            } else {
+                self.clauses.push(format!("{column} LIKE ? ESCAPE '\\'"));
+            }
             self.params.push(Box::new(format!("%{escaped}%")));
         }
         self

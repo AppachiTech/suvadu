@@ -34,6 +34,7 @@ pub fn handle_history(
         limit,
         0,
         &repository::QueryFilter {
+            query_tokens: &[],
             after: after_ms,
             before: before_ms,
             tag_id,

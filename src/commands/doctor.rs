@@ -301,6 +301,7 @@ fn check_database() -> CheckResult {
     let repo = Repository::new(conn);
     let count = repo
         .count_filtered(&crate::repository::QueryFilter {
+            query_tokens: &[],
             after: None,
             before: None,
             tag_id: None,

@@ -459,6 +459,7 @@ fn handle_search_commands(
         .map(|c| i32::try_from(c).unwrap_or(0));
 
     let qf = QueryFilter {
+        query_tokens: &[],
         after,
         before,
         tag_id: None,
@@ -510,6 +511,7 @@ fn handle_recent_commands(
     let entries = if executor.is_some() || after.is_some() {
         // Use filtered query when executor or after is specified
         let qf = QueryFilter {
+            query_tokens: &[],
             after,
             before: None,
             tag_id: None,
@@ -734,6 +736,7 @@ fn handle_get_stats(
     let after = Some(now - days * 24 * 60 * 60 * 1000);
 
     let qf = QueryFilter {
+        query_tokens: &[],
         after,
         before: None,
         tag_id: None,
@@ -927,6 +930,7 @@ fn handle_what_changed(
     let after = Some(now - hours * 60 * 60 * 1000);
 
     let qf = QueryFilter {
+        query_tokens: &[],
         after,
         before: None,
         tag_id: None,
@@ -1024,6 +1028,7 @@ fn handle_what_failed(
 
     // Get all entries in the time window, then filter to failures
     let qf = QueryFilter {
+        query_tokens: &[],
         after,
         before: None,
         tag_id: None,
@@ -1146,6 +1151,7 @@ fn handle_suggest_next(
     let week_ago = now - 7 * 24 * 60 * 60 * 1000;
 
     let qf = QueryFilter {
+        query_tokens: &[],
         after: Some(week_ago),
         before: None,
         tag_id: None,
@@ -1470,6 +1476,7 @@ fn handle_find_agent_session(
     let before = get_str(args, "before").and_then(|s| util::parse_date_input(s, true));
 
     let qf = QueryFilter {
+        query_tokens: &[],
         after,
         before,
         tag_id: None,

@@ -76,8 +76,16 @@ impl SearchApp {
     }
 
     /// Build a `QueryFilter` from the current search state.
-    fn build_query_filter<'a>(&'a self, query: Option<&'a str>) -> QueryFilter<'a> {
+    ///
+    /// `tokens` narrows candidates in SQL to rows the in-memory scorer could
+    /// accept; see `reload_entries`.
+    fn build_query_filter<'a>(
+        &'a self,
+        query: Option<&'a str>,
+        tokens: &'a [String],
+    ) -> QueryFilter<'a> {
         QueryFilter {
+            query_tokens: tokens,
             after: self.filters.after,
             before: self.filters.before,
             tag_id: self.filters.tag_id,
@@ -228,13 +236,21 @@ impl SearchApp {
         let use_fuzzy = !self.query.is_empty();
 
         if use_fuzzy {
-            // Fuzzy path: fetch broad candidates from DB, then score + rank
-            const MAX_FUZZY_CANDIDATES: usize = 5_000;
-            let qf = self.build_query_filter(None); // No SQL query — nucleo handles matching
+            // Fuzzy path: narrow candidates in SQL, then score + rank them.
+            //
+            // The scorer only keeps entries where every typed token appears as
+            // a literal substring (see `match_tier`), so asking SQL for the
+            // same thing yields the same set from the *whole* history. Before,
+            // this fetched the newest 5,000 rows and matched in memory, which
+            // silently hid any older match. The limit now bounds how many
+            // matches are ranked, not how much history is searched.
+            const MAX_RANKED_MATCHES: usize = 5_000;
+            let tokens: Vec<String> = self.query.split_whitespace().map(str::to_string).collect();
+            let qf = self.build_query_filter(None, &tokens); // Ranking still happens in memory
 
             if self.view.unique_mode {
                 let unique_res =
-                    repo.get_unique_entries_filtered(MAX_FUZZY_CANDIDATES, 0, &qf, false)?;
+                    repo.get_unique_entries_filtered(MAX_RANKED_MATCHES, 0, &qf, false)?;
                 let (entries, counts): (Vec<Entry>, Vec<i64>) = unique_res.into_iter().unzip();
 
                 let mut count_map = std::collections::HashMap::new();
@@ -261,7 +277,7 @@ impl SearchApp {
                 self.unique_counts = count_map;
                 self.fuzzy_results = scored;
             } else {
-                let entries = repo.get_entries_filtered(MAX_FUZZY_CANDIDATES, 0, &qf)?;
+                let entries = repo.get_entries_filtered(MAX_RANKED_MATCHES, 0, &qf)?;
 
                 let boost_cwd = if self.view.context_boost {
                     self.view.current_cwd.as_deref()
@@ -291,7 +307,7 @@ impl SearchApp {
             } else {
                 Some(self.query.as_str())
             };
-            let qf = self.build_query_filter(query_param);
+            let qf = self.build_query_filter(query_param, &[]);
 
             if self.view.unique_mode {
                 let new_count = repo.count_unique_filtered(&qf)?;
@@ -341,7 +357,7 @@ impl SearchApp {
             } else {
                 Some(self.query.as_str())
             };
-            let qf = self.build_query_filter(query_param);
+            let qf = self.build_query_filter(query_param, &[]);
 
             if self.view.unique_mode {
                 let unique_res =

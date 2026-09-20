@@ -313,6 +313,11 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
     // This avoids loading all rows into memory for regex-based delete/count.
     register_regexp(&conn)?;
 
+    // Register a Unicode-aware case-insensitive substring test. SQLite's LIKE
+    // only folds ASCII case, so interactive search uses this for any token
+    // containing non-ASCII characters (see FilterBuilder::with_query_tokens).
+    register_contains_ci(&conn)?;
+
     // WAL mode is persistent — only set if not already active.
     let current_mode: String = conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
     if current_mode != "wal" {
@@ -370,6 +375,36 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
 /// The compiled regex is cached in a `RefCell` so that the same pattern is only
 /// compiled once per query (not once per row). `SQLite` scalar-function callbacks
 /// run single-threaded, so `RefCell` is safe here.
+/// Registers `suvadu_contains_ci(haystack, needle)`: true when `needle`
+/// occurs in `haystack`, compared with Rust's Unicode lowercasing.
+///
+/// This exists because `SQLite`'s LIKE folds case for ASCII only, so
+/// `command LIKE '%émile%'` never matches a command containing "Émile". It is
+/// only used for tokens that actually contain non-ASCII characters; ASCII
+/// tokens keep using LIKE against the trigram index, which can use that index.
+fn register_contains_ci(conn: &Connection) -> DbResult<()> {
+    use rusqlite::functions::FunctionFlags;
+
+    conn.create_scalar_function(
+        "suvadu_contains_ci",
+        2,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        move |ctx| {
+            let haystack = ctx
+                .get_raw(0)
+                .as_str_or_null()
+                .unwrap_or(None)
+                .unwrap_or("");
+            let needle = ctx
+                .get_raw(1)
+                .as_str()
+                .map_err(|e| rusqlite::Error::UserFunctionError(e.into()))?;
+            Ok(haystack.to_lowercase().contains(&needle.to_lowercase()))
+        },
+    )?;
+    Ok(())
+}
+
 fn register_regexp(conn: &Connection) -> DbResult<()> {
     use rusqlite::functions::FunctionFlags;
     use std::cell::RefCell;
