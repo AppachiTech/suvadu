@@ -1,12 +1,14 @@
-use std::fmt::Write;
+//! Read-only `suvadu://…` resources. These serve the same records the
+//! tools do, so they answer in the same shape: see
+//! [`crate::mcp::conventions`] for the rules and
+//! [`crate::mcp::contract`] for the fixtures that enforce them on both
+//! surfaces at once.
 
 use serde_json::{json, Value};
 
+use super::conventions as conv;
 use crate::models::SearchField;
 use crate::repository::{QueryFilter, Repository};
-use crate::util;
-
-use chrono::TimeZone;
 
 // ── Resource catalog ────────────────────────────────────────
 
@@ -103,15 +105,24 @@ pub fn read_resource(
 
 // ── Resource handlers ───────────────────────────────────────
 
-fn format_time(ms: i64) -> String {
-    let ms_val = util::normalize_display_ms(ms);
-    chrono::Local
-        .timestamp_millis_opt(ms_val)
-        .single()
-        .map_or_else(
-            || "unknown".to_string(),
-            |dt| dt.format("%Y-%m-%d %H:%M:%S").to_string(),
-        )
+/// Rows a fixed-shape resource shows before saying how many it elided.
+/// Resources take no arguments, so these are the only page sizes there
+/// are — the matching tool is the way to see more.
+const MAX_FAILURES_SHOWN: usize = 20;
+const MAX_SESSIONS_SHOWN: usize = 5;
+
+/// One command row, matching the tool layer's exactly so an agent does
+/// not have to learn two shapes for the same record.
+fn command_row(e: &crate::models::Entry) -> String {
+    format!(
+        "  {} | {} | {} | {} | {} | {}",
+        conv::command_id(e.id),
+        conv::exit(e.exit_code),
+        conv::timestamp(e.started_at),
+        e.cwd,
+        conv::or_unknown(e.executor.as_deref()),
+        conv::clip(&e.command, conv::ROW_MAX_CHARS),
+    )
 }
 
 fn read_recent_history(
@@ -127,30 +138,17 @@ fn read_recent_history(
         .get_recent_entries(limit, 0, &filter, None)
         .map_err(|e| format!("query failed: {e}"))?;
 
-    if entries.is_empty() {
-        return Ok("No recent commands found.".to_string());
-    }
-
-    let mut out = String::new();
-    let _ = writeln!(out, "Recent commands ({}):\n", entries.len());
+    let mut response = conv::Response::new(
+        format!("{} most recent commands", entries.len()),
+        conv::Provenance::Observed,
+    );
     for entry in &entries {
-        let exit = match entry.exit_code {
-            Some(0) => "ok",
-            Some(_) => "FAIL",
-            None => "?",
-        };
-        let executor = entry.executor.as_deref().unwrap_or("terminal");
-        let _ = writeln!(
-            out,
-            "  [{}] {} | {} | {} | {}",
-            exit,
-            entry.command,
-            entry.cwd,
-            executor,
-            format_time(entry.started_at),
-        );
+        response.line(command_row(entry));
     }
-    Ok(out)
+    Ok(response
+        .shown(entries.len())
+        .note("call recent_commands for paging, filters and detail")
+        .render())
 }
 
 fn read_recent_failures(
@@ -187,34 +185,42 @@ fn read_recent_failures(
         .filter(|e| e.exit_code.is_some_and(|c| c != 0))
         .collect();
 
-    if failures.is_empty() {
-        return Ok("No failures in the last 24 hours.".to_string());
-    }
-
-    let mut out = String::new();
-    let _ = writeln!(out, "{} failures in the last 24 hours:\n", failures.len());
-
-    for entry in failures.iter().take(20) {
-        let code = entry.exit_code.unwrap_or(-1);
-        let prompt = entry
+    let mut response = conv::Response::new(
+        format!(
+            "{} commands failed in the {}",
+            failures.len(),
+            conv::window_hours(24)
+        ),
+        conv::Provenance::Observed,
+    );
+    for entry in failures.iter().take(MAX_FAILURES_SHOWN) {
+        response.line(command_row(entry));
+        if let Some(prompt) = entry
             .context
             .as_ref()
             .and_then(|ctx| ctx.get("agent_prompt"))
-            .map_or("(no prompt)", String::as_str);
-        let executor = entry.executor.as_deref().unwrap_or("terminal");
-        let _ = writeln!(
-            out,
-            "  exit {} | {} | {} | {}",
-            code,
-            entry.command,
-            executor,
-            format_time(entry.started_at),
-        );
-        if prompt != "(no prompt)" {
-            let _ = writeln!(out, "    prompt: \"{prompt}\"");
+            .filter(|p| !p.is_empty())
+        {
+            response.line(format!(
+                "    prompt \"{}\"",
+                conv::clip(prompt, conv::PROMPT_MAX_CHARS)
+            ));
         }
     }
-    Ok(out)
+    if failures.len() > MAX_FAILURES_SHOWN {
+        response.line(format!(
+            "  {}",
+            conv::more_not_shown(failures.len() - MAX_FAILURES_SHOWN)
+        ));
+    }
+    Ok(response
+        .shown(failures.len().min(MAX_FAILURES_SHOWN))
+        .matched(failures.len())
+        .note(
+            "the exit code is all suvadu recorded; the error text these commands printed was \
+             never captured. Call what_failed for paging and grouping",
+        )
+        .render())
 }
 
 fn read_today_stats(repo: &Repository, mcp: &crate::config::McpConfig) -> Result<String, String> {
@@ -251,12 +257,6 @@ fn read_today_stats(repo: &Repository, mcp: &crate::config::McpConfig) -> Result
         .count_filtered(&success_qf)
         .map_err(|e| format!("query failed: {e}"))?;
 
-    let rate = if total > 0 {
-        successes * 100 / total
-    } else {
-        0
-    };
-
     let entries = repo
         .get_entries_filtered(100, 0, &qf)
         .map_err(|e| format!("query failed: {e}"))?;
@@ -277,26 +277,36 @@ fn read_today_stats(repo: &Repository, mcp: &crate::config::McpConfig) -> Result
     top_dirs.sort_by_key(|b| std::cmp::Reverse(b.1));
     top_dirs.truncate(3);
 
-    let mut out = String::new();
-    let _ = writeln!(out, "Today's stats:\n");
-    let _ = writeln!(out, "  Total commands: {total}");
-    let _ = writeln!(out, "  Success rate: {rate}%\n");
-
+    let total_usize = usize::try_from(total).unwrap_or(usize::MAX);
+    let mut response = conv::Response::new(
+        format!(
+            "Today: {total} commands, {} succeeded",
+            conv::rate(usize::try_from(successes).unwrap_or(0), total_usize)
+        ),
+        conv::Provenance::ObservedAndInferred,
+    );
     if !top_cmds.is_empty() {
-        let _ = writeln!(out, "  Top commands:");
+        response.line("Top commands (ranked, inferred):");
         for (cmd, count) in &top_cmds {
-            let _ = writeln!(out, "    {count:>4}x  {cmd}");
+            response.line(format!("    {count:>4}x  {cmd}"));
         }
     }
-
     if !top_dirs.is_empty() {
-        let _ = writeln!(out, "\n  Top directories:");
+        response.blank();
+        response.line("Top directories (ranked, inferred):");
         for (dir, count) in &top_dirs {
-            let _ = writeln!(out, "    {count:>4}x  {dir}");
+            response.line(format!("    {count:>4}x  {dir}"));
         }
     }
-
-    Ok(out)
+    Ok(response
+        .shown(entries.len())
+        .matched(total_usize)
+        .note(format!(
+            "rankings are computed from the {} most recent of {total} commands today, not from \
+             all of them",
+            entries.len()
+        ))
+        .render())
 }
 
 fn read_risk_summary(repo: &Repository, mcp: &crate::config::McpConfig) -> Result<String, String> {
@@ -329,39 +339,56 @@ fn read_risk_summary(repo: &Repository, mcp: &crate::config::McpConfig) -> Resul
 
     let risk_summary = risk::session_risk(&entries);
 
-    let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "Risk summary (last 24 hours, {} commands):\n",
-        entries.len()
+    let mut response = conv::Response::new(
+        format!(
+            "Risk ratings for {} commands recorded in the {}",
+            entries.len(),
+            conv::window_hours(24)
+        ),
+        conv::Provenance::Inferred,
     );
-    let _ = writeln!(out, "  Critical: {}", risk_summary.critical_count);
-    let _ = writeln!(out, "  High:     {}", risk_summary.high_count);
-    let _ = writeln!(out, "  Medium:   {}", risk_summary.medium_count);
-    let _ = writeln!(out, "  Low:      {}", risk_summary.low_count);
-    let _ = writeln!(out, "  Safe:     {}", risk_summary.safe_count);
-
+    for (label, count) in [
+        ("critical", risk_summary.critical_count),
+        ("high", risk_summary.high_count),
+        ("medium", risk_summary.medium_count),
+        ("low", risk_summary.low_count),
+        ("safe", risk_summary.safe_count),
+    ] {
+        response.line(format!("  {label:<9} {count}"));
+    }
     if !risk_summary.packages_installed.is_empty() {
-        let _ = writeln!(out, "\n  Packages installed:");
+        response.blank();
+        response.line("Package installs (inferred from the command text):");
         for pkg in &risk_summary.packages_installed {
-            let _ = writeln!(out, "    {} ({})", pkg.packages.join(", "), pkg.manager);
+            response.line(format!("    {} ({})", pkg.packages.join(", "), pkg.manager));
         }
     }
-
     if !risk_summary.failed_commands.is_empty() {
-        let _ = writeln!(out, "\n  Failed commands:");
+        response.blank();
+        response.line("Failed commands (observed exit codes):");
         for fail in risk_summary.failed_commands.iter().take(10) {
-            let _ = writeln!(
-                out,
+            response.line(format!(
                 "    exit {} | {} | {}",
                 fail.exit_code,
-                fail.command,
-                format_time(fail.timestamp),
-            );
+                conv::clip(&fail.command, conv::ROW_MAX_CHARS),
+                conv::timestamp(fail.timestamp),
+            ));
+        }
+        if risk_summary.failed_commands.len() > 10 {
+            response.line(format!(
+                "    {}",
+                conv::more_not_shown(risk_summary.failed_commands.len() - 10)
+            ));
         }
     }
-
-    Ok(out)
+    Ok(response
+        .shown(entries.len())
+        .matched(entries.len())
+        .note(
+            "a rating is a pattern match on the command text, not an execution or a sandbox; \
+             suvadu did not observe what any of these commands touched",
+        )
+        .render())
 }
 
 fn read_agent_activity(
@@ -378,16 +405,17 @@ fn read_agent_activity(
         .map(|e| e.strip_prefix("agent: ").unwrap_or(e.as_str()))
         .collect();
 
-    if agents.is_empty() {
-        return Ok("No AI agent activity detected.".to_string());
-    }
-
     let now = chrono::Utc::now().timestamp_millis();
     let week_ago = now - 7 * 24 * 60 * 60 * 1000;
 
-    let mut out = String::new();
-    let _ = writeln!(out, "Agent activity (last 7 days):\n");
-    let _ = writeln!(out, "  Detected agents: {}\n", agents.join(", "));
+    let mut response = conv::Response::new(
+        format!(
+            "{} agents recorded commands in the {}",
+            agents.len(),
+            conv::window_days(7)
+        ),
+        conv::Provenance::Observed,
+    );
 
     for agent in &agents {
         let qf = QueryFilter {
@@ -414,29 +442,20 @@ fn read_agent_activity(
             ..qf
         };
         let successes = repo.count_filtered(&success_qf).unwrap_or(0);
-        let rate = if total > 0 {
-            successes * 100 / total
-        } else {
-            0
-        };
-
-        let _ = writeln!(out, "  {agent}: {total} commands, {rate}% success");
+        response.line(format!(
+            "  {agent} | {total} commands | {} ok",
+            conv::rate(
+                usize::try_from(successes).unwrap_or(0),
+                usize::try_from(total).unwrap_or(0)
+            )
+        ));
     }
 
-    Ok(out)
-}
-
-fn relative_time(now: i64, ms: i64) -> String {
-    let diff = now - ms;
-    let hours = diff / 3_600_000;
-    let days = hours / 24;
-    if days > 0 {
-        format!("{days} day{} ago", if days == 1 { "" } else { "s" })
-    } else if hours > 0 {
-        format!("{hours} hour{} ago", if hours == 1 { "" } else { "s" })
-    } else {
-        "just now".to_string()
-    }
+    Ok(response
+        .shown(agents.len())
+        .matched(agents.len())
+        .note("an executor is recorded by the shell integration; commands run another way are not attributed to any agent")
+        .render())
 }
 
 fn read_agent_sessions(
@@ -469,30 +488,40 @@ fn read_agent_sessions(
         .map_err(|e| format!("query failed: {e}"))?;
 
     let sessions = group_agent_sessions(&entries);
-    if sessions.is_empty() {
-        return Ok("No agent sessions in the last 7 days.".to_string());
-    }
-
-    let mut out = String::new();
-    let _ = writeln!(out, "Recent agent sessions (last 7 days):\n");
-    for (i, (sid, executor, count, success, failure, last_at, prompt)) in
-        sessions.iter().take(5).enumerate()
+    let mut response = conv::Response::new(
+        format!(
+            "{} agent sessions in the {}",
+            sessions.len(),
+            conv::window_days(7)
+        ),
+        conv::Provenance::Observed,
+    );
+    for (sid, executor, count, success, failure, last_at, prompt) in
+        sessions.iter().take(MAX_SESSIONS_SHOWN)
     {
-        let rel = relative_time(now, *last_at);
-        let status = if *failure == 0 {
-            "all ok".to_string()
-        } else {
-            format!("{success} ok, {failure} failed")
-        };
-        let _ = writeln!(out, "{}. {sid} ({executor}, {rel})", i + 1);
-        let _ = writeln!(out, "   {count} commands ({status})");
+        response.line(format!(
+            "  {sid} | {executor} | {count} commands, {} ok, {failure} failed | last activity {}",
+            conv::rate(*success, *count),
+            conv::when(*last_at),
+        ));
         if !prompt.is_empty() {
-            let display = util::truncate_str(prompt, 80, "...");
-            let _ = writeln!(out, "   \"{display}\"");
+            response.line(format!(
+                "    first prompt \"{}\"",
+                conv::clip(prompt, conv::PROMPT_MAX_CHARS)
+            ));
         }
-        out.push('\n');
     }
-    Ok(out)
+    if sessions.len() > MAX_SESSIONS_SHOWN {
+        response.line(format!(
+            "  {}",
+            conv::more_not_shown(sessions.len() - MAX_SESSIONS_SHOWN)
+        ));
+    }
+    Ok(response
+        .shown(sessions.len().min(MAX_SESSIONS_SHOWN))
+        .matched(sessions.len())
+        .note("grouped from recorded shell commands; call find_agent_session for paging and filters, or list_agent_sessions for sessions captured from an agent's own transcript")
+        .render())
 }
 
 /// Group agent entries by `session_id`, sorted by most recent.
@@ -551,10 +580,10 @@ fn group_agent_sessions(
     sessions
 }
 
-fn format_high_fail_rate(entries: &[crate::models::Entry], after: i64, out: &mut String) {
+fn high_fail_rate_rows(entries: &[crate::models::Entry], after: i64) -> Vec<String> {
     let day_entries: Vec<_> = entries.iter().filter(|e| e.started_at >= after).collect();
     if day_entries.is_empty() {
-        return;
+        return Vec::new();
     }
     let mut cmd_stats: std::collections::HashMap<&str, (usize, usize)> =
         std::collections::HashMap::new();
@@ -565,22 +594,24 @@ fn format_high_fail_rate(entries: &[crate::models::Entry], after: i64, out: &mut
             entry.1 += 1;
         }
     }
-    let high_fail: Vec<_> = cmd_stats
+    let mut high_fail: Vec<_> = cmd_stats
         .into_iter()
         .filter(|(_, (total, fails))| *total >= 3 && *fails * 100 / *total >= 50)
         .collect();
-
-    if !high_fail.is_empty() {
-        let _ = writeln!(out, "  Commands with high failure rate (last 24h):");
-        for (cmd, (total, fails)) in &high_fail {
-            let rate = fails * 100 / total;
-            let display = util::truncate_str(cmd, 50, "...");
-            let _ = writeln!(out, "    {display} — {fails}/{total} failed ({rate}%)");
-        }
-        out.push('\n');
-    }
+    high_fail.sort_by(|a, b| (b.1).1.cmp(&(a.1).1).then(a.0.cmp(b.0)));
+    high_fail
+        .into_iter()
+        .map(|(cmd, (total, fails))| {
+            format!(
+                "    {} — failed {}",
+                conv::clip(cmd, conv::ROW_MAX_CHARS),
+                conv::rate(fails, total)
+            )
+        })
+        .collect()
 }
 
+#[allow(clippy::too_many_lines)]
 fn read_project_context(
     repo: &Repository,
     mcp: &crate::config::McpConfig,
@@ -599,13 +630,6 @@ fn read_project_context(
         .get_entries_filtered(5000, 0, &qf)
         .map_err(|e| format!("query failed: {e}"))?;
 
-    if entries.is_empty() {
-        return Ok("No command history found for project context.".to_string());
-    }
-
-    let mut out = String::new();
-    let _ = writeln!(out, "Project context (last 7 days):\n");
-
     // Top commands by frequency
     let mut cmd_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for e in &entries {
@@ -613,15 +637,22 @@ fn read_project_context(
         *cmd_counts.entry(program).or_default() += 1;
     }
     let mut top_cmds: Vec<_> = cmd_counts.into_iter().collect();
-    top_cmds.sort_by_key(|b| std::cmp::Reverse(b.1));
+    top_cmds.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
     top_cmds.truncate(8);
 
+    let mut response = conv::Response::new(
+        format!(
+            "Project context — {} commands recorded in the {}",
+            entries.len(),
+            conv::window_days(7)
+        ),
+        conv::Provenance::ObservedAndInferred,
+    );
     if !top_cmds.is_empty() {
-        let _ = writeln!(out, "  Common commands:");
+        response.line("Common programs (inferred, ranked by frequency):");
         for (cmd, count) in &top_cmds {
-            let _ = writeln!(out, "    {count:>4}x  {cmd}");
+            response.line(format!("    {count:>4}x  {cmd}"));
         }
-        out.push('\n');
     }
 
     // Recent failures (last 24h)
@@ -642,45 +673,80 @@ fn read_project_context(
             }
         }
         let mut sorted_fails: Vec<_> = fail_counts.into_iter().collect();
-        sorted_fails.sort_by_key(|b| std::cmp::Reverse((b.1).0));
+        sorted_fails.sort_by(|a, b| (b.1).0.cmp(&(a.1).0).then(a.0.cmp(b.0)));
 
-        let _ = writeln!(out, "  Recent failures (last 24h):");
+        response.blank();
+        response.line(format!(
+            "Failures in the {} ({} recorded):",
+            conv::window_hours(24),
+            recent_failures.len()
+        ));
         for (cmd, (count, last_at)) in sorted_fails.iter().take(5) {
-            let rel = relative_time(now, *last_at);
-            let display = util::truncate_str(cmd, 60, "...");
-            let _ = writeln!(out, "    {count}x  {display} — last {rel}");
+            response.line(format!(
+                "    {count}x  {} — last {}",
+                conv::clip(cmd, conv::ROW_MAX_CHARS),
+                conv::when(*last_at)
+            ));
         }
-        out.push('\n');
+        if sorted_fails.len() > 5 {
+            response.line(format!(
+                "    {}",
+                conv::more_not_shown(sorted_fails.len() - 5)
+            ));
+        }
     }
 
-    format_high_fail_rate(&entries, day_ago, &mut out);
+    let high_fail = high_fail_rate_rows(&entries, day_ago);
+    if !high_fail.is_empty() {
+        response.blank();
+        response.line(format!(
+            "Commands failing half their runs or more in the {}:",
+            conv::window_hours(24)
+        ));
+        for row in &high_fail {
+            response.line(row);
+        }
+    }
 
     // Agent activity summary
     let agent_sessions = group_agent_sessions(&entries);
     if !agent_sessions.is_empty() {
-        let _ = writeln!(
-            out,
-            "  Agent activity ({} sessions this week):",
+        response.blank();
+        response.line(format!(
+            "Agent sessions in the {} ({}):",
+            conv::window_days(7),
             agent_sessions.len()
-        );
+        ));
         for (sid, executor, count, _success, failure, last_at, prompt) in
             agent_sessions.iter().take(3)
         {
-            let rel = relative_time(now, *last_at);
-            let status = if *failure == 0 {
-                format!("{count} cmds, all ok")
-            } else {
-                format!("{count} cmds, {failure} failed")
-            };
-            let _ = writeln!(out, "    {sid} ({executor}, {rel}) — {status}");
+            response.line(format!(
+                "    {sid} | {executor} | {count} cmds, {failure} failed | last activity {}",
+                conv::timestamp(*last_at)
+            ));
             if !prompt.is_empty() {
-                let display = util::truncate_str(prompt, 60, "...");
-                let _ = writeln!(out, "      \"{display}\"");
+                response.line(format!(
+                    "      \"{}\"",
+                    conv::clip(prompt, conv::PROMPT_MAX_CHARS)
+                ));
             }
+        }
+        if agent_sessions.len() > 3 {
+            response.line(format!(
+                "    {}",
+                conv::more_not_shown(agent_sessions.len() - 3)
+            ));
         }
     }
 
-    Ok(out)
+    Ok(response
+        .shown(entries.len())
+        .note(format!(
+            "computed over the {} most recent commands in this window; call project_context for \
+             a directory-scoped briefing with detail",
+            entries.len()
+        ))
+        .render())
 }
 
 fn read_skills_index(repo: &Repository) -> Result<String, String> {
@@ -689,37 +755,40 @@ fn read_skills_index(repo: &Repository) -> Result<String, String> {
         .list_skills(None, Some(crate::models::SKILL_STATUS_ACTIVE))
         .map_err(|e| format!("query failed: {e}"))?;
 
+    let mut response = conv::Response::new(
+        format!("{} active shared skills", skills.len()),
+        conv::Provenance::CallerReported,
+    );
     if skills.is_empty() {
-        return Ok(
-            "No skills in the shared library yet. Add one with `suv skills add <name>`, \
-             or propose one via the propose_skill tool if enabled."
-                .to_string(),
+        response.line(
+            "  (none — add one with `suv skills add <name>`, or via the propose_skill tool if \
+             enabled)",
         );
     }
-
-    let mut out = String::new();
-    let _ = writeln!(out, "{} active skill(s):\n", skills.len());
     for s in skills.iter().take(MAX_SHOWN) {
-        let triggers = if s.triggers.is_empty() {
-            String::new()
-        } else {
-            format!(" [{}]", s.triggers.join(", "))
-        };
-        let _ = writeln!(
-            out,
-            "- {} ({}) — {}{}",
-            s.name, s.scope, s.description, triggers
-        );
+        response.line(format!(
+            "  {} | scope {} | triggers {} | {}",
+            s.name,
+            s.scope,
+            if s.triggers.is_empty() {
+                conv::UNKNOWN.to_string()
+            } else {
+                s.triggers.join(", ")
+            },
+            conv::clip(&s.description, conv::PROMPT_MAX_CHARS)
+        ));
     }
     if skills.len() > MAX_SHOWN {
-        let _ = writeln!(
-            out,
-            "... and {} more (use search_skills)",
-            skills.len() - MAX_SHOWN
-        );
+        response.line(format!(
+            "  {}",
+            conv::more_not_shown(skills.len() - MAX_SHOWN)
+        ));
     }
-    out.push_str("\nUse get_skill(name) for the full content of any skill above.");
-    Ok(out)
+    Ok(response
+        .shown(skills.len().min(MAX_SHOWN))
+        .matched(skills.len())
+        .note("skill text is written by people and agents, not observed by suvadu; call get_skill(name) for one skill's full body or search_skills to narrow")
+        .render())
 }
 
 fn read_session_history(
@@ -742,28 +811,18 @@ fn read_session_history(
         )
         .map_err(|e| format!("query failed: {e}"))?;
 
-    if entries.is_empty() {
-        return Ok(format!("No commands found for session {session_id}."));
-    }
-
-    let mut out = String::new();
-    let _ = writeln!(out, "Session {session_id} ({} commands):\n", entries.len());
+    let mut response = conv::Response::new(
+        format!("Session {session_id} — {} commands", entries.len()),
+        conv::Provenance::Observed,
+    );
     for entry in &entries {
-        let exit = match entry.exit_code {
-            Some(0) => "ok",
-            Some(_) => "FAIL",
-            None => "?",
-        };
-        let _ = writeln!(
-            out,
-            "  [{}] {} | {} | {}",
-            exit,
-            entry.command,
-            entry.cwd,
-            format_time(entry.started_at),
-        );
+        response.line(command_row(entry));
     }
-    Ok(out)
+    Ok(response
+        .shown(entries.len())
+        .next_offset((entries.len() == 100).then_some(100))
+        .note("at most 100 commands; call session_history for paging and detail")
+        .render())
 }
 
 // ── Tests ───────────────────────────────────────────────────
@@ -886,7 +945,7 @@ mod tests {
         assert!(val["contents"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("No recent commands"));
+            .contains("shown: 0"));
     }
 
     #[test]
@@ -901,7 +960,7 @@ mod tests {
         assert!(result.unwrap()["contents"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("No failures"));
+            .contains("shown: 0"));
     }
 
     #[test]
@@ -916,7 +975,7 @@ mod tests {
         assert!(result.unwrap()["contents"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("Total commands: 0"));
+            .contains("Today: 0 commands"));
     }
 
     #[test]
@@ -942,7 +1001,7 @@ mod tests {
         assert!(result.unwrap()["contents"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("No AI agent activity"));
+            .contains("shown: 0"));
     }
 
     #[test]
@@ -957,7 +1016,7 @@ mod tests {
         assert!(result.unwrap()["contents"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("No agent sessions"));
+            .contains("shown: 0"));
     }
 
     #[test]
@@ -1020,7 +1079,7 @@ mod tests {
         assert!(result.unwrap()["contents"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("No command history"));
+            .contains("0 commands recorded"));
     }
 
     #[test]
@@ -1061,7 +1120,7 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(
-            text.contains("Common commands"),
+            text.contains("Common programs"),
             "should show common commands: {text}"
         );
         assert!(text.contains("cargo"), "should contain cargo: {text}");
@@ -1079,7 +1138,7 @@ mod tests {
         assert!(result.unwrap()["contents"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("No skills"));
+            .contains("shown: 0"));
     }
 
     #[test]

@@ -236,6 +236,51 @@ fn every_text_tool_response_carries_the_standard_trailer() {
     }
 }
 
+/// Resources serve the same records as the tools do, so they answer in
+/// the same shape. A caller that learned the trailer from one surface
+/// must not have to learn a second one for the other.
+fn resource_responses(repo: &Repository, mcp: &McpConfig) -> Vec<(String, String)> {
+    super::catalog::RESOURCES
+        .iter()
+        .map(super::catalog::ResourceEntry::uri)
+        .chain(std::iter::once(format!(
+            "suvadu://history/session/{SHELL_SESSION}"
+        )))
+        .map(|uri| {
+            let value = super::resources::read_resource(repo, &uri, mcp)
+                .unwrap_or_else(|e| panic!("{uri} failed: {e}"));
+            let text = value["contents"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            (uri, text)
+        })
+        .collect()
+}
+
+#[test]
+fn every_resource_answers_in_the_same_shape_as_the_tools() {
+    let (_dir, repo) = seeded();
+    for (uri, text) in resource_responses(&repo, &mcp()) {
+        let trailer = conv::parse_trailer(&text)
+            .unwrap_or_else(|| panic!("{uri} has no conventions trailer:\n{text}"));
+        for key in ["shown", "next_offset", "provenance"] {
+            assert!(
+                trailer.contains_key(key),
+                "{uri} trailer has no {key}: line\n{text}"
+            );
+        }
+        assert!(
+            !conv::has_legacy_timestamp(&text),
+            "{uri} still prints a space-separated local timestamp:\n{text}"
+        );
+        assert!(
+            !text.contains("[?]") && !text.contains("exit -1"),
+            "{uri} uses a placeholder other than `unknown`:\n{text}"
+        );
+    }
+}
+
 #[test]
 fn timestamps_are_rfc3339_with_an_explicit_offset() {
     let (_dir, repo) = seeded();
