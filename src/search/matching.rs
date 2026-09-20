@@ -26,8 +26,9 @@
 //!   in memory after SQL narrowing, so they fold case with Rust's full
 //!   Unicode lowercasing — a non-ASCII term also narrows through
 //!   `suvadu_contains_ci()` rather than `LIKE`, so `ÉCHO` does find `écho`.
-//!   `literal` and `prefix` are answered by SQL alone, and SQLite's `LIKE`
-//!   folds ASCII only, so in those two modes `ÉCHO` does not find `écho`.
+//!   `literal` and `prefix` are answered by SQL alone, and the underlying
+//!   `LIKE` folds ASCII only, so in those two modes `ÉCHO` does not find
+//!   `écho`.
 //!   [`MatchMode::matches`] below is the ASCII-only reference predicate used
 //!   by tests and by `fuzzy`'s subsequence check; it is not the live filter
 //!   for `terms`.
