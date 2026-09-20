@@ -293,6 +293,9 @@ fn run_search(cmd: Commands) -> Result<(), Box<dyn std::error::Error>> {
         include_agents,
         failed,
         field,
+        match_mode,
+        scope,
+        compact,
     } = cmd
     else {
         unreachable!()
@@ -309,6 +312,9 @@ fn run_search(cmd: Commands) -> Result<(), Box<dyn std::error::Error>> {
         field,
         include_agents,
         failed_only: failed,
+        match_mode,
+        scope,
+        compact,
     })
 }
 
@@ -534,6 +540,9 @@ mod tests {
             include_agents: false,
             failed: false,
             field: crate::models::SearchField::Command,
+            match_mode: None,
+            scope: None,
+            compact: false,
         };
         assert!(is_user_facing_command(&cmd));
     }

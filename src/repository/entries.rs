@@ -128,9 +128,9 @@ impl Repository {
         &self,
         limit: usize,
         offset: usize,
-        filter: &super::QueryFilter,
+        filter: &impl super::EntryQuery,
     ) -> DbResult<Vec<Entry>> {
-        let mut fb = filter.to_filter_builder();
+        let mut fb = filter.entry_filter_builder();
 
         let sql = format!(
             "SELECT {ENTRY_COLUMNS} {ENTRY_JOINS}{} ORDER BY e.started_at DESC LIMIT ? OFFSET ?",
@@ -196,10 +196,10 @@ impl Repository {
         &self,
         limit: usize,
         offset: usize,
-        filter: &super::QueryFilter,
+        filter: &impl super::EntryQuery,
         sort_alphabetically: bool,
     ) -> DbResult<Vec<(Entry, i64)>> {
-        let mut fb = filter.to_filter_builder();
+        let mut fb = filter.entry_filter_builder();
 
         let order = if sort_alphabetically {
             "g.occurrence_count DESC, e.command ASC"
@@ -252,10 +252,10 @@ impl Repository {
         &self,
         limit: usize,
         offset: usize,
-        filter: &super::QueryFilter,
+        filter: &impl super::EntryQuery,
         boost_cwd: Option<&str>,
     ) -> DbResult<Vec<Entry>> {
-        let mut fb = filter.to_filter_builder();
+        let mut fb = filter.entry_filter_builder();
 
         // Recency is the PRIMARY sort key so the just-typed command is always at
         // offset 0 regardless of which directory it ran in (a `cd` away must not
@@ -289,8 +289,8 @@ impl Repository {
     }
 
     /// Count unique entries matching `QueryFilter`
-    pub fn count_unique_filtered(&self, filter: &super::QueryFilter) -> DbResult<i64> {
-        let fb = filter.to_filter_builder();
+    pub fn count_unique_filtered(&self, filter: &impl super::EntryQuery) -> DbResult<i64> {
+        let fb = filter.entry_filter_builder();
 
         let sql = format!(
             "SELECT COUNT(DISTINCT command) FROM entries e
@@ -426,8 +426,8 @@ impl Repository {
     }
 
     /// Count entries matching a `QueryFilter`
-    pub fn count_filtered(&self, filter: &super::QueryFilter) -> DbResult<i64> {
-        let fb = filter.to_filter_builder();
+    pub fn count_filtered(&self, filter: &impl super::EntryQuery) -> DbResult<i64> {
+        let fb = filter.entry_filter_builder();
 
         let sql = format!(
             "SELECT COUNT(*) FROM entries e LEFT JOIN sessions s ON e.session_id = s.id{}",

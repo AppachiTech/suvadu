@@ -4,6 +4,7 @@ use crate::config;
 use crate::models::SearchField;
 use crate::repository::Repository;
 use crate::search;
+use crate::search::{MatchMode, RecallScope};
 
 /// Exit code signalling the shell widget that suvadu is inactive and should
 /// fall back to native search (e.g. Ctrl-R).
@@ -22,6 +23,13 @@ pub struct SearchParams<'a> {
     pub field: SearchField,
     pub include_agents: bool,
     pub failed_only: bool,
+    /// `--match`. `None` means "use the configured default", which is
+    /// `terms` unless the user changed it.
+    pub match_mode: Option<MatchMode>,
+    /// `--scope`. `None` means "use the configured default", which is `all`.
+    pub scope: Option<RecallScope>,
+    /// `--compact`: inline recall instead of the full-screen inspector.
+    pub compact: bool,
 }
 
 pub fn handle_search(p: &SearchParams) -> Result<(), Box<dyn std::error::Error>> {
@@ -46,12 +54,18 @@ pub fn handle_search(p: &SearchParams) -> Result<(), Box<dyn std::error::Error>>
         }
     }
 
-    // Resolve --here flag to current directory path
-    let cwd_filter = if p.here {
-        Some(std::env::current_dir()?.to_string_lossy().to_string())
-    } else {
-        None
-    };
+    // `--here` is the long-standing spelling of `--scope directory`; an
+    // explicit `--scope` always wins so the two never fight.
+    let scope = p
+        .scope
+        .or(if p.here {
+            Some(RecallScope::Directory)
+        } else {
+            None
+        })
+        .unwrap_or(app_config.search.scope);
+    let match_mode = p.match_mode.unwrap_or(app_config.search.match_mode);
+    let compact = p.compact || app_config.search.compact;
 
     // Hide agent/bot/ci/script commands from Ctrl+R recall unless the user
     // opted in (config default or the --include-agents flag). Togglable in the
@@ -69,11 +83,13 @@ pub fn handle_search(p: &SearchParams) -> Result<(), Box<dyn std::error::Error>>
             tag: resolved_tag.as_deref(),
             exit_code: p.exit_code,
             executor: p.executor,
-            prefix_match: false,
-            cwd: cwd_filter.as_deref(),
+            cwd: None,
             field: p.field,
             include_agents: show_agents,
             failed_only: p.failed_only,
+            match_mode,
+            scope,
+            compact,
         },
     )?;
 

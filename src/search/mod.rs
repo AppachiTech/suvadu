@@ -1,5 +1,9 @@
 mod data;
 mod format;
+pub mod matching;
+pub mod scope;
+pub use matching::MatchMode;
+pub use scope::{RecallContext, RecallScope};
 mod input;
 mod render;
 
@@ -7,7 +11,7 @@ mod render;
 mod tests;
 
 use crate::models::{Entry, SearchField, Tag};
-use crate::repository::{QueryFilter, Repository};
+use crate::repository::{QueryFilter, Repository, SessionScoped};
 use crate::util;
 use arboard::Clipboard;
 use chrono::Local;
@@ -77,6 +81,27 @@ pub struct ViewOptions {
     pub cwd_boost_percent: u32,
 }
 
+/// Matching mode plus recall scope: *how* a query is interpreted and *which*
+/// slice of history it runs against.
+///
+/// These are deliberately separate from [`ViewOptions`], which only affects
+/// ordering and presentation. Changing the ranking never changes the match
+/// set, and changing the match set never reorders within a mode.
+#[derive(Default)]
+pub struct RecallState {
+    /// Defaults to `MatchMode::Terms`: the interpretation recall has always
+    /// used, so an upgrade never re-reads an existing query.
+    pub match_mode: MatchMode,
+    /// Defaults to `RecallScope::All`.
+    pub scope: RecallScope,
+    /// Current directory, Git workspace root and session id, resolved once
+    /// when recall starts (see [`RecallContext`]).
+    pub context: RecallContext,
+    /// Explanation shown when the requested scope was not available and an
+    /// explicit fallback was used instead.
+    pub scope_note: Option<String>,
+}
+
 /// Active filter values and filter-dialog text inputs.
 pub struct FilterState {
     // Applied filter values
@@ -144,6 +169,7 @@ pub struct SearchConfig {
     pub show_risk_in_search: bool,
     pub vim_enabled: bool,
     pub view: ViewOptions,
+    pub recall: RecallState,
 }
 
 pub struct SearchApp {
@@ -155,6 +181,7 @@ pub struct SearchApp {
     pub filters: FilterState,
     dialog: DialogState,
     pub view: ViewOptions,
+    pub recall: RecallState,
     show_risk_in_search: bool,
     pub vim_enabled: bool,
     pub vim_mode: VimMode,
@@ -193,6 +220,15 @@ impl SearchApp {
             .ok()
             .map(|p| p.to_string_lossy().to_string());
 
+        // Resolve the scope context once, here, if the caller did not already
+        // do it. Everything downstream reads these values instead of touching
+        // the filesystem again, so a scope keeps meaning one thing for the
+        // whole of a recall session.
+        let mut recall = cfg.recall;
+        if recall.context.cwd.is_none() && recall.context.workspace.is_none() {
+            recall.context = RecallContext::resolve();
+        }
+
         let mut app = Self {
             query,
             entries: cfg.entries,
@@ -226,6 +262,7 @@ impl SearchApp {
 
             dialog: DialogState::None,
             view,
+            recall,
             show_risk_in_search: cfg.show_risk_in_search,
             vim_enabled: cfg.vim_enabled,
             vim_mode: VimMode::Insert,
@@ -242,6 +279,11 @@ impl SearchApp {
 
             status_message: None,
         };
+        // Derive the directory filter from the scope, unless the caller
+        // supplied an explicit one (`--cwd`), which always wins.
+        if app.filters.cwd.is_none() {
+            app.sync_scope_filters();
+        }
         app.table_state.select(if app.entries.is_empty() {
             None
         } else {
@@ -416,7 +458,7 @@ type SearchEntries = (Vec<Entry>, usize, std::collections::HashMap<i64, i64>);
 
 fn load_search_entries(
     repo: &Repository,
-    qf: &QueryFilter,
+    qf: &impl crate::repository::EntryQuery,
     page_size: usize,
     unique: bool,
 ) -> Result<SearchEntries, Box<dyn std::error::Error>> {
@@ -438,18 +480,105 @@ fn load_search_entries(
     }
 }
 
+/// Look up a tag by name, reporting a lookup failure rather than hiding it.
+fn resolve_tag_id(repo: &Repository, tag: Option<&str>) -> Option<i64> {
+    match tag.map(|t| repo.get_tag_id_by_name(t)).transpose() {
+        Ok(opt) => opt.flatten(),
+        Err(e) => {
+            eprintln!("suvadu: tag lookup failed: {e}");
+            None
+        }
+    }
+}
+
+/// Resolve "here" once and settle the scope for this recall session.
+///
+/// Returns the [`RecallState`] plus the directory filter the scope implies.
+/// An unavailable scope is reported on stderr and replaced by an explicit
+/// fallback — never silently swapped for something else.
+fn resolve_recall(
+    requested: RecallScope,
+    match_mode: MatchMode,
+    explicit_cwd: Option<&str>,
+) -> (RecallState, Option<String>) {
+    let context = RecallContext::resolve();
+    let (scope, scope_note) = context.resolve_scope(requested);
+    if let Some(note) = &scope_note {
+        eprintln!("suvadu: {note}");
+    }
+    let scope_cwd = match scope {
+        RecallScope::Directory => context.cwd.clone(),
+        RecallScope::Workspace => context.workspace_root(),
+        RecallScope::All | RecallScope::Session => None,
+    };
+    // An explicit --cwd always wins over the scope's directory.
+    let cwd_filter = explicit_cwd.map(String::from).or(scope_cwd);
+    (
+        RecallState {
+            match_mode,
+            scope,
+            context,
+            scope_note,
+        },
+        cwd_filter,
+    )
+}
+
+/// Pick the surface recall draws on.
+fn recall_surface(compact: bool) -> crate::util::RecallSurface {
+    if compact {
+        let rows = crossterm::terminal::size().map_or(24, |(_, rows)| rows);
+        crate::util::RecallSurface::Inline {
+            height: crate::util::inline_height(rows),
+        }
+    } else {
+        crate::util::RecallSurface::FullScreen
+    }
+}
+
+type RecallTerminal = Terminal<CrosstermBackend<io::Stderr>>;
+
+/// Put the terminal into `surface` and return the guard that restores it.
+///
+/// The guard must outlive the terminal, so it is returned alongside rather
+/// than dropped here.
+fn open_recall_terminal(
+    surface: crate::util::RecallSurface,
+) -> Result<(crate::util::TerminalGuardStderr, RecallTerminal), Box<dyn std::error::Error>> {
+    let guard = crate::util::TerminalGuardStderr::for_surface(surface)?;
+    let backend = CrosstermBackend::new(io::stderr());
+    let terminal = match surface {
+        crate::util::RecallSurface::Inline { height } => Terminal::with_options(
+            backend,
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Inline(height),
+            },
+        )?,
+        crate::util::RecallSurface::FullScreen => Terminal::new(backend)?,
+    };
+    Ok((guard, terminal))
+}
+
 /// Parameters for `run_search` — bundles the CLI flags into one struct
 /// to avoid excessive positional arguments.
 #[allow(clippy::struct_excessive_bools)]
 pub struct SearchArgs<'a> {
     pub initial_query: Option<&'a str>,
     pub unique_mode: bool,
+    /// How the query text is interpreted. Defaults to `MatchMode::Terms`,
+    /// which is what recall has always done.
+    pub match_mode: MatchMode,
+    /// Which slice of history to search. Defaults to `RecallScope::All`.
+    /// Resolved against the real context before use, so an unavailable scope
+    /// explains itself instead of silently doing something else.
+    pub scope: RecallScope,
+    /// Draw inline under the prompt instead of taking over the screen.
+    pub compact: bool,
     pub after: Option<&'a str>,
     pub before: Option<&'a str>,
     pub tag: Option<&'a str>,
     pub exit_code: Option<i32>,
     pub executor: Option<&'a str>,
-    pub prefix_match: bool,
     pub cwd: Option<&'a str>,
     pub field: SearchField,
     /// When `true`, include AI-agent / bot / CI / script commands in results.
@@ -471,40 +600,50 @@ pub fn run_search(
     let effective_unique = args.unique_mode || config.search.show_unique_by_default;
     let tags = repo.get_tags().unwrap_or_default();
 
-    let tag_id = match args.tag.map(|t| repo.get_tag_id_by_name(t)).transpose() {
-        Ok(opt) => opt.flatten(),
-        Err(e) => {
-            eprintln!("suvadu: tag lookup failed: {e}");
-            None
-        }
-    };
+    let tag_id = resolve_tag_id(repo, args.tag);
 
     let filter_after = args.after.and_then(|s| util::parse_date_input(s, false));
     let filter_before = args.before.and_then(|s| util::parse_date_input(s, true));
 
-    let qf = QueryFilter {
-        query_tokens: &[],
-        after: filter_after,
-        before: filter_before,
-        tag_id,
-        exit_code: args.exit_code,
-        query: args.initial_query,
-        prefix_match: args.prefix_match,
-        executor: args.executor,
-        cwd: args.cwd,
-        field: args.field,
-        exclude_agents: !args.include_agents,
-        cwd_prefix: false,
-        failed_only: args.failed_only,
-        bookmarked_only: false,
-        exclude_dirs: &[],
+    let (recall, cwd_filter) = resolve_recall(args.scope, args.match_mode, args.cwd);
+    let scope = recall.scope;
+
+    let plan = args.match_mode.plan(args.initial_query.unwrap_or_default());
+    let qf = SessionScoped {
+        filter: QueryFilter {
+            query_tokens: &plan.tokens,
+            after: filter_after,
+            before: filter_before,
+            tag_id,
+            exit_code: args.exit_code,
+            query: plan.query.as_deref(),
+            prefix_match: plan.prefix,
+            executor: args.executor,
+            cwd: cwd_filter.as_deref(),
+            field: args.field,
+            exclude_agents: !args.include_agents,
+            cwd_prefix: scope == RecallScope::Workspace,
+            failed_only: args.failed_only,
+            bookmarked_only: false,
+            exclude_dirs: &[],
+        },
+        session_id: if scope == RecallScope::Session {
+            recall.context.session_id.as_deref()
+        } else {
+            None
+        },
     };
 
     let (entries, total_count, unique_counts) =
         load_search_entries(repo, &qf, page_size, effective_unique)?;
 
-    if entries.is_empty() && total_count == 0 {
-        eprintln!("No history entries found matching filters.");
+    // An empty *scope* is a normal state the TUI explains in place; only a
+    // genuinely empty database is worth refusing to open for.
+    if entries.is_empty()
+        && total_count == 0
+        && repo.count_filtered(&QueryFilter::default()).unwrap_or(0) == 0
+    {
+        eprintln!("No history recorded yet.");
         return Ok(None);
     }
 
@@ -512,9 +651,12 @@ pub fn run_search(
     let noted_entry_ids = repo.get_noted_entry_ids().unwrap_or_default();
     let executors = repo.get_distinct_executors().unwrap_or_default();
 
-    let _guard = crate::util::TerminalGuardStderr::new()?;
-    let backend = CrosstermBackend::new(io::stderr());
-    let mut terminal = Terminal::new(backend)?;
+    // Compact recall keeps the surrounding shell context on screen by
+    // drawing into an inline viewport instead of the alternate screen. It is
+    // opt-in (`--compact` / `search.compact`), needs no daemon or PTY proxy,
+    // and the full-screen inspector stays the default.
+    let surface = recall_surface(args.compact);
+    let (_guard, mut terminal) = open_recall_terminal(surface)?;
 
     let mut app = SearchApp::new(SearchConfig {
         entries,
@@ -538,7 +680,7 @@ pub fn run_search(
         exit_code_input: args.exit_code.map(|ec| ec.to_string()),
         executor_filter_input: args.executor.map(String::from),
         bookmarked_commands,
-        filter_cwd: args.cwd.map(String::from),
+        filter_cwd: cwd_filter,
         noted_entry_ids,
         show_risk_in_search: config.agent.show_risk_in_search,
         vim_enabled: config.search.vim_mode,
@@ -552,9 +694,16 @@ pub fn run_search(
             human_boost_percent: config.search.human_boost_percent,
             cwd_boost_percent: config.search.cwd_boost_percent,
         },
+        recall,
     });
 
     let result = app.run(&mut terminal, repo);
+    // An inline viewport lives in the normal screen buffer, so it has to
+    // erase itself: the shell prompt must come back where it was, with the
+    // surrounding context intact.
+    if matches!(surface, crate::util::RecallSurface::Inline { .. }) {
+        terminal.clear()?;
+    }
     terminal.show_cursor()?;
     result
 }

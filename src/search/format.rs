@@ -266,6 +266,77 @@ impl StatusSegment {
     }
 }
 
+// ── No-results state (PROD-09) ─────────────────────────────────
+
+/// Everything the empty state needs to describe itself.
+pub(super) struct NoResults<'a> {
+    pub query: &'a str,
+    pub mode: crate::search::MatchMode,
+    pub scope: crate::search::RecallScope,
+    /// The directory or session the scope resolved to, if any.
+    pub scope_detail: Option<&'a str>,
+    pub agents_hidden: bool,
+    pub failed_only: bool,
+    pub bookmarks_only: bool,
+    /// Filter-dialog narrowings (date, tag, exit code, executor).
+    pub other_filters: usize,
+}
+
+/// The lines shown when a search matches nothing.
+///
+/// It names the mode and every active narrowing, then offers the keys that
+/// undo them. It deliberately does **not** retry with a wider scope or with
+/// agent commands included: a recall tool that quietly shows you history you
+/// asked it to exclude cannot be trusted about what it is showing.
+pub(super) fn no_results_lines(state: &NoResults) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    lines.push(if state.query.trim().is_empty() {
+        "No commands here yet.".to_string()
+    } else {
+        format!("No matches for \"{}\".", state.query.trim())
+    });
+    lines.push(String::new());
+
+    lines.push(format!(
+        "Mode    {} \u{2014} {}",
+        state.mode.label(),
+        state.mode.describe()
+    ));
+    lines.push(state.scope_detail.map_or_else(
+        || format!("Scope   {}", state.scope.status_value()),
+        |detail| format!("Scope   {} ({detail})", state.scope.status_value()),
+    ));
+
+    let mut filters: Vec<String> = Vec::new();
+    if state.agents_hidden {
+        filters.push("agent commands hidden".to_string());
+    }
+    if state.failed_only {
+        filters.push("failed only".to_string());
+    }
+    if state.bookmarks_only {
+        filters.push("bookmarked only".to_string());
+    }
+    if state.other_filters > 0 {
+        filters.push(format!(
+            "{} more filter{}",
+            state.other_filters,
+            if state.other_filters == 1 { "" } else { "s" }
+        ));
+    }
+    if !filters.is_empty() {
+        lines.push(format!("Filters {}", filters.join(", ")));
+    }
+
+    lines.push(String::new());
+    lines.push("^X change mode   ^P change scope   ^R reset to all history".to_string());
+    if state.agents_hidden {
+        lines.push("^A include agent commands".to_string());
+    }
+    lines
+}
+
 // ── Detail pane placement (PROD-03) ────────────────────────────
 
 /// Minimum content width before the detail pane may sit beside the results.
@@ -302,6 +373,113 @@ pub(super) const fn detail_placement(open: bool, width: u16, height: u16) -> Det
         return DetailPlacement::Bottom;
     }
     DetailPlacement::Hidden
+}
+
+#[cfg(test)]
+mod prod09_no_results_tests {
+    use super::{no_results_lines, NoResults};
+    use crate::search::{MatchMode, RecallScope};
+
+    fn base() -> NoResults<'static> {
+        NoResults {
+            query: "kubectl",
+            mode: MatchMode::Terms,
+            scope: RecallScope::All,
+            scope_detail: None,
+            agents_hidden: true,
+            failed_only: false,
+            bookmarks_only: false,
+            other_filters: 0,
+        }
+    }
+
+    #[test]
+    fn it_names_the_query_the_mode_and_the_scope() {
+        let text = no_results_lines(&base()).join("\n");
+        assert!(text.contains("No matches for \"kubectl\""), "{text}");
+        assert!(text.contains("terms"), "{text}");
+        assert!(text.contains("every word must appear"), "{text}");
+        assert!(text.contains("All history"), "{text}");
+    }
+
+    #[test]
+    fn it_names_the_directory_a_narrowed_scope_resolved_to() {
+        let state = NoResults {
+            scope: RecallScope::Workspace,
+            scope_detail: Some("/home/me/proj"),
+            ..base()
+        };
+        let text = no_results_lines(&state).join("\n");
+        assert!(text.contains("Workspace (/home/me/proj)"), "{text}");
+    }
+
+    #[test]
+    fn it_lists_every_active_filter_so_nothing_narrows_invisibly() {
+        let state = NoResults {
+            failed_only: true,
+            bookmarks_only: true,
+            other_filters: 2,
+            ..base()
+        };
+        let text = no_results_lines(&state).join("\n");
+        assert!(text.contains("agent commands hidden"), "{text}");
+        assert!(text.contains("failed only"), "{text}");
+        assert!(text.contains("bookmarked only"), "{text}");
+        assert!(text.contains("2 more filters"), "{text}");
+    }
+
+    #[test]
+    fn it_offers_a_reset_and_the_two_mode_keys() {
+        let text = no_results_lines(&base()).join("\n");
+        assert!(text.contains("^R reset to all history"), "{text}");
+        assert!(text.contains("^X change mode"), "{text}");
+        assert!(text.contains("^P change scope"), "{text}");
+    }
+
+    #[test]
+    fn including_agents_is_offered_as_a_key_never_done_for_you() {
+        let hidden = no_results_lines(&base()).join("\n");
+        assert!(
+            hidden.contains("^A include agent commands"),
+            "the way back in must be named: {hidden}"
+        );
+
+        // When agents are already shown there is nothing to offer, and the
+        // empty state must not claim a filter that is not applied.
+        let shown = no_results_lines(&NoResults {
+            agents_hidden: false,
+            ..base()
+        })
+        .join("\n");
+        assert!(!shown.contains("^A include"), "{shown}");
+        assert!(!shown.contains("agent commands hidden"), "{shown}");
+    }
+
+    #[test]
+    fn an_empty_query_says_the_scope_is_empty_not_that_a_search_failed() {
+        let text = no_results_lines(&NoResults {
+            query: "  ",
+            scope: RecallScope::Session,
+            ..base()
+        })
+        .join("\n");
+        assert!(text.contains("No commands here yet"), "{text}");
+        assert!(!text.contains("No matches for"), "{text}");
+    }
+
+    #[test]
+    fn every_mode_describes_itself_in_the_empty_state() {
+        for mode in [
+            MatchMode::Terms,
+            MatchMode::Literal,
+            MatchMode::Prefix,
+            MatchMode::Fuzzy,
+        ] {
+            let text = no_results_lines(&NoResults { mode, ..base() }).join("\n");
+            assert!(text.contains(mode.label()), "{mode:?}: {text}");
+            assert!(text.contains(mode.describe()), "{mode:?}: {text}");
+        }
+    }
 }
 
 #[cfg(test)]

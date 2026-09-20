@@ -57,6 +57,7 @@ fn test_search_config(entries: Vec<Entry>, total_items: usize) -> SearchConfig {
             human_boost_percent: 33,
             cwd_boost_percent: 50,
         },
+        recall: RecallState::default(),
     }
 }
 
@@ -1210,6 +1211,202 @@ fn test_unknown_ctrl_key_ignored() {
     );
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// PROD-09: explicit matching modes and predictable scopes
+// ───────────────────────────────────────────────────────────────────────────
+
+use crate::search::scope::RecallContext;
+use crate::search::{MatchMode, RecallScope};
+
+/// A repo-shaped temporary tree, so workspace scope is genuinely available.
+fn workspace_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("proj");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    (dir, root)
+}
+
+/// An app whose context has a directory, a workspace and a session, so every
+/// scope is reachable.
+fn app_with_full_context() -> (tempfile::TempDir, std::path::PathBuf, SearchApp) {
+    let (dir, root) = workspace_fixture();
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    app.recall.context = RecallContext::resolve_at(
+        Some(&root.join("src")),
+        Some("sess-1".to_string()),
+        Some(dir.path()),
+    );
+    app.sync_scope_filters();
+    (dir, root, app)
+}
+
+#[test]
+fn the_default_matching_mode_is_terms() {
+    let app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    assert_eq!(app.recall.match_mode, MatchMode::Terms);
+    assert_eq!(app.recall.scope, RecallScope::All);
+}
+
+#[test]
+fn ctrl_x_cycles_the_matching_mode_and_reloads() {
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    for expected in [
+        MatchMode::Literal,
+        MatchMode::Prefix,
+        MatchMode::Fuzzy,
+        MatchMode::Terms,
+    ] {
+        let action = app.handle_input(ctrl_key('x'));
+        assert!(matches!(action, SearchAction::Reload));
+        assert_eq!(app.recall.match_mode, expected);
+        assert!(app.status_message.is_some(), "the new mode must be named");
+    }
+}
+
+#[test]
+fn ctrl_p_cycles_scope_and_narrows_the_directory_filter() {
+    let (_d, root, mut app) = app_with_full_context();
+    let canonical_root = std::fs::canonicalize(&root).unwrap();
+    let canonical_src = std::fs::canonicalize(root.join("src")).unwrap();
+
+    assert_eq!(app.recall.scope, RecallScope::All);
+    assert!(app.filters.cwd.is_none());
+
+    assert!(matches!(
+        app.handle_input(ctrl_key('p')),
+        SearchAction::Reload
+    ));
+    assert_eq!(app.recall.scope, RecallScope::Directory);
+    assert_eq!(
+        app.filters.cwd.as_deref(),
+        Some(canonical_src.to_string_lossy().as_ref())
+    );
+
+    app.handle_input(ctrl_key('p'));
+    assert_eq!(app.recall.scope, RecallScope::Workspace);
+    assert_eq!(
+        app.filters.cwd.as_deref(),
+        Some(canonical_root.to_string_lossy().as_ref()),
+        "workspace scope must use the repository root, not the subdirectory"
+    );
+
+    app.handle_input(ctrl_key('p'));
+    assert_eq!(app.recall.scope, RecallScope::Session);
+    assert!(
+        app.filters.cwd.is_none(),
+        "session scope is not a directory filter"
+    );
+
+    app.handle_input(ctrl_key('p'));
+    assert_eq!(app.recall.scope, RecallScope::All);
+}
+
+#[test]
+fn ctrl_p_skips_scopes_that_are_unavailable_here() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let plain = dir.path().join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    // A directory, but no repository and no session.
+    app.recall.context = RecallContext::resolve_at(Some(&plain), None, Some(dir.path()));
+
+    app.handle_input(ctrl_key('p'));
+    assert_eq!(app.recall.scope, RecallScope::Directory);
+    // Workspace and session cannot apply here, so the cycle returns to All
+    // rather than landing on a scope that shows nothing.
+    app.handle_input(ctrl_key('p'));
+    assert_eq!(app.recall.scope, RecallScope::All);
+}
+
+#[test]
+fn ctrl_r_resets_every_narrowing_to_all_history_in_one_action() {
+    let (_d, _root, mut app) = app_with_full_context();
+    app.handle_input(ctrl_key('p')); // directory
+    app.handle_input(ctrl_key('p')); // workspace
+    app.handle_input(ctrl_key('x')); // literal
+    app.handle_input(ctrl_key('e')); // failed only
+    app.handle_input(ctrl_key('o')); // bookmarked only
+    app.filters.after = Some(1);
+    app.filters.tag_id = Some(2);
+    app.filters.exit_code = Some(3);
+    app.filters.executor_type = Some("bot".to_string());
+
+    let action = app.handle_input(ctrl_key('r'));
+    assert!(matches!(action, SearchAction::Reload));
+    assert_eq!(app.recall.scope, RecallScope::All);
+    assert_eq!(app.recall.match_mode, MatchMode::Terms);
+    assert!(app.filters.cwd.is_none());
+    assert!(!app.filters.failed_only);
+    assert!(!app.filters.bookmarks_only);
+    assert_eq!(app.active_filter_count(), 0);
+}
+
+#[test]
+fn reset_never_pulls_excluded_agent_commands_into_view() {
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    assert!(!app.filters.show_agents, "agents are hidden by default");
+    app.handle_input(ctrl_key('r'));
+    assert!(
+        !app.filters.show_agents,
+        "resetting the scope must not silently include agent commands"
+    );
+
+    // ...and it equally must not switch them off for someone who opted in.
+    app.handle_input(ctrl_key('a'));
+    assert!(app.filters.show_agents);
+    app.handle_input(ctrl_key('r'));
+    assert!(app.filters.show_agents);
+}
+
+#[test]
+fn matching_mode_and_ranking_mode_are_independent() {
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    let ranking_before = app.view.context_boost;
+
+    // Changing the match mode leaves the ranking alone...
+    app.handle_input(ctrl_key('x'));
+    assert_eq!(app.recall.match_mode, MatchMode::Literal);
+    assert_eq!(app.view.context_boost, ranking_before);
+
+    // ...and changing the ranking leaves the match mode alone.
+    app.handle_input(ctrl_key('s'));
+    assert_ne!(app.view.context_boost, ranking_before);
+    assert_eq!(app.recall.match_mode, MatchMode::Literal);
+
+    // Unique is a display choice, not a matching one.
+    app.handle_input(ctrl_key('u'));
+    assert_eq!(app.recall.match_mode, MatchMode::Literal);
+}
+
+#[test]
+fn changing_the_scope_leaves_the_matching_mode_alone() {
+    let (_d, _root, mut app) = app_with_full_context();
+    app.handle_input(ctrl_key('x'));
+    app.handle_input(ctrl_key('x'));
+    assert_eq!(app.recall.match_mode, MatchMode::Prefix);
+    app.handle_input(ctrl_key('p'));
+    assert_eq!(app.recall.match_mode, MatchMode::Prefix);
+}
+
+#[test]
+fn ctrl_l_still_toggles_between_all_history_and_this_directory() {
+    let (_d, _root, mut app) = app_with_full_context();
+    assert!(matches!(
+        app.handle_input(ctrl_key('l')),
+        SearchAction::Reload
+    ));
+    assert_eq!(app.recall.scope, RecallScope::Directory);
+    assert!(app.filters.cwd.is_some());
+
+    assert!(matches!(
+        app.handle_input(ctrl_key('l')),
+        SearchAction::Reload
+    ));
+    assert_eq!(app.recall.scope, RecallScope::All);
+    assert!(app.filters.cwd.is_none());
+}
+
 // ── handle_delete_dialog_input tests ──
 
 #[test]
@@ -2207,10 +2404,22 @@ fn test_paste_appends_to_existing_query() {
 fn test_paste_strips_control_characters() {
     let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
 
-    // Paste text with newlines, tabs, and other control chars
+    // Paste text with newlines, tabs, and other control chars. Newlines and
+    // tabs separated words in the source, so they become spaces (PROD-09):
+    // dropping them welded "cargo test" + "--offline" into one unmatchable
+    // token. Genuine control bytes are still removed.
     let needs_reload = app.handle_paste("hello\nworld\t!\x00\x07");
     assert!(needs_reload);
-    assert_eq!(app.query, "helloworld!");
+    assert_eq!(app.query, "hello world !");
+}
+
+#[test]
+fn test_paste_collapses_whitespace_and_trims() {
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    // A trailing newline must not leave a trailing space for `literal` mode
+    // to have to match.
+    assert!(app.handle_paste("  cargo   test \n"));
+    assert_eq!(app.query, "cargo test");
 }
 
 #[test]
@@ -2603,6 +2812,465 @@ fn typed_search_latency_on_a_large_history() {
         );
     }
 }
+
+#[test]
+#[ignore = "builds a 100k-entry database; run explicitly with --ignored"]
+fn matching_mode_latency_on_a_large_history() {
+    // Fuzzy narrows by single characters, which no trigram index can serve,
+    // so it is expected to be the slowest mode. This prints the cost rather
+    // than asserting it: latency is machine-dependent.
+    let (_dir, repo) = repo_with_old_command("cargo test --workspace rare_old", 100_000);
+
+    for (mode, query) in [
+        (MatchMode::Terms, "workspace rare_old"),
+        (MatchMode::Literal, "workspace rare_old"),
+        (MatchMode::Prefix, "cargo test"),
+        (MatchMode::Fuzzy, "wrkspc"),
+    ] {
+        let mut app = SearchApp::new(test_search_config(vec![], 100_001));
+        app.recall.match_mode = mode;
+        app.query = query.into();
+        let start = std::time::Instant::now();
+        app.reload_entries(&repo).unwrap();
+        println!(
+            "{:8} {query:?}: {} results in {:?}",
+            mode.label(),
+            app.pagination.total_items,
+            start.elapsed()
+        );
+    }
+}
+// ───────────────────────────────────────────────────────────────────────────
+// PROD-09: the matching modes and the recall scopes, end to end against a
+// real database. These are the behaviour the docs and the website promise.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// A repository holding exactly `commands`, newest last.
+fn repo_with(commands: &[&str]) -> (tempfile::TempDir, crate::repository::Repository) {
+    let (dir, repo) = crate::test_utils::test_repo();
+    repo.insert_session(&crate::models::Session {
+        id: "session123".into(),
+        hostname: "test".into(),
+        created_at: 1000,
+        tag_id: None,
+    })
+    .unwrap();
+    for (i, cmd) in commands.iter().enumerate() {
+        let mut entry = create_test_entry(cmd);
+        entry.started_at = 1000 + i64::try_from(i).unwrap();
+        entry.ended_at = 2000 + i64::try_from(i).unwrap();
+        repo.insert_entry(&entry).unwrap();
+    }
+    (dir, repo)
+}
+
+/// Run `query` in `mode` against `repo` and return the matching commands.
+fn search_in_mode(
+    repo: &crate::repository::Repository,
+    mode: MatchMode,
+    query: &str,
+) -> Vec<String> {
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+    app.recall.match_mode = mode;
+    app.query = query.into();
+    app.reload_entries(repo).unwrap();
+    app.entries.iter().map(|e| e.command.clone()).collect()
+}
+
+const MODE_CORPUS: &[&str] = &[
+    "git checkout main",
+    "git commit --amend",
+    "go container ops",
+    "cargo test --offline",
+    "ls -la",
+];
+
+#[test]
+fn literal_and_fuzzy_disagree_end_to_end_exactly_as_documented() {
+    let (_d, repo) = repo_with(MODE_CORPUS);
+
+    // "gco" is an abbreviation. Only fuzzy is allowed to resolve it.
+    assert!(search_in_mode(&repo, MatchMode::Terms, "gco").is_empty());
+    assert!(search_in_mode(&repo, MatchMode::Literal, "gco").is_empty());
+    assert!(search_in_mode(&repo, MatchMode::Prefix, "gco").is_empty());
+    let fuzzy = search_in_mode(&repo, MatchMode::Fuzzy, "gco");
+    assert!(
+        fuzzy.contains(&"git checkout main".to_string()),
+        "fuzzy should resolve the abbreviation: {fuzzy:?}"
+    );
+}
+
+#[test]
+fn terms_matches_scattered_words_where_literal_demands_the_phrase() {
+    let (_d, repo) = repo_with(MODE_CORPUS);
+
+    // The words are present but not adjacent.
+    assert_eq!(
+        search_in_mode(&repo, MatchMode::Terms, "git main"),
+        vec!["git checkout main".to_string()]
+    );
+    assert!(search_in_mode(&repo, MatchMode::Literal, "git main").is_empty());
+
+    // The phrase itself is found by both.
+    for mode in [MatchMode::Terms, MatchMode::Literal] {
+        assert_eq!(
+            search_in_mode(&repo, mode, "checkout main"),
+            vec!["git checkout main".to_string()],
+            "{mode:?}"
+        );
+    }
+}
+
+#[test]
+fn prefix_anchors_at_the_start_of_the_command_end_to_end() {
+    let (_d, repo) = repo_with(MODE_CORPUS);
+
+    let prefixed = search_in_mode(&repo, MatchMode::Prefix, "git");
+    assert_eq!(prefixed.len(), 2, "{prefixed:?}");
+    assert!(prefixed.iter().all(|c| c.starts_with("git")));
+
+    // "test" appears mid-command, so prefix finds nothing while terms does.
+    assert!(search_in_mode(&repo, MatchMode::Prefix, "test").is_empty());
+    assert_eq!(
+        search_in_mode(&repo, MatchMode::Terms, "test"),
+        vec!["cargo test --offline".to_string()]
+    );
+}
+
+#[test]
+fn case_and_punctuation_behave_as_the_help_describes() {
+    let (_d, repo) = repo_with(MODE_CORPUS);
+    // ASCII case folds.
+    assert_eq!(
+        search_in_mode(&repo, MatchMode::Literal, "GIT CHECKOUT"),
+        vec!["git checkout main".to_string()]
+    );
+    // Punctuation is matched, never stripped.
+    assert_eq!(
+        search_in_mode(&repo, MatchMode::Terms, "--amend"),
+        vec!["git commit --amend".to_string()]
+    );
+    // Quotes are ordinary characters, so this finds nothing.
+    assert!(search_in_mode(&repo, MatchMode::Terms, "\"git checkout\"").is_empty());
+}
+
+#[test]
+fn every_mode_finds_a_match_older_than_any_candidate_window() {
+    // The needle is the oldest of 5,001 entries: older than the in-memory
+    // ranking window, so only real SQL narrowing can find it in every mode.
+    let (_d, repo) = repo_with_old_match(5001, "echo audit_rare_old_command");
+
+    for (mode, query) in [
+        (MatchMode::Terms, "audit_rare_old_command"),
+        (MatchMode::Literal, "audit_rare_old_command"),
+        (MatchMode::Prefix, "echo audit_rare"),
+        (MatchMode::Fuzzy, "audit_rare_old_command"),
+    ] {
+        let found = search_in_mode(&repo, mode, query);
+        assert!(
+            found.contains(&"echo audit_rare_old_command".to_string()),
+            "{mode:?} lost an old match ({} results)",
+            found.len()
+        );
+    }
+}
+
+/// A repository whose entries live in three directories and two sessions.
+fn repo_for_scopes(root: &std::path::Path) -> (tempfile::TempDir, crate::repository::Repository) {
+    let (dir, repo) = crate::test_utils::test_repo();
+    for sid in ["sess-1", "sess-2"] {
+        repo.insert_session(&crate::models::Session {
+            id: sid.into(),
+            hostname: "test".into(),
+            created_at: 1000,
+            tag_id: None,
+        })
+        .unwrap();
+    }
+    let here = root.join("src").to_string_lossy().into_owned();
+    let sibling = root.join("docs").to_string_lossy().into_owned();
+    let elsewhere = "/somewhere/else".to_string();
+    for (i, (cmd, cwd, sid)) in [
+        ("cargo build here", &here, "sess-1"),
+        ("cargo build sibling", &sibling, "sess-1"),
+        ("cargo build elsewhere", &elsewhere, "sess-1"),
+        ("cargo build other session", &here, "sess-2"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut entry = create_test_entry(cmd);
+        entry.cwd = cwd.clone();
+        entry.session_id = sid.to_string();
+        entry.started_at = 1000 + i64::try_from(i).unwrap();
+        entry.ended_at = 2000 + i64::try_from(i).unwrap();
+        repo.insert_entry(&entry).unwrap();
+    }
+    (dir, repo)
+}
+
+/// An app whose context points into `root`'s worktree, session `sess-1`.
+fn scoped_app(root: &std::path::Path, ceiling: &std::path::Path) -> SearchApp {
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+    app.recall.context = RecallContext::resolve_at(
+        Some(&root.join("src")),
+        Some("sess-1".to_string()),
+        Some(ceiling),
+    );
+    app.sync_scope_filters();
+    app
+}
+
+fn results(app: &SearchApp) -> Vec<String> {
+    app.entries.iter().map(|e| e.command.clone()).collect()
+}
+
+#[test]
+fn each_scope_returns_exactly_the_slice_of_history_it_names() {
+    let (fixture, root) = workspace_fixture();
+    let canonical = std::fs::canonicalize(&root).unwrap();
+    let (_d, repo) = repo_for_scopes(&canonical);
+    let mut app = scoped_app(&canonical, fixture.path());
+
+    app.set_scope(RecallScope::All);
+    app.reload_entries(&repo).unwrap();
+    assert_eq!(results(&app).len(), 4, "all history: {:?}", results(&app));
+
+    app.set_scope(RecallScope::Directory);
+    app.reload_entries(&repo).unwrap();
+    let dir_results = results(&app);
+    assert_eq!(dir_results.len(), 2, "this directory: {dir_results:?}");
+    assert!(dir_results.contains(&"cargo build here".to_string()));
+    assert!(dir_results.contains(&"cargo build other session".to_string()));
+
+    // The workspace is the whole project tree, so the sibling directory
+    // joins in but the unrelated path does not.
+    app.set_scope(RecallScope::Workspace);
+    app.reload_entries(&repo).unwrap();
+    let ws_results = results(&app);
+    assert_eq!(ws_results.len(), 3, "workspace: {ws_results:?}");
+    assert!(ws_results.contains(&"cargo build sibling".to_string()));
+    assert!(!ws_results.contains(&"cargo build elsewhere".to_string()));
+
+    app.set_scope(RecallScope::Session);
+    app.reload_entries(&repo).unwrap();
+    let session_results = results(&app);
+    assert_eq!(session_results.len(), 3, "session: {session_results:?}");
+    assert!(!session_results.contains(&"cargo build other session".to_string()));
+}
+
+#[test]
+fn resetting_the_scope_brings_the_whole_history_back_in_one_action() {
+    let (fixture, root) = workspace_fixture();
+    let canonical = std::fs::canonicalize(&root).unwrap();
+    let (_d, repo) = repo_for_scopes(&canonical);
+    let mut app = scoped_app(&canonical, fixture.path());
+
+    app.set_scope(RecallScope::Directory);
+    app.filters.failed_only = true;
+    app.reload_entries(&repo).unwrap();
+    assert!(app.entries.is_empty(), "narrowed away to nothing");
+
+    app.reset_to_all_history();
+    app.reload_entries(&repo).unwrap();
+    assert_eq!(results(&app).len(), 4);
+}
+
+#[test]
+fn a_scope_keeps_its_meaning_even_if_the_repository_moves_underneath() {
+    let (fixture, root) = workspace_fixture();
+    let canonical = std::fs::canonicalize(&root).unwrap();
+    let (_d, repo) = repo_for_scopes(&canonical);
+    let mut app = scoped_app(&canonical, fixture.path());
+    app.set_scope(RecallScope::Workspace);
+    app.reload_entries(&repo).unwrap();
+    let before = results(&app);
+
+    // The boundary was resolved once, at the start. Deleting it must not
+    // silently turn "workspace" into "all history" mid-search.
+    std::fs::remove_dir_all(canonical.join(".git")).unwrap();
+    app.reload_entries(&repo).unwrap();
+    assert_eq!(results(&app), before);
+}
+
+#[test]
+fn a_nested_repository_scopes_to_itself_not_its_parent() {
+    let (fixture, outer) = workspace_fixture();
+    let inner = outer.join("vendor/inner");
+    std::fs::create_dir_all(inner.join(".git")).unwrap();
+    std::fs::create_dir_all(inner.join("src")).unwrap();
+    let canonical_outer = std::fs::canonicalize(&outer).unwrap();
+    let canonical_inner = std::fs::canonicalize(&inner).unwrap();
+
+    let (_d, repo) = crate::test_utils::test_repo();
+    repo.insert_session(&crate::models::Session {
+        id: "session123".into(),
+        hostname: "test".into(),
+        created_at: 1000,
+        tag_id: None,
+    })
+    .unwrap();
+    for (i, (cmd, cwd)) in [
+        ("cargo build outer", canonical_outer.join("src")),
+        ("cargo build inner", canonical_inner.join("src")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut entry = create_test_entry(cmd);
+        entry.cwd = cwd.to_string_lossy().into_owned();
+        entry.started_at = 1000 + i64::try_from(i).unwrap();
+        repo.insert_entry(&entry).unwrap();
+    }
+
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+    app.recall.context = RecallContext::resolve_at(
+        Some(&canonical_inner.join("src")),
+        None,
+        Some(fixture.path()),
+    );
+    app.set_scope(RecallScope::Workspace);
+    app.reload_entries(&repo).unwrap();
+    assert_eq!(results(&app), vec!["cargo build inner".to_string()]);
+}
+
+#[test]
+fn a_linked_worktree_scopes_to_the_worktree_not_the_main_repository() {
+    let (fixture, main) = workspace_fixture();
+    let wt = fixture.path().join("wt-feature");
+    std::fs::create_dir_all(wt.join("src")).unwrap();
+    std::fs::write(
+        wt.join(".git"),
+        format!("gitdir: {}/.git/worktrees/wt-feature\n", main.display()),
+    )
+    .unwrap();
+    let canonical_main = std::fs::canonicalize(&main).unwrap();
+    let canonical_wt = std::fs::canonicalize(&wt).unwrap();
+
+    let (_d, repo) = crate::test_utils::test_repo();
+    repo.insert_session(&crate::models::Session {
+        id: "session123".into(),
+        hostname: "test".into(),
+        created_at: 1000,
+        tag_id: None,
+    })
+    .unwrap();
+    for (i, (cmd, cwd)) in [
+        ("cargo build main", canonical_main.join("src")),
+        ("cargo build worktree", canonical_wt.join("src")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut entry = create_test_entry(cmd);
+        entry.cwd = cwd.to_string_lossy().into_owned();
+        entry.started_at = 1000 + i64::try_from(i).unwrap();
+        repo.insert_entry(&entry).unwrap();
+    }
+
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+    app.recall.context =
+        RecallContext::resolve_at(Some(&canonical_wt.join("src")), None, Some(fixture.path()));
+    app.set_scope(RecallScope::Workspace);
+    app.reload_entries(&repo).unwrap();
+    assert_eq!(results(&app), vec!["cargo build worktree".to_string()]);
+}
+
+#[test]
+fn no_mode_or_scope_ever_reveals_hidden_agent_commands() {
+    let (_d, repo) = crate::test_utils::test_repo();
+    repo.insert_session(&crate::models::Session {
+        id: "session123".into(),
+        hostname: "test".into(),
+        created_at: 1000,
+        tag_id: None,
+    })
+    .unwrap();
+    let mut human = create_test_entry("cargo build human");
+    human.started_at = 1000;
+    repo.insert_entry(&human).unwrap();
+    let mut agent = create_test_entry("cargo build agent");
+    agent.executor_type = Some("agent".to_string());
+    agent.executor = Some("claude-code".to_string());
+    agent.started_at = 1001;
+    repo.insert_entry(&agent).unwrap();
+
+    for mode in [
+        MatchMode::Terms,
+        MatchMode::Literal,
+        MatchMode::Prefix,
+        MatchMode::Fuzzy,
+    ] {
+        let found = search_in_mode(&repo, mode, "cargo build");
+        assert!(
+            !found.contains(&"cargo build agent".to_string()),
+            "{mode:?} leaked an agent command: {found:?}"
+        );
+    }
+
+    // ...and they are one discoverable key away.
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+    app.query = "cargo build".into();
+    app.handle_input(ctrl_key('a'));
+    app.reload_entries(&repo).unwrap();
+    assert_eq!(results(&app).len(), 2, "^A must include them");
+}
+
+#[test]
+fn pasted_multiline_text_becomes_one_searchable_query_line() {
+    let (_d, repo) = repo_with(MODE_CORPUS);
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+
+    // A paste of a wrapped command: the newlines must not end up in the
+    // query, and the search must still run.
+    assert!(app.handle_paste("cargo test\n--offline\n"));
+    assert!(!app.query.contains('\n'), "query: {:?}", app.query);
+    app.reload_entries(&repo).unwrap();
+    assert_eq!(app.recall.match_mode, MatchMode::Terms);
+    assert_eq!(
+        results(&app),
+        vec!["cargo test --offline".to_string()],
+        "query was {:?}",
+        app.query
+    );
+}
+
+#[test]
+fn cancelling_returns_nothing_so_the_shell_keeps_its_buffer() {
+    let (_d, _repo) = repo_with(MODE_CORPUS);
+    let mut app = SearchApp::new(test_search_config(
+        vec![create_test_entry("rm -rf /important")],
+        1,
+    ));
+    // Cycling modes and scopes must never accept anything on the way.
+    for key in ['x', 'p', 'r', 'l', 'a'] {
+        let action = app.handle_input(ctrl_key(key));
+        assert!(
+            !matches!(action, SearchAction::Select(_) | SearchAction::Exit),
+            "^{key} must not accept or quit"
+        );
+    }
+    assert!(matches!(
+        app.handle_input(KeyEvent::from(KeyCode::Esc)),
+        SearchAction::Exit
+    ));
+}
+
+#[test]
+fn accepting_hands_back_the_exact_command_and_nothing_else() {
+    let mut app = SearchApp::new(test_search_config(
+        vec![create_test_entry("rm -rf /important")],
+        1,
+    ));
+    app.table_state.select(Some(0));
+    let SearchAction::Select(cmd) = app.handle_input(KeyEvent::from(KeyCode::Enter)) else {
+        panic!("Enter must select the highlighted command");
+    };
+    // Exactly the recorded text: no added newline, no shell wrapping. The
+    // caller prints it for the shell to place on the line; nothing here runs.
+    assert_eq!(cmd, "rm -rf /important");
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // PROD-03: recall UI hierarchy — footer hint layout, persistent status area,
 // detail-pane placement. These tests render the whole screen into a ratatui
@@ -2634,6 +3302,9 @@ const FOOTER_KEY_TOKENS: &[&str] = &[
     "^D",
     "^G",
     "^S",
+    "^X",
+    "^P",
+    "^R",
     "j/k",
     "^U/^D",
     "/",
@@ -2645,8 +3316,10 @@ const FOOTER_KEY_TOKENS: &[&str] = &[
 /// Every hint label word the search footer is allowed to render.
 const FOOTER_LABEL_TOKENS: &[&str] = &[
     "Quit", "Run", "Nav", "Filter", "Detail", "Help", "Copy", "Bookmark", "Unique", "Agents",
-    "Scope", "Failed", "Marked", "Note", "Tag", "Delete", "Goto", "Match", "Scroll", "Search",
-    "Normal",
+    "Scope", "Failed", "Marked", "Note", "Tag", "Delete", "Goto", "Scroll", "Search", "Normal",
+    // PROD-09: "Mode" (^X) and "Scope" (^P) choose what matches; "Rank" (^S,
+    // renamed from "Match") and the rest only reorder it.
+    "Mode", "Reset", "Here", "Rank",
 ];
 
 fn render_lines(app: &mut SearchApp, width: u16, height: u16) -> Vec<String> {
@@ -2715,7 +3388,7 @@ fn assert_essential_hints(footer: &str, ctx: &str) {
 /// whether agent commands are included.
 fn assert_status_area(lines: &[String], ctx: &str) {
     let screen = lines.join("\n");
-    for expected in ["Scope", "Match", "Agents"] {
+    for expected in ["Scope", "Match", "Rank", "Agents"] {
         assert!(
             screen.contains(expected),
             "{ctx}: status indicator {expected:?} not visible on screen:\n{screen}"
@@ -2778,21 +3451,24 @@ fn prod03_status_area_visible_at_100x30() {
 fn prod03_status_area_reports_agent_visibility_and_scope() {
     let mut app = render_app();
     app.filters.show_agents = true;
-    app.filters.cwd = Some("/tmp".to_string());
+    app.set_scope(RecallScope::Directory);
     app.view.unique_mode = true;
     let lines = render_lines(&mut app, 100, 30);
     let screen = lines.join("\n");
     assert!(screen.contains("Shown"), "agents shown state:\n{screen}");
-    assert!(screen.contains("Here"), "cwd scope state:\n{screen}");
+    assert!(screen.contains("This dir"), "cwd scope state:\n{screen}");
     assert!(screen.contains("Unique"), "unique mode state:\n{screen}");
 
     app.filters.show_agents = false;
-    app.filters.cwd = None;
+    app.set_scope(RecallScope::All);
     app.view.unique_mode = false;
     let lines = render_lines(&mut app, 100, 30);
     let screen = lines.join("\n");
     assert!(screen.contains("Hidden"), "agents hidden state:\n{screen}");
-    assert!(screen.contains("All dirs"), "all-dirs scope:\n{screen}");
+    assert!(
+        screen.contains("All history"),
+        "all-history scope:\n{screen}"
+    );
 }
 
 #[test]
@@ -2986,17 +3662,83 @@ fn prod03_vim_mode_footer_is_not_clipped() {
     assert!(footer.contains("Help"), "vim insert: {footer:?}");
 }
 
+/// A rendered app with nothing to show.
+fn empty_render_app() -> SearchApp {
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+    app.query = "kubectl rollout".to_string();
+    app
+}
+
+#[test]
+fn prod09_no_results_state_names_the_mode_and_the_scope_on_screen() {
+    let mut app = empty_render_app();
+    app.recall.match_mode = MatchMode::Literal;
+    app.set_scope(RecallScope::Directory);
+    let screen = render_lines(&mut app, 100, 30).join("\n");
+
+    assert!(screen.contains("No matches for"), "{screen}");
+    assert!(
+        screen.contains("literal"),
+        "the mode must be named:\n{screen}"
+    );
+    assert!(
+        screen.contains("This dir"),
+        "the scope must be named:\n{screen}"
+    );
+    assert!(
+        screen.contains("^R reset to all history"),
+        "the way out must be offered:\n{screen}"
+    );
+}
+
+#[test]
+fn prod09_no_results_state_fits_an_80x24_terminal() {
+    let mut app = empty_render_app();
+    app.filters.failed_only = true;
+    let lines = render_lines(&mut app, 80, 24);
+    let screen = lines.join("\n");
+    assert!(screen.contains("No matches for"), "{screen}");
+    assert!(screen.contains("failed only"), "{screen}");
+    assert!(screen.contains("^R reset"), "{screen}");
+    // The footer is still laid out to the width, with nothing clipped.
+    assert_no_partial_hint(&footer_text(&lines), "no-results 80x24");
+    assert_essential_hints(&footer_text(&lines), "no-results 80x24");
+}
+
+#[test]
+fn prod09_no_results_state_never_widens_the_scope_by_itself() {
+    let mut app = empty_render_app();
+    app.set_scope(RecallScope::Directory);
+    let scope_before = app.recall.scope;
+    let agents_before = app.filters.show_agents;
+    let cwd_before = app.filters.cwd.clone();
+
+    let screen = render_lines(&mut app, 100, 30).join("\n");
+
+    assert_eq!(app.recall.scope, scope_before);
+    assert_eq!(app.filters.show_agents, agents_before);
+    assert_eq!(app.filters.cwd, cwd_before);
+    assert!(
+        screen.contains("^A include agent commands"),
+        "agent inclusion must be offered, not performed:\n{screen}"
+    );
+}
+
 #[test]
 fn prod03_footer_snapshot_at_80x24() {
     let mut app = render_app();
     let lines = render_lines(&mut app, 80, 24);
+    // PROD-09 changed this deliberately: `^X Mode` is now the first
+    // secondary hint (it displaces `^Y Copy` at 80 columns) because the
+    // matching mode decides what is eligible, and the status row renames
+    // the ranking segment to `Rank` so `Match` can mean the matching mode.
     assert_eq!(
         footer_text(&lines),
-        " Esc  Quit   \u{21b5}  Run   \u{2191}\u{2193}  Nav   ^F  Filter   Tab  Detail   ^Y  Copy   ?  Help   "
+        " Esc  Quit   \u{21b5}  Run   \u{2191}\u{2193}  Nav   ^F  Filter   Tab  Detail   ^X  Mode   ?  Help   "
     );
     assert_eq!(
         lines[4],
-        " Scope  All dirs   Match  Smart   Agents  Hidden   Show  All                    "
+        " Scope  All history   Match  terms   Rank  Smart   Agents  Hidden   Show  All   "
     );
 }
 
@@ -3006,7 +3748,7 @@ fn prod03_footer_snapshot_at_100x30() {
     let lines = render_lines(&mut app, 100, 30);
     assert_eq!(
         footer_text(&lines),
-        " Esc  Quit   \u{21b5}  Run   \u{2191}\u{2193}  Nav   ^F  Filter   Tab  Detail   ^Y  Copy   ^B  Bookmark   ?  Help        "
+        " Esc  Quit   \u{21b5}  Run   \u{2191}\u{2193}  Nav   ^F  Filter   Tab  Detail   ^X  Mode   ^P  Scope   ?  Help           "
     );
 }
 
@@ -3038,7 +3780,7 @@ fn prod03_help_overlay_fits_an_80x24_terminal() {
     let screen = lines.join("\n");
     for expected in [
         "Bookmarked only",
-        "Match smart/recent",
+        "Rank smart/recent",
         "Go to page...",
         "Press any key to close",
     ] {
