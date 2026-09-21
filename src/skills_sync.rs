@@ -442,6 +442,9 @@ enum Ownership {
     Ours,
     /// Written by suvadu, then edited by hand.
     Drifted,
+    /// Suvadu's region is intact, but somebody wrote below the marker.
+    /// Rewriting the file would delete that text, so it is a conflict too.
+    Appended,
     /// No suvadu marker and not recognisable as suvadu output.
     Foreign,
 }
@@ -453,8 +456,11 @@ fn managed_file_content(base: &str, skill_name: &str) -> String {
     format!("{before}{MANAGED_MARKER_PREFIX}skill={skill_name} checksum={sum} -->\n")
 }
 
-/// Split a managed file into (everything above the marker, recorded checksum).
-fn split_managed(existing: &str) -> Option<(&str, &str)> {
+/// Split a managed file into (everything above the marker, recorded
+/// checksum, everything below the marker line). The third part is the one
+/// suvadu's checksum says nothing about: it exists only because somebody
+/// wrote there, and a whole-file rewrite would delete it.
+fn split_managed(existing: &str) -> Option<(&str, &str, &str)> {
     let idx = existing.rfind(MANAGED_MARKER_PREFIX)?;
     let before = &existing[..idx];
     let line_end = existing[idx..]
@@ -463,32 +469,63 @@ fn split_managed(existing: &str) -> Option<(&str, &str)> {
     let sum = existing[idx..line_end]
         .split_whitespace()
         .find_map(|tok| tok.strip_prefix("checksum="))?;
-    Some((before, sum))
+    let after = existing.get(line_end + 1..).unwrap_or_default();
+    Some((before, sum, after))
 }
 
-/// The managed region of an existing file — what to diff against. For a
-/// marked file that's everything above the marker; otherwise the whole file.
-fn managed_region(existing: &str) -> &str {
-    split_managed(existing).map_or(existing, |(before, _)| before)
+/// The user-visible content of an existing marked file: everything except
+/// suvadu's own marker line. Trailing content counts — a diff that hides it
+/// would promise a clean update while a write silently deletes it. For an
+/// unmarked file it is the whole file.
+fn managed_region(existing: &str) -> String {
+    split_managed(existing).map_or_else(
+        || existing.to_string(),
+        |(before, _, after)| {
+            if after.is_empty() {
+                return before.to_string();
+            }
+            // The blank line suvadu leaves above its marker is bookkeeping,
+            // not content — dropping it here keeps a diff of appended text
+            // free of blank `-` lines nobody wrote.
+            format!("{}\n{after}", before.trim_end_matches('\n'))
+        },
+    )
+}
+
+/// Ownership of a file that carries suvadu's marker. `None` when there is
+/// no marker at all.
+fn marked_ownership(existing: &str) -> Option<Ownership> {
+    let (before, sum, after) = split_managed(existing)?;
+    Some(if short_checksum(before) != sum {
+        Ownership::Drifted
+    } else if after.trim().is_empty() {
+        Ownership::Ours
+    } else {
+        // The marker is terminal by construction, so anything below it was
+        // added afterwards by a person or another tool.
+        Ownership::Appended
+    })
 }
 
 fn classify_file(existing: Option<&str>, legacy_base: &str) -> Ownership {
     let Some(existing) = existing else {
         return Ownership::Absent;
     };
-    match split_managed(existing) {
-        Some((before, sum)) if short_checksum(before) == sum => Ownership::Ours,
-        Some(_) => Ownership::Drifted,
+    marked_ownership(existing).unwrap_or({
         // Pre-marker suvadu output, still byte-identical to what this
         // generator produces: adopt it silently rather than calling the
         // user's own file a conflict on the first upgraded sync.
-        None if existing == legacy_base => Ownership::Ours,
-        None => Ownership::Foreign,
-    }
+        if existing == legacy_base {
+            Ownership::Ours
+        } else {
+            Ownership::Foreign
+        }
+    })
 }
 
 const DRIFT_DETAIL: &str = "this file was edited outside suvadu since the last sync — not written. Fold your edit into the skill (`suv skills edit`), or re-run with --force to overwrite it.";
 const FOREIGN_DETAIL: &str = "this file was not written by suvadu (no managed marker) — not written. Move it aside, or re-run with --force to replace it.";
+const APPENDED_DETAIL: &str = "this file has content below suvadu's managed marker — not written, because suvadu owns the whole file and rewriting it would delete that text (the diff below shows it as removed). Move it into the skill (`suv skills edit`), or re-run with --force to discard it.";
 
 fn sync_whole_file(
     target: SyncTarget,
@@ -503,7 +540,7 @@ fn sync_whole_file(
     let ownership = classify_file(existing.as_deref(), base);
     let old_region = existing.as_deref().map(managed_region).unwrap_or_default();
     let new_region = format!("{base}\n");
-    let diff = diff_lines(old_region, &new_region);
+    let diff = diff_lines(&old_region, &new_region);
 
     let mut change = FileChange {
         target,
@@ -515,13 +552,13 @@ fn sync_whole_file(
     };
 
     match ownership {
-        Ownership::Drifted | Ownership::Foreign if !options.force => {
+        Ownership::Drifted | Ownership::Foreign | Ownership::Appended if !options.force => {
             change.kind = ChangeKind::Conflict;
             change.detail = Some(
-                if ownership == Ownership::Drifted {
-                    DRIFT_DETAIL
-                } else {
-                    FOREIGN_DETAIL
+                match ownership {
+                    Ownership::Drifted => DRIFT_DETAIL,
+                    Ownership::Appended => APPENDED_DETAIL,
+                    _ => FOREIGN_DETAIL,
                 }
                 .to_string(),
             );
@@ -923,6 +960,8 @@ const FOREIGN_CLEANUP_DETAIL: &str =
     "no suvadu managed marker — suvadu did not write this, so it is left in place. Remove it by hand if you no longer want it.";
 const DRIFTED_CLEANUP_DETAIL: &str =
     "suvadu wrote this but it was edited afterwards — left in place so your edit isn't lost. Remove it by hand once you've saved what you need.";
+const APPENDED_CLEANUP_DETAIL: &str =
+    "suvadu wrote this but text was added below its managed marker — left in place so that text isn't lost. Remove it by hand once you've saved what you need.";
 
 /// Delete `path` if suvadu generated it and no active skill still wants it.
 fn cleanup_generated_file(
@@ -939,8 +978,11 @@ fn cleanup_generated_file(
     let Ok(content) = std::fs::read_to_string(path) else {
         return Ok(());
     };
-    let detail = match split_managed(&content) {
-        Some((before, sum)) if short_checksum(before) == sum => None,
+    // The same complete ownership check `sync` uses: suvadu only deletes a
+    // file whose marker is intact *and* terminal.
+    let detail = match marked_ownership(&content) {
+        Some(Ownership::Ours) => None,
+        Some(Ownership::Appended) => Some(APPENDED_CLEANUP_DETAIL),
         Some(_) => Some(DRIFTED_CLEANUP_DETAIL),
         None => Some(FOREIGN_CLEANUP_DETAIL),
     };
@@ -1167,6 +1209,20 @@ mod tests {
         home: Option<&Path>,
     ) -> SyncReport {
         sync_inner(repo, targets, cwd, home, None, SyncOptions::apply()).unwrap()
+    }
+
+    /// Change a skill's body so the next sync genuinely wants to rewrite
+    /// its generated files.
+    fn revise_body(repo: &Repository, name: &str, scope: &str) {
+        repo.update_skill(
+            name,
+            scope,
+            None,
+            Some(&format!("Body for {name}, revised.")),
+            None,
+        )
+        .unwrap()
+        .expect("skill exists");
     }
 
     fn change_for<'a>(report: &'a SyncReport, path: &Path) -> &'a FileChange {
@@ -1934,10 +1990,19 @@ mod tests {
     #[test]
     fn split_managed_reads_back_the_checksum_it_wrote() {
         let content = managed_file_content("hello\n", "demo");
-        let (before, sum) = split_managed(&content).unwrap();
+        let (before, sum, after) = split_managed(&content).unwrap();
         assert_eq!(before, "hello\n\n");
         assert_eq!(sum, short_checksum(before));
+        assert_eq!(after, "", "suvadu's marker is the last line it writes");
         assert!(content.contains("skill=demo"));
+    }
+
+    #[test]
+    fn split_managed_reports_content_written_below_the_marker() {
+        let content = managed_file_content("hello\n", "demo") + "mine\n";
+        let (_, _, after) = split_managed(&content).unwrap();
+        assert_eq!(after, "mine\n");
+        assert!(managed_region(&content).contains("mine"));
     }
 
     #[test]
@@ -1955,6 +2020,16 @@ mod tests {
             classify_file(Some("someone else\n"), base),
             Ownership::Foreign
         );
+        assert_eq!(
+            classify_file(Some(&format!("{ours}my own notes\n")), base),
+            Ownership::Appended,
+            "text below the marker is not suvadu's to delete"
+        );
+        assert_eq!(
+            classify_file(Some(&format!("{ours}\n\n")), base),
+            Ownership::Ours,
+            "trailing blank lines are not user content"
+        );
     }
 
     #[test]
@@ -1962,5 +2037,236 @@ mod tests {
         let out = append_block("existing content\n", "<start>new<end>");
         assert!(out.starts_with("existing content\n"));
         assert!(out.contains("<start>new<end>"));
+    }
+
+    // ── Content written below suvadu's marker (whole-file targets) ────────
+    //
+    // The marker is *terminal*: it is the last thing suvadu writes, so
+    // anything after it came from somebody else. These cover appended text
+    // for preview, apply, --force and cleanup, on both whole-file targets.
+
+    const APPENDED: &str = "\nUSER APPENDED INSTRUCTIONS\n";
+
+    /// Sync `name` into both whole-file targets, then append user text to
+    /// the file at `path`. Returns the full file content afterwards.
+    fn sync_then_append(
+        repo: &Repository,
+        targets: &[SyncTarget],
+        cwd: &Path,
+        home: Option<&Path>,
+        path: &Path,
+    ) -> String {
+        apply(repo, targets, cwd, home);
+        let appended = std::fs::read_to_string(path).unwrap() + APPENDED;
+        std::fs::write(path, &appended).unwrap();
+        appended
+    }
+
+    #[test]
+    fn text_appended_below_the_claude_marker_is_a_conflict_not_a_silent_deletion() {
+        let (_dir, repo) = test_repo();
+        repo.create_skill(&skill("alpha", SKILL_SCOPE_GLOBAL))
+            .unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let targets = [SyncTarget::ClaudeCode];
+        let path = home.path().join(".claude/skills/alpha/SKILL.md");
+        let appended = sync_then_append(&repo, &targets, cwd.path(), Some(home.path()), &path);
+
+        // Change the skill so a sync genuinely wants to rewrite the file.
+        revise_body(&repo, "alpha", SKILL_SCOPE_GLOBAL);
+
+        let report = apply(&repo, &targets, cwd.path(), Some(home.path()));
+        assert_eq!(report.written(), 0, "a write here destroys the user's text");
+        assert_eq!(report.conflicts(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            appended,
+            "appended user instructions were silently deleted"
+        );
+        let change = change_for(&report, &path);
+        assert_eq!(change.kind, ChangeKind::Conflict);
+        assert!(change.detail.as_ref().unwrap().contains("--force"));
+    }
+
+    #[test]
+    fn preview_shows_appended_text_as_a_removal_instead_of_a_clean_update() {
+        let (_dir, repo) = test_repo();
+        repo.create_skill(&skill("alpha", SKILL_SCOPE_GLOBAL))
+            .unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let targets = [SyncTarget::ClaudeCode];
+        let path = home.path().join(".claude/skills/alpha/SKILL.md");
+        sync_then_append(&repo, &targets, cwd.path(), Some(home.path()), &path);
+
+        let preview = sync_inner(
+            &repo,
+            &targets,
+            cwd.path(),
+            Some(home.path()),
+            None,
+            SyncOptions::preview(),
+        )
+        .unwrap();
+        let change = change_for(&preview, &path);
+        assert_eq!(
+            change.kind,
+            ChangeKind::Conflict,
+            "a preview must not promise a clean 'would update'"
+        );
+        assert!(
+            change
+                .diff
+                .iter()
+                .any(|l| l.starts_with('-') && l.contains("USER APPENDED INSTRUCTIONS")),
+            "the preview must show the appended text as removed: {:?}",
+            change.diff
+        );
+        // The rendered preview shows a conflict's diff even without --diff.
+        let rendered = preview.lines(false).join("\n");
+        assert!(
+            rendered.contains("USER APPENDED INSTRUCTIONS"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn text_appended_below_a_cursor_rule_marker_is_a_conflict() {
+        let (_dir, repo) = test_repo();
+        repo.create_skill(&skill("alpha", SKILL_SCOPE_GLOBAL))
+            .unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let targets = [SyncTarget::Cursor];
+        let path = cursor_rule_path(cwd.path(), "alpha");
+        let appended = sync_then_append(&repo, &targets, cwd.path(), Some(home.path()), &path);
+        revise_body(&repo, "alpha", SKILL_SCOPE_GLOBAL);
+
+        let report = apply(&repo, &targets, cwd.path(), Some(home.path()));
+        assert_eq!(report.conflicts(), 1);
+        assert_eq!(report.written(), 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), appended);
+    }
+
+    #[test]
+    fn text_prepended_above_the_marker_is_a_conflict() {
+        let (_dir, repo) = test_repo();
+        repo.create_skill(&skill("alpha", SKILL_SCOPE_GLOBAL))
+            .unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let targets = [SyncTarget::ClaudeCode];
+        apply(&repo, &targets, cwd.path(), Some(home.path()));
+        let path = home.path().join(".claude/skills/alpha/SKILL.md");
+        let prepended = format!(
+            "USER PREPENDED INSTRUCTIONS\n{}",
+            std::fs::read_to_string(&path).unwrap()
+        );
+        std::fs::write(&path, &prepended).unwrap();
+
+        let report = apply(&repo, &targets, cwd.path(), Some(home.path()));
+        assert_eq!(report.conflicts(), 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), prepended);
+    }
+
+    #[test]
+    fn force_is_the_only_way_appended_text_is_overwritten() {
+        let (_dir, repo) = test_repo();
+        repo.create_skill(&skill("alpha", SKILL_SCOPE_GLOBAL))
+            .unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let targets = [SyncTarget::ClaudeCode];
+        let path = home.path().join(".claude/skills/alpha/SKILL.md");
+        sync_then_append(&repo, &targets, cwd.path(), Some(home.path()), &path);
+
+        let report = sync_inner(
+            &repo,
+            &targets,
+            cwd.path(),
+            Some(home.path()),
+            None,
+            SyncOptions {
+                dry_run: false,
+                force: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(report.conflicts(), 0);
+        assert_eq!(report.written(), 1);
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(!after.contains("USER APPENDED INSTRUCTIONS"));
+    }
+
+    #[test]
+    fn codex_keeps_hand_written_text_below_its_managed_block() {
+        let (_dir, repo) = test_repo();
+        repo.create_skill(&skill("alpha", SKILL_SCOPE_GLOBAL))
+            .unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let codex_home = tempfile::tempdir().unwrap();
+        let path = codex_home.path().join("AGENTS.md");
+        let targets = [SyncTarget::Codex];
+        sync_inner(
+            &repo,
+            &targets,
+            cwd.path(),
+            None,
+            Some(codex_home.path()),
+            SyncOptions::apply(),
+        )
+        .unwrap();
+        std::fs::write(
+            &path,
+            std::fs::read_to_string(&path).unwrap() + "\nUSER APPENDED INSTRUCTIONS\n",
+        )
+        .unwrap();
+        revise_body(&repo, "alpha", SKILL_SCOPE_GLOBAL);
+
+        let report = sync_inner(
+            &repo,
+            &targets,
+            cwd.path(),
+            None,
+            Some(codex_home.path()),
+            SyncOptions::apply(),
+        )
+        .unwrap();
+        assert_eq!(report.conflicts(), 0, "text outside the block is not drift");
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("USER APPENDED INSTRUCTIONS"),
+            "text below the managed block must survive: {after}"
+        );
+        assert!(after.contains("Body for alpha, revised."));
+    }
+
+    #[test]
+    fn cleanup_leaves_a_generated_file_with_appended_text_in_place() {
+        let (_dir, repo) = test_repo();
+        repo.create_skill(&skill("alpha", SKILL_SCOPE_GLOBAL))
+            .unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let targets = [SyncTarget::ClaudeCode, SyncTarget::Cursor];
+        let claude = home.path().join(".claude/skills/alpha/SKILL.md");
+        let cursor = cursor_rule_path(cwd.path(), "alpha");
+        let claude_text = sync_then_append(&repo, &targets, cwd.path(), Some(home.path()), &claude);
+        let cursor_text = std::fs::read_to_string(&cursor).unwrap() + APPENDED;
+        std::fs::write(&cursor, &cursor_text).unwrap();
+
+        repo.delete_skill("alpha", SKILL_SCOPE_GLOBAL).unwrap();
+        let report =
+            cleanup_inner(&repo, &targets, cwd.path(), Some(home.path()), None, false).unwrap();
+
+        assert_eq!(report.removed(), 0, "deleting these loses the user's text");
+        assert_eq!(std::fs::read_to_string(&claude).unwrap(), claude_text);
+        assert_eq!(std::fs::read_to_string(&cursor).unwrap(), cursor_text);
+        for path in [&claude, &cursor] {
+            let change = change_for(&report, path);
+            assert_eq!(change.kind, ChangeKind::Skipped);
+            assert!(change.detail.is_some());
+        }
     }
 }
