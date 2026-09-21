@@ -92,6 +92,12 @@ captured agent prompt and turn id for an agent-run command (re-redacted with
 that command's own directory policy before it is stored), and import
 provenance — source, import time, whether the timestamp was real or
 synthetic, and which fields the source did not have — for an imported one.
+An Atuin import also stores that row's free text (`atuin_intent`,
+`atuin_author`, `atuin_shell`, `atuin_host`, `atuin_user`) there. Every one of
+those passes through the same redaction and exclusion policy as the command
+before it is written; a field an exclusion pattern matched is withheld
+entirely and named in `context.withheld_fields`, so a missing field is
+visible rather than silent.
 
 How these interact:
 
@@ -134,13 +140,24 @@ The same configuration governs every path that writes to the database.
 
 | Path | Space-prefix skipped | Exclusions applied | Redaction applied |
 |---|---|---|---|
-| Live shell/agent recording (`suv add`, hooks) | yes | yes | yes |
-| Bash import (`suv import --from bash-history`, including `--dry-run`) | yes | yes | yes |
-| Zsh import (`suv import --from zsh-history`, including `--dry-run`) | yes | yes | yes |
-| Atuin import (`suv import --from atuin-db`, including `--dry-run`) | yes | yes | yes |
+| Live shell/agent recording (`suv add`, hooks) | yes | yes, per directory | yes, per directory |
+| Bash import (`suv import --from bash-history`, including `--dry-run`) | yes | yes, global config only | yes, global config only |
+| Zsh import (`suv import --from zsh-history`, including `--dry-run`) | yes | yes, global config only | yes, global config only |
+| Atuin import (`suv import --from atuin-db`, including `--dry-run`) | yes | yes, per source directory — command **and** free-text metadata | yes, per source directory — command **and** free-text metadata |
 | JSONL import (`suv import`) | n/a | no — restoring a Suvadu export is meant to reproduce it exactly | no |
 | Native transcript ingestion (Codex, Claude Code, OpenCode) | n/a | yes, per directory | yes, per directory |
 | Session summaries saved over MCP | n/a | yes — matching text is refused, not trimmed | yes |
+
+**"Per directory" means the policy of the directory the command ran in** —
+the global config with the nearest `.suvadu.toml` above that directory merged
+on top. Live recording resolves it from the command's own `cwd`; the Atuin
+importer resolves it from the `cwd` Atuin recorded for each row, so a project
+overlay governs imported history exactly as it governs new history. A row
+whose directory Atuin did not record, or which no longer exists on this
+machine, falls back to the global config. The Bash and Zsh importers cannot
+do this: their history files have no directory at all, so only the global
+config applies to them, and a project overlay's extra patterns and exclusions
+will **not** be honoured for what they import.
 
 Redaction rewrites the text before it is stored, so a secret already sitting
 in `~/.zsh_history` is redacted on the way in rather than copied verbatim. It

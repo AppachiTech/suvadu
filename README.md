@@ -190,17 +190,17 @@ tested against is rejected with the migration id rather than guessed at — run
 
 | Atuin field | Imported as |
 |-------------|-------------|
-| `command` | Command text, verbatim (multi-line and Unicode preserved). Redaction and your exclusion patterns apply, exactly as for live recording |
-| `timestamp` (nanoseconds) | `started_at`, truncated to milliseconds. Two runs of the same command inside one millisecond are kept apart by 1 ms so neither is lost |
+| `command` | Command text, verbatim (multi-line and Unicode preserved). Redaction and your exclusion patterns apply, exactly as for live recording — resolved from the directory Atuin recorded the row in, so a project `.suvadu.toml` governs imported history too |
+| `timestamp` (nanoseconds) | `started_at`, truncated to milliseconds, and nothing else. Two runs inside one millisecond keep the same `started_at` and stay separate entries: a row is identified by its Atuin `id`, never by its time |
 | `duration` (nanoseconds) | `duration_ms` / `ended_at`, truncated to milliseconds. Atuin's `-1` ("never finished") is stored as unknown, not as zero work |
 | `exit` | `exit_code`. Atuin's `-1` becomes `NULL` — never a fabricated success |
 | `cwd` | Directory. Empty or Atuin's literal `"unknown"` becomes unknown |
 | `session` | A Suvadu session per Atuin session, id `atuin-<session>` |
 | `hostname` (`host:user`) | Session hostname, plus `atuin_user` in the entry's context |
 | `author`, `author_kind` | `executor` and `executor_type` (`1`→human, `2`→agent). An unstated kind stays `unknown`: Atuin guesses "agent" from known author names, Suvadu records only what was stated |
-| `id`, `intent`, `shell` | Kept in the entry's `context` (`atuin_id`, `atuin_intent`, `atuin_shell`) — Suvadu has no columns for them |
+| `id`, `intent`, `shell` | Kept in the entry's `context` (`atuin_id`, `atuin_intent`, `atuin_shell`) — Suvadu has no columns for them. `atuin_id` is also what makes a re-import a no-op. The free-text ones go through the same redaction and exclusions as the command; a field an exclusion matched is withheld and named in `context.withheld_fields` |
 | `deleted_at` | Rows you deleted in Atuin are skipped and counted, never resurrected |
-| — | Sub-millisecond precision is lost. Atuin has no tags, notes or command output to carry over, and Suvadu keeps no Atuin sync/record-store state |
+| — | Sub-millisecond precision is lost (the rows are kept; only their ordering inside a millisecond is). Atuin has no tags, notes or command output to carry over, and Suvadu keeps no Atuin sync/record-store state |
 
 ---
 
