@@ -374,7 +374,11 @@ pub fn import_jsonl_into_repo_opts<R: BufRead>(
     allow_duplicates: bool,
 ) -> Result<ImportStats, Box<dyn std::error::Error>> {
     const BATCH_SIZE: u64 = 10_000;
-    const PLACEHOLDER_HOSTNAME: &str = "imported";
+    // The session this row belonged to on its source machine does not exist
+    // here. The placeholder hostname is also how the capture diagnostics
+    // recognise a JSONL-imported row as stored history rather than something
+    // this machine's hook observed, so it comes from the shared constant.
+    const PLACEHOLDER_HOSTNAME: &str = crate::repository::PLACEHOLDER_IMPORT_HOSTNAME;
 
     let mut stats = ImportStats::default();
     let mut batch_count = 0u64;
@@ -688,6 +692,34 @@ fn print_zsh_import_preview(parsed: &[(String, i64, i64)]) {
 
 /// Insert parsed entries in a batch. Returns (imported, skipped) counts.
 /// Errors are fatal — the caller is responsible for rolling back the transaction.
+/// Provenance stamped on every row the zsh importer writes.
+///
+/// Without it a zsh-imported row was indistinguishable from one the live
+/// hook recorded, and `suv status` / `suv doctor` read stored history as
+/// proof that capture was working. The keys match the Bash and Atuin
+/// importers so one check covers all three.
+fn zsh_import_context(imported_at_ms: i64, timestamp_from_file: bool) -> HashMap<String, String> {
+    let mut context = HashMap::new();
+    context.insert("import_source".to_string(), "zsh-history".to_string());
+    context.insert("imported_at".to_string(), imported_at_ms.to_string());
+    context.insert(
+        "timestamp_source".to_string(),
+        if timestamp_from_file {
+            "file".to_string()
+        } else {
+            // A plain (non-extended) ~/.zsh_history carries no times at all,
+            // so the import's own clock stands in. Say so rather than let it
+            // read as the moment the command actually ran.
+            "synthetic".to_string()
+        },
+    );
+    context.insert(
+        "unknown_fields".to_string(),
+        "cwd,exit_code,executor".to_string(),
+    );
+    context
+}
+
 fn import_entries_batch(
     repo: &Repository,
     parsed: &[(String, i64, i64)],
@@ -715,7 +747,7 @@ fn import_entries_batch(
         let started_at = if *ts > 0 { *ts } else { now };
         let ended_at = started_at + dur;
 
-        let entry = Entry::new(
+        let mut entry = Entry::new(
             session_id.to_string(),
             cmd.clone(),
             String::new(), // CWD unknown for imported entries
@@ -723,6 +755,7 @@ fn import_entries_batch(
             started_at,
             ended_at,
         );
+        entry.context = Some(zsh_import_context(now, *ts > 0));
 
         repo.insert_entry(&entry)?;
         imported += 1;
@@ -1417,6 +1450,64 @@ mod tests {
         })
         .unwrap();
         assert_eq!(count, 2);
+    }
+
+    /// Every zsh-imported row must carry the same provenance the Bash and
+    /// Atuin importers write. Without it `suv status`/`suv doctor` could not
+    /// tell a zsh-imported row from one the live hook recorded, and read
+    /// stored history as proof of capture (R09).
+    #[test]
+    fn zsh_imported_rows_carry_import_provenance() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let session = Session {
+            id: "import-zsh-provenance".to_string(),
+            hostname: "test-host".to_string(),
+            created_at: 1_000,
+            tag_id: None,
+        };
+        repo.insert_session(&session).unwrap();
+
+        let parsed = vec![
+            ("git status".to_string(), 1_700_000_000_000i64, 0i64),
+            // A plain (non-extended) history file carries no timestamp.
+            ("ls -la".to_string(), 0, 0),
+        ];
+        let tx = repo.transaction().unwrap();
+        import_entries_batch(&repo, &parsed, &session.id, 9_999_999).unwrap();
+        tx.commit().unwrap();
+
+        let mut seen = Vec::new();
+        repo.stream_export_entries(None, None, |entry| {
+            let ctx = entry
+                .context
+                .clone()
+                .unwrap_or_else(|| panic!("no provenance on {}", entry.command));
+            assert_eq!(
+                ctx.get("import_source").map(String::as_str),
+                Some("zsh-history")
+            );
+            assert_eq!(ctx.get("imported_at").map(String::as_str), Some("9999999"));
+            seen.push((
+                entry.command,
+                ctx.get("timestamp_source").cloned().unwrap_or_default(),
+            ));
+            Ok(())
+        })
+        .unwrap();
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![
+                ("git status".to_string(), "file".to_string()),
+                ("ls -la".to_string(), "synthetic".to_string()),
+            ],
+            "a time the importer invented must not be presented as one the file carried"
+        );
+
+        // …and the diagnostics must see them as stored history, not capture.
+        let stats = repo.capture_record_stats(Some(&session.id)).unwrap();
+        assert_eq!(stats.imported_records, 2);
+        assert_eq!(stats.live_records, 0);
     }
 
     #[test]

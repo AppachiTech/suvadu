@@ -2,12 +2,15 @@ mod ai_sessions;
 mod aliases;
 mod api;
 mod bookmarks;
+mod capture;
 mod entries;
 mod notes;
 mod skills;
 mod stats;
 mod storage;
 mod tags;
+
+pub use capture::{CaptureRecordStats, PLACEHOLDER_IMPORT_HOSTNAME};
 
 // Re-exported for use as a mockable trait boundary in tests and downstream consumers.
 #[allow(unused_imports)]

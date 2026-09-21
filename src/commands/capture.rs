@@ -71,27 +71,49 @@ pub fn recording_fixes(state: RecordingState) -> Vec<String> {
 }
 
 /// Observed facts about shell capture, gathered by the caller.
+///
+/// Counts are split by **provenance** and by **shell session** because the
+/// three questions are different: what is stored, what a live hook was seen
+/// writing, and whether the shell being diagnosed is the one writing it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CaptureFacts {
-    /// A `suv init <shell>` line was found in the shell's rc file.
+    /// A `suv init <shell>` line was found in the rc file of the shell being
+    /// diagnosed.
     pub hook_configured: bool,
     /// `SUVADU_SESSION_ID` is exported in this shell. Deliberately *not* an
     /// input to the verdict: it proves the hook ran once in this shell, not
     /// that any command reached the database.
     pub session_env_present: bool,
-    /// Number of stored non-agent (shell) records.
-    pub shell_records: i64,
-    /// Age of the newest stored shell record, in seconds.
-    pub newest_shell_record_age_secs: Option<i64>,
+    /// Non-agent records that no importer wrote — the only rows a live hook
+    /// could have produced.
+    pub live_records: i64,
+    /// Age of the newest live record, in seconds.
+    pub newest_live_record_age_secs: Option<i64>,
+    /// Live records belonging to the shell session being diagnosed.
+    pub session_records: i64,
+    /// Age of the newest live record from that session, in seconds.
+    pub newest_session_record_age_secs: Option<i64>,
+    /// Non-agent records an importer wrote. Searchable history — and it may
+    /// legitimately be dated "now" — but never evidence of capture.
+    pub imported_records: i64,
 }
 
 /// What can honestly be claimed about capture, strongest evidence first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureEvidence {
-    /// A shell record arrived recently — the hook is demonstrably working.
-    RecentRecord { age_secs: i64 },
-    /// Records exist but all are old: the hook was observed working before.
+    /// A live record arrived recently — the hook is demonstrably working.
+    /// `same_session` is `true` when it came from the shell being diagnosed.
+    RecentRecord { age_secs: i64, same_session: bool },
+    /// A live record arrived recently, but from a different shell session,
+    /// and the shell being diagnosed has no hook in its rc file. Some shell
+    /// is being captured; this one is not known to be.
+    RecordFromAnotherShell { age_secs: i64 },
+    /// Live records exist but all are old: the hook was observed working
+    /// before, not since.
     EarlierRecord { age_secs: i64 },
+    /// Nothing was captured; the stored shell history all came from an
+    /// import. Stored history is not evidence of capture.
+    ImportedHistoryOnly { records: i64 },
     /// Configuration is in place; nothing has been captured through it yet.
     ConfigurationPresent,
     /// No configuration and no records.
@@ -101,12 +123,30 @@ pub enum CaptureEvidence {
 impl CaptureEvidence {
     pub fn headline(self) -> String {
         match self {
-            Self::RecentRecord { age_secs } => {
-                format!("most recent record received {} ago", format_age(age_secs))
-            }
+            Self::RecentRecord {
+                age_secs,
+                same_session: true,
+            } => format!(
+                "most recent record received {} ago, from this shell session",
+                format_age(age_secs)
+            ),
+            Self::RecentRecord {
+                age_secs,
+                same_session: false,
+            } => format!(
+                "most recent record received {} ago, from another shell session",
+                format_age(age_secs)
+            ),
+            Self::RecordFromAnotherShell { age_secs } => format!(
+                "a record arrived {} ago, but from another shell \u{2014} this shell has no hook installed, so its own capture is not verified",
+                format_age(age_secs)
+            ),
             Self::EarlierRecord { age_secs } => format!(
                 "hook observed earlier (newest record {} old) \u{2014} not verified since",
                 format_age(age_secs)
+            ),
+            Self::ImportedHistoryOnly { records } => format!(
+                "not yet verified \u{2014} all {records} stored shell record(s) came from an import, which is stored history, not capture"
             ),
             Self::ConfigurationPresent => {
                 "configuration present, capture not yet verified".to_string()
@@ -115,35 +155,104 @@ impl CaptureEvidence {
         }
     }
 
-    /// `true` only when a stored record proves capture is working now.
+    /// `true` only when a live-recorded row proves capture is working now.
     pub const fn is_proven(self) -> bool {
         matches!(self, Self::RecentRecord { .. })
     }
 }
 
-/// Decide what the stored evidence supports. Configuration alone, and the
-/// session environment variable alone, never reach `RecentRecord`.
+/// Decide what the stored evidence supports.
+///
+/// Configuration alone, the session environment variable alone, and stored
+/// history alone never reach `RecentRecord`. Only a row that no importer
+/// could have written, recent enough to be about *now*, counts — and when
+/// it came from a different shell session, the shell being diagnosed must
+/// at least have the hook installed before its own capture is claimed.
 pub const fn capture_evidence(facts: &CaptureFacts) -> CaptureEvidence {
-    match facts.newest_shell_record_age_secs {
-        Some(age) if facts.shell_records > 0 && age <= RECENT_RECORD_WINDOW_SECS => {
-            CaptureEvidence::RecentRecord { age_secs: age }
+    if let Some(age) = facts.newest_session_record_age_secs {
+        if facts.session_records > 0 && age <= RECENT_RECORD_WINDOW_SECS {
+            return CaptureEvidence::RecentRecord {
+                age_secs: age,
+                same_session: true,
+            };
         }
-        Some(age) if facts.shell_records > 0 => CaptureEvidence::EarlierRecord { age_secs: age },
-        _ if facts.hook_configured => CaptureEvidence::ConfigurationPresent,
-        _ => CaptureEvidence::NotVerified,
+    }
+    if let Some(age) = facts.newest_live_record_age_secs {
+        if facts.live_records > 0 {
+            if age > RECENT_RECORD_WINDOW_SECS {
+                return CaptureEvidence::EarlierRecord { age_secs: age };
+            }
+            return if facts.hook_configured {
+                CaptureEvidence::RecentRecord {
+                    age_secs: age,
+                    same_session: false,
+                }
+            } else {
+                CaptureEvidence::RecordFromAnotherShell { age_secs: age }
+            };
+        }
+    }
+    if facts.hook_configured {
+        CaptureEvidence::ConfigurationPresent
+    } else if facts.imported_records > 0 {
+        CaptureEvidence::ImportedHistoryOnly {
+            records: facts.imported_records,
+        }
+    } else {
+        CaptureEvidence::NotVerified
     }
 }
 
 /// Caveats to print alongside the verdict.
 pub fn evidence_notes(facts: &CaptureFacts) -> Vec<String> {
     let mut notes = Vec::new();
-    if facts.session_env_present && !capture_evidence(facts).is_proven() {
+    let evidence = capture_evidence(facts);
+    if facts.session_env_present && !evidence.is_proven() {
         notes.push(
             "SUVADU_SESSION_ID is set in this shell, but a session variable is not proof that any command was stored."
                 .to_string(),
         );
     }
+    // Said whenever imported rows exist and capture is unproven, including
+    // the case where the hook *is* configured: the reason the diagnostics
+    // are not green is precisely that the only stored rows were imported.
+    if facts.imported_records > 0 && !evidence.is_proven() {
+        notes.push(format!(
+            "{} stored shell record(s) came from an import (suv import). They are searchable history, not evidence that a hook captured anything \u{2014} an imported row can carry any timestamp, including now.",
+            facts.imported_records
+        ));
+    }
     notes
+}
+
+/// What to do next when capture is not verified, in the order to do it.
+///
+/// An import-only user is the case this exists for: refusing to go green
+/// without saying why, or what would make it green, is not an improvement
+/// on claiming capture that never happened.
+pub fn capture_fixes(facts: &CaptureFacts, shell_name: &str) -> Vec<String> {
+    if capture_evidence(facts).is_proven() {
+        return Vec::new();
+    }
+    let mut fixes = Vec::new();
+    if !facts.hook_configured {
+        if let Some(rc) = rc_file_for_shell(shell_name) {
+            fixes.push(format!(
+                "suv init {shell_name} >> ~/{rc}   \u{2014} install the capture hook, then start a new shell"
+            ));
+        } else {
+            fixes.push(format!(
+                "suvadu has no shell hook for {shell_name}; shell capture needs bash or zsh"
+            ));
+        }
+    }
+    if facts.imported_records > 0 && facts.live_records == 0 {
+        fixes.push(
+            "imported history stays searchable either way \u{2014} only a command run through the hook can verify capture"
+                .to_string(),
+        );
+    }
+    fixes
 }
 
 /// Format an age in seconds as a coarse human string ("3 minutes").
@@ -204,6 +313,45 @@ pub fn shell_hook_configured() -> bool {
         .is_ok_and(|contents| rc_hook_configured(&contents))
 }
 
+/// The shell session id the current shell exported, if any.
+pub fn current_session_id() -> Option<String> {
+    std::env::var("SUVADU_SESSION_ID")
+        .ok()
+        .filter(|id| !id.is_empty())
+}
+
+/// Age in whole seconds of a millisecond timestamp, never negative.
+pub const fn age_secs(now_ms: i64, at_ms: i64) -> i64 {
+    let delta = now_ms - at_ms;
+    if delta < 0 {
+        0
+    } else {
+        delta / 1000
+    }
+}
+
+/// Turn the database's provenance-split counts into the facts the verdict
+/// is made from. Shared by `suv status` and `suv doctor` so the two can
+/// never disagree about what the same database supports.
+pub fn facts_from_records(
+    hook_configured: bool,
+    session_env_present: bool,
+    stats: &crate::repository::CaptureRecordStats,
+    now_ms: i64,
+) -> CaptureFacts {
+    CaptureFacts {
+        hook_configured,
+        session_env_present,
+        live_records: stats.live_records,
+        newest_live_record_age_secs: stats.newest_live_started_at.map(|at| age_secs(now_ms, at)),
+        session_records: stats.session_records,
+        newest_session_record_age_secs: stats
+            .newest_session_started_at
+            .map(|at| age_secs(now_ms, at)),
+        imported_records: stats.imported_records,
+    }
+}
+
 /// The exact sequence that proves capture end to end.
 pub fn verification_steps() -> Vec<String> {
     vec![
@@ -218,11 +366,17 @@ mod tests {
     use super::*;
 
     fn clean() -> CaptureFacts {
+        CaptureFacts::default()
+    }
+
+    /// A live record of the given age, in the shell session being diagnosed.
+    fn captured_here(age_secs: i64) -> CaptureFacts {
         CaptureFacts {
-            hook_configured: false,
-            session_env_present: false,
-            shell_records: 0,
-            newest_shell_record_age_secs: None,
+            live_records: 1,
+            newest_live_record_age_secs: Some(age_secs),
+            session_records: 1,
+            newest_session_record_age_secs: Some(age_secs),
+            ..clean()
         }
     }
 
@@ -288,13 +442,18 @@ mod tests {
     fn a_recent_record_is_proof_of_capture() {
         let facts = CaptureFacts {
             hook_configured: true,
-            shell_records: 12,
-            newest_shell_record_age_secs: Some(90),
+            live_records: 12,
+            newest_live_record_age_secs: Some(90),
+            session_records: 12,
+            newest_session_record_age_secs: Some(90),
             ..clean()
         };
         assert_eq!(
             capture_evidence(&facts),
-            CaptureEvidence::RecentRecord { age_secs: 90 }
+            CaptureEvidence::RecentRecord {
+                age_secs: 90,
+                same_session: true
+            }
         );
         assert!(capture_evidence(&facts).is_proven());
     }
@@ -304,8 +463,8 @@ mod tests {
         let age = RECENT_RECORD_WINDOW_SECS + 60;
         let facts = CaptureFacts {
             hook_configured: false,
-            shell_records: 3,
-            newest_shell_record_age_secs: Some(age),
+            live_records: 3,
+            newest_live_record_age_secs: Some(age),
             ..clean()
         };
         assert_eq!(
@@ -313,6 +472,209 @@ mod tests {
             CaptureEvidence::EarlierRecord { age_secs: age }
         );
         assert!(!capture_evidence(&facts).is_proven());
+    }
+
+    /// R09: one imported row dated *now* used to read as a green capture
+    /// check. Stored history is not evidence of capture, whatever its
+    /// timestamp says.
+    #[test]
+    fn imported_history_alone_is_never_capture_evidence() {
+        let facts = CaptureFacts {
+            imported_records: 1,
+            ..clean()
+        };
+        assert_eq!(
+            capture_evidence(&facts),
+            CaptureEvidence::ImportedHistoryOnly { records: 1 }
+        );
+        assert!(!capture_evidence(&facts).is_proven());
+        assert!(
+            capture_evidence(&facts).headline().contains("import"),
+            "the verdict must name the reason: {}",
+            capture_evidence(&facts).headline()
+        );
+    }
+
+    /// Having installed the hook does not turn imported rows into proof
+    /// either — but it does change what the user is told to do next.
+    #[test]
+    fn imported_history_with_the_hook_installed_is_still_only_configuration() {
+        let facts = CaptureFacts {
+            hook_configured: true,
+            imported_records: 400,
+            ..clean()
+        };
+        assert_eq!(
+            capture_evidence(&facts),
+            CaptureEvidence::ConfigurationPresent
+        );
+        assert!(!capture_evidence(&facts).is_proven());
+        assert!(
+            evidence_notes(&facts)
+                .iter()
+                .any(|note| note.contains("400 stored shell record(s) came from an import")),
+            "the imported rows must be explained: {:?}",
+            evidence_notes(&facts)
+        );
+        assert!(
+            capture_fixes(&facts, "zsh")
+                .iter()
+                .all(|fix| !fix.contains("suv init")),
+            "the hook is already installed; do not tell the user to install it again"
+        );
+    }
+
+    /// An import-only user must be told the two things that get them to
+    /// green, not merely refused.
+    #[test]
+    fn an_import_only_setup_is_told_how_to_become_verified() {
+        let facts = CaptureFacts {
+            imported_records: 12,
+            ..clean()
+        };
+        let fixes = capture_fixes(&facts, "zsh").join("\n");
+        assert!(
+            fixes.contains("suv init zsh >> ~/.zshrc"),
+            "the hook install must be spelled out: {fixes}"
+        );
+        assert!(
+            fixes.contains("imported history stays searchable"),
+            "the import must not be made to look like a mistake: {fixes}"
+        );
+        // And the existing end-to-end sequence stays the way it is resolved.
+        assert!(verification_steps()[0].contains(VERIFY_MARKER));
+    }
+
+    #[test]
+    fn a_shell_with_no_hook_of_its_own_has_no_install_advice_it_can_follow() {
+        let facts = CaptureFacts {
+            imported_records: 1,
+            ..clean()
+        };
+        let fixes = capture_fixes(&facts, "fish").join("\n");
+        assert!(
+            fixes.contains("no shell hook for fish"),
+            "an unsupported shell must be told so rather than given a broken command: {fixes}"
+        );
+    }
+
+    /// A live record from another shell session, while this shell has no
+    /// hook at all, is what `suv doctor` used to pass as capture evidence
+    /// on the same screen as "~/.zshrc not found".
+    #[test]
+    fn a_record_from_another_shell_does_not_verify_an_unhooked_shell() {
+        let facts = CaptureFacts {
+            hook_configured: false,
+            live_records: 5,
+            newest_live_record_age_secs: Some(30),
+            session_records: 0,
+            newest_session_record_age_secs: None,
+            ..clean()
+        };
+        assert_eq!(
+            capture_evidence(&facts),
+            CaptureEvidence::RecordFromAnotherShell { age_secs: 30 }
+        );
+        assert!(!capture_evidence(&facts).is_proven());
+        assert!(
+            capture_fixes(&facts, "zsh")
+                .iter()
+                .any(|fix| fix.contains("suv init zsh")),
+            "this shell must be told to install its own hook"
+        );
+    }
+
+    /// The same record in a shell that *is* hooked is fine: a terminal that
+    /// has not typed anything yet is not a broken setup.
+    #[test]
+    fn a_record_from_another_session_counts_when_this_shell_is_hooked() {
+        let facts = CaptureFacts {
+            hook_configured: true,
+            live_records: 5,
+            newest_live_record_age_secs: Some(30),
+            ..clean()
+        };
+        assert_eq!(
+            capture_evidence(&facts),
+            CaptureEvidence::RecentRecord {
+                age_secs: 30,
+                same_session: false
+            }
+        );
+        assert!(capture_evidence(&facts).is_proven());
+        assert!(capture_fixes(&facts, "zsh").is_empty());
+    }
+
+    /// The transition R09 asks for: unverified with imported rows, then a
+    /// genuine capture arrives in this session and the verdict flips.
+    #[test]
+    fn a_genuine_capture_turns_an_import_only_setup_verified() {
+        let before = CaptureFacts {
+            imported_records: 3,
+            ..clean()
+        };
+        assert!(!capture_evidence(&before).is_proven());
+
+        let after = CaptureFacts {
+            hook_configured: true,
+            session_env_present: true,
+            live_records: 1,
+            newest_live_record_age_secs: Some(2),
+            session_records: 1,
+            newest_session_record_age_secs: Some(2),
+            ..before
+        };
+        assert_eq!(
+            capture_evidence(&after),
+            CaptureEvidence::RecentRecord {
+                age_secs: 2,
+                same_session: true
+            }
+        );
+        assert!(capture_evidence(&after).is_proven());
+        assert!(
+            evidence_notes(&after).is_empty(),
+            "a proven setup needs no caveats: {:?}",
+            evidence_notes(&after)
+        );
+        assert!(capture_fixes(&after, "zsh").is_empty());
+    }
+
+    /// Imported rows must not drag a proven verdict backwards either: a
+    /// user who imports their old history and then runs a command is
+    /// captured, and the age reported is the live row's, not the import's.
+    #[test]
+    fn imported_rows_never_supply_the_age_of_the_proof() {
+        let facts = CaptureFacts {
+            hook_configured: true,
+            imported_records: 10_000,
+            ..captured_here(45)
+        };
+        assert_eq!(
+            capture_evidence(&facts),
+            CaptureEvidence::RecentRecord {
+                age_secs: 45,
+                same_session: true
+            }
+        );
+    }
+
+    #[test]
+    fn record_ages_are_measured_from_the_stored_timestamp() {
+        let stats = crate::repository::CaptureRecordStats {
+            live_records: 2,
+            newest_live_started_at: Some(9_000),
+            session_records: 1,
+            newest_session_started_at: Some(4_000),
+            imported_records: 7,
+            newest_record: None,
+        };
+        let facts = facts_from_records(true, true, &stats, 10_000);
+        assert_eq!(facts.newest_live_record_age_secs, Some(1));
+        assert_eq!(facts.newest_session_record_age_secs, Some(6));
+        assert_eq!(facts.imported_records, 7);
+        // A clock that jumped backwards must not produce a negative age.
+        assert_eq!(age_secs(0, 5_000), 0);
     }
 
     #[test]
@@ -402,9 +764,12 @@ mod tests {
 
     #[test]
     fn evidence_headlines_describe_the_proof_they_have() {
-        assert!(CaptureEvidence::RecentRecord { age_secs: 30 }
-            .headline()
-            .contains("most recent record received"));
+        assert!(CaptureEvidence::RecentRecord {
+            age_secs: 30,
+            same_session: true
+        }
+        .headline()
+        .contains("most recent record received"));
         assert!(CaptureEvidence::EarlierRecord { age_secs: 900_000 }
             .headline()
             .contains("hook observed"));

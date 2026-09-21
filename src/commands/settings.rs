@@ -16,12 +16,14 @@ pub fn handle_settings() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// The newest stored shell record, used as evidence that capture works.
-/// Fields are reported exactly as stored — a missing exit code stays missing.
+/// The newest stored shell record. Fields are reported exactly as stored —
+/// a missing exit code stays missing — and `imported` says where the row
+/// came from, because an imported row is history, not capture evidence.
 pub struct LastRecord {
     pub command: String,
     pub age_secs: i64,
     pub exit_code: Option<i32>,
+    pub imported: bool,
 }
 
 /// Everything `status_lines` needs, gathered by the caller so the rendering
@@ -30,6 +32,8 @@ pub struct StatusFacts {
     pub state: capture::RecordingState,
     pub capture: capture::CaptureFacts,
     pub last_record: Option<LastRecord>,
+    /// The shell being diagnosed, for the repair advice.
+    pub shell_name: String,
 }
 
 /// Render the recording/capture section of `suv status`.
@@ -60,8 +64,15 @@ fn status_lines(facts: &StatusFacts) -> Vec<String> {
         let exit = last
             .exit_code
             .map_or_else(|| "exit unknown".to_string(), |c| format!("exit {c}"));
+        // Say which kind of row this is. Naming it "Last shell record"
+        // without qualification was how an imported line read as capture.
+        let label = if last.imported {
+            "Last stored record (imported)"
+        } else {
+            "Last captured record"
+        };
         lines.push(format!(
-            "  Last shell record: {} \u{2014} {} ago, {exit}",
+            "  {label}: {} \u{2014} {} ago, {exit}",
             crate::util::truncate_str(&last.command, 60, "\u{2026}"),
             capture::format_age(last.age_secs),
         ));
@@ -80,6 +91,15 @@ fn status_lines(facts: &StatusFacts) -> Vec<String> {
         }
     }
 
+    let capture_fixes = capture::capture_fixes(&facts.capture, &facts.shell_name);
+    if !capture_fixes.is_empty() {
+        lines.push(String::new());
+        lines.push("To start capturing:".to_string());
+        for fix in capture_fixes {
+            lines.push(format!("  {fix}"));
+        }
+    }
+
     lines.push(String::new());
     lines.push("To verify capture end-to-end:".to_string());
     for step in capture::verification_steps() {
@@ -89,30 +109,13 @@ fn status_lines(facts: &StatusFacts) -> Vec<String> {
     lines
 }
 
-/// Gather the newest stored shell (non-agent) record, if any.
-fn last_shell_record(repo: &Repository, now_ms: i64) -> Option<LastRecord> {
-    let filter = crate::repository::QueryFilter {
-        exclude_agents: true,
-        ..Default::default()
-    };
-    let entry = repo
-        .get_recent_entries(1, 0, &filter, None)
-        .ok()?
-        .into_iter()
-        .next()?;
-    Some(LastRecord {
-        age_secs: (now_ms - entry.started_at).max(0) / 1000,
-        command: entry.command,
-        exit_code: entry.exit_code,
-    })
-}
-
 pub fn handle_status() -> Result<(), Box<dyn std::error::Error>> {
     let global_enabled = config::is_enabled()?;
     let is_paused = config::is_paused();
     let state = capture::recording_state(global_enabled, is_paused);
-    let session_env_present = std::env::var("SUVADU_SESSION_ID").is_ok();
+    let session_id = capture::current_session_id();
     let hook_configured = capture::shell_hook_configured();
+    let shell_name = capture::current_shell_name();
 
     // Open the database first: only stored records can prove capture.
     let db_path = db::get_db_path().ok();
@@ -121,29 +124,34 @@ pub fn handle_status() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|p| db::init_db(p).ok())
         .map(Repository::new);
 
-    let (shell_records, last_record) = repo.as_ref().map_or((0, None), |repo| {
-        let count = repo
-            .count_filtered(&crate::repository::QueryFilter {
-                query_tokens: &[],
-                exclude_agents: true,
-                ..Default::default()
-            })
-            .unwrap_or(0);
-        (
-            count,
-            last_shell_record(repo, chrono::Utc::now().timestamp_millis()),
-        )
-    });
+    // Rows are counted by provenance: an imported row is searchable history
+    // and may carry any timestamp, so it can never be the thing that proves
+    // a live hook is running.
+    let record_stats = repo
+        .as_ref()
+        .and_then(|repo| repo.capture_record_stats(session_id.as_deref()).ok())
+        .unwrap_or_default();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let last_record = record_stats
+        .newest_record
+        .as_ref()
+        .map(|record| LastRecord {
+            command: record.command.clone(),
+            age_secs: capture::age_secs(now_ms, record.started_at),
+            exit_code: record.exit_code,
+            imported: record.imported,
+        });
 
     for line in status_lines(&StatusFacts {
         state,
-        capture: capture::CaptureFacts {
+        capture: capture::facts_from_records(
             hook_configured,
-            session_env_present,
-            shell_records,
-            newest_shell_record_age_secs: last_record.as_ref().map(|r| r.age_secs),
-        },
+            session_id.is_some(),
+            &record_stats,
+            now_ms,
+        ),
         last_record,
+        shell_name,
     }) {
         println!("{line}");
     }
@@ -451,6 +459,7 @@ mod tests {
             state,
             capture: facts,
             last_record: last,
+            shell_name: "zsh".to_string(),
         }
     }
 
@@ -477,13 +486,17 @@ mod tests {
             CaptureFacts {
                 hook_configured: true,
                 session_env_present: true,
-                shell_records: 42,
-                newest_shell_record_age_secs: Some(120),
+                live_records: 42,
+                newest_live_record_age_secs: Some(120),
+                session_records: 42,
+                newest_session_record_age_secs: Some(120),
+                imported_records: 0,
             },
             Some(LastRecord {
                 command: "echo hi".into(),
                 age_secs: 120,
                 exit_code: Some(0),
+                imported: false,
             }),
         ))
         .join("\n");
@@ -501,14 +514,17 @@ mod tests {
             RecordingState::Enabled,
             CaptureFacts {
                 hook_configured: true,
-                shell_records: 1,
-                newest_shell_record_age_secs: Some(10),
+                live_records: 1,
+                newest_live_record_age_secs: Some(10),
+                session_records: 1,
+                newest_session_record_age_secs: Some(10),
                 ..CaptureFacts::default()
             },
             Some(LastRecord {
                 command: "sleep 1".into(),
                 age_secs: 10,
                 exit_code: None,
+                imported: false,
             }),
         ))
         .join("\n");

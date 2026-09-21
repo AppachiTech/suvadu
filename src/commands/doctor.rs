@@ -454,41 +454,36 @@ fn assess_recording(config_enabled: bool, paused_in_shell: bool) -> CheckResult 
 }
 
 /// Gather the stored evidence that shell capture actually works.
+///
+/// Rows are counted by provenance, not merely by recency: `suv import`
+/// writes ordinary history rows that can carry any timestamp, including
+/// this second, so counting recent rows proved nothing about the hook.
 fn gather_capture_facts(repo: Option<&Repository>) -> capture::CaptureFacts {
-    let mut facts = capture::CaptureFacts {
-        hook_configured: capture::shell_hook_configured(),
-        session_env_present: std::env::var("SUVADU_SESSION_ID").is_ok(),
-        ..Default::default()
-    };
-    if let Some(repo) = repo {
-        let filter = crate::repository::QueryFilter {
-            exclude_agents: true,
-            ..Default::default()
-        };
-        facts.shell_records = repo.count_filtered(&filter).unwrap_or(0);
-        facts.newest_shell_record_age_secs = repo
-            .get_recent_entries(1, 0, &filter, None)
-            .ok()
-            .and_then(|entries| entries.into_iter().next())
-            .map(|entry| (chrono::Utc::now().timestamp_millis() - entry.started_at).max(0) / 1000);
-    }
-    facts
+    let session_id = capture::current_session_id();
+    let stats = repo
+        .and_then(|repo| repo.capture_record_stats(session_id.as_deref()).ok())
+        .unwrap_or_default();
+    capture::facts_from_records(
+        capture::shell_hook_configured(),
+        session_id.is_some(),
+        &stats,
+        chrono::Utc::now().timestamp_millis(),
+    )
 }
 
 /// Report what the stored data proves, separately from what the config allows.
 fn assess_capture(facts: &capture::CaptureFacts) -> CheckResult {
     let evidence = capture::capture_evidence(facts);
-    let status = if evidence.is_proven() {
-        Status::Pass
-    } else {
-        Status::Warn
-    };
-    let check = CheckResult::blocker("Capture evidence", status, evidence.headline());
     if evidence.is_proven() {
-        check
-    } else {
-        check.with_fix("run the verification sequence below and re-run suv doctor")
+        return CheckResult::blocker("Capture evidence", Status::Pass, evidence.headline());
     }
+    // Everything short of a live record is a warning, and the repair says
+    // what this particular setup is missing before the shared verification
+    // sequence at the foot of the report can succeed.
+    let mut fix = capture::capture_fixes(facts, &capture::current_shell_name());
+    fix.push("run the verification sequence below and re-run suv doctor".to_string());
+    CheckResult::blocker("Capture evidence", Status::Warn, evidence.headline())
+        .with_fix(fix.join("; "))
 }
 
 /// How an agent integration is installed on this machine.
@@ -971,11 +966,68 @@ mod tests {
 
         let proven = assess_capture(&crate::commands::capture::CaptureFacts {
             hook_configured: true,
-            shell_records: 3,
-            newest_shell_record_age_secs: Some(60),
+            live_records: 3,
+            newest_live_record_age_secs: Some(60),
+            session_records: 3,
+            newest_session_record_age_secs: Some(60),
             ..Default::default()
         });
         assert!(matches!(proven.status, Status::Pass), "{}", proven.detail);
+    }
+
+    /// R09: `suv doctor` used to pass "Capture evidence" on the strength of
+    /// a single imported row while, three lines above, warning that the
+    /// shell's rc file did not exist.
+    #[test]
+    fn imported_history_does_not_pass_the_capture_evidence_check() {
+        let imported = assess_capture(&crate::commands::capture::CaptureFacts {
+            hook_configured: false,
+            imported_records: 1,
+            ..Default::default()
+        });
+        assert!(
+            matches!(imported.status, Status::Warn),
+            "an imported row passed as capture: {}",
+            imported.detail
+        );
+        assert!(
+            imported.detail.contains("import"),
+            "the reason must be stated: {}",
+            imported.detail
+        );
+        let fix = imported.fix.unwrap_or_default();
+        assert!(
+            fix.contains("suv init"),
+            "an import-only user must be told to install the hook: {fix}"
+        );
+        assert!(
+            fix.contains("verification sequence"),
+            "and how to confirm it afterwards: {fix}"
+        );
+    }
+
+    /// The same combination the reviewer saw: a recent row, but nothing
+    /// tying it to the shell whose rc file is missing.
+    #[test]
+    fn a_record_from_another_shell_does_not_pass_for_an_unhooked_shell() {
+        let elsewhere = assess_capture(&crate::commands::capture::CaptureFacts {
+            hook_configured: false,
+            live_records: 4,
+            newest_live_record_age_secs: Some(30),
+            ..Default::default()
+        });
+        assert!(
+            matches!(elsewhere.status, Status::Warn),
+            "{}",
+            elsewhere.detail
+        );
+        assert!(
+            elsewhere
+                .detail
+                .contains("this shell has no hook installed"),
+            "{}",
+            elsewhere.detail
+        );
     }
 
     #[test]
