@@ -2,8 +2,10 @@
 //!
 //! A user configures `exclusions` and `redaction` once. This exercises each
 //! ingestion path against the *same* configuration — live recording, the
-//! Bash importer, the Zsh importer and native transcript ingestion — so a
-//! path that quietly ignores the policy is visible instead of assumed.
+//! Bash importer, the Zsh importer, the Atuin importer and native transcript
+//! ingestion — so a path that quietly ignores the policy is visible instead
+//! of assumed. For a path that carries free text beside the command (an
+//! agent prompt, an Atuin `intent`), that text is judged too.
 //!
 //! Every test runs the real binary against a private HOME; nothing here
 //! reads or writes the user's own database, backups or config.
@@ -262,5 +264,177 @@ fn transcript_ingestion_redacts_prompts_and_drops_excluded_turns() {
     assert!(
         session.contains("use GITHUB_TOKEN=***REDACTED*** and key ***REDACTED***"),
         "a redacted turn must still be captured, minus the secrets:\n{session}"
+    );
+}
+
+/// Build an Atuin 18.22.0-shaped `history.db` beneath the sandbox.
+///
+/// Columns: `(id, timestamp_ns, command, cwd, intent)`. Nothing here reads
+/// the user's own Atuin database.
+fn atuin_fixture(s: &Sandbox, rows: &[(&str, i64, &str, &str, Option<&str>)]) -> PathBuf {
+    let path = s.home.path().join("atuin-history.db");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "create table history (
+            id text primary key, timestamp integer not null, duration integer not null,
+            exit integer not null, command text not null, cwd text not null,
+            session text not null, hostname text not null, deleted_at integer,
+            author text, intent text, shell text, author_kind integer);
+         create table _sqlx_migrations (
+            version bigint primary key, description text not null,
+            installed_on timestamp not null default current_timestamp,
+            success boolean not null, checksum blob not null, execution_time bigint not null);",
+    )
+    .unwrap();
+    for v in [
+        20_210_422_143_411_i64,
+        20_220_505_083_406,
+        20_220_806_155_627,
+        20_230_315_220_114,
+        20_230_319_185_725,
+        20_260_224_000_100,
+        20_260_709_214_605,
+        20_260_723_000_000,
+        20_260_723_000_001,
+        20_260_723_000_002,
+        20_260_723_000_003,
+        20_260_818_000_000,
+    ] {
+        conn.execute(
+            "insert into _sqlx_migrations (version, description, success, checksum, \
+             execution_time) values (?1, 'test', 1, x'00', 0)",
+            rusqlite::params![v],
+        )
+        .unwrap();
+    }
+    for (id, ts, command, cwd, intent) in rows {
+        conn.execute(
+            "insert into history (id, timestamp, duration, exit, command, cwd, session, \
+             hostname, author, intent, shell, author_kind)
+             values (?1, ?2, 0, 0, ?3, ?4, 'atuin-session', 'laptop:ellie', 'claude', ?5, \
+             'zsh', 2)",
+            rusqlite::params![id, ts, command, cwd, intent],
+        )
+        .unwrap();
+    }
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").ok();
+    path
+}
+
+/// The Atuin importer is an ingestion path like any other. Atuin also stores
+/// free-form `intent` text beside the command, and that text is governed by
+/// the same policy — a secret an agent wrote into its intent must not reach
+/// storage just because it never appeared on a command line.
+#[test]
+fn atuin_import_applies_the_policy_to_commands_and_to_free_text_metadata() {
+    let s = Sandbox::new();
+    let db = atuin_fixture(
+        &s,
+        &[
+            (
+                "r1",
+                1_700_000_000_000_000_000,
+                SECRET_COMMAND,
+                "/work",
+                None,
+            ),
+            (
+                "r2",
+                1_700_000_001_000_000_000,
+                CUSTOM_SECRET_COMMAND,
+                "/work",
+                None,
+            ),
+            (
+                "r3",
+                1_700_000_002_000_000_000,
+                EXCLUDED_COMMAND,
+                "/work",
+                None,
+            ),
+            (
+                "r4",
+                1_700_000_003_000_000_000,
+                "echo normal",
+                "/work",
+                Some("deploy with GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123 and corp-ab12cd"),
+            ),
+            (
+                "r5",
+                1_700_000_004_000_000_000,
+                "echo also normal",
+                "/work",
+                Some("go and read SECRETFILE"),
+            ),
+        ],
+    );
+
+    let report = s.stdout(&["import", "--from", "atuin-db", db.to_str().unwrap()]);
+    assert!(
+        report.contains("Excluded by config: 1"),
+        "the excluded command was imported: {report}"
+    );
+    assert!(
+        report.contains("Redacted before storage: 4 row(s); 2 metadata field(s)"),
+        "two secret commands plus two rows whose only offending text was in \
+         `intent` (one redacted, one withheld): {report}"
+    );
+
+    let everything = s.stdout(&["history", "--json", "-n", "100"]);
+    assert!(
+        !everything.contains("ghp_abcdefghijklmnopqrstuvwxyz0123"),
+        "a known secret shape reached storage:\n{everything}"
+    );
+    assert!(
+        !everything.contains("corp-ab12cd"),
+        "a user-configured pattern was ignored:\n{everything}"
+    );
+    assert!(
+        !everything.contains("vault login"),
+        "an excluded command was stored:\n{everything}"
+    );
+    assert!(
+        !everything.contains("SECRETFILE"),
+        "excluded text was stored in metadata:\n{everything}"
+    );
+    // Redaction edits the metadata; it does not discard the row.
+    assert!(
+        everything.contains("echo normal"),
+        "a clean command was dropped:\n{everything}"
+    );
+    assert!(
+        everything.contains("withheld_fields"),
+        "a withheld metadata field must be declared, not silently missing:\n{everything}"
+    );
+}
+
+/// A dry run must reach the same verdict and leak nothing the apply hides.
+#[test]
+fn atuin_import_preview_shows_redacted_text_only() {
+    let s = Sandbox::new();
+    let db = atuin_fixture(
+        &s,
+        &[(
+            "r1",
+            1_700_000_000_000_000_000,
+            "echo normal",
+            "/work",
+            Some("deploy with GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123"),
+        )],
+    );
+    let preview = s.stdout(&[
+        "import",
+        "--from",
+        "atuin-db",
+        "--dry-run",
+        db.to_str().unwrap(),
+    ]);
+    assert!(
+        !preview.contains("ghp_abcdefghijklmnopqrstuvwxyz0123"),
+        "the preview printed a secret:\n{preview}"
+    );
+    assert!(
+        preview.contains("Redacted before storage: 1"),
+        "the dry run must count what the apply would redact:\n{preview}"
     );
 }

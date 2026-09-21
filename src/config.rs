@@ -471,14 +471,22 @@ fn merge_toml_value(base: &mut toml::Value, overlay: toml::Value) {
 ///
 /// Returns the global config unchanged if `dir` has no project overlay.
 pub fn load_config_for_dir(dir: &std::path::Path) -> ConfigResult<Config> {
-    let base = load_config()?;
+    overlay_config_for_dir(&load_config()?, dir)
+}
+
+/// [`load_config_for_dir`] against a base config the caller already holds.
+///
+/// Importers need this: they read the global config once and then resolve a
+/// policy for each source row's own directory, without re-reading the global
+/// file (and without silently picking up a different one) per directory.
+pub fn overlay_config_for_dir(base: &Config, dir: &std::path::Path) -> ConfigResult<Config> {
     let Some(overlay_path) = find_project_overlay(dir) else {
-        return Ok(base);
+        return Ok(base.clone());
     };
 
     let overlay_contents = std::fs::read_to_string(&overlay_path)?;
     let overlay_value: toml::Value = toml::from_str(&overlay_contents)?;
-    let mut merged_value = toml::Value::try_from(base)?;
+    let mut merged_value = toml::Value::try_from(base.clone())?;
     merge_toml_value(&mut merged_value, overlay_value);
     let merged: Config = merged_value.try_into()?;
     validate_config(&merged)?;

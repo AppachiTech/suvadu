@@ -49,6 +49,43 @@ pub fn apply_recording_policy(
     RecordingPolicy::Keep { command, redacted }
 }
 
+/// What the recording policy says about one imported free-text metadata
+/// field (an Atuin `intent`, an author name, a shell name — anything the
+/// source recorded as prose and we persist beside the command).
+pub enum MetadataPolicy {
+    /// Store it — possibly rewritten by redaction first.
+    Keep { text: String, redacted: bool },
+    /// An exclusion pattern matched. The field is withheld entirely rather
+    /// than trimmed: exclusions say "this text must never be stored", and a
+    /// metadata field has no safe partial form.
+    Withheld,
+}
+
+/// Apply the recording policy to one free-text metadata value.
+///
+/// This mirrors what live recording does to `context.agent_prompt` — the
+/// closest analogue Suvadu records itself — with one addition: an exclusion
+/// match withholds the field. It never drops the whole row, because the
+/// command has already been judged on its own.
+pub fn apply_metadata_policy(
+    raw: &str,
+    config: &crate::config::Config,
+    exclusions: Option<&[CompiledExclusion]>,
+) -> MetadataPolicy {
+    if let Some(patterns) = exclusions {
+        if crate::util::is_excluded_compiled(raw, patterns) {
+            return MetadataPolicy::Withheld;
+        }
+    }
+    let text = if config.redaction.enabled {
+        crate::redact::redact_secrets_with_extra(raw, &config.redaction.extra_patterns)
+    } else {
+        raw.to_string()
+    };
+    let redacted = text != raw;
+    MetadataPolicy::Keep { text, redacted }
+}
+
 /// How many times this (command, source timestamp) pair has already been seen
 /// in this import. Importers add the ordinal to the derived `started_at`, so
 /// repeated executions keep distinct timestamps — deterministically, which is

@@ -122,6 +122,30 @@ impl Repository {
         Ok(count)
     }
 
+    /// Every source-row identity already imported from `source`, read out of
+    /// `context.<id_key>` (for Atuin, `atuin_id` — the row's own UUID).
+    ///
+    /// Importers use this for idempotency: a source row is "already present"
+    /// when its own identity is present, not when some other row happens to
+    /// share a command and a timestamp. Read once per import, so re-importing
+    /// a large database costs one scan rather than one query per row.
+    pub fn imported_source_ids(
+        &self,
+        source: &str,
+        id_key: &str,
+    ) -> DbResult<std::collections::HashSet<String>> {
+        let path = format!("$.{id_key}");
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT json_extract(context, ?2) FROM entries
+             WHERE json_extract(context, '$.import_source') = ?1
+               AND json_extract(context, ?2) IS NOT NULL",
+        )?;
+        let ids = stmt
+            .query_map(params![source, path], |row| row.get::<_, String>(0))?
+            .collect::<Result<std::collections::HashSet<_>, _>>()?;
+        Ok(ids)
+    }
+
     /// Get entries with optional filters and field-specific search
     #[allow(clippy::cast_possible_wrap)]
     pub fn get_entries_filtered(

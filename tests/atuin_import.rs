@@ -414,3 +414,113 @@ fn atuin_import_cli_skips_malformed_rows_and_keeps_going() {
         "a malformed record is never echoed: {out}"
     );
 }
+
+/// Shaped like a GitHub token, never issued.
+const FAKE_TOKEN: &str = "ghp_abcdefghijklmnopqrstuvwxyz0123";
+
+#[test]
+fn atuin_import_cli_redacts_a_secret_that_only_appears_in_metadata() {
+    let s = Sandbox::new();
+    let db = s.path("history.db");
+    let mut row = Row::new("id-meta", 1_700_000_100_000_000_000, "echo normal");
+    row.intent = Some(format!("deploy with GITHUB_TOKEN={FAKE_TOKEN}"));
+    atuin_db(&db, &[row]);
+
+    let out = s.import(&db, &[]);
+    assert!(out.contains("Imported: 1"), "{out}");
+    assert!(
+        out.contains("Redacted before storage: 1"),
+        "a metadata-only secret is counted, not silently kept: {out}"
+    );
+    assert!(
+        !out.contains(FAKE_TOKEN),
+        "the report echoed the secret: {out}"
+    );
+
+    let entries = s.history_json();
+    assert_eq!(entries.len(), 1);
+    let intent = entries[0]["context"]["atuin_intent"].as_str().unwrap();
+    assert!(!intent.contains(FAKE_TOKEN), "{intent}");
+    assert!(intent.contains("REDACTED"), "{intent}");
+}
+
+#[test]
+fn atuin_import_cli_uses_each_source_directorys_project_policy() {
+    let s = Sandbox::new();
+    let project = s.path("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join(".suvadu.toml"),
+        "exclusions = [\"PRIVATEPROJECT\"]\n\
+         [redaction]\nextra_patterns = [\"corp-[a-z0-9]{6}\"]\n",
+    )
+    .unwrap();
+    let dir = project.to_string_lossy().to_string();
+
+    let db = s.path("history.db");
+    let mut secret = Row::new(
+        "id-secret",
+        1_700_000_100_000_000_000,
+        "deploy --key corp-ab12cd",
+    );
+    secret.cwd.clone_from(&dir);
+    let mut excluded = Row::new(
+        "id-excluded",
+        1_700_000_200_000_000_000,
+        "echo PRIVATEPROJECT",
+    );
+    excluded.cwd.clone_from(&dir);
+    atuin_db(&db, &[secret, excluded]);
+
+    let out = s.import(&db, &[]);
+    assert!(out.contains("Excluded by config: 1"), "{out}");
+
+    let commands: Vec<String> = s
+        .history_json()
+        .iter()
+        .map(|e| e["command"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    assert!(!commands[0].contains("corp-ab12cd"), "{commands:?}");
+    assert!(commands[0].contains("REDACTED"), "{commands:?}");
+}
+
+#[test]
+fn atuin_import_cli_keeps_executions_that_collide_after_truncation() {
+    let s = Sandbox::new();
+    let db = s.path("history.db");
+    atuin_db(
+        &db,
+        &[
+            Row::new("0", 1_700_000_000_000_000_000, "true"),
+            Row::new("1", 1_700_000_000_000_000_001, "true"),
+            Row::new("2", 1_700_000_000_001_000_000, "true"),
+        ],
+    );
+
+    let preview = s.import(&db, &["--dry-run"]);
+    assert!(
+        preview.contains("3 entry(ies) would be imported"),
+        "{preview}"
+    );
+
+    let out = s.import(&db, &[]);
+    assert!(
+        out.contains("Imported: 3"),
+        "the apply matches the preview: {out}"
+    );
+    assert!(out.contains("Already present: 0"), "{out}");
+
+    let entries = s.history_json();
+    let mut ids: Vec<String> = entries
+        .iter()
+        .map(|e| e["context"]["atuin_id"].as_str().unwrap().to_string())
+        .collect();
+    ids.sort();
+    assert_eq!(ids, vec!["0", "1", "2"], "every source row survives");
+
+    let second = s.import(&db, &[]);
+    assert!(second.contains("Imported: 0"), "{second}");
+    assert!(second.contains("Already present: 3"), "{second}");
+    assert_eq!(s.history_json().len(), 3);
+}

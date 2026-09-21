@@ -40,7 +40,7 @@ use rusqlite::{Connection, OpenFlags};
 use crate::models::Entry;
 use crate::repository::Repository;
 
-use super::{apply_recording_policy, next_occurrence, print_dry_run_samples, RecordingPolicy};
+use super::{apply_recording_policy, print_dry_run_samples, RecordingPolicy};
 
 /// Every `_sqlx_migrations` version this importer has been tested against —
 /// the union of the migration sets shipped by Atuin 18.0.0 … 18.22.0. A
@@ -163,8 +163,12 @@ pub struct AtuinImportStats {
     pub duplicates: u64,
     /// Rows dropped by the configured exclusion patterns.
     pub excluded: u64,
-    /// Rows whose text was changed by redaction before storage.
+    /// Rows whose stored text — the command or any free-text metadata field —
+    /// was rewritten or withheld by the recording policy before storage.
     pub redacted: u64,
+    /// Individual metadata fields (intent, author, shell, host, user) the
+    /// policy rewrote or withheld. Several can come from one row.
+    pub metadata_redacted: u64,
     /// Blank or space-prefixed rows.
     pub ignored: u64,
     /// Rows skipped because a required column was unreadable.
@@ -516,10 +520,84 @@ const fn executor_type_for(author_kind: Option<i64>) -> &'static str {
     }
 }
 
+/// The free text an Atuin row carries beside its command, after the
+/// recording policy has run over every field: redacted in place, or withheld
+/// when an exclusion matched.
+///
+/// Nothing here reaches storage without passing through
+/// [`crate::import_export::apply_metadata_policy`] first. `intent` in
+/// particular is prose an agent wrote and is exactly where a token that never
+/// appeared on the command line ends up.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SanitizedMetadata {
+    host: Option<String>,
+    user: Option<String>,
+    author: Option<String>,
+    intent: Option<String>,
+    shell: Option<String>,
+    /// Context keys the policy withheld, recorded so the entry says so
+    /// instead of quietly looking like the source had nothing there.
+    withheld: Vec<&'static str>,
+    /// Fields rewritten or withheld — one row can contribute several.
+    changed: u64,
+}
+
+impl SanitizedMetadata {
+    /// Run every free-text field of `row` through the policy resolved for
+    /// that row's own directory.
+    fn from_row(
+        row: &AtuinRow,
+        config: &crate::config::Config,
+        exclusions: Option<&[crate::util::CompiledExclusion]>,
+    ) -> Self {
+        let mut withheld: Vec<&'static str> = Vec::new();
+        let mut changed = 0u64;
+        let (host, user, author, intent, shell) = {
+            let mut police = |key: &'static str, raw: Option<String>| -> Option<String> {
+                let raw = raw?;
+                match super::apply_metadata_policy(&raw, config, exclusions) {
+                    super::MetadataPolicy::Keep { text, redacted } => {
+                        if redacted {
+                            changed += 1;
+                        }
+                        Some(text)
+                    }
+                    super::MetadataPolicy::Withheld => {
+                        withheld.push(key);
+                        changed += 1;
+                        None
+                    }
+                }
+            };
+            (
+                police(
+                    "atuin_host",
+                    (!row.host.is_empty()).then(|| row.host.clone()),
+                ),
+                police("atuin_user", row.user.clone()),
+                police("atuin_author", row.author.clone()),
+                police("atuin_intent", row.intent.clone()),
+                police("atuin_shell", row.shell.clone()),
+            )
+        };
+
+        Self {
+            host,
+            user,
+            author,
+            intent,
+            shell,
+            withheld,
+            changed,
+        }
+    }
+}
+
 /// Build the stored entry for one Atuin row.
 fn atuin_entry(
     opts: &AtuinImportOptions<'_>,
     row: &AtuinRow,
+    meta: &SanitizedMetadata,
     command: String,
     started_at: i64,
     duration_ms: Option<i64>,
@@ -534,7 +612,7 @@ fn atuin_entry(
         started_at + duration_ms.unwrap_or(0),
     );
     entry.executor_type = Some(executor_type_for(row.author_kind).to_string());
-    entry.executor.clone_from(&row.author);
+    entry.executor.clone_from(&meta.author);
 
     let mut unknown_fields = Vec::new();
     if exit_code.is_none() {
@@ -556,24 +634,82 @@ fn atuin_entry(
     // Every Atuin row carries a real execution time; none is ever synthesised.
     context.insert("timestamp_source".to_string(), "file".to_string());
     context.insert("atuin_id".to_string(), row.id.clone());
-    if !row.host.is_empty() {
-        context.insert("atuin_host".to_string(), row.host.clone());
-    }
     for (key, value) in [
-        ("atuin_user", row.user.as_ref()),
-        ("atuin_author", row.author.as_ref()),
-        ("atuin_intent", row.intent.as_ref()),
-        ("atuin_shell", row.shell.as_ref()),
+        ("atuin_host", meta.host.as_ref()),
+        ("atuin_user", meta.user.as_ref()),
+        ("atuin_author", meta.author.as_ref()),
+        ("atuin_intent", meta.intent.as_ref()),
+        ("atuin_shell", meta.shell.as_ref()),
     ] {
         if let Some(value) = value {
             context.insert(key.to_string(), value.clone());
         }
+    }
+    if !meta.withheld.is_empty() {
+        context.insert("withheld_fields".to_string(), meta.withheld.join(","));
     }
     if !unknown_fields.is_empty() {
         context.insert("unknown_fields".to_string(), unknown_fields.join(","));
     }
     entry.context = Some(context);
     entry
+}
+
+/// The recording policy for one directory: the effective config, plus its
+/// exclusion patterns compiled once.
+struct DirectoryPolicy {
+    config: crate::config::Config,
+    exclusions: Option<Vec<crate::util::CompiledExclusion>>,
+}
+
+impl DirectoryPolicy {
+    fn new(config: crate::config::Config) -> Self {
+        let exclusions = (!config.exclusions.is_empty())
+            .then(|| crate::util::compile_exclusions(&config.exclusions));
+        Self { config, exclusions }
+    }
+}
+
+/// Resolves the recording policy for each source row's own directory, the way
+/// live recording does, and caches the answer per directory so a million-row
+/// import walks the filesystem once per distinct `cwd` rather than once per
+/// row.
+struct PolicyResolver {
+    global: std::rc::Rc<DirectoryPolicy>,
+    by_dir: HashMap<String, std::rc::Rc<DirectoryPolicy>>,
+}
+
+impl PolicyResolver {
+    fn new(global: &crate::config::Config) -> Self {
+        Self {
+            global: std::rc::Rc::new(DirectoryPolicy::new(global.clone())),
+            by_dir: HashMap::new(),
+        }
+    }
+
+    /// The policy for `cwd`. A row Atuin recorded no directory for is judged
+    /// under the global configuration — there is no project to ask.
+    ///
+    /// An unreadable or invalid `.suvadu.toml` is an error, not a shrug: the
+    /// import stops rather than quietly falling back to a looser policy than
+    /// the directory asked for.
+    fn for_cwd(
+        &mut self,
+        cwd: Option<&str>,
+    ) -> Result<std::rc::Rc<DirectoryPolicy>, Box<dyn std::error::Error>> {
+        let Some(cwd) = cwd else {
+            return Ok(std::rc::Rc::clone(&self.global));
+        };
+        if let Some(found) = self.by_dir.get(cwd) {
+            return Ok(std::rc::Rc::clone(found));
+        }
+        let merged = crate::config::overlay_config_for_dir(&self.global.config, Path::new(cwd))
+            .map_err(|e| format!("reading the project configuration for {cwd}: {e}"))?;
+        let policy = std::rc::Rc::new(DirectoryPolicy::new(merged));
+        self.by_dir
+            .insert(cwd.to_string(), std::rc::Rc::clone(&policy));
+        Ok(policy)
+    }
 }
 
 /// Import an Atuin history database into `repo`.
@@ -590,18 +726,29 @@ fn atuin_entry(
 /// | `cwd` | `cwd` | `""`/`"unknown"` → empty (unknown) |
 /// | `session` | `session_id` | `atuin-<session>` |
 /// | `hostname` (`host:user`) | session hostname + `atuin_user` context | split |
-/// | `author` | `executor` + `atuin_author` context | verbatim |
+/// | `author` | `executor` + `atuin_author` context | policy applied |
 /// | `author_kind` | `executor_type` | `1`→human, `2`→agent, else unknown |
-/// | `id`, `intent`, `shell` | `context` | provenance only |
+/// | `id` | `context.atuin_id` | provenance and identity |
+/// | `intent`, `shell` | `context` | policy applied |
 /// | `deleted_at` | — | row skipped |
 ///
-/// **Idempotency.** `started_at` is derived deterministically from the row: the
-/// source timestamp in milliseconds, plus the number of times that exact
-/// (redacted) command has already appeared at that millisecond in this pass —
-/// Atuin keeps nanoseconds, so two runs inside one millisecond would otherwise
-/// collide. Repeated executions therefore all survive with distinct times,
-/// while re-running the import produces the same times and skips every row as
-/// a duplicate. Existing Suvadu rows are never modified or removed.
+/// **Idempotency.** A source row is identified by its own Atuin `id`, kept in
+/// `context.atuin_id`. Before the pass begins we read every `atuin_id` already
+/// imported from this source; a row whose id is present (in the destination,
+/// or earlier in this same pass) is "already present" and skipped. Times are
+/// therefore never invented: `started_at` is the source timestamp truncated to
+/// milliseconds and nothing else, so two executions inside one millisecond
+/// both survive as their own rows, and an unrelated Suvadu row that happens to
+/// share a command and a millisecond is not mistaken for one of them. A dry
+/// run takes exactly the same decisions as an apply. Existing Suvadu rows are
+/// never modified or removed.
+///
+/// **Policy scope.** `config` is the global configuration. Each row is then
+/// judged under the configuration of *its own* `cwd` — the global config with
+/// the nearest `.suvadu.toml` above that directory merged on top, exactly as
+/// live recording resolves policy for a command. A row whose directory Atuin
+/// did not record, or which does not exist on this machine, falls back to the
+/// global configuration. Resolution is cached per directory.
 pub fn import_atuin_history(
     repo: &Repository,
     conn: &Connection,
@@ -612,13 +759,15 @@ pub fn import_atuin_history(
     const BATCH_SIZE: u64 = 5_000;
     const MAX_SAMPLES: usize = 10;
 
-    let exclusions = (!config.exclusions.is_empty())
-        .then(|| crate::util::compile_exclusions(&config.exclusions));
+    let mut policies = PolicyResolver::new(config);
 
     let mut stats = AtuinImportStats::default();
-    let mut occurrences: HashMap<(String, Option<i64>), i64> = HashMap::new();
     let mut sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut batch_count = 0u64;
+
+    // Idempotency is decided against the source rows already imported, read
+    // once rather than queried per row.
+    let mut seen_source_ids = repo.imported_source_ids(IMPORT_SOURCE, "atuin_id")?;
 
     let tx = if opts.dry_run {
         None
@@ -627,7 +776,11 @@ pub fn import_atuin_history(
     };
 
     let read_stats = stream_atuin_history(conn, schema, |row| {
-        let command = match apply_recording_policy(&row.command, config, exclusions.as_deref()) {
+        let policy = policies.for_cwd(row.cwd.as_deref())?;
+        let config = &policy.config;
+        let exclusions = policy.exclusions.as_deref();
+
+        let command = match apply_recording_policy(&row.command, config, exclusions) {
             RecordingPolicy::Ignored => {
                 stats.ignored += 1;
                 return Ok(());
@@ -644,9 +797,19 @@ pub fn import_atuin_history(
             }
         };
 
-        let source_ms = row.timestamp_ns.div_euclid(NANOS_PER_MS);
-        let ordinal = next_occurrence(&mut occurrences, (command.clone(), Some(source_ms)));
-        let started_at = source_ms.saturating_add(ordinal);
+        // Free text the source recorded beside the command gets the same
+        // policy before any of it is persisted or previewed.
+        let meta = SanitizedMetadata::from_row(&row, config, exclusions);
+        if meta.changed > 0 {
+            stats.metadata_redacted += meta.changed;
+            if command == row.command {
+                // The command itself was clean, so this row has not been
+                // counted as redacted yet — but something was.
+                stats.redacted += 1;
+            }
+        }
+
+        let started_at = row.timestamp_ns.div_euclid(NANOS_PER_MS);
         let duration_ms = row.duration_ns.map(|d| d.div_euclid(NANOS_PER_MS));
 
         if row.exit.is_none() {
@@ -662,13 +825,15 @@ pub fn import_atuin_history(
             stats.unknown_executor += 1;
         }
 
-        if repo.entry_exists(&command, started_at)? {
+        // Identity, not (command, time): a row already imported is skipped,
+        // and a row that merely looks like a Suvadu row we already had is not.
+        if !seen_source_ids.insert(row.id.clone()) {
             stats.duplicates += 1;
             return Ok(());
         }
 
         if stats.samples.len() < MAX_SAMPLES {
-            stats.samples.push((command.clone(), Some(source_ms)));
+            stats.samples.push((command.clone(), Some(started_at)));
         }
 
         if opts.dry_run {
@@ -681,16 +846,21 @@ pub fn import_atuin_history(
 
         let session_id = session_id_for(&row.session);
         if sessions.insert(session_id.clone()) {
-            let hostname = if row.host.is_empty() {
-                opts.hostname_fallback
-            } else {
-                &row.host
-            };
+            // The session's hostname is the policed one: a host the policy
+            // rewrote or withheld must not reappear as a session name.
+            let hostname = meta.host.as_deref().unwrap_or(opts.hostname_fallback);
             repo.insert_session_if_missing(&session_id, hostname, started_at)?;
             stats.sessions += 1;
         }
 
-        repo.insert_entry(&atuin_entry(opts, &row, command, started_at, duration_ms))?;
+        repo.insert_entry(&atuin_entry(
+            opts,
+            &row,
+            &meta,
+            command,
+            started_at,
+            duration_ms,
+        ))?;
         stats.imported += 1;
         batch_count += 1;
         if batch_count >= BATCH_SIZE {
@@ -760,7 +930,9 @@ pub fn handle_import_atuin_db(
         "Note: Atuin's nanosecond times are truncated to milliseconds, and its row id,\n\
          \x20     intent and shell are kept in each entry's context rather than as Suvadu\n\
          \x20     columns. Rows Atuin never finished (exit/duration -1) are stored as\n\
-         \x20     unknown, never as a success."
+         \x20     unknown, never as a success. Every row — its command and its free-text\n\
+         \x20     metadata alike — is judged under the policy of the directory Atuin\n\
+         \x20     recorded it in: the global config plus that directory's .suvadu.toml."
     );
 
     if dry_run {
@@ -829,7 +1001,10 @@ fn print_atuin_import_counts(stats: &AtuinImportStats) {
     println!("  Blank/space-prefixed, not recorded: {}", stats.ignored);
     println!("  Deleted in Atuin, skipped: {}", stats.deleted);
     println!("  Malformed rows skipped: {}", stats.malformed);
-    println!("  Redacted before storage: {}", stats.redacted);
+    println!(
+        "  Redacted before storage: {} row(s); {} metadata field(s) rewritten or withheld",
+        stats.redacted, stats.metadata_redacted
+    );
     println!("  Atuin sessions preserved: {}", stats.sessions);
     println!(
         "  Unknown in Atuin (stored unknown): {} exit code(s), {} duration(s), {} directory(ies), \
@@ -908,7 +1083,7 @@ mod tests {
         duration: i64,
         exit: i64,
         command: &'static str,
-        cwd: &'static str,
+        cwd: String,
         session: &'static str,
         hostname: &'static str,
         deleted_at: Option<i64>,
@@ -926,7 +1101,7 @@ mod tests {
                 duration: 1_500_000_000,
                 exit: 0,
                 command,
-                cwd: "/home/ellie/work",
+                cwd: "/home/ellie/work".to_string(),
                 session: "0193c0ffee",
                 hostname: "laptop:ellie",
                 deleted_at: None,
@@ -1173,7 +1348,7 @@ mod tests {
         let mut unfinished = Row::new("b", 1_700_000_200_000_000_000, "sleep 100");
         unfinished.exit = -1;
         unfinished.duration = -1;
-        unfinished.cwd = "unknown";
+        unfinished.cwd = "unknown".to_string();
         unfinished.hostname = "laptop";
         let fixture =
             Fixture::modern(&[unfinished, Row::new("a", 1_700_000_100_000_000_000, "ls")]);
@@ -1272,7 +1447,7 @@ mod tests {
         let mut unfinished = Row::new("unfinished", 1_700_000_300_000_000_000, "sleep 100");
         unfinished.exit = -1;
         unfinished.duration = -1;
-        unfinished.cwd = "unknown";
+        unfinished.cwd = "unknown".to_string();
         unfinished.author_kind = None;
         let fixture = Fixture::modern(&[agent, unfinished]);
 
@@ -1377,10 +1552,17 @@ mod tests {
             .map(|e| e.started_at)
             .collect();
         times.sort_unstable();
+        // Each row keeps the time Atuin recorded, truncated and nothing more.
+        // The two runs inside one millisecond therefore share a `started_at`;
+        // they stay separate rows because identity is the source row id, not
+        // a nudged timestamp. (Before the R05 fix the middle value was
+        // 1_700_000_100_001 — an invented time that could collide with a
+        // genuinely different execution.)
         assert_eq!(
             times,
-            vec![1_700_000_100_000, 1_700_000_100_001, 1_700_000_200_000]
+            vec![1_700_000_100_000, 1_700_000_100_000, 1_700_000_200_000]
         );
+        assert_eq!(stored_source_ids(&repo), vec!["a", "b", "c"]);
     }
 
     #[test]
@@ -1665,6 +1847,270 @@ mod tests {
             repo.count_entries_by_import(IMPORT_SOURCE, Some(1))
                 .unwrap(),
             0
+        );
+    }
+
+    // ── free-text metadata is policed like the command (R04) ────────────
+
+    /// Shaped like a GitHub token, never issued: the redactor keys off the
+    /// `ghp_` prefix and length, not off any real credential.
+    const FAKE_TOKEN: &str = "ghp_abcdefghijklmnopqrstuvwxyz0123";
+
+    #[test]
+    fn a_secret_that_lives_only_in_atuin_metadata_is_redacted_and_counted() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config::default();
+        let mut row = Row::new("meta", 1_700_000_100_000_000_000, "echo normal");
+        row.intent = Some("deploy with GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123");
+        let fixture = Fixture::modern(&[row]);
+
+        let stats = import(&fixture, &repo, &cfg, false);
+        assert_eq!(stats.imported, 1);
+        assert_eq!(
+            stats.redacted, 1,
+            "a row whose only secret is in metadata still counts as redacted"
+        );
+        assert_eq!(stats.metadata_redacted, 1, "one metadata field rewritten");
+
+        let entry = &repo.get_entries_by_session("atuin-0193c0ffee").unwrap()[0];
+        assert_eq!(
+            entry.command, "echo normal",
+            "the command was already clean"
+        );
+        let intent = entry.context.as_ref().unwrap().get("atuin_intent").unwrap();
+        assert!(!intent.contains(FAKE_TOKEN), "{intent}");
+        assert!(intent.contains("REDACTED"), "{intent}");
+    }
+
+    #[test]
+    fn a_dry_run_preview_never_carries_a_secret_out_of_metadata() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config::default();
+        let mut row = Row::new("meta", 1_700_000_100_000_000_000, "echo normal");
+        row.intent = Some("deploy with GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123");
+        let fixture = Fixture::modern(&[row]);
+
+        let dry = import(&fixture, &repo, &cfg, true);
+        assert_eq!(dry.redacted, 1, "the dry run reaches the same verdict");
+        assert_eq!(dry.metadata_redacted, 1);
+    }
+
+    #[test]
+    fn every_free_text_metadata_field_goes_through_redaction() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config::default();
+        let mut row = Row::new("meta", 1_700_000_100_000_000_000, "echo normal");
+        row.author = Some("agent ghp_abcdefghijklmnopqrstuvwxyz0123");
+        row.intent = Some("deploy ghp_abcdefghijklmnopqrstuvwxyz0123");
+        row.shell = Some("bash ghp_abcdefghijklmnopqrstuvwxyz0123");
+        row.hostname = "laptop ghp_abcdefghijklmnopqrstuvwxyz0123:ellie";
+        let fixture = Fixture::modern(&[row]);
+
+        let stats = import(&fixture, &repo, &cfg, false);
+        assert_eq!(stats.metadata_redacted, 4, "author, intent, shell and host");
+
+        let entry = &repo.get_entries_by_session("atuin-0193c0ffee").unwrap()[0];
+        assert!(!entry.executor.as_deref().unwrap().contains(FAKE_TOKEN));
+        let ctx = entry.context.as_ref().unwrap();
+        for key in ["atuin_author", "atuin_intent", "atuin_shell", "atuin_host"] {
+            let value = ctx.get(key).unwrap_or_else(|| panic!("{key} missing"));
+            assert!(
+                !value.contains(FAKE_TOKEN),
+                "{key} kept the secret: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_matching_an_exclusion_pattern_is_dropped_not_stored() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config {
+            exclusions: vec!["PRIVATEPROJECT".to_string()],
+            ..Default::default()
+        };
+        let mut row = Row::new("meta", 1_700_000_100_000_000_000, "echo normal");
+        row.intent = Some("work on PRIVATEPROJECT");
+        let fixture = Fixture::modern(&[row]);
+
+        let stats = import(&fixture, &repo, &cfg, false);
+        assert_eq!(stats.imported, 1, "the command itself is not excluded");
+        assert_eq!(stats.excluded, 0, "an excluded field never drops the row");
+        assert_eq!(stats.metadata_redacted, 1);
+
+        let entry = &repo.get_entries_by_session("atuin-0193c0ffee").unwrap()[0];
+        let ctx = entry.context.as_ref().unwrap();
+        assert!(
+            !ctx.contains_key("atuin_intent"),
+            "an excluded field is omitted entirely"
+        );
+        assert_eq!(ctx.get("withheld_fields").unwrap(), "atuin_intent");
+    }
+
+    // ── distinct executions survive (R05) ───────────────────────────────
+
+    /// The reviewer's fixture: two runs inside one millisecond and a third a
+    /// millisecond later, which the old occurrence-ordinal nudge collapsed.
+    fn colliding_fixture() -> Fixture {
+        Fixture::modern(&[
+            Row::new("0", 1_700_000_000_000_000_000, "true"),
+            Row::new("1", 1_700_000_000_000_000_001, "true"),
+            Row::new("2", 1_700_000_000_001_000_000, "true"),
+        ])
+    }
+
+    fn stored_source_ids(repo: &Repository) -> Vec<String> {
+        let mut ids: Vec<String> = repo
+            .get_entries_by_session("atuin-0193c0ffee")
+            .unwrap()
+            .iter()
+            .map(|e| e.context.as_ref().unwrap().get("atuin_id").unwrap().clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn executions_that_collide_after_truncation_all_keep_their_own_row() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config::default();
+        let fixture = colliding_fixture();
+
+        let stats = import(&fixture, &repo, &cfg, false);
+        assert_eq!(stats.imported, 3, "three source rows, three entries");
+        assert_eq!(stats.duplicates, 0);
+        assert_eq!(
+            stored_source_ids(&repo),
+            vec!["0".to_string(), "1".to_string(), "2".to_string()],
+            "every source row id survives the import"
+        );
+
+        let mut times: Vec<i64> = repo
+            .get_entries_by_session("atuin-0193c0ffee")
+            .unwrap()
+            .iter()
+            .map(|e| e.started_at)
+            .collect();
+        times.sort_unstable();
+        assert_eq!(
+            times,
+            vec![1_700_000_000_000, 1_700_000_000_000, 1_700_000_000_001],
+            "times are the source's own, truncated — never nudged"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_of_colliding_rows_reaches_the_same_verdict_as_the_apply() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config::default();
+        let fixture = colliding_fixture();
+
+        let dry = import(&fixture, &repo, &cfg, true);
+        let applied = import(&fixture, &repo, &cfg, false);
+        assert_eq!(dry.imported, applied.imported);
+        assert_eq!(dry.duplicates, applied.duplicates);
+        assert_eq!(dry.sessions, applied.sessions);
+
+        // And the dry run *after* the apply agrees the work is done.
+        let again = import(&fixture, &repo, &cfg, true);
+        assert_eq!(again.imported, 0);
+        assert_eq!(again.duplicates, 3);
+    }
+
+    #[test]
+    fn re_importing_colliding_rows_adds_nothing() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config::default();
+        let fixture = colliding_fixture();
+
+        assert_eq!(import(&fixture, &repo, &cfg, false).imported, 3);
+        let second = import(&fixture, &repo, &cfg, false);
+        assert_eq!(second.imported, 0);
+        assert_eq!(second.duplicates, 3);
+        assert_eq!(repo.count_entries().unwrap(), 3);
+        assert_eq!(
+            stored_source_ids(&repo),
+            vec!["0".to_string(), "1".to_string(), "2".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_destination_row_with_the_same_text_and_time_is_not_a_duplicate() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cfg = crate::config::Config::default();
+        // A natively recorded `true` at exactly the millisecond the Atuin row
+        // truncates to. It is a different execution and must not shadow it.
+        repo.insert_session_if_missing("native", "test-host", 1_700_000_000_000)
+            .unwrap();
+        repo.insert_entry(&crate::models::Entry::new(
+            "native".to_string(),
+            "true".to_string(),
+            "/home/ellie/work".to_string(),
+            Some(0),
+            1_700_000_000_000,
+            1_700_000_000_000,
+        ))
+        .unwrap();
+
+        let fixture = Fixture::modern(&[Row::new("0", 1_700_000_000_000_000_000, "true")]);
+        let stats = import(&fixture, &repo, &cfg, false);
+        assert_eq!(
+            stats.imported, 1,
+            "provenance, not (command, time), decides"
+        );
+        assert_eq!(stats.duplicates, 0);
+        assert_eq!(repo.count_entries().unwrap(), 2);
+    }
+
+    // ── each source directory's own policy (project overlay) ────────────
+
+    #[test]
+    fn a_source_directorys_project_overlay_governs_that_rows_policy() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            project.path().join(".suvadu.toml"),
+            "exclusions = [\"PRIVATEPROJECT\"]\n\
+             [redaction]\nextra_patterns = [\"corp-[a-z0-9]{6}\"]\n",
+        )
+        .unwrap();
+        let project_dir = project.path().to_string_lossy().to_string();
+
+        // The global config knows neither the pattern nor the exclusion.
+        let cfg = crate::config::Config::default();
+        let mut secret = Row::new("s", 1_700_000_100_000_000_000, "deploy --key corp-ab12cd");
+        secret.cwd.clone_from(&project_dir);
+        let mut excluded = Row::new("x", 1_700_000_200_000_000_000, "echo PRIVATEPROJECT");
+        excluded.cwd.clone_from(&project_dir);
+        // A row outside the project keeps the global (permissive) policy.
+        let outside = Row::new(
+            "o",
+            1_700_000_300_000_000_000,
+            "echo PRIVATEPROJECT elsewhere",
+        );
+        let fixture = Fixture::modern(&[secret, excluded, outside]);
+
+        let stats = import(&fixture, &repo, &cfg, false);
+        assert_eq!(stats.excluded, 1, "the project's exclusion dropped one row");
+        assert_eq!(stats.redacted, 1, "the project's extra pattern matched one");
+        assert_eq!(stats.imported, 2);
+
+        let commands: Vec<String> = repo
+            .get_entries_by_session("atuin-0193c0ffee")
+            .unwrap()
+            .iter()
+            .map(|e| e.command.clone())
+            .collect();
+        assert!(
+            !commands.iter().any(|c| c.contains("corp-ab12cd")),
+            "{commands:?}"
+        );
+        assert!(
+            !commands.contains(&"echo PRIVATEPROJECT".to_string()),
+            "{commands:?}"
+        );
+        assert!(
+            commands.contains(&"echo PRIVATEPROJECT elsewhere".to_string()),
+            "a directory without the overlay keeps the global policy: {commands:?}"
         );
     }
 
