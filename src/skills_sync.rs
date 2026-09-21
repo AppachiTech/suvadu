@@ -2160,6 +2160,33 @@ mod tests {
     }
 
     #[test]
+    fn a_cursor_rule_edited_inside_or_above_the_managed_region_is_a_conflict() {
+        let (_dir, repo) = test_repo();
+        repo.create_skill(&skill("alpha", SKILL_SCOPE_GLOBAL))
+            .unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let targets = [SyncTarget::Cursor];
+        let path = cursor_rule_path(cwd.path(), "alpha");
+
+        for edited in [
+            // Inside the region suvadu generated…
+            |generated: String| generated.replace("Body for alpha.", "MY OWN NOTES"),
+            // …and above it.
+            |generated: String| format!("USER PREPENDED INSTRUCTIONS\n{generated}"),
+        ] {
+            apply(&repo, &targets, cwd.path(), Some(home.path()));
+            let text = edited(std::fs::read_to_string(&path).unwrap());
+            std::fs::write(&path, &text).unwrap();
+
+            let report = apply(&repo, &targets, cwd.path(), Some(home.path()));
+            assert_eq!(report.conflicts(), 1, "{text}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+
+    #[test]
     fn text_prepended_above_the_marker_is_a_conflict() {
         let (_dir, repo) = test_repo();
         repo.create_skill(&skill("alpha", SKILL_SCOPE_GLOBAL))
