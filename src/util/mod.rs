@@ -42,6 +42,30 @@ pub fn project_dirs() -> Option<&'static directories::ProjectDirs> {
     PROJECT_DIRS.as_ref()
 }
 
+// ── Subsequence matching ───────────────────────────────
+
+/// `true` when every character of `needle` occurs in `haystack` in order,
+/// gaps allowed, folding ASCII case. An empty (or whitespace-only) needle
+/// matches everything.
+///
+/// This is the single definition of the `fuzzy` recall mode's rule. It lives
+/// here rather than in `search::matching` because the database needs it too:
+/// `db::register_subseq_ci` exposes it to SQL as `suvadu_subseq_ci()` so a
+/// fuzzy query can be matched and counted completely in the database, while
+/// `MatchMode::matches` answers with the very same function in memory.
+pub fn is_subsequence_ci(haystack: &str, needle: &str) -> bool {
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return true;
+    }
+    let hay = haystack.to_ascii_lowercase();
+    let mut chars = hay.chars();
+    needle
+        .to_ascii_lowercase()
+        .chars()
+        .all(|c| chars.any(|h| h == c))
+}
+
 // ── Session ID validation ──────────────────────────────
 
 /// Returns `true` if `id` contains only safe characters for use as a session

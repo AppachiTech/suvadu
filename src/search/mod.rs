@@ -197,8 +197,10 @@ pub struct SearchApp {
     noted_entry_ids: std::collections::HashSet<i64>,
     bookmarked_commands: std::collections::HashSet<String>,
 
-    // Fuzzy search: cached scored results for pagination
-    fuzzy_results: Vec<Entry>,
+    // The newest eligible matches, ranked by relevance. Empty for modes that
+    // never rank. Pages past its end are read from the database instead —
+    // see `SearchApp::RANK_WINDOW`.
+    ranked_window: Vec<Entry>,
 
     // UI Feedback
     status_message: Option<(String, std::time::Instant)>,
@@ -275,7 +277,7 @@ impl SearchApp {
             noted_entry_ids: cfg.noted_entry_ids,
             bookmarked_commands: cfg.bookmarked_commands,
 
-            fuzzy_results: Vec::new(),
+            ranked_window: Vec::new(),
 
             status_message: None,
         };

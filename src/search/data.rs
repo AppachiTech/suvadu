@@ -181,6 +181,28 @@ impl SearchApp {
         }
     }
 
+    /// The query object for the current state, including the `fuzzy` mode's
+    /// subsequence rule, so SQL decides eligibility completely: what
+    /// `count_filtered` counts is exactly what `LIMIT`/`OFFSET` can walk.
+    fn build_matched_query<'a>(
+        &'a self,
+        plan: &'a super::matching::QueryPlan,
+        subsequence: Option<&'a str>,
+    ) -> crate::repository::Subsequence<'a, SessionScoped<'a>> {
+        crate::repository::Subsequence {
+            inner: self.build_query_filter(plan.query.as_deref(), &plan.tokens, plan.prefix),
+            needle: subsequence,
+            field: self.view.search_field,
+        }
+    }
+
+    /// The trimmed query when the mode matches by subsequence, else `None`.
+    fn subsequence_needle<'a>(&'a self, plan: &super::matching::QueryPlan) -> Option<&'a str> {
+        plan.allow_subsequence
+            .then(|| self.query.trim())
+            .filter(|q| !q.is_empty())
+    }
+
     /// Rank with the default (`terms`) rule: a pure subsequence is not a match.
     #[cfg(test)]
     pub(super) fn fuzzy_score(
@@ -204,10 +226,15 @@ impl SearchApp {
         )
     }
 
-    /// As `fuzzy_score`, but `allow_subsequence` decides whether an
-    /// abbreviation that shares no literal token (`gco` → `git checkout`)
-    /// counts as a match. Only `MatchMode::Fuzzy` passes `true`; that single
-    /// flag is the whole behavioural difference between the two modes.
+    /// As `fuzzy_score`, but `allow_subsequence` selects the `fuzzy` mode's
+    /// eligibility rule (`gco` → `git checkout`) instead of the default one.
+    /// Only `MatchMode::Fuzzy` passes `true`; that single flag is the whole
+    /// behavioural difference between the two modes.
+    ///
+    /// Eligibility is decided *before* and independently of the ranking tier,
+    /// and the relevance score never removes an entry — it only orders what
+    /// the mode already accepted. That is what lets the database count the
+    /// same set this function keeps.
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
@@ -256,54 +283,63 @@ impl SearchApp {
                 }
                 SearchField::Command => &entry.command,
             };
-            let haystack = Utf32Str::new(field_value, &mut buf);
-            if let Some(score) = pattern.score(haystack, &mut matcher) {
-                // Penalise long commands — short matches are more relevant.
-                // Commands ≤ length_threshold chars keep full score; longer
-                // ones are scaled down by sqrt(threshold/len).
-                let cmd_len = field_value.len().max(1) as f64;
-                let length_factor = if cmd_len <= threshold {
-                    1.0
-                } else {
-                    (threshold / cmd_len).sqrt()
-                };
-                let mut final_score = (f64::from(score) * length_factor) as u32;
-
-                // Boost human-executed commands over agent commands
-                if entry.is_human() && human_boost_percent > 0 {
-                    final_score = final_score.saturating_add(
-                        (f64::from(final_score) * f64::from(human_boost_percent) / 100.0) as u32,
-                    );
-                }
-                // Boost same-CWD commands
-                if boost_cwd.is_some_and(|cwd| entry.cwd == cwd) && cwd_boost_percent > 0 {
-                    final_score = final_score.saturating_add(
-                        (f64::from(final_score) * f64::from(cwd_boost_percent) / 100.0) as u32,
-                    );
-                }
-
-                // Match-quality tier (see `match_tier`): textual match quality
-                // dominates the cwd/recency boosts, which only break ties within
-                // a tier.
-                let tier = match_tier(&field_value.to_lowercase(), &query_lc, &atoms);
-
-                // Require every typed token to actually appear as a literal
-                // substring (tier >= 1). Pure subsequence matches (tier 0)
-                // surface unrelated commands — e.g. "git add" matching
-                // "git rev-parse", or random gibberish matching long commands
-                // whose characters happen to contain it as a subsequence.
-                // Results always contain what you typed; nucleo still ranks
-                // within the literal matches. `fuzzy` mode opts out of this
-                // guard — surfacing abbreviations is exactly what it is for,
-                // but only for entries the documented subsequence rule
-                // actually accepts, so the mode matches its own help.
-                if tier == 0 && !(allow_subsequence && MatchMode::Fuzzy.matches(field_value, query))
-                {
-                    continue;
-                }
-
-                scored.push((entry, tier, final_score));
+            // ── Matching: is this entry eligible at all? ───────────────
+            // Decided by the mode's own rule, never by how well it ranks.
+            //
+            // `terms` (and every non-subsequence mode) requires each typed
+            // token to appear as a literal substring, which is tier >= 1:
+            // pure subsequence hits surface unrelated commands, e.g.
+            // "git add" matching "git rev-parse". `fuzzy` asks the documented
+            // whole-query subsequence rule instead — *instead*, not as a
+            // fallback for tier 0, or a query whose words each appear would
+            // slip past the ordering the mode's own help promises.
+            let tier = match_tier(&field_value.to_lowercase(), &query_lc, &atoms);
+            let eligible = if allow_subsequence {
+                MatchMode::Fuzzy.matches(field_value, query)
+            } else {
+                tier >= 1
+            };
+            if !eligible {
+                continue;
             }
+
+            // ── Ranking: order what matching already accepted. ─────────
+            // A missing nucleo score means "no relevance signal", not "not a
+            // match" — nucleo's smart-case rule is stricter than the
+            // documented, case-insensitive one — so it scores 0 and keeps its
+            // place rather than disappearing from a result set the database
+            // has already counted.
+            let haystack = Utf32Str::new(field_value, &mut buf);
+            let score = pattern.score(haystack, &mut matcher).unwrap_or(0);
+
+            // Penalise long commands — short matches are more relevant.
+            // Commands ≤ length_threshold chars keep full score; longer
+            // ones are scaled down by sqrt(threshold/len).
+            let cmd_len = field_value.len().max(1) as f64;
+            let length_factor = if cmd_len <= threshold {
+                1.0
+            } else {
+                (threshold / cmd_len).sqrt()
+            };
+            let mut final_score = (f64::from(score) * length_factor) as u32;
+
+            // Boost human-executed commands over agent commands
+            if entry.is_human() && human_boost_percent > 0 {
+                final_score = final_score.saturating_add(
+                    (f64::from(final_score) * f64::from(human_boost_percent) / 100.0) as u32,
+                );
+            }
+            // Boost same-CWD commands
+            if boost_cwd.is_some_and(|cwd| entry.cwd == cwd) && cwd_boost_percent > 0 {
+                final_score = final_score.saturating_add(
+                    (f64::from(final_score) * f64::from(cwd_boost_percent) / 100.0) as u32,
+                );
+            }
+
+            // Match-quality tier (see `match_tier`): textual match quality
+            // dominates the cwd/recency boosts, which only break ties within
+            // a tier.
+            scored.push((entry, tier, final_score));
         }
 
         scored.sort_by(|a, b| {
@@ -340,49 +376,81 @@ impl SearchApp {
         });
     }
 
+    /// How many of the newest eligible matches are ranked by relevance.
+    ///
+    /// **Ranking versus pagination.** Matching and counting are complete: SQL
+    /// decides eligibility for every mode (including `fuzzy`, via
+    /// `suvadu_subseq_ci`), so `total_items` is the true number of matches in
+    /// the whole history and every page it implies can be fetched. Relevance
+    /// ranking, which needs the candidates in memory, is deliberately *not*
+    /// complete: only the newest `RANK_WINDOW` matches are ranked. Anything
+    /// beyond that window is paged straight from the database in recency
+    /// order — the order those pages would have had anyway, since a ranking
+    /// that could only see part of the result set would be arbitrary there.
+    ///
+    /// The consequence to hold on to: a partial ranking window never becomes
+    /// the whole result set, and a count is never reported that cannot be
+    /// paged to.
+    const RANK_WINDOW: usize = 5_000;
+
+    /// The ranking window rounded up to whole pages, so no single page ever
+    /// straddles the boundary between ranked results and the recency tail.
+    fn rank_window_size(&self) -> usize {
+        let page_size = self.pagination.page_size.max(1);
+        page_size * Self::RANK_WINDOW.div_ceil(page_size)
+    }
+
+    /// Re-run the query: count every eligible match, rank the newest window
+    /// of them, and show the first page.
+    ///
+    /// This is the one pipeline. Startup (`--query`), typing, editing, mode
+    /// and scope changes and pagination all arrive here or at
+    /// [`Self::set_page`], so they cannot disagree about what matches.
     pub(super) fn reload_entries(
         &mut self,
         repo: &Repository,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // The matching mode decides how the query becomes SQL; see
-        // `MatchMode::plan`. Every mode narrows in the database, so how far
-        // back a match lives never decides whether it is found.
+        // `MatchMode::plan`. Every mode narrows *and decides* in the database,
+        // so how far back a match lives never decides whether it is found.
         let plan = self.recall.match_mode.plan(&self.query);
+        let window = if plan.rerank {
+            self.rank_window_size()
+        } else {
+            0
+        };
 
-        // `literal` and `prefix` are exactly what SQL returns, so they keep
-        // the database's recency order and paginate in the database. `terms`
-        // and `fuzzy` rank in memory, which is what `plan.rerank` marks.
-        if plan.rerank {
-            // Narrow candidates in SQL, then score + rank them.
-            //
-            // The scorer only keeps entries where every typed token appears as
-            // a literal substring (see `match_tier`), so asking SQL for the
-            // same thing yields the same set from the *whole* history. Before,
-            // this fetched the newest 5,000 rows and matched in memory, which
-            // silently hid any older match. The limit now bounds how many
-            // matches are ranked, not how much history is searched.
-            const MAX_RANKED_MATCHES: usize = 5_000;
-            let qf = self.build_query_filter(None, &plan.tokens, false);
+        // Borrow-only phase: everything that reads `self` through the query.
+        let (total, ranked, ranked_counts) = {
+            let qf = self.build_matched_query(&plan, self.subsequence_needle(&plan));
 
-            if self.view.unique_mode {
-                let unique_res =
-                    repo.get_unique_entries_filtered(MAX_RANKED_MATCHES, 0, &qf, false)?;
-                let (entries, counts): (Vec<Entry>, Vec<i64>) = unique_res.into_iter().unzip();
+            let total = usize::try_from(if self.view.unique_mode {
+                repo.count_unique_filtered(&qf)?
+            } else {
+                repo.count_filtered(&qf)?
+            })?;
 
-                let mut count_map = std::collections::HashMap::new();
-                for (entry, count) in entries.iter().zip(counts.iter()) {
-                    if let Some(id) = entry.id {
-                        count_map.insert(id, *count);
-                    }
-                }
-
+            if window == 0 {
+                (total, Vec::new(), std::collections::HashMap::new())
+            } else {
                 let boost_cwd = if self.view.context_boost {
                     self.view.current_cwd.as_deref()
                 } else {
                     None
                 };
-                let scored = Self::fuzzy_score_mode(
-                    entries,
+                let (candidates, counts) = if self.view.unique_mode {
+                    let rows = repo.get_unique_entries_filtered(window, 0, &qf, false)?;
+                    let (entries, counts): (Vec<Entry>, Vec<i64>) = rows.into_iter().unzip();
+                    let map = Self::count_map(&entries, &counts);
+                    (entries, map)
+                } else {
+                    (
+                        repo.get_entries_filtered(window, 0, &qf)?,
+                        std::collections::HashMap::new(),
+                    )
+                };
+                let ranked = Self::fuzzy_score_mode(
+                    candidates,
                     &self.query,
                     boost_cwd,
                     self.view.search_field,
@@ -391,109 +459,72 @@ impl SearchApp {
                     self.view.cwd_boost_percent,
                     plan.allow_subsequence,
                 );
-                self.unique_counts = count_map;
-                self.fuzzy_results = scored;
-            } else {
-                let entries = repo.get_entries_filtered(MAX_RANKED_MATCHES, 0, &qf)?;
-
-                let boost_cwd = if self.view.context_boost {
-                    self.view.current_cwd.as_deref()
-                } else {
-                    None
-                };
-                self.fuzzy_results = Self::fuzzy_score_mode(
-                    entries,
-                    &self.query,
-                    boost_cwd,
-                    self.view.search_field,
-                    self.view.length_threshold,
-                    self.view.human_boost_percent,
-                    self.view.cwd_boost_percent,
-                    plan.allow_subsequence,
-                );
+                (total, ranked, counts)
             }
+        };
 
-            self.pagination.total_items = self.fuzzy_results.len();
-            self.pagination.page = 1;
-            let end = self.pagination.page_size.min(self.fuzzy_results.len());
-            self.entries = self.fuzzy_results[..end].to_vec();
-        } else {
-            // Exact path: SQL does the whole match and the pagination, and
-            // results stay in recency order — that predictability is the
-            // point of the literal and prefix modes.
-            self.fuzzy_results.clear();
-            let qf = self.build_query_filter(plan.query.as_deref(), &[], plan.prefix);
-
-            if self.view.unique_mode {
-                let new_count = repo.count_unique_filtered(&qf)?;
-                let unique_res =
-                    repo.get_unique_entries_filtered(self.pagination.page_size, 0, &qf, true)?;
-                // qf no longer needed — safe to mutate self
-                self.pagination.total_items = usize::try_from(new_count)?;
-                self.pagination.page = 1;
-                let (entries, counts): (Vec<Entry>, Vec<i64>) = unique_res.into_iter().unzip();
-                self.unique_counts.clear();
-                for (entry, count) in entries.iter().zip(counts.iter()) {
-                    if let Some(id) = entry.id {
-                        self.unique_counts.insert(id, *count);
-                    }
-                }
-                self.entries = entries;
-            } else {
-                let new_count = repo.count_filtered(&qf)?;
-                let new_entries = repo.get_entries_filtered(self.pagination.page_size, 0, &qf)?;
-                // qf no longer needed — safe to mutate self
-                self.pagination.total_items = usize::try_from(new_count)?;
-                self.pagination.page = 1;
-                self.entries = new_entries;
-            }
-        }
-
-        self.table_state.select(if self.entries.is_empty() {
-            None
-        } else {
-            Some(0)
-        });
-        Ok(())
+        self.pagination.total_items = total;
+        self.ranked_window = ranked;
+        self.unique_counts = ranked_counts;
+        self.set_page(repo, 1)
     }
 
+    /// Map entry id → occurrence count, for unique mode's badge.
+    fn count_map(entries: &[Entry], counts: &[i64]) -> std::collections::HashMap<i64, i64> {
+        let mut map = std::collections::HashMap::new();
+        for (entry, count) in entries.iter().zip(counts.iter()) {
+            if let Some(id) = entry.id {
+                map.insert(id, *count);
+            }
+        }
+        map
+    }
+
+    /// Show page `page` of the current result set.
+    ///
+    /// Pages inside the ranking window are served from it; the rest come
+    /// straight from the database at the same offset, in recency order (see
+    /// [`Self::RANK_WINDOW`]). Because the window is a whole number of pages,
+    /// one page is never half ranked and half not.
     pub(super) fn set_page(
         &mut self,
         repo: &Repository,
         page: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.pagination.page = page;
-        let offset = (self.pagination.page - 1) * self.pagination.page_size;
+        self.pagination.page = page.max(1);
+        let page_size = self.pagination.page_size;
+        let offset = (self.pagination.page - 1) * page_size;
 
-        if self.fuzzy_results.is_empty() {
-            // Standard DB-level pagination. The plan must match the one
+        if offset < self.ranked_window.len() {
+            let end = (offset + page_size).min(self.ranked_window.len());
+            self.entries = self.ranked_window[offset..end].to_vec();
+        } else {
+            // Beyond the ranked window, or a mode that never ranks: the
+            // database answers directly. The plan must be the one
             // `reload_entries` used, or page 2 would answer a different
             // question from page 1.
             let plan = self.recall.match_mode.plan(&self.query);
-            let qf = self.build_query_filter(plan.query.as_deref(), &plan.tokens, plan.prefix);
-
-            if self.view.unique_mode {
-                let unique_res =
-                    repo.get_unique_entries_filtered(self.pagination.page_size, offset, &qf, true)?;
-                let (entries, counts): (Vec<Entry>, Vec<i64>) = unique_res.into_iter().unzip();
-                self.unique_counts.clear();
-                for (entry, count) in entries.iter().zip(counts.iter()) {
-                    if let Some(id) = entry.id {
-                        self.unique_counts.insert(id, *count);
-                    }
+            let (entries, counts) = {
+                let qf = self.build_matched_query(&plan, self.subsequence_needle(&plan));
+                if self.view.unique_mode {
+                    // `sort_alphabetically` must match the ordering the window
+                    // was drawn from, or a tail page could repeat or skip.
+                    let rows =
+                        repo.get_unique_entries_filtered(page_size, offset, &qf, !plan.rerank)?;
+                    let (entries, counts): (Vec<Entry>, Vec<i64>) = rows.into_iter().unzip();
+                    let map = Self::count_map(&entries, &counts);
+                    (entries, map)
+                } else {
+                    (
+                        repo.get_entries_filtered(page_size, offset, &qf)?,
+                        std::collections::HashMap::new(),
+                    )
                 }
-                self.entries = entries;
-            } else {
-                self.entries = repo.get_entries_filtered(self.pagination.page_size, offset, &qf)?;
-            }
-        } else {
-            // Fuzzy mode: paginate from in-memory scored results
-            let end = (offset + self.pagination.page_size).min(self.fuzzy_results.len());
-            self.entries = if offset < self.fuzzy_results.len() {
-                self.fuzzy_results[offset..end].to_vec()
-            } else {
-                Vec::new()
             };
+            if self.view.unique_mode {
+                self.unique_counts.extend(counts);
+            }
+            self.entries = entries;
         }
 
         self.table_state.select(if self.entries.is_empty() {

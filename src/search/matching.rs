@@ -22,16 +22,15 @@
 //!   entries whose terms appear contiguously and in query order rank higher,
 //!   but a scattered match is still a match.
 //! * **Case:** matching is always case-insensitive for ASCII, and how far it
-//!   goes beyond that depends on the mode. `terms` and `fuzzy` are re-ranked
-//!   in memory after SQL narrowing, so they fold case with Rust's full
-//!   Unicode lowercasing — a non-ASCII term also narrows through
+//!   goes beyond that depends on the mode. `terms` folds case with Rust's
+//!   full Unicode lowercasing — a non-ASCII term narrows through
 //!   `suvadu_contains_ci()` rather than `LIKE`, so `ÉCHO` does find `écho`.
-//!   `literal` and `prefix` are answered by SQL alone, and the underlying
-//!   `LIKE` folds ASCII only, so in those two modes `ÉCHO` does not find
-//!   `écho`.
+//!   `literal`, `prefix` and `fuzzy` fold ASCII only: the first two are
+//!   answered by `LIKE`, and `fuzzy` by `suvadu_subseq_ci()`, which is
+//!   [`MatchMode::matches`] itself.
 //!   [`MatchMode::matches`] below is the ASCII-only reference predicate used
-//!   by tests and by `fuzzy`'s subsequence check; it is not the live filter
-//!   for `terms`.
+//!   by tests and, for `fuzzy`, the live rule; it is not the live filter for
+//!   `terms`, which folds more case than it does.
 //! * **Quoting:** there is no quoting syntax. `"` and `'` are ordinary
 //!   characters that must appear in the entry. To match a phrase that contains
 //!   spaces or punctuation exactly, use `literal` mode.
@@ -116,7 +115,7 @@ impl MatchMode {
             Self::Terms => query_terms(&needle).iter().all(|t| hay.contains(t)),
             Self::Literal => hay.contains(&needle),
             Self::Prefix => hay.starts_with(&needle),
-            Self::Fuzzy => is_subsequence(&hay, &needle),
+            Self::Fuzzy => is_subsequence_ci(&hay, &needle),
         }
     }
 }
@@ -131,8 +130,14 @@ pub fn query_terms(query: &str) -> Vec<&str> {
 ///
 /// Every mode narrows in SQL, so a match is found however old it is and
 /// however large the history has grown — the database never hands back "the
-/// newest N rows and hope". The narrowing is always a *superset* of the mode's
-/// true match set; the in-memory pass then applies the exact rule.
+/// newest N rows and hope".
+///
+/// The clauses below are a *superset* of the mode's true match set on their
+/// own: `fuzzy` asks only that each distinct query character occur somewhere.
+/// Recall therefore pairs them with the mode's exact rule, also in SQL
+/// (`FilterBuilder::with_subsequence`, i.e. `suvadu_subseq_ci`), so the
+/// database decides eligibility completely. That is what makes a result count
+/// trustworthy and every page of it reachable; the in-memory pass only ranks.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct QueryPlan {
     /// Whole-query clause (`QueryFilter::query`), for literal and prefix.
@@ -147,9 +152,11 @@ pub struct QueryPlan {
     /// returns, so results stay in recency order and the mode is predictable.
     /// `true` for terms and fuzzy, where relevance ordering is the point.
     pub rerank: bool,
-    /// Whether the scorer may keep a pure subsequence match (an abbreviation).
-    /// Only `fuzzy` says yes; that is the whole difference between it and the
-    /// default.
+    /// Whether this mode's eligibility rule is the whole-query subsequence
+    /// (an abbreviation like `gco` → `git checkout`) rather than "every token
+    /// appears literally". Only `fuzzy` says yes; that is the whole difference
+    /// between it and the default. It selects the rule outright — it is not a
+    /// fallback applied only when nothing matched literally.
     pub allow_subsequence: bool,
 }
 
@@ -201,11 +208,10 @@ fn distinct_chars(q: &str) -> Vec<String> {
     seen
 }
 
-/// `true` when every char of `needle` appears in `hay`, in order.
-fn is_subsequence(hay: &str, needle: &str) -> bool {
-    let mut chars = hay.chars();
-    needle.chars().all(|c| chars.any(|h| h == c))
-}
+/// The one definition of `fuzzy` eligibility, shared with the SQL predicate
+/// `suvadu_subseq_ci` so the database and the in-memory pass can never
+/// disagree about which entries the mode accepts.
+pub use crate::util::is_subsequence_ci;
 
 #[cfg(test)]
 mod tests {

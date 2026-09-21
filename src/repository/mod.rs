@@ -155,6 +155,26 @@ impl EntryQuery for SessionScoped<'_> {
     }
 }
 
+/// Any entry query plus the `fuzzy` mode's subsequence rule.
+///
+/// Wrapping rather than adding a field to [`QueryFilter`] keeps the rule where
+/// it belongs — only interactive recall's `fuzzy` mode has one — and means
+/// every other caller is untouched. `needle: None` behaves exactly like the
+/// inner query, so the wrapper is safe to apply unconditionally.
+pub struct Subsequence<'a, Q: EntryQuery> {
+    pub inner: Q,
+    pub needle: Option<&'a str>,
+    pub field: crate::models::SearchField,
+}
+
+impl<Q: EntryQuery> EntryQuery for Subsequence<'_, Q> {
+    fn entry_filter_builder(&self) -> FilterBuilder {
+        self.inner
+            .entry_filter_builder()
+            .with_subsequence(self.needle, self.field)
+    }
+}
+
 use crate::models::SearchField;
 
 /// Filter parameters for replay queries.
@@ -327,6 +347,28 @@ impl FilterBuilder {
             }
             self.params.push(Box::new(format!("%{escaped}%")));
         }
+        self
+    }
+
+    /// Require `field` to contain `needle` as a case-insensitive subsequence
+    /// — the `fuzzy` recall mode's own rule, evaluated by the database.
+    ///
+    /// The per-character `LIKE` clauses from `with_query_tokens` narrow the
+    /// rows this has to look at; this clause then decides eligibility exactly,
+    /// so `count_filtered`/`count_unique_filtered` return a number the caller
+    /// can really page to and `LIMIT`/`OFFSET` walk only accepted matches.
+    pub fn with_subsequence(mut self, needle: Option<&str>, field: SearchField) -> Self {
+        let Some(needle) = needle.filter(|n| !n.trim().is_empty()) else {
+            return self;
+        };
+        let column = match field {
+            SearchField::Cwd => "e.cwd",
+            SearchField::Session => "e.session_id",
+            SearchField::Executor => "COALESCE(e.executor_type || ' ' || e.executor, '')",
+            SearchField::Command => "e.command",
+        };
+        self.clauses.push(format!("suvadu_subseq_ci({column}, ?)"));
+        self.params.push(Box::new(needle.to_string()));
         self
     }
 

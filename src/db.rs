@@ -326,6 +326,11 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
     // containing non-ASCII characters (see FilterBuilder::with_query_tokens).
     register_contains_ci(&conn)?;
 
+    // Register the `fuzzy` mode's subsequence rule so the database can decide
+    // eligibility itself. Without it, SQL could only narrow to a superset and
+    // the true number of matches was unknowable without loading them all.
+    register_subseq_ci(&conn)?;
+
     // WAL mode is persistent — only set if not already active.
     let current_mode: String = conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
     if current_mode != "wal" {
@@ -408,6 +413,36 @@ fn register_contains_ci(conn: &Connection) -> DbResult<()> {
                 .as_str()
                 .map_err(|e| rusqlite::Error::UserFunctionError(e.into()))?;
             Ok(haystack.to_lowercase().contains(&needle.to_lowercase()))
+        },
+    )?;
+    Ok(())
+}
+
+/// Registers `suvadu_subseq_ci(haystack, needle)`: true when `needle`'s
+/// characters occur in `haystack` in order, gaps allowed, folding ASCII case.
+///
+/// This is the `fuzzy` matching mode's documented rule, evaluated by the
+/// database so that counting and paginating a fuzzy query need no in-memory
+/// pass over the whole history. It shares its implementation with
+/// `MatchMode::matches`, so the two can never drift apart.
+fn register_subseq_ci(conn: &Connection) -> DbResult<()> {
+    use rusqlite::functions::FunctionFlags;
+
+    conn.create_scalar_function(
+        "suvadu_subseq_ci",
+        2,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        move |ctx| {
+            let haystack = ctx
+                .get_raw(0)
+                .as_str_or_null()
+                .unwrap_or(None)
+                .unwrap_or("");
+            let needle = ctx
+                .get_raw(1)
+                .as_str()
+                .map_err(|e| rusqlite::Error::UserFunctionError(e.into()))?;
+            Ok(crate::util::is_subsequence_ci(haystack, needle))
         },
     )?;
     Ok(())

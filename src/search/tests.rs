@@ -2791,6 +2791,156 @@ fn filters_still_exclude_an_old_command_that_matches_the_text() {
     drop(dir);
 }
 
+// ── broad queries: complete counting and reachable pages (R01) ─────
+// The fixtures above plant one rare match behind thousands of *non*-matching
+// rows, which only proves SQL narrowing reaches back far enough. These plant
+// thousands of *eligible* matches with the sought one oldest, which is what
+// exposes a ranking window being mistaken for the whole result set.
+
+/// A repository where `needle` is the oldest entry and every one of the
+/// `filler` newer entries also matches the same broad query.
+fn repo_with_broad_matches(
+    needle: &str,
+    filler_template: &str,
+    filler: usize,
+) -> (tempfile::TempDir, crate::repository::Repository) {
+    let (dir, repo) = crate::test_utils::test_repo();
+    repo.insert_session(&crate::models::Session {
+        id: "session123".into(),
+        hostname: "test".into(),
+        created_at: 1000,
+        tag_id: None,
+    })
+    .unwrap();
+    let mut oldest = create_test_entry(needle);
+    oldest.started_at = 1000;
+    oldest.ended_at = 2000;
+    repo.insert_entry(&oldest).unwrap();
+    for i in 1..=i64::try_from(filler).unwrap() {
+        let mut entry = create_test_entry(&format!("{filler_template}{i}"));
+        entry.started_at = 1000 + i;
+        entry.ended_at = 2000 + i;
+        repo.insert_entry(&entry).unwrap();
+    }
+    (dir, repo)
+}
+
+/// Walk every page the app claims to have and return what it showed.
+fn walk_every_page(app: &mut SearchApp, repo: &crate::repository::Repository) -> Vec<String> {
+    let pages = app
+        .pagination
+        .total_items
+        .div_ceil(app.pagination.page_size);
+    let mut seen = Vec::new();
+    for page in 1..=pages {
+        app.set_page(repo, page).unwrap();
+        seen.extend(app.entries.iter().map(|e| e.command.clone()));
+    }
+    seen
+}
+
+#[test]
+fn a_broad_query_reports_a_total_it_can_page_to() {
+    // 5,001 eligible matches for "git": more than any ranking window.
+    let (_d, repo) = repo_with_broad_matches("git", "echo git filler", 5000);
+
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+    app.query = "git".into();
+    app.reload_entries(&repo).unwrap();
+
+    assert_eq!(
+        app.pagination.total_items, 5001,
+        "the total must be the count of eligible matches, not of ranked ones"
+    );
+
+    let seen = walk_every_page(&mut app, &repo);
+    assert_eq!(
+        seen.len(),
+        5001,
+        "every claimed page must yield its entries"
+    );
+    assert!(
+        seen.contains(&"git".to_string()),
+        "the oldest exact match must be reachable by paging"
+    );
+    let unique: std::collections::HashSet<&String> = seen.iter().collect();
+    assert_eq!(unique.len(), 5001, "paging must not repeat an entry");
+}
+
+#[test]
+fn a_broad_unique_query_reports_a_total_it_can_page_to() {
+    let (_d, repo) = repo_with_broad_matches("git", "echo git filler", 5000);
+
+    let mut config = test_search_config(vec![], 0);
+    config.view.unique_mode = true;
+    let mut app = SearchApp::new(config);
+    app.query = "git".into();
+    app.reload_entries(&repo).unwrap();
+
+    assert_eq!(
+        app.pagination.total_items, 5001,
+        "unique mode must count every distinct eligible command"
+    );
+
+    let seen = walk_every_page(&mut app, &repo);
+    assert!(
+        seen.contains(&"git".to_string()),
+        "unique mode must reach the oldest exact match"
+    );
+    let unique: std::collections::HashSet<&String> = seen.iter().collect();
+    assert_eq!(
+        unique.len(),
+        5001,
+        "unique paging must not repeat a command"
+    );
+}
+
+#[test]
+fn a_broad_fuzzy_query_reports_a_total_it_can_page_to() {
+    // Every entry is a "gco" subsequence match; the sought one is the oldest.
+    let (_d, repo) = repo_with_broad_matches("git checkout", "echo git checkout filler", 5000);
+
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+    app.recall.match_mode = MatchMode::Fuzzy;
+    app.query = "gco".into();
+    app.reload_entries(&repo).unwrap();
+
+    assert_eq!(
+        app.pagination.total_items, 5001,
+        "fuzzy must count the entries it would actually accept"
+    );
+
+    let seen = walk_every_page(&mut app, &repo);
+    assert!(
+        seen.contains(&"git checkout".to_string()),
+        "fuzzy must reach the oldest abbreviation match"
+    );
+    let unique: std::collections::HashSet<&String> = seen.iter().collect();
+    assert_eq!(unique.len(), 5001, "fuzzy paging must not repeat an entry");
+}
+
+#[test]
+fn a_fuzzy_total_never_counts_a_candidate_the_mode_would_reject() {
+    // SQL narrows fuzzy by distinct characters, which admits far more than
+    // the subsequence rule accepts. The reported total must be the accepted
+    // set, or the footer promises pages that hold nothing.
+    let (_d, repo) = repo_with(&["git checkout", "ocg", "cog", "go cook"]);
+
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+    app.recall.match_mode = MatchMode::Fuzzy;
+    app.query = "gco".into();
+    app.reload_entries(&repo).unwrap();
+
+    let expected = ["git checkout", "go cook"];
+    assert_eq!(
+        app.pagination.total_items,
+        expected.len(),
+        "total counted rejected candidates: showed {:?}",
+        app.entries.iter().map(|e| &e.command).collect::<Vec<_>>()
+    );
+    assert_eq!(app.entries.len(), expected.len());
+}
+
 /// Rough guard that matching across the whole history stays interactive.
 /// Ignored by default: it builds a 100k-entry database. Run with
 /// `cargo test --release --bin suv typed_search_latency -- --ignored --nocapture`.
@@ -2972,6 +3122,82 @@ fn every_mode_finds_a_match_older_than_any_candidate_window() {
             "{mode:?} lost an old match ({} results)",
             found.len()
         );
+    }
+}
+
+// ── fuzzy obeys its own ordering rule (R10) ───────────────────────
+
+#[test]
+fn fuzzy_rejects_a_query_whose_words_are_present_but_out_of_order() {
+    let (_d, repo) = repo_with(&["git checkout"]);
+
+    // "checkout git" is not a subsequence of "git checkout", so fuzzy — whose
+    // help promises "letters in order, gaps allowed" — must reject it.
+    assert!(
+        search_in_mode(&repo, MatchMode::Fuzzy, "checkout git").is_empty(),
+        "fuzzy accepted an out-of-order query"
+    );
+    // `terms` keeps unordered token matching; that difference is the point.
+    assert_eq!(
+        search_in_mode(&repo, MatchMode::Terms, "checkout git"),
+        vec!["git checkout".to_string()]
+    );
+}
+
+#[test]
+fn fuzzy_eligibility_does_not_depend_on_the_ranking_tier() {
+    // Each of these queries has at least one literal token in the command, so
+    // the ranking tier is non-zero — but none is a whole-query subsequence.
+    let (_d, repo) = repo_with(&["git checkout main", "cargo test --offline"]);
+
+    for query in ["checkout git", "main git", "offline cargo", "test cargo"] {
+        assert!(
+            search_in_mode(&repo, MatchMode::Fuzzy, query).is_empty(),
+            "fuzzy accepted {query:?} because its tier was non-zero"
+        );
+    }
+}
+
+/// Every mode's live result set must equal its documented predicate.
+#[test]
+fn every_mode_agrees_end_to_end_with_its_reference_predicate() {
+    const CORPUS: &[&str] = &[
+        "git checkout main",
+        "git commit --amend",
+        "go container ops",
+        "cargo test --offline",
+        "ls -la",
+        "ocg",
+        "echo GIT",
+    ];
+    let (_d, repo) = repo_with(CORPUS);
+
+    for mode in [
+        MatchMode::Terms,
+        MatchMode::Literal,
+        MatchMode::Prefix,
+        MatchMode::Fuzzy,
+    ] {
+        for query in [
+            "gco",
+            "git",
+            "GIT",
+            "checkout git",
+            "git checkout",
+            "cargo test",
+            "test cargo",
+            "ls",
+        ] {
+            let mut expected: Vec<String> = CORPUS
+                .iter()
+                .filter(|c| mode.matches(c, query))
+                .map(|c| (*c).to_string())
+                .collect();
+            expected.sort();
+            let mut got = search_in_mode(&repo, mode, query);
+            got.sort();
+            assert_eq!(got, expected, "{mode:?} with {query:?}");
+        }
     }
 }
 
