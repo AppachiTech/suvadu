@@ -463,6 +463,61 @@ fn excluded_directories_are_invisible_to_every_tool_and_resource() {
     }
 }
 
+/// A recorded capture gap is evidence that something is missing, and the
+/// reader must keep being told that. The *directory* the gap names is a
+/// path the user asked suvadu to keep quiet about, so it is withheld: the
+/// point is to hide the path, not the fact.
+#[test]
+fn a_capture_gap_in_an_excluded_directory_is_reported_without_naming_it() {
+    let (dir, repo) = crate::test_utils::test_repo();
+    captured_session(&repo, dir.path(), "run-gap", OPEN_DIR);
+    repo.raw_execute_for_test(&format!(
+        "UPDATE ai_sources SET gaps='{{\"all_before\":0,\"dirs\":{{\"{SECRET_DIR}\":100}}}}'"
+    ))
+    .unwrap();
+
+    let read = |cfg: &McpConfig| -> Value {
+        serde_json::from_str(
+            &super::tools::call_tool(
+                &repo,
+                "get_agent_session",
+                &json!({"session_id": "codex-run-gap"}),
+                cfg,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+
+    let capture = read(&McpConfig {
+        exclude_dirs: vec![SECRET_DIR.to_string()],
+        ..mcp()
+    })["session"]["capture"]
+        .clone();
+    let missing = capture["known_missing"].to_string();
+    assert!(
+        !missing.contains(SECRET_DIR),
+        "capture diagnostics named an excluded directory:\n{missing}"
+    );
+    assert_eq!(
+        capture["complete"], false,
+        "hiding the path also hid the gap:\n{capture}"
+    );
+    assert!(
+        missing.contains("capture was off"),
+        "the reader is no longer told those records are missing:\n{missing}"
+    );
+
+    // Without the exclusion the same gap still names the directory, so the
+    // filtering above is the exclusion policy and not a lost message.
+    assert!(
+        read(&mcp())["session"]["capture"]["known_missing"]
+            .to_string()
+            .contains(SECRET_DIR),
+        "an unexcluded gap should still name its directory"
+    );
+}
+
 #[test]
 fn disabling_a_tool_also_disables_the_resource_that_mirrors_it() {
     let (_dir, repo) = seeded();

@@ -750,7 +750,7 @@ impl Repository {
             }
         }
         let model = latest_model;
-        let capture = self.ai_capture_status(id, row.7, unreadable)?;
+        let capture = self.ai_capture_status(id, row.7, unreadable, excluded_dirs)?;
         Ok(
             json!({"id":id,"native_id":row.0,"agent":row.1,"cwd":row.2,"parent_id":row.3,"created_at":row.4,"updated_at":row.5,"first_activity_at":first_activity_at.unwrap_or(row.4),"last_activity_at":last_activity_at.unwrap_or(row.5),"revision":format!("e{}-c{count}-{max_id}",row.6),"model":model,"models":models,"usage":usage,"coverage":"partial","usage_complete":row.7,"event_count":event_count,"command_count":count,"preview":preview,"capture":capture,"coverage_note":"Captured native transcript events and locally recorded shell commands only; child sessions, non-shell tools and unavailable records are not combined."}),
         )
@@ -762,11 +762,17 @@ impl Repository {
     /// capture switched off, usage counters it could not follow);
     /// `unverifiable` names what suvadu never observes at all, so a captured
     /// final answer is never read as proof that every command was recorded.
+    ///
+    /// A gap's directory is a path the caller may have asked suvadu to keep
+    /// quiet about, so `excluded_dirs` applies here exactly as it does to
+    /// the records themselves: the fact that something is missing is always
+    /// reported, the excluded path never is.
     fn ai_capture_status(
         &self,
         id: &str,
         usage_complete: bool,
         unreadable_records: usize,
+        excluded_dirs: &[String],
     ) -> DbResult<Value> {
         let mut statement = self
             .conn
@@ -795,6 +801,13 @@ impl Repository {
             }
         }
         disabled_dirs.sort();
+        // Naming an excluded directory would disclose the very path the
+        // exclusion exists to hide, so those gaps are counted instead.
+        let hidden_dirs = disabled_dirs
+            .iter()
+            .filter(|dir| excluded(dir, excluded_dirs))
+            .count();
+        disabled_dirs.retain(|dir| !excluded(dir, excluded_dirs));
         future_versions.sort_unstable();
         let mut known_missing = Vec::new();
         if paused_window {
@@ -806,6 +819,17 @@ impl Repository {
         for dir in disabled_dirs {
             known_missing.push(format!(
                 "Records from {dir} were skipped while capture was off there"
+            ));
+        }
+        if hidden_dirs > 0 {
+            let noun = if hidden_dirs == 1 {
+                "directory"
+            } else {
+                "directories"
+            };
+            known_missing.push(format!(
+                "Records from {hidden_dirs} {noun} were skipped while capture was off there; \
+                 the path is withheld by mcp.exclude_dirs"
             ));
         }
         if !usage_complete {
