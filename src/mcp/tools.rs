@@ -2181,7 +2181,7 @@ fn format_skill_summary(s: &crate::models::Skill) -> String {
 /// A skill scoped to a directory the user asked suvadu to keep quiet about
 /// discloses that directory's path just by being listed, so exclusions
 /// apply to skills as well as to commands.
-fn skill_visible(skill: &crate::models::Skill, mcp: &crate::config::McpConfig) -> bool {
+pub(super) fn skill_visible(skill: &crate::models::Skill, mcp: &crate::config::McpConfig) -> bool {
     skill.scope == crate::models::SKILL_SCOPE_GLOBAL
         || !mcp.exclude_dirs.iter().any(|dir| {
             let root = crate::repository::expand_tilde(dir);

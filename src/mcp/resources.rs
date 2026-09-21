@@ -86,7 +86,7 @@ pub fn read_resource(
         "suvadu://agents/activity" => read_agent_activity(repo, mcp)?,
         "suvadu://agents/sessions" => read_agent_sessions(repo, mcp)?,
         "suvadu://context/project" => read_project_context(repo, mcp)?,
-        "suvadu://skills/index" => read_skills_index(repo)?,
+        "suvadu://skills/index" => read_skills_index(repo, mcp)?,
         _ if uri.starts_with("suvadu://history/session/") => {
             let session_id = uri.strip_prefix("suvadu://history/session/").unwrap_or("");
             read_session_history(repo, session_id, mcp)?
@@ -749,11 +749,17 @@ fn read_project_context(
         .render())
 }
 
-fn read_skills_index(repo: &Repository) -> Result<String, String> {
+fn read_skills_index(repo: &Repository, mcp: &crate::config::McpConfig) -> Result<String, String> {
     const MAX_SHOWN: usize = 30;
-    let skills = repo
+    // PROD-13: this resource mirrors `list_skills`, so it hides exactly
+    // what that tool hides. A skill scoped to an excluded directory names
+    // that directory in its scope — and often in its description too.
+    let skills: Vec<_> = repo
         .list_skills(None, Some(crate::models::SKILL_STATUS_ACTIVE))
-        .map_err(|e| format!("query failed: {e}"))?;
+        .map_err(|e| format!("query failed: {e}"))?
+        .into_iter()
+        .filter(|skill| super::tools::skill_visible(skill, mcp))
+        .collect();
 
     let mut response = conv::Response::new(
         format!("{} active shared skills", skills.len()),

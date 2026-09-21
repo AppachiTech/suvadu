@@ -156,6 +156,20 @@ fn seeded() -> (tempfile::TempDir, Repository) {
     })
     .unwrap();
 
+    // A skill scoped to the excluded directory: its name, scope and
+    // description all name a place the user asked suvadu to keep quiet
+    // about, so no surface may print it under that configuration.
+    repo.create_skill(&crate::models::NewSkill {
+        name: "secret-release".into(),
+        description: format!("How to cut a release from {SECRET_DIR}"),
+        body: "1. read topsecret.env\n".into(),
+        triggers: vec!["release".into()],
+        scope: SECRET_DIR.to_string(),
+        source: "human".into(),
+        status: crate::models::SKILL_STATUS_ACTIVE.to_string(),
+    })
+    .unwrap();
+
     (dir, repo)
 }
 
