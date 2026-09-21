@@ -129,8 +129,11 @@ exited 0.** There is no frecency in interactive search. `literal`, `prefix`
 and an empty query are not re-ranked at all: those come back newest first.
 
 At most 5,000 matches are ordered. That caps the ranking work, not how much
-history was searched — the database has already narrowed to real matches by
-then.
+history was searched, and not how much of it you can reach: matching and
+counting finish in the database, so the result count is the real number of
+matches and every page of it can be opened. Pages past the ranked window
+come back newest first — a relevance order computed from only part of the
+result set would be arbitrary there.
 
 Up/Down arrow recall is a different, simpler path: prefix match, newest
 first, no deduplication, with the current directory used only to break ties

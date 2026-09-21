@@ -104,7 +104,8 @@ Recording overhead per command: p50 82µs, p95 151µs, p99 1.42ms.
   times a one-token query.
 - The harness asks for **every** match with no limit. Interactive search ranks
   at most 5,000 matches, so it does less work than this; these are worst-case
-  figures.
+  figures. It does count every match, but only when that window comes back
+  full — i.e. only when there is more to page through.
 - Non-ASCII queries (`unicode-command`, `unicode-case-folded`) use
   `suvadu_contains_ci()`, which cannot use an index and scans. At 100k they
   are comparable to indexed queries, but expect them to degrade faster on a
