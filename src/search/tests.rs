@@ -995,6 +995,25 @@ fn test_enter_with_no_selection_continues() {
 }
 
 #[test]
+fn enter_on_an_empty_result_set_leaves_recall_with_nothing() {
+    // There is nothing to accept, so accepting means accepting nothing —
+    // recall closes and the shell keeps whatever it had, exactly as Esc.
+    // Without this, a query that matches nothing traps the user in the TUI.
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+    assert!(matches!(
+        app.handle_input(KeyEvent::from(KeyCode::Enter)),
+        SearchAction::Exit
+    ));
+
+    let mut vim = SearchApp::new(test_vim_config(vec![], 0));
+    vim.vim_mode = VimMode::Normal;
+    assert!(matches!(
+        vim.handle_input(KeyEvent::from(KeyCode::Enter)),
+        SearchAction::Exit
+    ));
+}
+
+#[test]
 fn test_right_at_last_page_continues() {
     let entries = vec![create_test_entry("cmd")];
     // 50 total items with page_size 50 = 1 page
@@ -3123,6 +3142,117 @@ fn every_mode_finds_a_match_older_than_any_candidate_window() {
             found.len()
         );
     }
+}
+
+// ── one pipeline for startup, typing and pagination (R02) ─────────
+
+/// The CLI arguments for an unfiltered `suv search`, in `mode`.
+fn search_args(query: Option<&str>, mode: MatchMode, unique: bool) -> SearchArgs<'_> {
+    SearchArgs {
+        initial_query: query,
+        unique_mode: unique,
+        match_mode: mode,
+        scope: RecallScope::All,
+        compact: false,
+        after: None,
+        before: None,
+        tag: None,
+        exit_code: None,
+        executor: None,
+        cwd: None,
+        field: SearchField::Command,
+        include_agents: false,
+        failed_only: false,
+    }
+}
+
+/// What `suv search --query <query> --match <mode>` shows before a key is
+/// pressed: the startup path, run headless.
+fn initial_query_results(
+    repo: &crate::repository::Repository,
+    mode: MatchMode,
+    query: &str,
+    unique: bool,
+) -> Vec<String> {
+    let config = crate::config::Config::default();
+    let app = super::build_search_app(repo, &search_args(Some(query), mode, unique), &config)
+        .expect("startup search");
+    app.entries.iter().map(|e| e.command.clone()).collect()
+}
+
+/// The same query typed into an already-open recall session.
+fn typed_query_results(
+    repo: &crate::repository::Repository,
+    mode: MatchMode,
+    query: &str,
+    unique: bool,
+) -> Vec<String> {
+    let config = crate::config::Config::default();
+    let mut app =
+        super::build_search_app(repo, &search_args(None, mode, unique), &config).expect("recall");
+    app.recall.match_mode = mode;
+    app.query = query.into();
+    app.reload_entries(repo).unwrap();
+    app.entries.iter().map(|e| e.command.clone()).collect()
+}
+
+#[test]
+fn starting_with_a_query_returns_exactly_what_typing_it_returns() {
+    // `ocg` holds every character of `gco` but in the wrong order, and it is
+    // newer than the real match — so a startup path that skips the matching
+    // stage puts it first.
+    let (_d, repo) = repo_with(&[
+        "git checkout main",
+        "git commit --amend",
+        "go container ops",
+        "cargo test --offline",
+        "ls -la",
+        "ocg",
+    ]);
+
+    for mode in [
+        MatchMode::Terms,
+        MatchMode::Literal,
+        MatchMode::Prefix,
+        MatchMode::Fuzzy,
+    ] {
+        for query in ["gco", "git", "checkout git", "cargo test", "ls"] {
+            for unique in [false, true] {
+                assert_eq!(
+                    initial_query_results(&repo, mode, query, unique),
+                    typed_query_results(&repo, mode, query, unique),
+                    "{mode:?} {query:?} unique={unique}: startup and typing disagree"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn an_initial_fuzzy_query_never_returns_out_of_order_characters() {
+    let (_d, repo) = repo_with(&["git checkout", "ocg"]);
+
+    assert_eq!(
+        initial_query_results(&repo, MatchMode::Fuzzy, "gco", false),
+        vec!["git checkout".to_string()],
+        "the startup path returned a command the mode does not match"
+    );
+}
+
+#[test]
+fn an_initial_query_reports_a_total_it_can_page_to() {
+    let (_d, repo) = repo_with_broad_matches("git", "echo git filler", 5000);
+    let config = crate::config::Config::default();
+    let mut app = super::build_search_app(
+        &repo,
+        &search_args(Some("git"), MatchMode::Terms, false),
+        &config,
+    )
+    .unwrap();
+
+    assert_eq!(app.pagination.total_items, 5001);
+    let seen = walk_every_page(&mut app, &repo);
+    assert!(seen.contains(&"git".to_string()));
 }
 
 // ── fuzzy obeys its own ordering rule (R10) ───────────────────────

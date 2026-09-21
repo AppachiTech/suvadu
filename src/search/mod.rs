@@ -11,7 +11,7 @@ mod render;
 mod tests;
 
 use crate::models::{Entry, SearchField, Tag};
-use crate::repository::{QueryFilter, Repository, SessionScoped};
+use crate::repository::{QueryFilter, Repository};
 use crate::util;
 use arboard::Clipboard;
 use chrono::Local;
@@ -456,32 +456,6 @@ fn fill_text(text: &str, width: usize) -> String {
 
 use crate::util::centered_rect;
 
-type SearchEntries = (Vec<Entry>, usize, std::collections::HashMap<i64, i64>);
-
-fn load_search_entries(
-    repo: &Repository,
-    qf: &impl crate::repository::EntryQuery,
-    page_size: usize,
-    unique: bool,
-) -> Result<SearchEntries, Box<dyn std::error::Error>> {
-    if unique {
-        let count = usize::try_from(repo.count_unique_filtered(qf)?)?;
-        let unique_res = repo.get_unique_entries_filtered(page_size, 0, qf, true)?;
-        let (entries, counts): (Vec<Entry>, Vec<i64>) = unique_res.into_iter().unzip();
-        let mut count_map = std::collections::HashMap::new();
-        for (entry, cnt) in entries.iter().zip(counts.iter()) {
-            if let Some(id) = entry.id {
-                count_map.insert(id, *cnt);
-            }
-        }
-        Ok((entries, count, count_map))
-    } else {
-        let count = usize::try_from(repo.count_filtered(qf)?)?;
-        let entries = repo.get_entries_filtered(page_size, 0, qf)?;
-        Ok((entries, count, std::collections::HashMap::new()))
-    }
-}
-
 /// Look up a tag by name, reporting a lookup failure rather than hiding it.
 fn resolve_tag_id(repo: &Repository, tag: Option<&str>) -> Option<i64> {
     match tag.map(|t| repo.get_tag_id_by_name(t)).transpose() {
@@ -590,14 +564,17 @@ pub struct SearchArgs<'a> {
     pub failed_only: bool,
 }
 
-pub fn run_search(
+/// Everything recall does before it touches the terminal: resolve the scope,
+/// build the app, and fill it with the first page of results.
+///
+/// Split out from [`run_search`] so the startup path is exercisable without a
+/// TTY — the initial `--query` must produce exactly what typing the same
+/// query produces, and that is only testable if it can be run headless.
+fn build_search_app(
     repo: &Repository,
     args: &SearchArgs,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let config = crate::config::load_config().unwrap_or_else(|e| {
-        eprintln!("suvadu: config load failed, using defaults: {e}");
-        crate::config::Config::default()
-    });
+    config: &crate::config::Config,
+) -> Result<SearchApp, Box<dyn std::error::Error>> {
     let page_size = config.search.page_limit;
     let effective_unique = args.unique_mode || config.search.show_unique_by_default;
     let tags = repo.get_tags().unwrap_or_default();
@@ -608,67 +585,23 @@ pub fn run_search(
     let filter_before = args.before.and_then(|s| util::parse_date_input(s, true));
 
     let (recall, cwd_filter) = resolve_recall(args.scope, args.match_mode, args.cwd);
-    let scope = recall.scope;
-
-    let plan = args.match_mode.plan(args.initial_query.unwrap_or_default());
-    let qf = SessionScoped {
-        filter: QueryFilter {
-            query_tokens: &plan.tokens,
-            after: filter_after,
-            before: filter_before,
-            tag_id,
-            exit_code: args.exit_code,
-            query: plan.query.as_deref(),
-            prefix_match: plan.prefix,
-            executor: args.executor,
-            cwd: cwd_filter.as_deref(),
-            field: args.field,
-            exclude_agents: !args.include_agents,
-            cwd_prefix: scope == RecallScope::Workspace,
-            failed_only: args.failed_only,
-            bookmarked_only: false,
-            exclude_dirs: &[],
-        },
-        session_id: if scope == RecallScope::Session {
-            recall.context.session_id.as_deref()
-        } else {
-            None
-        },
-    };
-
-    let (entries, total_count, unique_counts) =
-        load_search_entries(repo, &qf, page_size, effective_unique)?;
-
-    // An empty *scope* is a normal state the TUI explains in place; only a
-    // genuinely empty database is worth refusing to open for.
-    if entries.is_empty()
-        && total_count == 0
-        && repo.count_filtered(&QueryFilter::default()).unwrap_or(0) == 0
-    {
-        eprintln!("No history recorded yet.");
-        return Ok(None);
-    }
 
     let bookmarked_commands = repo.get_bookmarked_commands().unwrap_or_default();
     let noted_entry_ids = repo.get_noted_entry_ids().unwrap_or_default();
     let executors = repo.get_distinct_executors().unwrap_or_default();
 
-    // Compact recall keeps the surrounding shell context on screen by
-    // drawing into an inline viewport instead of the alternate screen. It is
-    // opt-in (`--compact` / `search.compact`), needs no daemon or PTY proxy,
-    // and the full-screen inspector stays the default.
-    let surface = recall_surface(args.compact);
-    let (_guard, mut terminal) = open_recall_terminal(surface)?;
-
     let mut app = SearchApp::new(SearchConfig {
-        entries,
+        // The one pipeline fills these in below. Starting empty is what makes
+        // that unavoidable: startup cannot quietly keep a different, unranked
+        // candidate set the way it used to.
+        entries: Vec::new(),
         initial_query: args.initial_query.map(String::from),
-        total_items: total_count,
+        total_items: 0,
         page: 1,
         page_size,
         tags,
         executors,
-        unique_counts,
+        unique_counts: std::collections::HashMap::new(),
         filter_after,
         filter_before,
         filter_tag_id: tag_id,
@@ -698,6 +631,40 @@ pub fn run_search(
         },
         recall,
     });
+    // Startup goes through exactly the stages typing does — matching,
+    // counting, ranking, first page — so `--query gco` and typing `gco`
+    // cannot answer differently.
+    app.reload_entries(repo)?;
+    Ok(app)
+}
+
+pub fn run_search(
+    repo: &Repository,
+    args: &SearchArgs,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let config = crate::config::load_config().unwrap_or_else(|e| {
+        eprintln!("suvadu: config load failed, using defaults: {e}");
+        crate::config::Config::default()
+    });
+
+    let mut app = build_search_app(repo, args, &config)?;
+
+    // An empty *scope* is a normal state the TUI explains in place; only a
+    // genuinely empty database is worth refusing to open for.
+    if app.entries.is_empty()
+        && app.pagination.total_items == 0
+        && repo.count_filtered(&QueryFilter::default()).unwrap_or(0) == 0
+    {
+        eprintln!("No history recorded yet.");
+        return Ok(None);
+    }
+
+    // Compact recall keeps the surrounding shell context on screen by
+    // drawing into an inline viewport instead of the alternate screen. It is
+    // opt-in (`--compact` / `search.compact`), needs no daemon or PTY proxy,
+    // and the full-screen inspector stays the default.
+    let surface = recall_surface(args.compact);
+    let (_guard, mut terminal) = open_recall_terminal(surface)?;
 
     let result = app.run(&mut terminal, repo);
     // An inline viewport lives in the normal screen buffer, so it has to

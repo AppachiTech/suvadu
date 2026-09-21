@@ -221,6 +221,12 @@ impl SearchApp {
                 if let Some(cmd) = self.get_selected_command() {
                     return SearchAction::Select(cmd);
                 }
+                if self.entries.is_empty() {
+                    // Nothing to accept, so accept nothing and close: a query
+                    // that matches nothing must not trap the user in recall.
+                    // The shell keeps its buffer, exactly as on Esc.
+                    return SearchAction::Exit;
+                }
             }
             KeyCode::Esc => {
                 if self.vim_enabled {
@@ -274,6 +280,12 @@ impl SearchApp {
             KeyCode::Enter => {
                 if let Some(cmd) = self.get_selected_command() {
                     return SearchAction::Select(cmd);
+                }
+                if self.entries.is_empty() {
+                    // Nothing to accept, so accept nothing and close: a query
+                    // that matches nothing must not trap the user in recall.
+                    // The shell keeps its buffer, exactly as on Esc.
+                    return SearchAction::Exit;
                 }
             }
             KeyCode::Tab => {
