@@ -41,6 +41,9 @@ const CODEX_BLOCK_NOTE: &str =
 /// from a hand-edited one).
 const MANAGED_MARKER_PREFIX: &str = "<!-- suvadu:managed ";
 
+/// The marker's closing delimiter. Content after it belongs to the user.
+const MANAGED_MARKER_SUFFIX: &str = "-->";
+
 /// How many diff lines a single file's preview may show before it is
 /// truncated. Long enough for a realistic skill edit, short enough that a
 /// first sync of a dozen skills stays readable in a terminal.
@@ -463,13 +466,20 @@ fn managed_file_content(base: &str, skill_name: &str) -> String {
 fn split_managed(existing: &str) -> Option<(&str, &str, &str)> {
     let idx = existing.rfind(MANAGED_MARKER_PREFIX)?;
     let before = &existing[..idx];
-    let line_end = existing[idx..]
-        .find('\n')
-        .map_or(existing.len(), |off| idx + off);
-    let sum = existing[idx..line_end]
+    // The marker ends at its own `-->`, not at the end of the line. Treating
+    // the whole line as suvadu's meant text typed after the delimiter —
+    // `<!-- suvadu:managed … --> keep this` — was invisible to drift
+    // detection and deleted by the next write.
+    let marker_end = existing[idx..]
+        .find(MANAGED_MARKER_SUFFIX)
+        .map(|off| idx + off + MANAGED_MARKER_SUFFIX.len())?;
+    let sum = existing[idx..marker_end]
         .split_whitespace()
         .find_map(|tok| tok.strip_prefix("checksum="))?;
-    let after = existing.get(line_end + 1..).unwrap_or_default();
+    // Everything after the delimiter is the user's, including the rest of
+    // this line. Only the single newline suvadu itself writes is skipped.
+    let rest = &existing[marker_end..];
+    let after = rest.strip_prefix('\n').unwrap_or(rest);
     Some((before, sum, after))
 }
 
@@ -2007,6 +2017,32 @@ mod tests {
         assert!(content.contains("skill=demo"));
     }
 
+    /// F02: the marker ends at its `-->`, not at the end of its line. Text
+    /// typed after the delimiter is the user's, wherever it sits.
+    #[test]
+    fn split_managed_reports_content_written_after_the_marker_delimiter() {
+        let content = managed_file_content("hello\n", "demo")
+            .trim_end()
+            .to_string()
+            + " USER APPENDED INSTRUCTIONS\n";
+        let (before, _, after) = split_managed(&content).unwrap();
+        assert_eq!(before, "hello\n\n");
+        assert!(
+            after.contains("USER APPENDED INSTRUCTIONS"),
+            "text after the marker's --> belongs to the user: {after:?}"
+        );
+    }
+
+    #[test]
+    fn split_managed_reports_content_after_the_delimiter_without_a_final_newline() {
+        let content = managed_file_content("hello\n", "demo")
+            .trim_end()
+            .to_string()
+            + " mine";
+        let (_, _, after) = split_managed(&content).unwrap();
+        assert!(after.contains("mine"), "{after:?}");
+    }
+
     #[test]
     fn split_managed_reports_content_written_below_the_marker() {
         let content = managed_file_content("hello\n", "demo") + "mine\n";
@@ -2070,6 +2106,96 @@ mod tests {
         let appended = std::fs::read_to_string(path).unwrap() + APPENDED;
         std::fs::write(path, &appended).unwrap();
         appended
+    }
+
+    /// Same as appending below the marker, but written on the marker's own
+    /// line after its `-->`. F02: this was still deleted silently.
+    fn sync_then_append_on_the_marker_line(
+        repo: &Repository,
+        targets: &[SyncTarget],
+        cwd: &Path,
+        home: Option<&Path>,
+        path: &Path,
+    ) -> String {
+        apply(repo, targets, cwd, home);
+        let generated = std::fs::read_to_string(path).unwrap();
+        let appended = generated.trim_end().to_string() + " USER APPENDED INSTRUCTIONS\n";
+        std::fs::write(path, &appended).unwrap();
+        appended
+    }
+
+    #[test]
+    fn text_written_after_the_marker_delimiter_is_a_conflict_not_a_silent_deletion() {
+        for target in [SyncTarget::ClaudeCode, SyncTarget::Cursor] {
+            let (_dir, repo) = test_repo();
+            repo.create_skill(&skill("alpha", SKILL_SCOPE_GLOBAL))
+                .unwrap();
+            let home = tempfile::tempdir().unwrap();
+            let cwd = tempfile::tempdir().unwrap();
+            let targets = [target];
+            let path = if target == SyncTarget::ClaudeCode {
+                home.path().join(".claude/skills/alpha/SKILL.md")
+            } else {
+                cursor_rule_path(cwd.path(), "alpha")
+            };
+            let appended = sync_then_append_on_the_marker_line(
+                &repo,
+                &targets,
+                cwd.path(),
+                Some(home.path()),
+                &path,
+            );
+            revise_body(&repo, "alpha", SKILL_SCOPE_GLOBAL);
+
+            let preview = sync_inner(
+                &repo,
+                &targets,
+                cwd.path(),
+                Some(home.path()),
+                None,
+                SyncOptions::preview(),
+            )
+            .unwrap();
+            assert_eq!(
+                change_for(&preview, &path).kind,
+                ChangeKind::Conflict,
+                "{target:?}: the preview must not promise a clean update"
+            );
+
+            let report = apply(&repo, &targets, cwd.path(), Some(home.path()));
+            assert_eq!(report.written(), 0, "{target:?}: a write destroys the text");
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                appended,
+                "{target:?}: instructions on the marker line were deleted"
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_leaves_text_written_after_the_marker_delimiter_in_place() {
+        let (_dir, repo) = test_repo();
+        repo.create_skill(&skill("alpha", SKILL_SCOPE_GLOBAL))
+            .unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let targets = [SyncTarget::ClaudeCode];
+        let path = home.path().join(".claude/skills/alpha/SKILL.md");
+        let appended = sync_then_append_on_the_marker_line(
+            &repo,
+            &targets,
+            cwd.path(),
+            Some(home.path()),
+            &path,
+        );
+
+        repo.delete_skill("alpha", SKILL_SCOPE_GLOBAL).unwrap();
+        let report =
+            cleanup_inner(&repo, &targets, cwd.path(), Some(home.path()), None, false).unwrap();
+
+        assert_eq!(report.removed(), 0, "cleanup deleted the user's text");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), appended);
+        assert_eq!(change_for(&report, &path).kind, ChangeKind::Skipped);
     }
 
     #[test]
