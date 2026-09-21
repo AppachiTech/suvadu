@@ -430,9 +430,11 @@ pub fn import_jsonl_into_repo_opts<R: BufRead>(
             entry.tag_id = resolved;
         }
 
-        // Mark the row as one this database received from an import, without
-        // touching the exported `context`: a restore is meant to reproduce
-        // where the command was *originally* recorded. Diagnostics used to
+        // Mark the row as one this database received from an import. Every
+        // other key of the exported `context` is kept, because a restore is
+        // meant to reproduce where the command was *originally* recorded;
+        // this one key is added (replacing an export's own copy of it, which
+        // described a different database). Diagnostics used to
         // infer this from the placeholder session hostname, which is only
         // stamped on a session the importer had to create — so a restore into
         // a session that already existed read as live capture.

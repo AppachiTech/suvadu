@@ -20,9 +20,11 @@ pub const PLACEHOLDER_IMPORT_HOSTNAME: &str = "imported";
 /// Context key the JSONL importer stamps on every row it writes, recording
 /// when *this* database received it.
 ///
-/// It is deliberately not `import_source`/`imported_at`: a JSONL restore
-/// preserves the exported row's own context so it still says where the
-/// command was originally recorded, and overwriting that would lose it.
+/// It is deliberately not `import_source`/`imported_at`: those keys are kept
+/// as the export wrote them so a restored row still says where the command
+/// was originally recorded, and overwriting them would lose that. This key
+/// is the one addition, and it replaces itself if an export already carried
+/// one — it describes *this* database's copy, not the original.
 pub const RESTORED_AT_KEY: &str = "restored_at";
 
 /// SQL that is true for a row an importer wrote.
@@ -39,9 +41,10 @@ pub const RESTORED_AT_KEY: &str = "restored_at";
 ///   `atuin-…` are namespaces no live hook can produce (a hook session id is
 ///   a UUID, and `suv add` rejects anything that is not a valid session id).
 /// * the JSONL importer's placeholder session hostname, which is how an
-///   export from another machine lands here. That importer preserves the
-///   exported `context` verbatim rather than overwriting it, so the row's
-///   own provenance — where it was *originally* recorded — survives.
+///   export from another machine lands here. That importer keeps the
+///   exported `context` rather than replacing it, so the row's own
+///   provenance — where it was *originally* recorded — survives; the one
+///   key it adds is `restored_at`, below.
 /// * `context.restored_at`, which that importer stamps on every row it
 ///   writes. The hostname rule alone only catches a session the importer
 ///   created, so a restore into an existing session used to look live.

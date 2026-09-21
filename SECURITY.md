@@ -92,9 +92,11 @@ captured agent prompt and turn id for an agent-run command (re-redacted with
 that command's own directory policy before it is stored), and import
 provenance — source, import time, whether the timestamp was real or
 synthetic, and which fields the source did not have — for an imported one.
-The Bash, Zsh and Atuin importers all write that provenance; a JSONL import
-keeps the exported `context` exactly as it was instead, so a restored row
-still says where it was *originally* recorded. Either way `suv status` and
+The Bash, Zsh and Atuin importers all write that provenance. A JSONL import
+keeps the exported `context` — so a restored row still says where it was
+*originally* recorded — and adds one key of its own, `restored_at`, which
+records when this database received the row (replacing that key if the
+export already carried one). Either way `suv status` and
 `suv doctor` treat an imported row as stored history, never as evidence that
 this machine's shell hook captured anything.
 An Atuin import also stores that row's free text (`atuin_intent`,
