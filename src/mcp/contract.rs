@@ -562,6 +562,117 @@ fn a_malformed_stored_record_is_reported_not_silently_dropped() {
     );
 }
 
+/// A stored native session whose event rows follow `readable`: `true` is a
+/// record suvadu can decode, `false` a row that reached the database
+/// malformed. Written straight to the tables because no adapter will
+/// produce corruption on request.
+fn session_with_unreadable_rows(repo: &Repository, id: &str, readable: &[bool]) {
+    repo.raw_execute_for_test(&format!(
+        "INSERT INTO ai_sessions(id,native_id,agent,cwd,created_at,updated_at) \
+         VALUES ('{id}','{id}','openai-codex','{OPEN_DIR}',1,1)"
+    ))
+    .unwrap();
+    for (index, decodable) in readable.iter().enumerate() {
+        let data = if *decodable {
+            json!({
+                "id": format!("e{index}"), "turn_id": Value::Null, "kind": "prompt",
+                "at": index, "model": Value::Null, "cwd": OPEN_DIR,
+                "data": {"text": format!("event {index}")}
+            })
+            .to_string()
+            .replace('\'', "''")
+        } else {
+            "{not json".to_string()
+        };
+        repo.raw_execute_for_test(&format!(
+            "INSERT INTO ai_events(session_id,event_id,kind,cwd,data) \
+             VALUES ('{id}','e{index}','prompt','{OPEN_DIR}','{data}')"
+        ))
+        .unwrap();
+    }
+}
+
+/// Paging must be able to reach the end of a session that holds a record
+/// suvadu cannot read. An unreadable row is skipped, not counted as a
+/// delivered event and never allowed to consume the look-ahead that
+/// decides whether there is a next page — otherwise a client that follows
+/// `next_event_offset` exactly as the contract tells it to silently stops
+/// short of the last events.
+#[test]
+fn following_event_cursors_returns_every_readable_record_exactly_once() {
+    for (case, readable) in [
+        ("malformed first", vec![false, true, true, true, true]),
+        (
+            "malformed in the middle",
+            vec![true, true, true, false, true, true],
+        ),
+        (
+            "malformed exactly on a page boundary",
+            vec![true, true, false, true, true],
+        ),
+        (
+            "a run of malformed rows straddling a boundary",
+            vec![true, true, false, false, true, true, true],
+        ),
+        ("malformed last", vec![true, true, true, false]),
+        ("nothing but malformed rows", vec![false, false]),
+    ] {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        session_with_unreadable_rows(&repo, "codex-paging", &readable);
+        let expected: Vec<String> = readable
+            .iter()
+            .enumerate()
+            .filter(|(_, decodable)| **decodable)
+            .map(|(index, _)| format!("e{index}"))
+            .collect();
+
+        let mut collected: Vec<String> = Vec::new();
+        let mut offset = Some(0_u64);
+        let mut pages = 0;
+        let mut last = Value::Null;
+        while let Some(at) = offset {
+            pages += 1;
+            assert!(pages < 20, "{case}: paging never reached the end");
+            let page: Value = serde_json::from_str(
+                &super::tools::call_tool(
+                    &repo,
+                    "get_agent_session",
+                    &json!({"session_id": "codex-paging", "limit": 2, "offset": at}),
+                    &mcp(),
+                )
+                .expect("an unreadable record must not fail the read"),
+            )
+            .unwrap();
+            for event in page["events"].as_array().unwrap() {
+                collected.push(event["id"].as_str().unwrap_or_default().to_string());
+            }
+            if collected.len() < expected.len() {
+                assert_eq!(
+                    page["session_complete"], false,
+                    "{case}: a partial page called itself the whole session:\n{page}"
+                );
+            }
+            offset = page["next_event_offset"].as_u64();
+            last = page;
+        }
+
+        assert_eq!(
+            collected, expected,
+            "{case}: paging did not deliver every readable event exactly once"
+        );
+        assert_eq!(
+            last["events_total"].as_u64().unwrap_or_default(),
+            expected.len() as u64,
+            "{case}: events_total counts records paging never hands over:\n{last}"
+        );
+        assert_eq!(
+            last["next_event_offset"],
+            Value::Null,
+            "{case}: the final page still offers a cursor"
+        );
+    }
+}
+
 #[test]
 fn an_unsupported_adapter_version_is_declared_on_the_session() {
     let (dir, repo) = crate::test_utils::test_repo();

@@ -1069,25 +1069,42 @@ impl Repository {
         command_offset: usize,
         excluded_dirs: &[String],
     ) -> DbResult<Value> {
-        let (sql_limit, sql_event_offset) = page(limit, event_offset)?;
+        let (sql_limit, _) = page(limit, event_offset)?;
         let (_, sql_command_offset) = page(limit, command_offset)?;
         let snapshot = self.conn.unchecked_transaction()?;
         let session = self.ai_session_header(id, excluded_dirs)?;
-        let mut statement = self.conn.prepare(
-            "SELECT data FROM ai_events WHERE session_id=?1 ORDER BY rowid LIMIT ?2 OFFSET ?3",
-        )?;
         // Rule: a record suvadu cannot read is reported, never fatal and
         // never silent — the session's `capture.unreadable_records` and
         // `capture.known_missing` already say how many were skipped.
+        //
+        // `event_offset` counts *readable* events, the same unit as
+        // `events_total`, the header's `event_count` and a summary's
+        // `resume_event_offset`. Letting SQL page over raw rows instead
+        // used to let one malformed row eat the look-ahead slot, so a
+        // client that followed `next_event_offset` was told the session
+        // was complete while readable events were still unread. Skipping
+        // therefore happens before the window is cut, not after it.
+        let mut statement = self
+            .conn
+            .prepare("SELECT data FROM ai_events WHERE session_id=?1 ORDER BY rowid")?;
         let mut skipped = 0_usize;
-        let mut events = statement
-            .query_map(params![id, sql_limit + 1, sql_event_offset], |r| {
-                r.get::<_, String>(0)
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .filter_map(|row| decode_or_skip::<AiEvent>(&row, &mut skipped))
-            .collect::<Vec<_>>();
+        let mut passed = 0_usize;
+        let mut events: Vec<AiEvent> = Vec::new();
+        let mut more_events = false;
+        for row in statement.query_map(params![id], |r| r.get::<_, String>(0))? {
+            let Some(event) = decode_or_skip::<AiEvent>(&row?, &mut skipped) else {
+                continue;
+            };
+            if passed < event_offset {
+                passed += 1;
+                continue;
+            }
+            if events.len() == limit {
+                more_events = true;
+                break;
+            }
+            events.push(event);
+        }
         let mut statement = self.conn.prepare("SELECT id,command,cwd,exit_code,started_at,duration_ms,context FROM entries WHERE session_id=?1 ORDER BY id LIMIT ?2 OFFSET ?3")?;
         let mut commands = statement.query_map(params![id,sql_limit+1,sql_command_offset], |r| {
             let context: Option<String> = r.get(6)?;
@@ -1099,9 +1116,10 @@ impl Repository {
                 .unwrap_or(Value::Null);
             Ok(json!({"id":format!("command-{}",r.get::<_,i64>(0)?),"command":r.get::<_,String>(1)?,"cwd":r.get::<_,String>(2)?,"exit_code":r.get::<_,Option<i32>>(3)?,"started_at":r.get::<_,i64>(4)?,"duration_ms":r.get::<_,i64>(5)?,"turn_id":turn_id}))
         })?.collect::<Result<Vec<_>,_>>()?;
-        let more_events = events.len() > limit;
+        // Command rows are never skipped — an unparseable `context` blob
+        // degrades to null rather than dropping the row — so the raw
+        // look-ahead is still the right test for them.
         let more_commands = commands.len() > limit;
-        events.truncate(limit);
         commands.truncate(limit);
         let summaries = self.summary_checkpoints_json(id, &session)?;
         let event_total = session["event_count"].as_i64().unwrap_or_default();
