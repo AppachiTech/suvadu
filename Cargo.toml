@@ -45,6 +45,9 @@ libc = "0.2"
 
 [dev-dependencies]
 
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
 [build-dependencies]
 chrono = "0.4"
 

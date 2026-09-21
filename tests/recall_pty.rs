@@ -1,0 +1,284 @@
+//! Recall under a real terminal, with stdout captured.
+//!
+//! The shell widget runs recall inside a command substitution
+//! (`selected="$("$_SUVADU_BIN" "$@")"`), so stdout is a pipe while the
+//! terminal is still reachable on `/dev/tty`. Inline recall has to ask the
+//! terminal where the cursor is; these tests pin down both answers to that
+//! question — a terminal that replies, and one that stays silent — because
+//! neither can be exercised without a pty.
+
+#![cfg(unix)]
+// Driving a pty means openpty/ioctl/select; there is no safe wrapper for them
+// in the standard library, and a real terminal is the only way to exercise
+// the cursor-report path at all.
+#![allow(unsafe_code)]
+
+use std::io::Read;
+use std::os::unix::io::{FromRawFd, RawFd};
+use std::os::unix::process::CommandExt;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+/// The command planted in the database and selected in the UI.
+const PLANTED: &str = "echo pty-recall";
+
+/// A fragment of the planted command that styling cannot split, so it is a
+/// reliable sign that a frame has been drawn.
+const DRAWN_MARKER: &str = "pty-recall";
+
+/// Give up on the child long before the harness itself is killed.
+const RUN_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long to wait before looking at the terminal again.
+const POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+/// What the terminal saw, and what the shell would have captured.
+struct Recall {
+    /// Everything written to the terminal, escape sequences included.
+    terminal: String,
+    /// Everything written to stdout — what the shell wrapper substitutes.
+    stdout: String,
+    success: bool,
+    /// How many cursor queries the harness answered.
+    answered: usize,
+}
+
+impl Recall {
+    fn entered_alternate_screen(&self) -> bool {
+        self.terminal.contains("\u{1b}[?1049h")
+    }
+}
+
+/// Open a pty pair sized like an ordinary terminal window.
+fn open_pty() -> (RawFd, RawFd) {
+    let mut master: RawFd = -1;
+    let mut slave: RawFd = -1;
+    let mut size = libc::winsize {
+        ws_row: 30,
+        ws_col: 100,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: both fds are out-parameters we own, and `size` outlives the call.
+    let rc = unsafe {
+        libc::openpty(
+            &raw mut master,
+            &raw mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &raw mut size,
+        )
+    };
+    assert_eq!(rc, 0, "openpty failed: {}", std::io::Error::last_os_error());
+    // The child must not inherit the master side, or reads never see EOF.
+    // SAFETY: `master` is a valid fd we just opened.
+    unsafe { libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC) };
+    (master, slave)
+}
+
+/// Make reads on `fd` return instead of blocking.
+///
+/// `poll` is not an option: on macOS it answers POLLNVAL for terminal
+/// devices, so readiness cannot be waited on portably here.
+fn set_nonblocking(fd: RawFd) {
+    // SAFETY: `fd` is open and `fcntl` touches no memory of ours.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        assert!(flags >= 0, "F_GETFL failed");
+        assert!(
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) >= 0,
+            "F_SETFL failed"
+        );
+    }
+}
+
+/// Record one command so recall has something to show.
+fn plant(home: &Path) {
+    let status = Command::new(env!("CARGO_BIN_EXE_suv"))
+        .args([
+            "add",
+            "--session-id",
+            "pty-session",
+            "--command",
+            PLANTED,
+            "--cwd",
+            "/tmp",
+            "--exit-code",
+            "0",
+            "--started-at",
+            "1000",
+            "--ended-at",
+            "1001",
+        ])
+        .envs(env_for(home))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "planting the history entry failed");
+}
+
+fn env_for(home: &Path) -> Vec<(String, String)> {
+    vec![
+        ("HOME".into(), home.display().to_string()),
+        (
+            "XDG_DATA_HOME".into(),
+            home.join("data").display().to_string(),
+        ),
+        (
+            "XDG_CONFIG_HOME".into(),
+            home.join("config").display().to_string(),
+        ),
+        ("TERM".into(), "xterm-256color".into()),
+        ("NO_COLOR".into(), "1".into()),
+    ]
+}
+
+/// Run recall attached to a pty, acting as the terminal on the other side.
+///
+/// When `answer_cursor_query` is set we reply to `ESC[6n` the way a real
+/// terminal does; otherwise we stay silent, standing in for the terminals
+/// and multiplexers that ignore the request.
+fn run_recall(home: &Path, args: &[&str], answer_cursor_query: bool) -> Recall {
+    let stdout_path = home.join("stdout.txt");
+    let stdout_file = std::fs::File::create(&stdout_path).unwrap();
+    let (master, slave) = open_pty();
+
+    // SAFETY: `slave` stays open until after the child is spawned; the dups
+    // are handed to the child as its stdin and stderr.
+    let (child_stdin, child_stderr) = unsafe {
+        (
+            Stdio::from_raw_fd(libc::dup(slave)),
+            Stdio::from_raw_fd(libc::dup(slave)),
+        )
+    };
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_suv"));
+    command
+        .arg("search")
+        .args(args)
+        .envs(env_for(home))
+        .current_dir(home)
+        .stdin(child_stdin)
+        .stdout(Stdio::from(stdout_file))
+        .stderr(child_stderr);
+    // SAFETY: only async-signal-safe calls between fork and exec. The child
+    // needs its own session with the pty as controlling terminal, so that
+    // opening /dev/tty reaches this pty.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            libc::ioctl(0, libc::TIOCSCTTY.into(), 0);
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
+    // SAFETY: the child holds its own dups; the parent's copy is done.
+    unsafe { libc::close(slave) };
+
+    set_nonblocking(master);
+    // SAFETY: the master fd is ours alone and closed when this file drops.
+    let mut terminal_side = unsafe { std::fs::File::from_raw_fd(master) };
+    let mut seen = Vec::new();
+    let mut answered = 0usize;
+    let mut selected = false;
+    let deadline = Instant::now() + RUN_TIMEOUT;
+    let status = loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            break None;
+        }
+        let mut chunk = [0u8; 4096];
+        match terminal_side.read(&mut chunk) {
+            Ok(0) | Err(_) => std::thread::sleep(POLL_INTERVAL),
+            Ok(read) => seen.extend_from_slice(&chunk[..read]),
+        }
+        // Answer every cursor query, counting against the whole stream so a
+        // query split across two reads is not missed.
+        if answer_cursor_query {
+            let queries = seen.windows(4).filter(|w| *w == b"\x1b[6n").count();
+            while answered < queries {
+                write_all(master, b"\x1b[12;1R");
+                answered += 1;
+            }
+        }
+        // Once the planted command is on screen the UI is drawn and ready to
+        // accept the selection, whichever surface it ended up on.
+        if !selected && String::from_utf8_lossy(&seen).contains(DRAWN_MARKER) {
+            write_all(master, b"\r");
+            selected = true;
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+    };
+
+    Recall {
+        terminal: String::from_utf8_lossy(&seen).into_owned(),
+        stdout: std::fs::read_to_string(&stdout_path).unwrap_or_default(),
+        success: status.is_some_and(|s| s.success()),
+        answered,
+    }
+}
+
+fn write_all(fd: RawFd, bytes: &[u8]) {
+    // SAFETY: `fd` is the open master side; the slice outlives the call.
+    unsafe {
+        libc::write(fd, bytes.as_ptr().cast::<libc::c_void>(), bytes.len());
+    }
+}
+
+#[test]
+fn compact_recall_draws_inline_when_the_terminal_reports_the_cursor() {
+    let home = tempfile::tempdir().unwrap();
+    plant(home.path());
+
+    let recall = run_recall(home.path(), &["--compact", "--query", "pty-recall"], true);
+
+    assert!(
+        recall.success,
+        "recall exited with an error; terminal saw: {}",
+        recall.terminal
+    );
+    assert_eq!(
+        recall.stdout.trim(),
+        PLANTED,
+        "the selected command must reach stdout for the shell wrapper"
+    );
+    assert!(
+        !recall.entered_alternate_screen(),
+        "compact recall must stay inline when the cursor position is known; answered {} queries, terminal saw: {}",
+        recall.answered,
+        recall.terminal.escape_debug()
+    );
+}
+
+#[test]
+fn compact_recall_still_returns_a_selection_when_the_terminal_stays_silent() {
+    let home = tempfile::tempdir().unwrap();
+    plant(home.path());
+
+    let recall = run_recall(home.path(), &["--compact", "--query", "pty-recall"], false);
+
+    assert!(
+        recall.entered_alternate_screen(),
+        "recall must fall back to the full screen; terminal saw: {}",
+        recall.terminal
+    );
+    assert!(
+        recall.terminal.contains("Opening full screen instead"),
+        "the fallback must say why; terminal saw: {}",
+        recall.terminal
+    );
+    assert!(
+        recall.success,
+        "the fallback must not fail; terminal saw: {}",
+        recall.terminal
+    );
+    assert_eq!(
+        recall.stdout.trim(),
+        PLANTED,
+        "the selection must survive the fallback and reach the shell wrapper"
+    );
+}

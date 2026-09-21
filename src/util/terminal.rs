@@ -198,6 +198,33 @@ impl Drop for TerminalGuardStderr {
 }
 
 #[cfg(test)]
+mod cursor_report_tests {
+    use super::parse_cursor_report;
+
+    #[test]
+    fn reads_a_plain_report() {
+        assert_eq!(parse_cursor_report(b"\x1b[12;40R"), Some((12, 40)));
+    }
+
+    #[test]
+    fn reads_a_report_with_a_stray_keystroke_around_it() {
+        assert_eq!(parse_cursor_report(b"q\x1b[3;7Rx"), Some((3, 7)));
+    }
+
+    #[test]
+    fn takes_the_last_complete_report() {
+        assert_eq!(parse_cursor_report(b"\x1b[1;1R\x1b[9;2R"), Some((9, 2)));
+    }
+
+    #[test]
+    fn rejects_an_incomplete_or_absent_report() {
+        assert_eq!(parse_cursor_report(b""), None);
+        assert_eq!(parse_cursor_report(b"\x1b[12;40"), None);
+        assert_eq!(parse_cursor_report(b"hello"), None);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         inline_height, setup_steps, teardown_steps, RecallSurface, TerminalStep, INLINE_MAX_HEIGHT,
@@ -311,5 +338,186 @@ mod tests {
     fn inline_height_is_capped_on_very_tall_terminals() {
         assert_eq!(inline_height(200), INLINE_MAX_HEIGHT);
         assert_eq!(inline_height(INLINE_MIN_HEIGHT), INLINE_MIN_HEIGHT);
+    }
+}
+
+/// Parse a terminal's reply to the cursor-position request (`ESC[6n`),
+/// which looks like `ESC[<row>;<col>R`, both 1-based.
+///
+/// The reply can arrive with other bytes around it: a keystroke typed at the
+/// wrong moment, or a stray earlier response. Scanning for the last complete
+/// report is more robust than assuming the buffer holds exactly one.
+pub fn parse_cursor_report(bytes: &[u8]) -> Option<(u16, u16)> {
+    let text = String::from_utf8_lossy(bytes);
+    let (start, body) = text
+        .rmatch_indices("\u{1b}[")
+        .find_map(|(i, _)| text[i + 2..].split_once('R').map(|(body, _)| (i, body)))?;
+    let _ = start;
+    let (row, col) = body.split_once(';')?;
+    Some((row.trim().parse().ok()?, col.trim().parse().ok()?))
+}
+
+/// Ask the controlling terminal where the cursor is.
+///
+/// `crossterm::cursor::position()` writes its request to **stdout**. Recall
+/// draws to stderr precisely because stdout carries the selected command
+/// back to the shell wrapper, which runs `suv search` inside a command
+/// substitution — so on that path the request goes into a pipe, the terminal
+/// never sees it, and the read times out with "The cursor position could not
+/// be read within a normal duration". Asking `/dev/tty` directly keeps the
+/// request and its reply on the terminal whatever stdout is connected to.
+///
+/// Raw mode must already be on, or the terminal will not answer. Returns an
+/// error rather than a guess if it does not answer in time.
+pub fn cursor_position_from_tty() -> std::io::Result<(u16, u16)> {
+    use std::io::{Read, Write};
+    use std::os::unix::io::AsRawFd;
+
+    let mut tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")?;
+    tty.write_all(b"\x1b[6n")?;
+    tty.flush()?;
+
+    // Read without blocking, retrying until the deadline, rather than waiting
+    // on readiness first. `poll` cannot be used here: on macOS it reports
+    // POLLNVAL for terminal devices, which made the wait either hang on a
+    // blocking read or give up before the reply arrived. Retrying a
+    // non-blocking read needs no readiness call at all, so it behaves the
+    // same on every platform.
+    set_nonblocking(tty.as_raw_fd())?;
+
+    let deadline = std::time::Instant::now() + CURSOR_REPORT_TIMEOUT;
+    let mut buf = Vec::with_capacity(32);
+    let mut chunk = [0u8; 32];
+    while std::time::Instant::now() < deadline {
+        let read = match tty.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                std::thread::sleep(CURSOR_REPORT_RETRY);
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
+        buf.extend_from_slice(&chunk[..read]);
+        if let Some(position) = parse_cursor_report(&buf) {
+            return Ok(position);
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "the terminal did not report the cursor position",
+    ))
+}
+
+/// How long to wait for the terminal's reply before giving up. Long enough
+/// for a slow remote terminal, short enough not to look like a hang.
+const CURSOR_REPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How long to wait between attempts to read the reply. Short enough that
+/// the terminal's answer is picked up without a visible pause.
+const CURSOR_REPORT_RETRY: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// Switch `fd` to non-blocking reads.
+///
+/// The standard library has no portable way to do this for a `File`, so it
+/// goes through `fcntl` directly.
+#[allow(unsafe_code)]
+fn set_nonblocking(fd: std::os::unix::io::RawFd) -> std::io::Result<()> {
+    // SAFETY: `fcntl` takes the descriptor by value and touches no memory of
+    // ours. `fd` belongs to a `File` the caller keeps open across both calls,
+    // and each result is checked before use.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: as above; the flags were just read from this same descriptor.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// A `CrosstermBackend` whose cursor query goes to the terminal rather than
+/// to stdout.
+///
+/// Everything else is the crossterm backend unchanged; only
+/// [`Backend::get_cursor_position`] differs, because that is the one call
+/// crossterm routes through stdout (see [`cursor_position_from_tty`]).
+pub struct TtyCursorBackend<W: std::io::Write> {
+    inner: ratatui::backend::CrosstermBackend<W>,
+}
+
+impl<W: std::io::Write> TtyCursorBackend<W> {
+    pub const fn new(writer: W) -> Self {
+        Self {
+            inner: ratatui::backend::CrosstermBackend::new(writer),
+        }
+    }
+}
+
+impl<W: std::io::Write> ratatui::backend::Backend for TtyCursorBackend<W> {
+    type Error = std::io::Error;
+
+    fn draw<'a, I>(&mut self, content: I) -> std::io::Result<()>
+    where
+        I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
+    {
+        self.inner.draw(content)
+    }
+
+    fn hide_cursor(&mut self) -> std::io::Result<()> {
+        self.inner.hide_cursor()
+    }
+
+    fn show_cursor(&mut self) -> std::io::Result<()> {
+        self.inner.show_cursor()
+    }
+
+    fn get_cursor_position(&mut self) -> std::io::Result<ratatui::layout::Position> {
+        let (row, col) = crate::util::cursor_position_from_tty()?;
+        // The terminal reports 1-based row/column; ratatui wants 0-based x/y.
+        Ok(ratatui::layout::Position {
+            x: col.saturating_sub(1),
+            y: row.saturating_sub(1),
+        })
+    }
+
+    fn set_cursor_position<P: Into<ratatui::layout::Position>>(
+        &mut self,
+        position: P,
+    ) -> std::io::Result<()> {
+        self.inner.set_cursor_position(position)
+    }
+
+    fn clear(&mut self) -> std::io::Result<()> {
+        self.inner.clear()
+    }
+
+    fn clear_region(&mut self, clear_type: ratatui::backend::ClearType) -> std::io::Result<()> {
+        self.inner.clear_region(clear_type)
+    }
+
+    fn append_lines(&mut self, n: u16) -> std::io::Result<()> {
+        self.inner.append_lines(n)
+    }
+
+    fn size(&self) -> std::io::Result<ratatui::layout::Size> {
+        self.inner.size()
+    }
+
+    fn window_size(&mut self) -> std::io::Result<ratatui::backend::WindowSize> {
+        self.inner.window_size()
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
     }
 }

@@ -17,7 +17,6 @@ use arboard::Clipboard;
 use chrono::Local;
 use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::{
-    backend::CrosstermBackend,
     widgets::{ListState, TableState},
     Terminal,
 };
@@ -296,7 +295,7 @@ impl SearchApp {
 
     pub fn run(
         &mut self,
-        terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
+        terminal: &mut Terminal<crate::util::TtyCursorBackend<io::Stderr>>,
         repo: &Repository,
     ) -> Result<Option<String>, Box<dyn std::error::Error>> {
         loop {
@@ -512,27 +511,66 @@ fn recall_surface(compact: bool) -> crate::util::RecallSurface {
     }
 }
 
-type RecallTerminal = Terminal<CrosstermBackend<io::Stderr>>;
+type RecallTerminal = Terminal<crate::util::TtyCursorBackend<io::Stderr>>;
 
-/// Put the terminal into `surface` and return the guard that restores it.
+/// An open recall terminal: the guard that restores the screen, the terminal
+/// itself, and the surface it actually ended up on.
 ///
 /// The guard must outlive the terminal, so it is returned alongside rather
-/// than dropped here.
+/// than dropped here. `surface` is the one in use, which is not always the
+/// one that was asked for — inline can fall back to full screen — and the
+/// teardown has to follow the surface that is really on screen.
+struct OpenRecall {
+    guard: crate::util::TerminalGuardStderr,
+    terminal: RecallTerminal,
+    surface: crate::util::RecallSurface,
+}
+
+/// Put the terminal into `surface`, falling back to full screen if inline
+/// cannot be established.
 fn open_recall_terminal(
     surface: crate::util::RecallSurface,
-) -> Result<(crate::util::TerminalGuardStderr, RecallTerminal), Box<dyn std::error::Error>> {
+) -> Result<OpenRecall, Box<dyn std::error::Error>> {
     let guard = crate::util::TerminalGuardStderr::for_surface(surface)?;
-    let backend = CrosstermBackend::new(io::stderr());
+    let backend = crate::util::TtyCursorBackend::new(io::stderr());
     let terminal = match surface {
-        crate::util::RecallSurface::Inline { height } => Terminal::with_options(
-            backend,
-            ratatui::TerminalOptions {
-                viewport: ratatui::Viewport::Inline(height),
-            },
-        )?,
+        crate::util::RecallSurface::Inline { height } => {
+            // Inline needs to know where the cursor is. If the terminal will
+            // not say — no /dev/tty, or it ignores the request — fall back to
+            // the full-screen surface rather than refusing to open recall at
+            // all. The guard already matches the inline surface, so tear it
+            // down and reopen for full screen.
+            match Terminal::with_options(
+                backend,
+                ratatui::TerminalOptions {
+                    viewport: ratatui::Viewport::Inline(height),
+                },
+            ) {
+                Ok(terminal) => terminal,
+                Err(err) => {
+                    drop(guard);
+                    eprintln!(
+                        "suvadu: inline recall needs the terminal to report the cursor \
+                         position, which it did not ({err}). Opening full screen instead."
+                    );
+                    let surface = crate::util::RecallSurface::FullScreen;
+                    let guard = crate::util::TerminalGuardStderr::for_surface(surface)?;
+                    let backend = crate::util::TtyCursorBackend::new(io::stderr());
+                    return Ok(OpenRecall {
+                        guard,
+                        terminal: Terminal::new(backend)?,
+                        surface,
+                    });
+                }
+            }
+        }
         crate::util::RecallSurface::FullScreen => Terminal::new(backend)?,
     };
-    Ok((guard, terminal))
+    Ok(OpenRecall {
+        guard,
+        terminal,
+        surface,
+    })
 }
 
 /// Parameters for `run_search` — bundles the CLI flags into one struct
@@ -663,13 +701,19 @@ pub fn run_search(
     // drawing into an inline viewport instead of the alternate screen. It is
     // opt-in (`--compact` / `search.compact`), needs no daemon or PTY proxy,
     // and the full-screen inspector stays the default.
-    let surface = recall_surface(args.compact);
-    let (_guard, mut terminal) = open_recall_terminal(surface)?;
+    let OpenRecall {
+        guard: _guard,
+        mut terminal,
+        surface,
+    } = open_recall_terminal(recall_surface(args.compact))?;
 
     let result = app.run(&mut terminal, repo);
     // An inline viewport lives in the normal screen buffer, so it has to
     // erase itself: the shell prompt must come back where it was, with the
-    // surrounding context intact.
+    // surrounding context intact. `clear` asks the terminal for the cursor
+    // position, so it must only run on a surface that is genuinely inline —
+    // on a terminal that would not answer, the fallback is already on the
+    // alternate screen and asking again would fail and lose the selection.
     if matches!(surface, crate::util::RecallSurface::Inline { .. }) {
         terminal.clear()?;
     }

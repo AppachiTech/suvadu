@@ -2,7 +2,6 @@ use crate::risk;
 use crate::theme::theme;
 use chrono::{Local, TimeZone};
 use ratatui::{
-    backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -34,7 +33,7 @@ fn push_hint(spans: &mut Vec<Span<'static>>, hint: Hint, key: Style, label: Styl
 impl SearchApp {
     pub(super) fn render(
         &mut self,
-        terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
+        terminal: &mut Terminal<crate::util::TtyCursorBackend<io::Stderr>>,
     ) -> io::Result<()> {
         terminal.draw(|f| self.draw(f))?;
 
