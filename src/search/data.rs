@@ -273,16 +273,11 @@ impl SearchApp {
 
         for entry in entries {
             buf.clear();
-            let executor_str;
-            let field_value: &str = match field {
-                SearchField::Cwd => &entry.cwd,
-                SearchField::Session => &entry.session_id,
-                SearchField::Executor => {
-                    executor_str = entry.executor_type.as_deref().unwrap_or("").to_string();
-                    &executor_str
-                }
-                SearchField::Command => &entry.command,
-            };
+            // One definition of "the text this field searches", shared with
+            // the SQL side (see Entry::search_field_text) so the database and
+            // the scorer can never disagree about what matched.
+            let field_text = entry.search_field_text(field);
+            let field_value: &str = field_text.as_ref();
             // ── Matching: is this entry eligible at all? ───────────────
             // Decided by the mode's own rule, never by how well it ranks.
             //

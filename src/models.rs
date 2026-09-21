@@ -20,6 +20,31 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// The text a `SearchField` search matches against, in exactly the form
+    /// the SQL side builds.
+    ///
+    /// Both sides must agree or a row can be counted by the database and then
+    /// dropped by the in-memory scorer, which is what made the executor field
+    /// report more results than it would show. The executor case mirrors
+    /// `COALESCE(e.executor_type || ' ' || e.executor, '')`: SQL concatenation
+    /// yields NULL if either half is NULL, so a row missing either one has no
+    /// executor text at all.
+    #[must_use]
+    pub fn search_field_text(&self, field: SearchField) -> std::borrow::Cow<'_, str> {
+        use std::borrow::Cow;
+        match field {
+            SearchField::Command => Cow::Borrowed(self.command.as_str()),
+            SearchField::Cwd => Cow::Borrowed(self.cwd.as_str()),
+            SearchField::Session => Cow::Borrowed(self.session_id.as_str()),
+            SearchField::Executor => {
+                match (self.executor_type.as_deref(), self.executor.as_deref()) {
+                    (Some(kind), Some(name)) => Cow::Owned(format!("{kind} {name}")),
+                    _ => Cow::Borrowed(""),
+                }
+            }
+        }
+    }
+
     /// Create a new entry
     pub const fn new(
         session_id: String,

@@ -4159,3 +4159,63 @@ fn prod03_active_filters_shown_in_status_row() {
         lines[4]
     );
 }
+
+// ── executor-field search (F01) ────────────────────────────────────
+// SQL matches "<type> <name>" for the executor field, but the in-memory
+// scorer only looked at the type, so a row matching on the name alone was
+// counted and then dropped during ranking: the footer said 2 results and
+// showed 1.
+
+fn repo_with_two_executors() -> (tempfile::TempDir, crate::repository::Repository) {
+    let (dir, repo) = crate::test_utils::test_repo();
+    repo.insert_session(&crate::models::Session {
+        id: "session123".into(),
+        hostname: "test".into(),
+        created_at: 1000,
+        tag_id: None,
+    })
+    .unwrap();
+    let mut human = create_test_entry("human command");
+    human.executor_type = Some("human".into());
+    human.executor = Some("terminal".into());
+    repo.insert_entry(&human).unwrap();
+
+    let mut agent = create_test_entry("agent command");
+    agent.executor_type = Some("agent".into());
+    agent.executor = Some("codex".into());
+    agent.started_at = 2000;
+    agent.ended_at = 3000;
+    repo.insert_entry(&agent).unwrap();
+    (dir, repo)
+}
+
+/// `terminal` contains "e", so the human row is eligible on its executor
+/// *name*. Every mode must agree, and the count must match what is shown.
+#[test]
+fn executor_field_search_matches_the_executor_name_not_only_its_type() {
+    for mode in [MatchMode::Terms, MatchMode::Fuzzy, MatchMode::Literal] {
+        let (_dir, repo) = repo_with_two_executors();
+        let mut config = test_search_config(vec![], 2);
+        config.view.search_field = SearchField::Executor;
+        config.show_agents = true;
+        let mut app = SearchApp::new(config);
+        app.recall.match_mode = mode;
+        app.query = "e".into();
+        app.reload_entries(&repo).unwrap();
+
+        let shown: Vec<String> = app.entries.iter().map(|e| e.command.clone()).collect();
+        assert_eq!(
+            app.pagination.total_items,
+            shown.len(),
+            "{mode:?}: the count must equal what the user can actually see: {shown:?}"
+        );
+        assert!(
+            shown.contains(&"human command".to_string()),
+            "{mode:?}: the human/terminal row matches on its executor name: {shown:?}"
+        );
+        assert!(
+            shown.contains(&"agent command".to_string()),
+            "{mode:?}: the agent/codex row matches on its executor type: {shown:?}"
+        );
+    }
+}
