@@ -424,13 +424,12 @@ impl SearchApp {
         let (total, ranked, ranked_counts) = {
             let qf = self.build_matched_query(&plan, self.subsequence_needle(&plan));
 
-            let total = usize::try_from(if self.view.unique_mode {
-                repo.count_unique_filtered(&qf)?
-            } else {
-                repo.count_filtered(&qf)?
-            })?;
-
             if window == 0 {
+                let total = usize::try_from(if self.view.unique_mode {
+                    repo.count_unique_filtered(&qf)?
+                } else {
+                    repo.count_filtered(&qf)?
+                })?;
                 (total, Vec::new(), std::collections::HashMap::new())
             } else {
                 let boost_cwd = if self.view.context_boost {
@@ -448,6 +447,19 @@ impl SearchApp {
                         repo.get_entries_filtered(window, 0, &qf)?,
                         std::collections::HashMap::new(),
                     )
+                };
+                // A window that came back short *is* the whole match set, so
+                // the count is already known and the second query — the
+                // expensive half of a fuzzy reload — is skipped. Only a full
+                // window leaves anything to count.
+                let total = if candidates.len() < window {
+                    candidates.len()
+                } else {
+                    usize::try_from(if self.view.unique_mode {
+                        repo.count_unique_filtered(&qf)?
+                    } else {
+                        repo.count_filtered(&qf)?
+                    })?
                 };
                 let ranked = Self::fuzzy_score_mode(
                     candidates,
