@@ -11,7 +11,7 @@
 //! | unversioned (no `schema_version` table) | pre-release / pre-versioning installs |
 //! | v5 | v0.1.3 – v0.3.7 |
 //! | v7 | v0.4.0 |
-//! | v9 | v0.4.1 (current) |
+//! | v9 | v0.4.1 – v0.4.2 (current) |
 //!
 //! Every test writes to a `tempfile` directory. Nothing reads or writes the
 //! user's real database, backups or config.
