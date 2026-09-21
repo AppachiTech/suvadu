@@ -620,13 +620,28 @@ fn handle_cleanup(
     for line in report.lines(false) {
         println!("{line}");
     }
-    println!("{}", cleanup_summary(report.removed(), dry_run));
+    println!(
+        "{}",
+        cleanup_summary(report.removed(), report.left_alone(), dry_run)
+    );
     Ok(())
 }
 
 /// The closing line of a cleanup run.
-pub fn cleanup_summary(removed: usize, dry_run: bool) -> String {
+///
+/// `left_alone` is the number of files cleanup deliberately kept — generated
+/// by suvadu, but edited since, so removing them would destroy that edit.
+/// Removing nothing because everything is still in use and removing nothing
+/// because edited files were preserved are different outcomes, and the
+/// reassuring wording is only true of the first.
+pub fn cleanup_summary(removed: usize, left_alone: usize, dry_run: bool) -> String {
     if removed == 0 {
+        if left_alone > 0 {
+            return format!(
+                "\nNo files removed. {left_alone} generated file(s) were left alone because they \
+                 were edited outside suvadu — see the reason against each above."
+            );
+        }
         return "\nNothing to clean up — every generated file still has an active skill behind it."
             .to_string();
     }
@@ -639,6 +654,27 @@ pub fn cleanup_summary(removed: usize, dry_run: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Cleanup that removed nothing because it deliberately preserved an
+    /// externally edited file must not claim every generated file still has
+    /// an active skill behind it — it does not, which is why the file was
+    /// left alone.
+    #[test]
+    fn cleanup_summary_does_not_claim_all_is_well_when_files_were_left_alone() {
+        let summary = cleanup_summary(0, 1, false);
+        assert!(
+            !summary.contains("every generated file still has an active skill"),
+            "left-alone files contradict that claim: {summary}"
+        );
+        assert!(
+            summary.to_lowercase().contains("left alone") || summary.contains("above"),
+            "the summary must point at the per-file explanation: {summary}"
+        );
+        // With nothing skipped the reassuring wording is still right.
+        assert!(
+            cleanup_summary(0, 0, false).contains("every generated file still has an active skill")
+        );
+    }
+
     use super::*;
     use crate::models::{SKILL_SOURCE_HUMAN, SKILL_STATUS_PENDING};
     use crate::test_utils::test_repo;

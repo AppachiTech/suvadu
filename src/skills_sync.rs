@@ -150,6 +150,12 @@ impl SyncReport {
         self.count(ChangeKind::Removed)
     }
 
+    /// Files cleanup kept on purpose: suvadu generated them, but they have
+    /// been edited since, so deleting them would destroy that edit.
+    pub fn left_alone(&self) -> usize {
+        self.count(ChangeKind::Skipped)
+    }
+
     fn push(&mut self, change: FileChange) {
         self.changes.push(change);
     }
