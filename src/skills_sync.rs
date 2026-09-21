@@ -895,6 +895,18 @@ fn cleanup_inner(
     let cwd_str = cwd.to_string_lossy().to_string();
     let (relevant, _) = resolve_for_cwd(&all, &cwd_str);
 
+    // Global destinations are shared by every project, so what belongs in
+    // them is decided by the active *global* library entries — before any
+    // project-scoped shadowing. `relevant` has shadowed globals removed for
+    // this cwd, which is right for deciding what to write here but wrong
+    // for deciding what is orphaned: a project override of `alpha` must
+    // never uninstall global `alpha` for every other directory.
+    let global_names: Vec<&str> = all
+        .iter()
+        .filter(|s| s.scope == SKILL_SCOPE_GLOBAL)
+        .map(|s| s.name.as_str())
+        .collect();
+
     let mut report = SyncReport {
         changes: Vec::new(),
         notes: Vec::new(),
@@ -904,15 +916,10 @@ fn cleanup_inner(
     for &target in targets {
         match target {
             SyncTarget::ClaudeCode => {
-                let expected: Vec<&str> = relevant
-                    .iter()
-                    .filter(|s| s.scope == SKILL_SCOPE_GLOBAL)
-                    .map(|s| s.name.as_str())
-                    .collect();
                 if let Some(home) = home {
                     cleanup_claude_root(
                         &home.join(".claude").join("skills"),
-                        &expected,
+                        &global_names,
                         dry_run,
                         &mut report,
                     )?;
@@ -930,6 +937,9 @@ fn cleanup_inner(
                 )?;
             }
             SyncTarget::Cursor => {
+                // Cursor rules live in this project only and a shadowed
+                // global always has a same-named project skill writing the
+                // same file, so the cwd-resolved set is complete here.
                 let expected: Vec<&str> = relevant.iter().map(|s| s.name.as_str()).collect();
                 cleanup_cursor(
                     &cwd.join(".cursor").join("rules"),
@@ -939,7 +949,7 @@ fn cleanup_inner(
                 )?;
             }
             SyncTarget::Codex => {
-                let has_global = relevant.iter().any(|s| s.scope == SKILL_SCOPE_GLOBAL);
+                let has_global = !global_names.is_empty();
                 if let Some(codex_home) = codex_home_path(home, codex_home_override) {
                     cleanup_codex_file(
                         &codex_home.join("AGENTS.md"),
@@ -2268,5 +2278,140 @@ mod tests {
             assert_eq!(change.kind, ChangeKind::Skipped);
             assert!(change.detail.is_some());
         }
+    }
+
+    // ── A project override must not uninstall the global skill ────────────
+
+    /// Global `alpha` synced everywhere, then shadowed by a project-scoped
+    /// `alpha` in `cwd` and synced again.
+    fn shadowed_global_fixture(
+        repo: &Repository,
+        cwd: &Path,
+        home: &Path,
+        codex_home: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        repo.create_skill(&skill("alpha", SKILL_SCOPE_GLOBAL))?;
+        sync_inner(
+            repo,
+            &ALL_TARGETS,
+            cwd,
+            Some(home),
+            Some(codex_home),
+            SyncOptions::apply(),
+        )?;
+        repo.create_skill(&skill("alpha", &cwd.to_string_lossy()))?;
+        sync_inner(
+            repo,
+            &ALL_TARGETS,
+            cwd,
+            Some(home),
+            Some(codex_home),
+            SyncOptions::apply(),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn cleanup_from_the_overriding_project_keeps_the_global_skill_installed() {
+        let (_dir, repo) = test_repo();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let codex_home = tempfile::tempdir().unwrap();
+        shadowed_global_fixture(&repo, cwd.path(), home.path(), codex_home.path()).unwrap();
+
+        let global_claude = home.path().join(".claude/skills/alpha/SKILL.md");
+        let global_codex = codex_home.path().join("AGENTS.md");
+        assert!(global_claude.exists());
+        assert!(std::fs::read_to_string(&global_codex)
+            .unwrap()
+            .contains("Body for alpha."));
+
+        let report = cleanup_inner(
+            &repo,
+            &ALL_TARGETS,
+            cwd.path(),
+            Some(home.path()),
+            Some(codex_home.path()),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.removed(),
+            0,
+            "a project override must not uninstall the global skill for other projects: {:?}",
+            report.changes
+        );
+        assert!(
+            global_claude.exists(),
+            "the active global Claude skill was deleted by a project cleanup"
+        );
+        let codex = std::fs::read_to_string(&global_codex).unwrap();
+        assert!(
+            codex.contains(CODEX_BLOCK_START_PREFIX) && codex.contains("Body for alpha."),
+            "the active global Codex block was removed by a project cleanup: {codex}"
+        );
+    }
+
+    #[test]
+    fn cleanup_from_an_unrelated_directory_keeps_the_shadowed_global_skill() {
+        let (_dir, repo) = test_repo();
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let codex_home = tempfile::tempdir().unwrap();
+        shadowed_global_fixture(&repo, project.path(), home.path(), codex_home.path()).unwrap();
+
+        let elsewhere = tempfile::tempdir().unwrap();
+        let report = cleanup_inner(
+            &repo,
+            &ALL_TARGETS,
+            elsewhere.path(),
+            Some(home.path()),
+            Some(codex_home.path()),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(report.removed(), 0, "{:?}", report.changes);
+        assert!(home.path().join(".claude/skills/alpha/SKILL.md").exists());
+        assert!(std::fs::read_to_string(codex_home.path().join("AGENTS.md"))
+            .unwrap()
+            .contains("Body for alpha."));
+        // The project's own generated files are untouched from elsewhere.
+        assert!(project
+            .path()
+            .join(".claude/skills/alpha/SKILL.md")
+            .exists());
+    }
+
+    #[test]
+    fn cleanup_still_removes_a_global_file_once_the_global_skill_is_gone() {
+        let (_dir, repo) = test_repo();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let codex_home = tempfile::tempdir().unwrap();
+        shadowed_global_fixture(&repo, cwd.path(), home.path(), codex_home.path()).unwrap();
+
+        repo.delete_skill("alpha", SKILL_SCOPE_GLOBAL).unwrap();
+        let report = cleanup_inner(
+            &repo,
+            &ALL_TARGETS,
+            cwd.path(),
+            Some(home.path()),
+            Some(codex_home.path()),
+            false,
+        )
+        .unwrap();
+
+        assert!(!home.path().join(".claude/skills/alpha/SKILL.md").exists());
+        assert!(
+            !std::fs::read_to_string(codex_home.path().join("AGENTS.md"))
+                .unwrap()
+                .contains(CODEX_BLOCK_START_PREFIX)
+        );
+        assert_eq!(report.removed(), 2);
+        // The project-scoped skill of the same name keeps its own files.
+        assert!(cwd.path().join(".claude/skills/alpha/SKILL.md").exists());
+        assert!(cursor_rule_path(cwd.path(), "alpha").exists());
     }
 }
