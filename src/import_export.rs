@@ -382,6 +382,7 @@ pub fn import_jsonl_into_repo_opts<R: BufRead>(
 
     let mut stats = ImportStats::default();
     let mut batch_count = 0u64;
+    let restored_at = chrono::Utc::now().timestamp_millis();
     let mut ensured_sessions: HashSet<String> = HashSet::new();
     // Lower-cased tag name → resolved local tag_id (or None if creation failed
     // and we had to drop the association).
@@ -428,6 +429,17 @@ pub fn import_jsonl_into_repo_opts<R: BufRead>(
             let resolved = remap_tag_id(repo, &entry, &mut tag_remap, &mut stats)?;
             entry.tag_id = resolved;
         }
+
+        // Mark the row as one this database received from an import, without
+        // touching the exported `context`: a restore is meant to reproduce
+        // where the command was *originally* recorded. Diagnostics used to
+        // infer this from the placeholder session hostname, which is only
+        // stamped on a session the importer had to create — so a restore into
+        // a session that already existed read as live capture.
+        entry.context.get_or_insert_with(HashMap::new).insert(
+            crate::repository::RESTORED_AT_KEY.to_string(),
+            restored_at.to_string(),
+        );
 
         match repo.insert_entry(&entry) {
             Ok(_) => {

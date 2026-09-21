@@ -17,6 +17,14 @@ use super::Repository;
 /// import site so the diagnostics query and the importer cannot drift.
 pub const PLACEHOLDER_IMPORT_HOSTNAME: &str = "imported";
 
+/// Context key the JSONL importer stamps on every row it writes, recording
+/// when *this* database received it.
+///
+/// It is deliberately not `import_source`/`imported_at`: a JSONL restore
+/// preserves the exported row's own context so it still says where the
+/// command was originally recorded, and overwriting that would lose it.
+pub const RESTORED_AT_KEY: &str = "restored_at";
+
 /// SQL that is true for a row an importer wrote.
 ///
 /// Four independent signals, because no single one covers every importer or
@@ -34,6 +42,9 @@ pub const PLACEHOLDER_IMPORT_HOSTNAME: &str = "imported";
 ///   export from another machine lands here. That importer preserves the
 ///   exported `context` verbatim rather than overwriting it, so the row's
 ///   own provenance — where it was *originally* recorded — survives.
+/// * `context.restored_at`, which that importer stamps on every row it
+///   writes. The hostname rule alone only catches a session the importer
+///   created, so a restore into an existing session used to look live.
 ///
 /// Every comparison is NULL-safe: a signal that is unknown must read as
 /// "not imported", never as NULL, or the negation would silently drop rows.
@@ -43,6 +54,7 @@ pub const IMPORTED_ROW_SQL: &str = "(\
      OR e.session_id LIKE 'import-bash-%' \
      OR e.session_id LIKE 'import-zsh-%' \
      OR e.session_id LIKE 'atuin-%' \
+     OR json_extract(e.context, '$.restored_at') IS NOT NULL \
      OR IFNULL(s.hostname, '') = 'imported')";
 
 /// The newest stored shell record, for display.

@@ -85,7 +85,12 @@ impl Sandbox {
 
     /// One command recorded the way the live shell hook records it.
     fn record_live(&self, session: &str, command: &str) {
-        let now = chrono::Utc::now().timestamp_millis().to_string();
+        self.record_live_at(session, command, chrono::Utc::now().timestamp_millis());
+    }
+
+    /// `record_live`, but at a chosen time, for "this record is old" cases.
+    fn record_live_at(&self, session: &str, command: &str, at_ms: i64) {
+        let now = at_ms.to_string();
         self.ok(
             Some(session),
             &[
@@ -343,4 +348,43 @@ fn an_import_only_setup_becomes_verified_after_a_genuine_capture() {
     sandbox.install_zsh_hook();
     sandbox.record_live("zsh-session", "echo suvadu-capture-check");
     assert_capture_claimed("after a genuine capture", &sandbox, Some("zsh-session"));
+}
+
+/// F03: restoring a JSONL export into a session that already exists.
+///
+/// The importer only stamps its placeholder hostname on a session it has to
+/// create, so a row restored into an existing session carried no import
+/// marker at all and read as a locally captured record. Reproduced from the
+/// corrective-release review: an old live record, then a JSONL row dated now
+/// with the same session id, flipped capture to verified with no hook
+/// installed.
+#[test]
+fn a_jsonl_import_into_an_existing_session_is_not_capture_evidence() {
+    let sandbox = Sandbox::new();
+    let session = "11111111-1111-4111-8111-111111111111";
+
+    // A genuine hook-written record, but two days old: not current proof.
+    let old = chrono::Utc::now().timestamp_millis() - 2 * 24 * 60 * 60 * 1000;
+    sandbox.record_live_at(session, "echo captured-two-days-ago", old);
+    assert_capture_not_claimed("before the import", &sandbox, Some(session));
+
+    // Restoring an export into that same session must not become proof.
+    let file = sandbox.path("export.jsonl");
+    let now = chrono::Utc::now().timestamp_millis();
+    std::fs::write(
+        &file,
+        format!(
+            "{{\"session_id\":\"{session}\",\"command\":\"echo restored-not-captured\",\
+             \"cwd\":\"/work\",\"exit_code\":0,\"started_at\":{now},\"ended_at\":{now},\
+             \"duration_ms\":0}}\n"
+        ),
+    )
+    .unwrap();
+    sandbox.ok(Some(session), &["import", file.to_str().unwrap()]);
+
+    assert_capture_not_claimed(
+        "after restoring into an existing session",
+        &sandbox,
+        Some(session),
+    );
 }
