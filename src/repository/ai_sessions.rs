@@ -862,6 +862,17 @@ impl Repository {
 
     /// Fingerprint the exact ordered event/command prefix covered by a summary.
     /// Returning `None` means the requested prefix is no longer present.
+    ///
+    /// `event_count` counts **readable** events — the unit a summary's
+    /// `source_event_count`, the header's `event_count`, `events_total` and
+    /// `resume_event_offset` all use. Rows suvadu cannot decode are skipped
+    /// before the window is cut, exactly as `get_ai_session` pages them.
+    /// Slicing raw rows instead used to let an unreadable row consume a slot,
+    /// so the fingerprint stopped short of the last readable events the
+    /// summary was written from and a change to them went undetected.
+    /// Command rows are unaffected: an unparseable `context` degrades to
+    /// null rather than dropping the row, so `command_count` is a raw count
+    /// and a raw `LIMIT` is the right window for it.
     fn ai_session_prefix_hash(
         &self,
         id: &str,
@@ -875,13 +886,20 @@ impl Repository {
         hash_field(&mut hash, id.as_bytes());
         hash_field(&mut hash, b"events");
         let mut seen_events = 0_i64;
-        let mut statement = self.conn.prepare(
-            "SELECT event_id,data FROM ai_events WHERE session_id=?1 ORDER BY rowid LIMIT ?2",
-        )?;
-        for row in statement.query_map(params![id, event_count], |row| {
+        let mut skipped = 0_usize;
+        let mut statement = self
+            .conn
+            .prepare("SELECT event_id,data FROM ai_events WHERE session_id=?1 ORDER BY rowid")?;
+        for row in statement.query_map(params![id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })? {
+            if seen_events == event_count {
+                break;
+            }
             let (event_id, data) = row?;
+            if decode_or_skip::<AiEvent>(&data, &mut skipped).is_none() {
+                continue;
+            }
             hash_field(&mut hash, event_id.as_bytes());
             hash_field(&mut hash, data.as_bytes());
             seen_events += 1;
@@ -1993,6 +2011,205 @@ mod tests {
         assert!(repo
             .get_ai_session("codex-fixture", 20, 0, &["/worker".into()])
             .is_ok());
+    }
+
+    /// A row that reached the database malformed. No adapter produces one
+    /// on request, so it is written straight to the table.
+    fn insert_unreadable_event(repo: &Repository, event_id: &str) {
+        repo.conn
+            .execute(
+                "INSERT INTO ai_events(session_id,event_id,kind,cwd,data) \
+                 VALUES ('codex-fixture',?1,'prompt','/work/project','{not json')",
+                params![event_id],
+            )
+            .unwrap();
+    }
+
+    /// Rewrite one stored event's text, as a re-sync or a corrupted write
+    /// would, and bump the session revision the way any change does.
+    fn rewrite_event(repo: &Repository, event_id: &str) {
+        let original: String = repo
+            .conn
+            .query_row(
+                "SELECT data FROM ai_events WHERE session_id='codex-fixture' AND event_id=?1",
+                [event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let rewritten = original.replace("request", "demand");
+        assert_ne!(
+            rewritten, original,
+            "the fixture event must actually change"
+        );
+        repo.conn
+            .execute(
+                "UPDATE ai_events SET data=?1 WHERE session_id='codex-fixture' AND event_id=?2",
+                params![rewritten, event_id],
+            )
+            .unwrap();
+        repo.conn
+            .execute(
+                "UPDATE ai_sessions SET revision=revision+1 WHERE id='codex-fixture'",
+                [],
+            )
+            .unwrap();
+    }
+
+    /// Build `codex-fixture` with an unreadable row sitting *before* the
+    /// last readable event, and return (readable event count, id of the
+    /// last readable event).
+    fn fixture_with_a_malformed_row_in_the_middle(repo: &Repository, path: &Path) -> (i64, String) {
+        std::fs::write(path, records()).unwrap();
+        import(repo, path);
+        insert_unreadable_event(repo, "corrupt-1");
+        append(path, &prompt("second request"));
+        import(repo, path);
+
+        let page = repo.get_ai_session("codex-fixture", 50, 0, &[]).unwrap();
+        let events = page["events"].as_array().unwrap();
+        let last = events.last().unwrap()["id"].as_str().unwrap().to_owned();
+        let readable = page["session"]["event_count"].as_i64().unwrap();
+        let raw: i64 = repo
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM ai_events WHERE session_id='codex-fixture'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            raw,
+            readable + 1,
+            "the fixture must hold exactly one unreadable row"
+        );
+        (readable, last)
+    }
+
+    fn save_summary_over_everything(repo: &Repository, source_id: &str) -> String {
+        let session = repo.get_ai_session("codex-fixture", 50, 0, &[]).unwrap();
+        let input = SummaryInput {
+            session_id: "codex-fixture".into(),
+            source_revision: session["session"]["revision"].as_str().unwrap().into(),
+            text: "Everything the session has done so far.".into(),
+            agent: "claude".into(),
+            model: "fixture-writer".into(),
+            source_ids: vec![source_id.to_string()],
+            base_summary_id: None,
+        };
+        repo.save_ai_summary(&input, &[]).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    /// A summary's `source_event_count` counts *readable* events — the same
+    /// unit as `event_count`, `events_total` and `resume_event_offset`. The
+    /// fingerprint must therefore cover that many readable events, not that
+    /// many raw rows: with an unreadable row inside the session the raw
+    /// window stops short, and a change to a readable event the summary was
+    /// actually written from goes unnoticed.
+    #[test]
+    fn summary_fingerprints_cover_readable_events_not_raw_rows() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("fixture.jsonl");
+        let (readable_at_save, last_readable) =
+            fixture_with_a_malformed_row_in_the_middle(&repo, &path);
+        save_summary_over_everything(&repo, &last_readable);
+
+        let saved = repo.get_ai_session("codex-fixture", 50, 0, &[]).unwrap();
+        assert_eq!(
+            saved["summaries"][0]["source_event_count"], readable_at_save,
+            "the basis is stated in readable events"
+        );
+
+        // New activity arrives, and the last event the summary was written
+        // from is rewritten underneath it.
+        append(&path, &prompt("third request"));
+        import(&repo, &path);
+        rewrite_event(&repo, &last_readable);
+
+        let changed = repo.get_ai_session("codex-fixture", 50, 0, &[]).unwrap();
+        let summary = &changed["summaries"][0];
+        assert_eq!(
+            summary["stale"], true,
+            "an event inside the summary's own basis changed:\n{summary}"
+        );
+        assert_eq!(summary["incremental_safe"], false, "{summary}");
+        assert_eq!(summary["resume_event_offset"], Value::Null, "{summary}");
+    }
+
+    /// The other half: an unreadable row must not make a perfectly good
+    /// summary read as stale, and the offset it hands back must resume on
+    /// exactly the readable events it has not seen.
+    #[test]
+    fn a_summary_saved_over_a_session_holding_malformed_rows_still_validates() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("fixture.jsonl");
+        let (readable_at_save, last_readable) =
+            fixture_with_a_malformed_row_in_the_middle(&repo, &path);
+        save_summary_over_everything(&repo, &last_readable);
+        assert_eq!(
+            repo.get_ai_session("codex-fixture", 50, 0, &[]).unwrap()["summaries"][0]["current"],
+            true,
+            "a summary saved against the evidence as it stands is current"
+        );
+
+        append(&path, &prompt("third request"));
+        import(&repo, &path);
+
+        let appended = repo.get_ai_session("codex-fixture", 50, 0, &[]).unwrap();
+        let summary = &appended["summaries"][0];
+        assert_eq!(summary["stale"], false, "{summary}");
+        assert_eq!(summary["has_new_activity"], true, "{summary}");
+        assert_eq!(summary["incremental_safe"], true, "{summary}");
+        assert_eq!(
+            summary["resume_event_offset"], readable_at_save,
+            "{summary}"
+        );
+
+        // Resuming there returns only the readable events added since.
+        let resumed = repo
+            .get_ai_session(
+                "codex-fixture",
+                50,
+                usize::try_from(readable_at_save).unwrap(),
+                &[],
+            )
+            .unwrap();
+        let ids: Vec<&str> = resumed["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids.len(),
+            usize::try_from(
+                appended["session"]["event_count"].as_i64().unwrap() - readable_at_save
+            )
+            .unwrap(),
+            "resuming at the summary's offset must hand over exactly the unseen events: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&last_readable.as_str()),
+            "an event the summary already covered was replayed: {ids:?}"
+        );
+
+        // A follow-up summary can still be built on it.
+        let session = repo.get_ai_session("codex-fixture", 50, 0, &[]).unwrap();
+        let follow_up = SummaryInput {
+            session_id: "codex-fixture".into(),
+            source_revision: session["session"]["revision"].as_str().unwrap().into(),
+            text: "Now including the third request.".into(),
+            agent: "claude".into(),
+            model: "fixture-writer".into(),
+            source_ids: vec![last_readable, ids[0].to_string()],
+            base_summary_id: Some(summary["id"].as_str().unwrap().to_string()),
+        };
+        assert!(
+            repo.save_ai_summary(&follow_up, &[]).is_ok(),
+            "a base summary whose prefix still holds must remain usable"
+        );
     }
 
     #[test]
