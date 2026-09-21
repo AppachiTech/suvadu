@@ -54,7 +54,8 @@ SUVADU_BENCH_SIZES=10000,100000,1000000 \
 
 ## Baseline, 20 September 2026
 
-Suvadu at the PROD-01 search repair, release profile.
+Suvadu 0.4.2, release profile, measured at the commit that repaired typed search
+(`a765027`). Later 0.4.2 commits did not re-run it.
 **Apple M4 Max, 128 GB RAM, macOS 27.0, rustc 1.96.0.** Single machine, one
 run; treat these as an order of magnitude, not a specification.
 
