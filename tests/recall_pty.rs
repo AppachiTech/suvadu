@@ -140,7 +140,31 @@ fn env_for(home: &Path) -> Vec<(String, String)> {
 /// When `answer_cursor_query` is set we reply to `ESC[6n` the way a real
 /// terminal does; otherwise we stay silent, standing in for the terminals
 /// and multiplexers that ignore the request.
-fn run_recall(home: &Path, args: &[&str], answer_cursor_query: bool) -> Recall {
+/// One run of recall under a pty.
+struct Scenario<'a> {
+    args: &'a [&'a str],
+    /// Reply to `ESC[6n` the way a real terminal does.
+    answer_cursor_query: bool,
+    /// Bytes delivered to the terminal *before* the cursor query is answered,
+    /// standing in for someone who types while recall is still measuring.
+    type_before_answer: &'a str,
+    /// Text whose appearance means a frame has been drawn and the UI can
+    /// take a keypress.
+    ready_marker: &'a str,
+    /// How many cursor queries to answer before going silent. Recall asks
+    /// once to open an inline viewport and again to erase it on the way out,
+    /// so `1` is a terminal that stops responding during cleanup.
+    max_answers: usize,
+}
+
+fn run_recall(home: &Path, scenario: &Scenario) -> Recall {
+    let Scenario {
+        args,
+        answer_cursor_query,
+        type_before_answer,
+        ready_marker,
+        max_answers,
+    } = *scenario;
     let stdout_path = home.join("stdout.txt");
     let stdout_file = std::fs::File::create(&stdout_path).unwrap();
     let (master, slave) = open_pty();
@@ -196,16 +220,20 @@ fn run_recall(home: &Path, args: &[&str], answer_cursor_query: bool) -> Recall {
         }
         // Answer every cursor query, counting against the whole stream so a
         // query split across two reads is not missed.
-        if answer_cursor_query {
-            let queries = seen.windows(4).filter(|w| *w == b"\x1b[6n").count();
-            while answered < queries {
-                write_all(master, b"\x1b[12;1R");
-                answered += 1;
+        let queries = seen.windows(4).filter(|w| *w == b"\x1b[6n").count();
+        while answered < queries {
+            // Anything typed now arrives while recall is reading the reply.
+            if !type_before_answer.is_empty() {
+                write_all(master, type_before_answer.as_bytes());
             }
+            if answer_cursor_query && answered < max_answers {
+                write_all(master, b"\x1b[12;1R");
+            }
+            answered += 1;
         }
         // Once the planted command is on screen the UI is drawn and ready to
         // accept the selection, whichever surface it ended up on.
-        if !selected && String::from_utf8_lossy(&seen).contains(DRAWN_MARKER) {
+        if !selected && String::from_utf8_lossy(&seen).contains(ready_marker) {
             write_all(master, b"\r");
             selected = true;
         }
@@ -234,7 +262,16 @@ fn compact_recall_draws_inline_when_the_terminal_reports_the_cursor() {
     let home = tempfile::tempdir().unwrap();
     plant(home.path());
 
-    let recall = run_recall(home.path(), &["--compact", "--query", "pty-recall"], true);
+    let recall = run_recall(
+        home.path(),
+        &Scenario {
+            args: &["--compact", "--query", "pty-recall"],
+            answer_cursor_query: true,
+            type_before_answer: "",
+            ready_marker: DRAWN_MARKER,
+            max_answers: usize::MAX,
+        },
+    );
 
     assert!(
         recall.success,
@@ -259,7 +296,16 @@ fn compact_recall_still_returns_a_selection_when_the_terminal_stays_silent() {
     let home = tempfile::tempdir().unwrap();
     plant(home.path());
 
-    let recall = run_recall(home.path(), &["--compact", "--query", "pty-recall"], false);
+    let recall = run_recall(
+        home.path(),
+        &Scenario {
+            args: &["--compact", "--query", "pty-recall"],
+            answer_cursor_query: false,
+            type_before_answer: "",
+            ready_marker: DRAWN_MARKER,
+            max_answers: usize::MAX,
+        },
+    );
 
     assert!(
         recall.entered_alternate_screen(),
@@ -280,5 +326,68 @@ fn compact_recall_still_returns_a_selection_when_the_terminal_stays_silent() {
         recall.stdout.trim(),
         PLANTED,
         "the selection must survive the fallback and reach the shell wrapper"
+    );
+}
+
+#[test]
+fn characters_typed_while_the_cursor_is_measured_reach_the_query() {
+    let home = tempfile::tempdir().unwrap();
+    plant(home.path());
+
+    // `zzz` matches nothing that was planted. If those keystrokes are
+    // swallowed the query stays empty, the planted command is still on
+    // screen, and Enter selects it — which is how the loss shows up.
+    let recall = run_recall(
+        home.path(),
+        &Scenario {
+            args: &["--compact"],
+            answer_cursor_query: true,
+            type_before_answer: "zzz",
+            ready_marker: "SUVADU SEARCH",
+            max_answers: usize::MAX,
+        },
+    );
+
+    assert!(
+        recall.terminal.contains("zzz"),
+        "the typed characters must appear in the query; terminal saw: {}",
+        recall.terminal.escape_debug()
+    );
+    assert_eq!(
+        recall.stdout.trim(),
+        "",
+        "nothing matches `zzz`, so Enter must return no command"
+    );
+}
+
+#[test]
+fn an_accepted_command_survives_a_terminal_that_stops_answering() {
+    let home = tempfile::tempdir().unwrap();
+    plant(home.path());
+
+    // Answer the measurement that opens the inline viewport, then go silent.
+    // Erasing that viewport on the way out asks a second time. By then the
+    // command has already been accepted, so a cleanup failure must not turn
+    // it into an error with nothing on the prompt.
+    let recall = run_recall(
+        home.path(),
+        &Scenario {
+            args: &["--compact", "--query", "pty-recall"],
+            answer_cursor_query: true,
+            type_before_answer: "",
+            ready_marker: DRAWN_MARKER,
+            max_answers: 1,
+        },
+    );
+
+    assert_eq!(
+        recall.stdout.trim(),
+        PLANTED,
+        "the accepted command must still reach the shell; terminal saw: {}",
+        recall.terminal.escape_debug()
+    );
+    assert!(
+        recall.success,
+        "recall must not exit with an error after accepting a command"
     );
 }

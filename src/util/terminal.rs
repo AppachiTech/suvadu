@@ -201,26 +201,44 @@ impl Drop for TerminalGuardStderr {
 mod cursor_report_tests {
     use super::parse_cursor_report;
 
+    fn position(bytes: &[u8]) -> Option<(u16, u16)> {
+        parse_cursor_report(bytes).map(|r| (r.row, r.col))
+    }
+
+    fn leftover(bytes: &[u8]) -> Vec<u8> {
+        parse_cursor_report(bytes).expect("a report").leftover
+    }
+
     #[test]
     fn reads_a_plain_report() {
-        assert_eq!(parse_cursor_report(b"\x1b[12;40R"), Some((12, 40)));
+        assert_eq!(position(b"\x1b[12;40R"), Some((12, 40)));
+        assert!(leftover(b"\x1b[12;40R").is_empty());
     }
 
     #[test]
     fn reads_a_report_with_a_stray_keystroke_around_it() {
-        assert_eq!(parse_cursor_report(b"q\x1b[3;7Rx"), Some((3, 7)));
+        assert_eq!(position(b"q\x1b[3;7Rx"), Some((3, 7)));
+    }
+
+    #[test]
+    fn keeps_keystrokes_that_arrived_with_the_report() {
+        // Typing during the measurement must not cost the typist those
+        // characters: they are input, not part of the answer.
+        assert_eq!(leftover(b"ab\x1b[3;7Rcd"), b"abcd".to_vec());
+        assert_eq!(leftover(b"\x1b[3;7Rzzz"), b"zzz".to_vec());
+        assert_eq!(leftover(b"zzz\x1b[3;7R"), b"zzz".to_vec());
     }
 
     #[test]
     fn takes_the_last_complete_report() {
-        assert_eq!(parse_cursor_report(b"\x1b[1;1R\x1b[9;2R"), Some((9, 2)));
+        assert_eq!(position(b"\x1b[1;1R\x1b[9;2R"), Some((9, 2)));
     }
 
     #[test]
     fn rejects_an_incomplete_or_absent_report() {
-        assert_eq!(parse_cursor_report(b""), None);
-        assert_eq!(parse_cursor_report(b"\x1b[12;40"), None);
-        assert_eq!(parse_cursor_report(b"hello"), None);
+        assert!(parse_cursor_report(b"").is_none());
+        assert!(parse_cursor_report(b"\x1b[12;40").is_none());
+        assert!(parse_cursor_report(b"hello").is_none());
     }
 }
 
@@ -341,20 +359,41 @@ mod tests {
     }
 }
 
+/// A terminal's reply to the cursor-position request, and anything that
+/// arrived with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorReport {
+    /// 1-based row, as the terminal reports it.
+    pub row: u16,
+    /// 1-based column, as the terminal reports it.
+    pub col: u16,
+    /// Bytes read from the terminal that were not part of the report —
+    /// keystrokes typed while recall was measuring. They belong to whoever
+    /// typed them, so they are handed back rather than dropped.
+    pub leftover: Vec<u8>,
+}
+
 /// Parse a terminal's reply to the cursor-position request (`ESC[6n`),
 /// which looks like `ESC[<row>;<col>R`, both 1-based.
 ///
 /// The reply can arrive with other bytes around it: a keystroke typed at the
 /// wrong moment, or a stray earlier response. Scanning for the last complete
-/// report is more robust than assuming the buffer holds exactly one.
-pub fn parse_cursor_report(bytes: &[u8]) -> Option<(u16, u16)> {
+/// report is more robust than assuming the buffer holds exactly one, and
+/// everything outside it is returned in `leftover`.
+pub fn parse_cursor_report(bytes: &[u8]) -> Option<CursorReport> {
     let text = String::from_utf8_lossy(bytes);
     let (start, body) = text
         .rmatch_indices("\u{1b}[")
         .find_map(|(i, _)| text[i + 2..].split_once('R').map(|(body, _)| (i, body)))?;
-    let _ = start;
     let (row, col) = body.split_once(';')?;
-    Some((row.trim().parse().ok()?, col.trim().parse().ok()?))
+    let row: u16 = row.trim().parse().ok()?;
+    let col: u16 = col.trim().parse().ok()?;
+
+    // `ESC[` + body + `R` is the report; the rest is someone's input.
+    let end = start + 2 + body.len() + 1;
+    let mut leftover = text[..start].as_bytes().to_vec();
+    leftover.extend_from_slice(text[end..].as_bytes());
+    Some(CursorReport { row, col, leftover })
 }
 
 /// Ask the controlling terminal where the cursor is.
@@ -369,7 +408,7 @@ pub fn parse_cursor_report(bytes: &[u8]) -> Option<(u16, u16)> {
 ///
 /// Raw mode must already be on, or the terminal will not answer. Returns an
 /// error rather than a guess if it does not answer in time.
-pub fn cursor_position_from_tty() -> std::io::Result<(u16, u16)> {
+pub fn cursor_position_from_tty() -> std::io::Result<CursorReport> {
     use std::io::{Read, Write};
     use std::os::unix::io::AsRawFd;
 
@@ -407,8 +446,8 @@ pub fn cursor_position_from_tty() -> std::io::Result<(u16, u16)> {
             Err(err) => return Err(err),
         };
         buf.extend_from_slice(&chunk[..read]);
-        if let Some(position) = parse_cursor_report(&buf) {
-            return Ok(position);
+        if let Some(report) = parse_cursor_report(&buf) {
+            return Ok(report);
         }
     }
     Err(std::io::Error::new(
@@ -453,13 +492,23 @@ fn set_nonblocking(fd: std::os::unix::io::RawFd) -> std::io::Result<()> {
 /// crossterm routes through stdout (see [`cursor_position_from_tty`]).
 pub struct TtyCursorBackend<W: std::io::Write> {
     inner: ratatui::backend::CrosstermBackend<W>,
+    /// Keystrokes that arrived while the cursor was being measured. Reading
+    /// from `/dev/tty` consumes them, so they are held here until the caller
+    /// replays them into the UI.
+    pending_input: Vec<u8>,
 }
 
 impl<W: std::io::Write> TtyCursorBackend<W> {
     pub const fn new(writer: W) -> Self {
         Self {
             inner: ratatui::backend::CrosstermBackend::new(writer),
+            pending_input: Vec::new(),
         }
+    }
+
+    /// Take the keystrokes read alongside a cursor report, leaving none behind.
+    pub fn take_pending_input(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.pending_input)
     }
 }
 
@@ -482,7 +531,9 @@ impl<W: std::io::Write> ratatui::backend::Backend for TtyCursorBackend<W> {
     }
 
     fn get_cursor_position(&mut self) -> std::io::Result<ratatui::layout::Position> {
-        let (row, col) = crate::util::cursor_position_from_tty()?;
+        let report = crate::util::cursor_position_from_tty()?;
+        self.pending_input.extend_from_slice(&report.leftover);
+        let (row, col) = (report.row, report.col);
         // The terminal reports 1-based row/column; ratatui wants 0-based x/y.
         Ok(ratatui::layout::Position {
             x: col.saturating_sub(1),
