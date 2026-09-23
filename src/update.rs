@@ -14,6 +14,54 @@ const MINISIGN_PUBLIC_KEY: &str = "RWSnsbPkvYdmk4EtxJ9WjItHLwx/GkmnBFNjeUhGWT2Z2
 
 const VERSION_URL: &str = "https://downloads.appachi.tech/version.txt";
 
+/// Which published archive this machine needs.
+///
+/// The release workflow leaves each operating system's *primary* target
+/// unsuffixed, and those targets differ: macOS publishes arm64 unsuffixed and
+/// Intel as `-x86_64`, while Linux publishes `x86_64` unsuffixed and ARM as
+/// `-aarch64`. Deriving the suffix from the architecture alone therefore asks
+/// for an archive that was never published on one platform, and silently
+/// fetches the wrong architecture's binary on the other. `scripts/install.sh`
+/// resolves the same four names; the tests hold the two to each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReleaseTarget {
+    platform: &'static str,
+    label: &'static str,
+    arch_suffix: &'static str,
+}
+
+impl ReleaseTarget {
+    /// The target for `os`/`arch` as `std::env::consts` spells them, or
+    /// `None` when no build is published for that combination.
+    fn resolve(os: &str, arch: &str) -> Option<Self> {
+        let (platform, label, arch_suffix) = match (os, arch) {
+            ("linux", "x86_64") => ("linux", "Linux", ""),
+            ("linux", "aarch64" | "arm64") => ("linux", "Linux", "-aarch64"),
+            ("macos", "aarch64" | "arm64") => ("macos", "macOS", ""),
+            ("macos", "x86_64") => ("macos", "macOS", "-x86_64"),
+            _ => return None,
+        };
+        Some(Self {
+            platform,
+            label,
+            arch_suffix,
+        })
+    }
+
+    /// The target for the machine this binary is running on.
+    fn current() -> Option<Self> {
+        Self::resolve(std::env::consts::OS, std::env::consts::ARCH)
+    }
+
+    fn archive_name(self) -> String {
+        format!("suv-{}{}-latest.tar.gz", self.platform, self.arch_suffix)
+    }
+
+    fn base_url(self) -> String {
+        format!("https://downloads.appachi.tech/{}", self.platform)
+    }
+}
+
 const SUVADU_LOGO: &str = r"
                                __
    _______  ___   ______ _____/ /_  __
@@ -93,25 +141,17 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
 
     display_release_notes(latest_version.as_deref());
 
-    let (platform, platform_label) = match std::env::consts::OS {
-        "macos" => ("macos", "macOS"),
-        "linux" => ("linux", "Linux"),
-        os => {
-            return Err(format!(
-                "Unsupported platform '{os}'. Only macOS and Linux are supported."
-            )
-            .into());
-        }
-    };
+    let target = ReleaseTarget::current().ok_or_else(|| {
+        format!(
+            "No published build for {}/{}. Build from source instead: cargo install suvadu",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
+    let platform_label = target.label;
 
-    let arch_suffix = if std::env::consts::ARCH == "aarch64" {
-        "-aarch64"
-    } else {
-        ""
-    };
-
-    let base_url = format!("https://downloads.appachi.tech/{platform}");
-    let archive_name = format!("suv-{platform}{arch_suffix}-latest.tar.gz");
+    let base_url = target.base_url();
+    let archive_name = target.archive_name();
     let archive_url = format!("{base_url}/{archive_name}");
     let checksum_url = format!("{base_url}/{archive_name}.sha256");
     let signature_url = format!("{base_url}/{archive_name}.minisig");
@@ -481,6 +521,122 @@ fn install_binary(binary_path: &std::path::Path) -> Result<bool, Box<dyn std::er
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The four archives the release workflow actually publishes. Anything
+    /// else is a download that 404s, or the wrong architecture's binary.
+    #[test]
+    fn release_target_names_only_published_archives() {
+        let cases = [
+            ("linux", "x86_64", "linux", "suv-linux-latest.tar.gz"),
+            (
+                "linux",
+                "aarch64",
+                "linux",
+                "suv-linux-aarch64-latest.tar.gz",
+            ),
+            ("macos", "aarch64", "macos", "suv-macos-latest.tar.gz"),
+            ("macos", "x86_64", "macos", "suv-macos-x86_64-latest.tar.gz"),
+        ];
+        for (os, arch, platform, archive) in cases {
+            let target = ReleaseTarget::resolve(os, arch)
+                .unwrap_or_else(|| panic!("{os}/{arch} should be supported"));
+            assert_eq!(target.platform, platform, "{os}/{arch}");
+            assert_eq!(target.archive_name(), archive, "{os}/{arch}");
+        }
+    }
+
+    /// The updater and the install script resolve the same four names. They
+    /// drifted apart once already, and only the script was corrected.
+    #[test]
+    fn release_target_agrees_with_the_install_script() {
+        let script = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/install.sh"),
+        )
+        .expect("scripts/install.sh must be readable");
+        for (os, arch) in [
+            ("linux", "x86_64"),
+            ("linux", "aarch64"),
+            ("macos", "aarch64"),
+            ("macos", "x86_64"),
+        ] {
+            let archive = ReleaseTarget::resolve(os, arch).unwrap().archive_name();
+            let stem = archive
+                .strip_suffix("-latest.tar.gz")
+                .expect("archive name shape");
+            let suffix = stem
+                .strip_prefix(&format!("suv-{os}"))
+                .expect("archive names start with the platform");
+            let uname_os = if os == "macos" { "Darwin" } else { "Linux" };
+            let uname_arch = if os == "macos" && arch == "aarch64" {
+                "arm64"
+            } else {
+                arch
+            };
+            let expected = format!("{uname_os}/{uname_arch}");
+            let line = script
+                .lines()
+                .find(|l| l.trim_start().starts_with(&expected))
+                .unwrap_or_else(|| panic!("install.sh has no case for {expected}"));
+            let script_suffix = line
+                .split("ARCH_SUFFIX=\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or_else(|| panic!("no ARCH_SUFFIX in {line}"));
+            assert_eq!(
+                suffix, script_suffix,
+                "{os}/{arch}: updater and install.sh disagree"
+            );
+        }
+    }
+
+    /// The workflow publishes; the updater and the install script consume.
+    /// Reading the matrix keeps all three tied to one set of names.
+    #[test]
+    fn release_target_matches_what_the_workflow_publishes() {
+        let workflow = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/release.yml"),
+        )
+        .expect("the release workflow must be readable");
+
+        let mut published: Vec<(String, String)> = Vec::new();
+        let (mut os, mut target) = (None, None);
+        for line in workflow.lines().map(str::trim) {
+            if let Some(value) = line.strip_prefix("- os: ") {
+                os = Some(value.trim().to_string());
+                target = None;
+            } else if let Some(value) = line.strip_prefix("target: ") {
+                target = Some(value.trim().to_string());
+            } else if let Some(value) = line.strip_prefix("suffix: ") {
+                if let (Some(os), Some(target)) = (os.as_ref(), target.as_ref()) {
+                    let arch = target.split('-').next().expect("target triple");
+                    let suffix = value.trim().trim_matches('"').to_string();
+                    published.push((format!("{os}/{arch}"), suffix));
+                }
+            }
+        }
+        assert_eq!(
+            published.len(),
+            4,
+            "expected four published targets, parsed {published:?}"
+        );
+
+        for (key, suffix) in published {
+            let (os, arch) = key.split_once('/').expect("os/arch");
+            let target = ReleaseTarget::resolve(os, arch)
+                .unwrap_or_else(|| panic!("{key} is published but the updater cannot resolve it"));
+            assert_eq!(
+                target.archive_name(),
+                format!("suv-{os}{suffix}-latest.tar.gz"),
+                "{key}: the updater asks for a name the workflow does not publish"
+            );
+        }
+    }
+
+    #[test]
+    fn release_target_rejects_an_architecture_with_no_build() {
+        assert!(ReleaseTarget::resolve("linux", "riscv64").is_none());
+        assert!(ReleaseTarget::resolve("windows", "x86_64").is_none());
+    }
 
     #[test]
     fn test_is_not_homebrew_install() {
