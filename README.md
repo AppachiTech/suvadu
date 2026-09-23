@@ -142,6 +142,13 @@ between commands recorded at the same millisecond.
 `suv search --compact` draws the same UI inline under your prompt instead of
 taking over the screen, so the output you were reading stays visible.
 
+**Making a choice stick.** `search.match_mode`, `search.scope` and
+`search.compact` set the default for every recall. All three are
+**config-file only**: `suv settings` does not offer them. Put them in the
+`[search]` section of `config.toml`, in the config directory listed under
+[Data Storage](SECURITY.md#data-storage). All three default to the behaviour
+of earlier releases.
+
 ---
 
 ## Bring your existing history
