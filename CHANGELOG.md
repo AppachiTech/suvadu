@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.4.2] - 2026-09-21
+## [0.4.2] - 2026-09-24
 
 ### Added
 - **Explicit matching modes and recall scopes in `suv search`** — how a query matches and where it looks are now two separate, visible controls instead of one fixed behaviour. `--match terms|literal|prefix|fuzzy` (`^X` in the UI) picks the matching rule: `terms` (the default, unchanged — every whitespace-separated word must appear as a substring, in any order), `literal` (the whole query including spaces and punctuation), `prefix` (the command starts with the query), and `fuzzy` (the query's letters appear in order with gaps, so `gco` finds `git checkout`). `--scope all|directory|workspace|session` (`^P` to cycle, `^R` to reset to `all`) picks the history to look at: everything, exactly the current directory, anywhere in the current Git repository or linked worktree, or the current shell session. Every mode narrows candidates in SQL, so none of them falls back to scanning a recent window; a scope that cannot apply here (no repository, no session) says so and falls back explicitly rather than silently. `--here` is now the spelling of `--scope directory`. `--compact` draws recall inline under the prompt instead of taking over the screen. All three have config keys — `search.match_mode`, `search.scope`, `search.compact` — and all default to the previous behaviour.
