@@ -334,29 +334,27 @@ fn characters_typed_while_the_cursor_is_measured_reach_the_query() {
     let home = tempfile::tempdir().unwrap();
     plant(home.path());
 
-    // `zzz` matches nothing that was planted. If those keystrokes are
-    // swallowed the query stays empty, the planted command is still on
-    // screen, and Enter selects it — which is how the loss shows up.
+    // Plain typing, the simplest case. The outcome is asserted through the
+    // returned command rather than the drawn text: ratatui diffs frames and
+    // writes one changed cell at a time, so typed text never appears as a
+    // contiguous string in the byte stream.
     let recall = run_recall(
         home.path(),
         &Scenario {
-            args: &["--compact"],
+            args: &["--compact", "--query", "pty-recall"],
             answer_cursor_query: true,
-            type_before_answer: "zzz",
+            type_before_answer: NO_MATCH,
             ready_marker: "SUVADU SEARCH",
             max_answers: usize::MAX,
         },
     );
 
-    assert!(
-        recall.terminal.contains("zzz"),
-        "the typed characters must appear in the query; terminal saw: {}",
-        recall.terminal.escape_debug()
-    );
     assert_eq!(
         recall.stdout.trim(),
         "",
-        "nothing matches `zzz`, so Enter must return no command"
+        "typing during the measurement must narrow the query to nothing; \
+         swallowing it returns the planted command instead. Terminal saw: {}",
+        recall.terminal.escape_debug()
     );
 }
 
@@ -389,5 +387,96 @@ fn an_accepted_command_survives_a_terminal_that_stops_answering() {
     assert!(
         recall.success,
         "recall must not exit with an error after accepting a command"
+    );
+}
+
+/// Text that matches nothing planted, so a query that really arrived is
+/// visible in the outcome: no selection instead of the planted command.
+const NO_MATCH: &str = "zzzznomatch";
+
+/// Bracketed paste, as a terminal sends it.
+fn pasted(text: &str) -> String {
+    format!("\x1b[200~{text}\x1b[201~")
+}
+
+#[test]
+fn a_paste_during_opening_reaches_the_query() {
+    let home = tempfile::tempdir().unwrap();
+    plant(home.path());
+
+    let recall = run_recall(
+        home.path(),
+        &Scenario {
+            args: &["--compact", "--query", "pty-recall"],
+            answer_cursor_query: true,
+            type_before_answer: &pasted(NO_MATCH),
+            ready_marker: "SUVADU SEARCH",
+            max_answers: usize::MAX,
+        },
+    );
+
+    assert_eq!(
+        recall.stdout.trim(),
+        "",
+        "the pasted text matches nothing, so Enter must return no command; terminal saw: {}",
+        recall.terminal.escape_debug()
+    );
+}
+
+#[test]
+fn editing_keys_during_opening_are_not_swallowed() {
+    let home = tempfile::tempdir().unwrap();
+    plant(home.path());
+
+    // Backspace first: it applies to an empty query, so everything after it
+    // is still ordinary typing. Dropping the rest of the buffer at the first
+    // control byte would lose all of it.
+    let typed = format!("\x7f{NO_MATCH}");
+    let recall = run_recall(
+        home.path(),
+        &Scenario {
+            args: &["--compact", "--query", "pty-recall"],
+            answer_cursor_query: true,
+            type_before_answer: &typed,
+            ready_marker: "SUVADU SEARCH",
+            max_answers: usize::MAX,
+        },
+    );
+
+    assert_eq!(
+        recall.stdout.trim(),
+        "",
+        "the typing after Backspace must reach the query; terminal saw: {}",
+        recall.terminal.escape_debug()
+    );
+}
+
+#[test]
+fn typing_during_the_fallback_wait_reaches_the_query() {
+    let home = tempfile::tempdir().unwrap();
+    plant(home.path());
+
+    // The terminal never answers, so recall waits, gives up and opens full
+    // screen. What was typed during that wait belongs in the query.
+    let recall = run_recall(
+        home.path(),
+        &Scenario {
+            args: &["--compact", "--query", "pty-recall"],
+            answer_cursor_query: false,
+            type_before_answer: NO_MATCH,
+            ready_marker: "SUVADU SEARCH",
+            max_answers: usize::MAX,
+        },
+    );
+
+    assert!(
+        recall.entered_alternate_screen(),
+        "this case must fall back to full screen"
+    );
+    assert_eq!(
+        recall.stdout.trim(),
+        "",
+        "typing during the wait must reach the query; terminal saw: {}",
+        recall.terminal.escape_debug()
     );
 }

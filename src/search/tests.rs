@@ -1261,25 +1261,6 @@ fn app_with_full_context() -> (tempfile::TempDir, std::path::PathBuf, SearchApp)
 }
 
 #[test]
-fn replayable_input_keeps_plain_typing() {
-    // Characters typed while the terminal was being measured are read off
-    // /dev/tty by that measurement; they are the typist's, not the reply's.
-    assert_eq!(super::replayable_input(b"zzz"), "zzz");
-    assert_eq!(super::replayable_input(b"git st"), "git st");
-    assert_eq!(super::replayable_input(b""), "");
-}
-
-#[test]
-fn replayable_input_stops_at_the_first_control_byte() {
-    // An escape sequence is not text. Replaying its bytes as characters
-    // would type `[A` into the query, which is worse than dropping it.
-    assert_eq!(super::replayable_input(b"ab\x1b[A"), "ab");
-    assert_eq!(super::replayable_input(b"\x1b[Aab"), "");
-    assert_eq!(super::replayable_input(b"ab\rcd"), "ab");
-    assert_eq!(super::replayable_input(b"ab\x7f"), "ab");
-}
-
-#[test]
 fn the_default_matching_mode_is_terms() {
     let app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
     assert_eq!(app.recall.match_mode, MatchMode::Terms);

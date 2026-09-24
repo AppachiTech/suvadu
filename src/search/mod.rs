@@ -15,7 +15,7 @@ use crate::repository::{QueryFilter, Repository};
 use crate::util;
 use arboard::Clipboard;
 use chrono::Local;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::{
     widgets::{ListState, TableState},
     Terminal,
@@ -524,10 +524,6 @@ struct OpenRecall {
     guard: crate::util::TerminalGuardStderr,
     terminal: RecallTerminal,
     surface: crate::util::RecallSurface,
-    /// Keystrokes that arrived while the cursor position was being read.
-    /// Measuring consumes them from `/dev/tty`, so they are carried out here
-    /// to be replayed rather than lost.
-    typed_while_opening: Vec<u8>,
 }
 
 /// Put the terminal into `surface`, falling back to full screen if inline
@@ -560,40 +556,21 @@ fn open_recall_terminal(
                     let surface = crate::util::RecallSurface::FullScreen;
                     let guard = crate::util::TerminalGuardStderr::for_surface(surface)?;
                     let backend = crate::util::TtyCursorBackend::new(io::stderr());
-                    let mut terminal = Terminal::new(backend)?;
-                    let typed_while_opening = terminal.backend_mut().take_pending_input();
                     return Ok(OpenRecall {
                         guard,
-                        terminal,
+                        terminal: Terminal::new(backend)?,
                         surface,
-                        typed_while_opening,
                     });
                 }
             }
         }
         crate::util::RecallSurface::FullScreen => Terminal::new(backend)?,
     };
-    let mut terminal = terminal;
-    let typed_while_opening = terminal.backend_mut().take_pending_input();
     Ok(OpenRecall {
         guard,
         terminal,
         surface,
-        typed_while_opening,
     })
-}
-
-/// The characters from `bytes` that can be replayed as typing.
-///
-/// Replaying stops at the first control byte: an escape sequence is not
-/// text, and typing its bytes as characters would put `[A` in the query
-/// box. Plain typing — which is what someone does while recall is opening —
-/// comes through whole.
-fn replayable_input(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes)
-        .chars()
-        .take_while(|c| !c.is_control())
-        .collect()
 }
 
 /// Parameters for `run_search` — bundles the CLI flags into one struct
@@ -728,21 +705,7 @@ pub fn run_search(
         guard: _guard,
         mut terminal,
         surface,
-        typed_while_opening,
     } = open_recall_terminal(recall_surface(args.compact))?;
-
-    // Opening an inline viewport asks the terminal where the cursor is, and
-    // reading that answer off /dev/tty also consumes anything typed in the
-    // meantime. Those keystrokes go through the ordinary input path here, so
-    // typing straight into `Ctrl+R` does not silently lose characters.
-    for ch in replayable_input(&typed_while_opening).chars() {
-        if matches!(
-            app.handle_input(KeyEvent::from(KeyCode::Char(ch))),
-            SearchAction::Reload
-        ) {
-            app.reload_entries(repo)?;
-        }
-    }
 
     let result = app.run(&mut terminal, repo);
 
