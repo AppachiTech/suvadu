@@ -135,6 +135,34 @@ pub fn teardown_steps(surface: RecallSurface) -> Vec<TerminalStep> {
     steps
 }
 
+/// The step that undoes a setup step, if it needs undoing.
+const fn undo(step: TerminalStep) -> Option<TerminalStep> {
+    match step {
+        TerminalStep::EnableRawMode => Some(TerminalStep::DisableRawMode),
+        TerminalStep::EnterAlternateScreen => Some(TerminalStep::LeaveAlternateScreen),
+        TerminalStep::EnableBracketedPaste => Some(TerminalStep::DisableBracketedPaste),
+        _ => None,
+    }
+}
+
+/// Apply `steps` in order. If one fails, undo the ones already applied, in
+/// reverse, before returning the error: a half-set-up terminal (raw mode on,
+/// no screen to show it) would otherwise be left behind.
+pub fn apply_all(
+    steps: &[TerminalStep],
+    mut apply: impl FnMut(TerminalStep) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    for (done, step) in steps.iter().enumerate() {
+        if let Err(e) = apply(*step) {
+            for undo in steps[..done].iter().rev().filter_map(|s| undo(*s)) {
+                let _ = apply(undo);
+            }
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
 /// Apply one [`TerminalStep`] to stderr.
 fn apply_step(step: TerminalStep) -> std::io::Result<()> {
     use crossterm::{cursor, event, terminal};
@@ -180,9 +208,7 @@ impl TerminalGuardStderr {
     /// Enter `surface`. Inline stays in the normal screen buffer so the
     /// commands already on screen remain visible.
     pub fn for_surface(surface: RecallSurface) -> Result<Self, Box<dyn std::error::Error>> {
-        for step in setup_steps(surface) {
-            apply_step(step)?;
-        }
+        apply_all(&setup_steps(surface), apply_step)?;
         Ok(Self { surface })
     }
 }
@@ -351,8 +377,8 @@ impl<W: std::io::Write> ratatui::backend::Backend for TtyCursorBackend<W> {
 #[cfg(test)]
 mod tests {
     use super::{
-        inline_height, setup_steps, teardown_steps, RecallSurface, TerminalStep, INLINE_MAX_HEIGHT,
-        INLINE_MIN_HEIGHT,
+        apply_all, inline_height, setup_steps, teardown_steps, RecallSurface, TerminalStep,
+        INLINE_MAX_HEIGHT, INLINE_MIN_HEIGHT,
     };
 
     const INLINE: RecallSurface = RecallSurface::Inline { height: 12 };
@@ -435,6 +461,51 @@ mod tests {
                 .unwrap();
             assert!(screen < raw, "{surface:?}: {teardown:?}");
         }
+    }
+
+    #[test]
+    fn a_failed_setup_step_undoes_the_steps_before_it() {
+        let steps = setup_steps(RecallSurface::FullScreen);
+        let mut calls = Vec::new();
+        let result = apply_all(&steps, |step| {
+            calls.push(step);
+            if step == TerminalStep::EnableBracketedPaste {
+                Err(std::io::Error::other("no paste"))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            calls,
+            [
+                TerminalStep::EnableRawMode,
+                TerminalStep::EnterAlternateScreen,
+                TerminalStep::EnableBracketedPaste,
+                TerminalStep::LeaveAlternateScreen,
+                TerminalStep::DisableRawMode,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_first_step_failure_has_nothing_to_undo_and_success_undoes_nothing() {
+        let steps = setup_steps(RecallSurface::FullScreen);
+        let mut calls = Vec::new();
+        let result = apply_all(&steps, |step| {
+            calls.push(step);
+            Err(std::io::Error::other("not a terminal"))
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, [TerminalStep::EnableRawMode]);
+
+        let mut calls = Vec::new();
+        apply_all(&steps, |step| {
+            calls.push(step);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(calls, steps);
     }
 
     #[test]

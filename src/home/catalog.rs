@@ -185,8 +185,6 @@ const fn ex(command: &'static str, note: &'static str) -> Example {
     Example { command, note }
 }
 
-const PICKED_NOT_RUN: &str = "The command you pick is shown here to copy; nothing is run.";
-
 static FEATURES: &[Feature] = &[
     // ── Find a command ──────────────────────────────────────────
     Feature {
@@ -1411,7 +1409,7 @@ pub fn features() -> &'static [Feature] {
 }
 
 pub fn feature(id: FeatureId) -> Option<&'static Feature> {
-    FEATURES.iter().find(|f| f.id == id)
+    features().iter().find(|f| f.id == id)
 }
 
 pub fn category(id: CategoryId) -> Option<&'static Category> {
@@ -1420,7 +1418,7 @@ pub fn category(id: CategoryId) -> Option<&'static Category> {
 
 /// A category's features, in catalog order.
 pub fn category_features(id: CategoryId) -> Vec<&'static Feature> {
-    FEATURES.iter().filter(|f| f.category == id).collect()
+    features().iter().filter(|f| f.category == id).collect()
 }
 
 /// The fixed command line for an executable feature; `None` for guides and
@@ -1438,7 +1436,7 @@ pub fn launch_request(id: FeatureId) -> Option<LaunchRequest> {
 }
 
 pub fn search_features(query: &str) -> Vec<FeatureId> {
-    search_in(FEATURES, query)
+    search_in(features(), query)
 }
 
 /// Feature search over the catalog — never over history. Every word of the

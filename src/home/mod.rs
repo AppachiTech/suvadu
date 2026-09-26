@@ -2,24 +2,30 @@
 //! (and, when chosen, by a bare `suv`). It is a discovery layer: every
 //! feature it opens is the existing command, run as its own process.
 
-// The catalog, model and reference are built before the controller that
-// drives them; this allowance goes when the controller lands.
-#[allow(dead_code)]
 pub mod catalog;
-#[allow(dead_code)]
 pub mod model;
-#[allow(dead_code)]
 pub mod reference;
-#[allow(dead_code)]
 pub mod runner;
 pub mod startup;
-#[allow(dead_code)]
 pub mod ui;
 
 use std::io::IsTerminal;
+use std::path::Path;
+use std::time::Duration;
 
-use crate::config::{self, HomeConfig, HomeStartup};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+
+use crate::config::{self, Config, ConfigError, HomeConfig, HomeStartup};
+use catalog::{LaunchMode, LaunchRequest};
+use model::{HomeAction, HomeState, HomeStatus, Outcome};
 use startup::{resolve_startup, StartupRoute};
+
+/// Exit status for Ctrl+C, as a shell reports an interrupted program.
+const INTERRUPTED: i32 = 130;
+
+/// A screen that closes sooner than this printed something and left, rather
+/// than being used and closed: its words stay on screen until a key.
+const QUICK_EXIT: Duration = Duration::from_secs(1);
 
 /// Entry point for a bare `suv` (`explicit_home == false`) and `suv home`.
 ///
@@ -61,22 +67,180 @@ pub fn start(explicit_home: bool) -> Result<(), Box<dyn std::error::Error>> {
             print!("{}", crate::cli::overview());
             Ok(())
         }
-        StartupRoute::Home => Err("Suvadu Home is not available in this build yet".into()),
+        StartupRoute::Home => run(loaded.unwrap_or(Ok(None))),
+    }
+}
+
+/// Home's loop: draw and handle keys with the terminal, give the terminal
+/// up entirely while a screen or picker it opened runs, then take it back
+/// exactly where the person left off.
+fn run(loaded: Result<Option<Config>, ConfigError>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = HomeState::new();
+    state.no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+    apply_config(&mut state, loaded);
+    // The very program running now, so a development build opens its own
+    // features rather than whichever suv is first on PATH.
+    let executable = std::env::current_exe()?;
+    let mut clipboard = SystemClipboard::default();
+    loop {
+        let action = {
+            let _guard = crate::util::TerminalGuardStderr::new()?;
+            // Buffered, so a frame reaches the terminal in a few writes
+            // rather than one per changed cell; ratatui flushes each frame.
+            let backend = ratatui::backend::CrosstermBackend::new(
+                std::io::BufWriter::with_capacity(64 * 1024, std::io::stderr()),
+            );
+            let mut terminal = ratatui::Terminal::new(backend)?;
+            interact(&mut terminal, &mut state, &mut clipboard, &executable)?
+            // The guard drops here: the terminal is restored before any
+            // child starts.
+        };
+        match action {
+            HomeAction::Launch(request) => {
+                let result = runner::run_child(&executable, &request);
+                if let Ok(result) = &result {
+                    if needs_a_pause(&request, result) && wait_for_key()? == HomeAction::Interrupt {
+                        std::process::exit(INTERRUPTED);
+                    }
+                }
+                show_result(&mut state, &request, result);
+                // Settings may have changed the theme, icons or recording.
+                apply_config(&mut state, config::read_global_config());
+            }
+            HomeAction::Interrupt => std::process::exit(INTERRUPTED),
+            _ => return Ok(()),
+        }
+    }
+}
+
+/// Draw and handle events until Home must hand the terminal to a child or
+/// exit. Copies and short reports are handled here, without leaving.
+fn interact(
+    terminal: &mut ratatui::Terminal<
+        ratatui::backend::CrosstermBackend<std::io::BufWriter<std::io::Stderr>>,
+    >,
+    state: &mut HomeState,
+    clipboard: &mut dyn Clipboard,
+    executable: &Path,
+) -> Result<HomeAction, Box<dyn std::error::Error>> {
+    loop {
+        let size = terminal.size()?;
+        state.set_viewport(size.width, size.height);
+        terminal.draw(|frame| ui::draw(frame, state))?;
+        match state.on_event(event::read()?) {
+            HomeAction::None | HomeAction::Redraw => {}
+            HomeAction::Copy(text) => copy(state, clipboard, &text),
+            HomeAction::Launch(request) => {
+                // Only a request the catalog itself would make is ever run.
+                if catalog::launch_request(request.feature).as_ref() != Some(&request) {
+                    continue;
+                }
+                if request.mode != LaunchMode::Report {
+                    return Ok(HomeAction::Launch(request));
+                }
+                // A report never touches the terminal, so Home stays up.
+                let command = catalog::feature(request.feature).map_or("suv", |f| f.command);
+                state.set_notice(format!("Running {command}…"), false);
+                terminal.draw(|frame| ui::draw(frame, state))?;
+                let result = runner::run_child(executable, &request);
+                state.clear_notice();
+                show_result(state, &request, result);
+            }
+            action => return Ok(action),
+        }
+    }
+}
+
+fn show_result(
+    state: &mut HomeState,
+    request: &LaunchRequest,
+    result: std::io::Result<runner::LaunchResult>,
+) {
+    let outcome = match result {
+        Ok(result) => runner::outcome(request, &result),
+        Err(e) => {
+            let command = catalog::feature(request.feature).map_or("suv", |f| f.command);
+            Some(Outcome::Failed {
+                message: format!("Could not start {command}: {e}"),
+                retry: true,
+            })
+        }
+    };
+    if let Some(outcome) = outcome {
+        state.show_outcome(request.feature, outcome);
+    }
+}
+
+/// Whether a child's last words need a moment on screen: it failed, or it
+/// closed too soon to have been used — most likely printing why — and
+/// returned nothing Home will show instead.
+fn needs_a_pause(request: &LaunchRequest, result: &runner::LaunchResult) -> bool {
+    let answered = request.mode == LaunchMode::Selection && !result.stdout.is_empty();
+    result.code != Some(0) || (result.elapsed < QUICK_EXIT && !answered)
+}
+
+/// On the normal screen, under whatever the child printed: wait for a key.
+fn wait_for_key() -> std::io::Result<HomeAction> {
+    use crate::util::TerminalStep;
+    eprint!("\r\nPress any key to return to Suvadu Home.");
+    crate::util::apply_all(&[TerminalStep::EnableRawMode], |_| {
+        crossterm::terminal::enable_raw_mode()
+    })?;
+    let pressed = loop {
+        match event::read() {
+            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => break Ok(key),
+            Ok(_) => {}
+            Err(e) => break Err(e),
+        }
+    };
+    let _ = crossterm::terminal::disable_raw_mode();
+    eprint!("\r\n");
+    let key = pressed?;
+    let ctrl_c = key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('c' | 'C'));
+    Ok(if ctrl_c {
+        HomeAction::Interrupt
+    } else {
+        HomeAction::Redraw
+    })
+}
+
+/// Take the preferences and recording facts Home shows from the global
+/// config. An unreadable config is reported, never repaired.
+fn apply_config(state: &mut HomeState, loaded: Result<Option<Config>, ConfigError>) {
+    let paused = config::is_paused();
+    match loaded {
+        Ok(found) => {
+            let config = found.unwrap_or_default();
+            crate::theme::init_theme(config.theme);
+            state.icons = config.home.icons;
+            state.status = HomeStatus {
+                recording: Some(config.enabled),
+                paused,
+                warning: None,
+            };
+        }
+        Err(e) => {
+            state.status = HomeStatus {
+                recording: None,
+                paused,
+                warning: Some(format!(
+                    "{} (left unchanged; defaults in use)",
+                    concise_error(&e.to_string())
+                )),
+            };
+        }
     }
 }
 
 /// Where copied text goes. A trait so tests can stand in for the system
 /// clipboard, which may be missing (no display, no clipboard service).
-// Used by the controller; allowed until it lands.
-#[allow(dead_code)]
 pub trait Clipboard {
     fn set_text(&mut self, text: &str) -> Result<(), String>;
 }
 
 /// The system clipboard, opened on first use and kept open while Home runs:
 /// on some Linux desktops copied text lasts only while its owner does.
-// Used by the controller; allowed until it lands.
-#[allow(dead_code)]
 #[derive(Default)]
 pub struct SystemClipboard {
     inner: Option<arboard::Clipboard>,
@@ -97,8 +261,6 @@ impl Clipboard for SystemClipboard {
 
 /// Copy `text` and tell the person what happened — success only once the
 /// clipboard has accepted it. Copying never runs anything.
-// Used by the controller; allowed until it lands.
-#[allow(dead_code)]
 fn copy(state: &mut model::HomeState, clipboard: &mut dyn Clipboard, text: &str) {
     let result = clipboard.set_text(text);
     state.copied(text, &result);
