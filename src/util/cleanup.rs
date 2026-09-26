@@ -22,7 +22,18 @@ fn cleanup_shell_rc_at(rc_path: &std::path::Path, shell: &str) -> Result<(), std
         .collect();
 
     let new_content = filtered_content.join("\n") + "\n";
-    atomic_write(rc_path, &new_content)?;
+    // Rewrite the file the path names, not the path: a ~/.zshrc linked into a
+    // dotfiles repository must stay a link, and the file keeps its mode
+    // instead of taking the temporary file's.
+    let target = std::fs::canonicalize(rc_path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&target)?.permissions().mode() & 0o7777;
+        super::atomic_write_with_mode(&target, &new_content, mode)?;
+    }
+    #[cfg(not(unix))]
+    atomic_write(&target, &new_content)?;
 
     Ok(())
 }
@@ -289,6 +300,33 @@ mod tests {
         assert!(!content.contains("suv init zsh"));
         assert!(content.contains("export FOO=bar"));
         assert!(content.contains("alias ll='ls -la'"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleaning_a_linked_rc_file_edits_its_target_and_keeps_the_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let dotfiles = dir.path().join("dotfiles");
+        std::fs::create_dir(&dotfiles).unwrap();
+        let real = dotfiles.join("zshrc");
+        std::fs::write(&real, "export FOO=bar\neval \"$(suv init zsh)\"\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let rc = dir.path().join(".zshrc");
+        std::os::unix::fs::symlink(&real, &rc).unwrap();
+
+        cleanup_shell_rc_at(&rc, "zsh").unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&rc)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "~/.zshrc must still be the link into the dotfiles repository"
+        );
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "export FOO=bar\n");
+        let mode = std::fs::metadata(&real).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644, "the file keeps its permissions");
     }
 
     #[test]

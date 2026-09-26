@@ -355,7 +355,10 @@ fn uninstall_data_paths() -> Vec<String> {
 fn script_install_at(exe: &std::path::Path) -> Option<std::path::PathBuf> {
     let exe = exe.canonicalize().ok()?;
     let shown = exe.to_string_lossy();
-    if crate::update::is_homebrew_path(&shown) || crate::update::is_cargo_path(&shown) {
+    if crate::update::is_homebrew_path(&shown)
+        || crate::update::is_cargo_path(&shown)
+        || is_system_or_package_path(&shown)
+    {
         return None;
     }
     let link = exe.parent()?.join("suvadu");
@@ -364,6 +367,24 @@ fn script_install_at(exe: &std::path::Path) -> Option<std::path::PathBuf> {
         .file_type()
         .is_symlink();
     (is_link && link.canonicalize().ok()? == exe).then_some(exe)
+}
+
+/// Whether `path` is somewhere the install script never installs but a
+/// system package manager does: the Nix and Guix stores, Snap, `/opt/local`,
+/// and the system's own binary directories. A package that happens to copy
+/// the `suv` + `suvadu` layout there is that package manager's to remove.
+fn is_system_or_package_path(path: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "/nix/",
+        "/gnu/store/",
+        "/snap/",
+        "/opt/local/",
+        "/usr/bin/",
+        "/usr/sbin/",
+        "/bin/",
+        "/sbin/",
+    ];
+    PREFIXES.iter().any(|prefix| path.starts_with(prefix))
 }
 
 /// Delete a script install's `suv` and the `suvadu` link beside it, and
@@ -698,6 +719,28 @@ mod tests {
                 None,
                 "{dir} belongs to a package manager"
             );
+        }
+    }
+
+    #[test]
+    fn system_and_package_locations_are_never_script_installs() {
+        for path in [
+            "/usr/bin/suv",
+            "/bin/suv",
+            "/usr/sbin/suv",
+            "/nix/store/abc-suvadu-0.4.2/bin/suv",
+            "/gnu/store/abc-suvadu/bin/suv",
+            "/snap/suvadu/12/bin/suv",
+            "/opt/local/bin/suv",
+        ] {
+            assert!(is_system_or_package_path(path), "{path}");
+        }
+        for path in [
+            "/usr/local/bin/suv",
+            "/home/u/.local/bin/suv",
+            "/opt/tools/bin/suv",
+        ] {
+            assert!(!is_system_or_package_path(path), "{path}");
         }
     }
 
