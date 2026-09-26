@@ -8,6 +8,7 @@ set -e
 # Options:
 #   --user          Install into ~/.local/bin. No sudo.
 #   --dir DIR       Install into DIR. sudo is used only if DIR is not writable.
+#   --no-modify-rc  Never offer to add the shell hook to a startup file.
 #   -h, --help      Show this help.
 #
 # SUVADU_INSTALL_DIR=DIR is the same as --dir DIR.
@@ -19,6 +20,7 @@ BIN_NAME="suv"
 SYMLINK_NAME="suvadu"
 DEFAULT_INSTALL_DIR="/usr/local/bin"
 INSTALL_DIR="${SUVADU_INSTALL_DIR:-}"
+MODIFY_RC=1
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -32,6 +34,7 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         --dir=*) INSTALL_DIR="${1#--dir=}" ;;
+        --no-modify-rc) MODIFY_RC=0 ;;
         -h|--help)
             echo "Suvadu installer"
             echo ""
@@ -39,6 +42,7 @@ while [ $# -gt 0 ]; do
             echo ""
             echo "  --user          Install into ~/.local/bin. No sudo."
             echo "  --dir DIR       Install into DIR. sudo is used only if DIR is not writable."
+            echo "  --no-modify-rc  Never offer to add the shell hook to a startup file."
             echo ""
             echo "SUVADU_INSTALL_DIR=DIR is the same as --dir DIR."
             exit 0
@@ -269,10 +273,7 @@ if [ "$ON_PATH" = 0 ]; then
     echo ""
 fi
 
-# Check if shell integration is already set up
-if ! grep -q 'eval "$(suv init' "$HOME/.zshrc" 2>/dev/null && \
-   ! grep -q 'eval "$(suv init' "$HOME/.bashrc" 2>/dev/null && \
-   ! grep -q 'eval "$(suv init' "$HOME/.bash_profile" 2>/dev/null; then
+print_hook_instructions() {
     echo "To set up shell integration, run:"
     echo ""
     echo "  # For zsh:"
@@ -280,6 +281,61 @@ if ! grep -q 'eval "$(suv init' "$HOME/.zshrc" 2>/dev/null && \
     echo ""
     echo "  # For bash:"
     echo "  echo 'eval \"\$(suv init bash)\"' >> ~/.bashrc && source ~/.bashrc"
+}
+
+# The startup file this shell reads, when there is exactly one sure answer.
+# Not offered: a ZDOTDIR elsewhere, and bash on macOS, whose login shells read
+# ~/.bash_profile and may never read ~/.bashrc.
+hook_rc_file() {
+    case "$(basename "${SHELL:-}")" in
+        zsh)
+            if [ -z "${ZDOTDIR:-}" ] || [ "${ZDOTDIR%/}" = "${HOME%/}" ]; then
+                echo "$HOME/.zshrc"
+            fi
+            ;;
+        bash) [ "$OS" = "Linux" ] && echo "$HOME/.bashrc" ;;
+    esac
+    return 0
+}
+
+# Shell integration. Nothing is written without a "y" typed at the terminal:
+# the exact line and file are shown first, a copy of an existing file is kept,
+# and a hook already in any startup file means there is nothing to add.
+if ! grep -qs 'eval "$(suv init' "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; then
+    RC_FILE=$(hook_rc_file)
+    if [ "$MODIFY_RC" = 1 ] && [ -n "$RC_FILE" ] && [ "$ON_PATH" = 1 ] \
+        && [ -t 1 ] && { : </dev/tty; } 2>/dev/null; then
+        HOOK_LINE="eval \"\$(suv init $(basename "$SHELL"))\""
+        echo "Suvadu records commands once its hook is in your shell's startup file."
+        echo "It can add this line to the end of $RC_FILE:"
+        echo ""
+        echo "  $HOOK_LINE"
+        echo ""
+        printf "Add it now? [y/N] "
+        read -r ANSWER </dev/tty || ANSWER=""
+        case "$ANSWER" in
+            y|Y|yes|Yes|YES)
+                if [ -f "$RC_FILE" ]; then
+                    BACKUP="$RC_FILE.suvadu-backup"
+                    if [ -e "$BACKUP" ]; then
+                        BACKUP="$BACKUP.$(date +%Y%m%d%H%M%S)"
+                    fi
+                    cp -p "$RC_FILE" "$BACKUP"
+                    echo "Saved the previous $RC_FILE as $BACKUP"
+                fi
+                printf '\n%s\n' "$HOOK_LINE" >>"$RC_FILE"
+                echo "Added. Open a new terminal (or run: source $RC_FILE), then check with: suv status"
+                echo "suv uninstall removes this line again."
+                ;;
+            *)
+                echo "Left $RC_FILE unchanged."
+                echo ""
+                print_hook_instructions
+                ;;
+        esac
+    else
+        print_hook_instructions
+    fi
 fi
 
 # Agent hook definitions are not refreshed by replacing the binary.

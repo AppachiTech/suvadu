@@ -145,7 +145,85 @@ else
     printf 'skip  minisign verifies the published signature (minisign not installed)\n'
 fi
 
-# 9. An unknown option is an error, not a silent default install.
+# run_in_terminal ANSWER HOME PATH [args...] — runs the installer on a pseudo
+# terminal, typing ANSWER at the first "[y/N]" prompt. Prints the transcript.
+run_in_terminal() {
+    local answer="$1" home="$2" path="$3"
+    shift 3
+    HOME="$home" PATH="$path" SHELL=/bin/zsh SUVADU_INSTALL_OS=Linux ANSWER="$answer" \
+        python3 - "$INSTALLER" "$@" <<'PY'
+import os, pty, select, sys
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp("bash", ["bash"] + sys.argv[1:])
+out, answered = b"", False
+while True:
+    ready, _, _ = select.select([fd], [], [], 300)
+    if not ready:
+        break
+    try:
+        chunk = os.read(fd, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    out += chunk
+    if not answered and b"[y/N]" in out:
+        os.write(fd, os.environ["ANSWER"].encode() + b"\n")
+        answered = True
+_, status = os.waitpid(pid, 0)
+sys.stdout.write(out.decode(errors="replace"))
+sys.exit(os.waitstatus_to_exitcode(status))
+PY
+}
+
+if command -v python3 >/dev/null 2>&1; then
+    # 9. At a terminal, "y" appends the hook once and keeps the old file.
+    home9="$WORK/home9"
+    mkdir -p "$home9"
+    printf 'export EDITOR=vi\n' >"$home9/.zshrc"
+    out=$(run_in_terminal y "$home9" "$WORK/tty/bin:$BASE_PATH" --dir "$WORK/tty/bin")
+    if [ "$(grep -c '^eval "$(suv init zsh)"$' "$home9/.zshrc")" = 1 ] \
+        && grep -q '^export EDITOR=vi$' "$home9/.zshrc" \
+        && [ "$(cat "$home9/.zshrc.suvadu-backup")" = "export EDITOR=vi" ] \
+        && [[ "$out" == *'eval "$(suv init zsh)"'* ]]; then
+        pass "at a terminal, yes adds the hook once and keeps a backup"
+    else
+        fail "at a terminal, yes adds the hook once and keeps a backup" "$out"
+    fi
+
+    # 10. With the hook already present there is nothing to ask.
+    out=$(run_in_terminal y "$home9" "$WORK/tty2/bin:$BASE_PATH" --dir "$WORK/tty2/bin")
+    if [[ "$out" != *"[y/N]"* ]] && [ "$(grep -c 'suv init zsh' "$home9/.zshrc")" = 1 ]; then
+        pass "an existing hook is never added twice"
+    else
+        fail "an existing hook is never added twice" "$out"
+    fi
+
+    # 11. Anything but yes leaves the file byte-for-byte alone.
+    home11="$WORK/home11"
+    mkdir -p "$home11"
+    printf 'export EDITOR=vi\n' >"$home11/.zshrc"
+    out=$(run_in_terminal n "$home11" "$WORK/tty3/bin:$BASE_PATH" --dir "$WORK/tty3/bin")
+    if [ "$(cat "$home11/.zshrc")" = "export EDITOR=vi" ] && [ ! -e "$home11/.zshrc.suvadu-backup" ] \
+        && [[ "$out" == *"Left $home11/.zshrc unchanged"* ]]; then
+        pass "declining leaves the startup file untouched"
+    else
+        fail "declining leaves the startup file untouched" "$out"
+    fi
+
+    # 12. --no-modify-rc never asks, even at a terminal.
+    out=$(run_in_terminal y "$home11" "$WORK/tty4/bin:$BASE_PATH" --dir "$WORK/tty4/bin" --no-modify-rc)
+    if [[ "$out" != *"[y/N]"* ]] && [ "$(cat "$home11/.zshrc")" = "export EDITOR=vi" ]; then
+        pass "--no-modify-rc never offers to edit a startup file"
+    else
+        fail "--no-modify-rc never offers to edit a startup file" "$out"
+    fi
+else
+    printf 'skip  terminal prompts (python3 not installed)\n'
+fi
+
+# 13. An unknown option is an error, not a silent default install.
 out=$(run_installer "$home1" "$BASE_PATH" --prefix /tmp/x)
 status=$?
 if [ $status -ne 0 ] && [[ "$out" == *"unknown option"* ]]; then

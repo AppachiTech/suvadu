@@ -46,6 +46,10 @@ directory is not writable; `--user` or `--dir DIR` (or `SUVADU_INSTALL_DIR`)
 choose another place. Re-running it updates a script-installed `suv` where it
 already is. If the `suv` on your PATH came from Homebrew or Cargo, it stops and
 names that package manager's update command rather than install a second copy.
+Run at a terminal, it offers to add the shell hook below to `~/.zshrc` (or
+`~/.bashrc` on Linux): it shows the line first, writes nothing unless you type
+`y`, keeps a copy of the file as `.suvadu-backup`, and never adds the hook
+twice. `--no-modify-rc` turns the offer off.
 
 Then add shell hooks:
 
