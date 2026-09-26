@@ -3154,7 +3154,8 @@ fn initial_query_results(
     query: &str,
     unique: bool,
 ) -> Vec<String> {
-    let config = crate::config::Config::default();
+    let mut config = crate::config::Config::default();
+    config.search.show_unique_by_default = false; // `unique` alone decides the view
     let app = super::build_search_app(repo, &search_args(Some(query), mode, unique), &config)
         .expect("startup search");
     app.entries.iter().map(|e| e.command.clone()).collect()
@@ -3167,7 +3168,8 @@ fn typed_query_results(
     query: &str,
     unique: bool,
 ) -> Vec<String> {
-    let config = crate::config::Config::default();
+    let mut config = crate::config::Config::default();
+    config.search.show_unique_by_default = false; // `unique` alone decides the view
     let mut app =
         super::build_search_app(repo, &search_args(None, mode, unique), &config).expect("recall");
     app.recall.match_mode = mode;
@@ -3222,7 +3224,8 @@ fn an_initial_fuzzy_query_never_returns_out_of_order_characters() {
 #[test]
 fn an_initial_query_reports_a_total_it_can_page_to() {
     let (_d, repo) = repo_with_broad_matches("git", "echo git filler", 5000);
-    let config = crate::config::Config::default();
+    let mut config = crate::config::Config::default();
+    config.search.show_unique_by_default = false; // count every run, not groups
     let mut app = super::build_search_app(
         &repo,
         &search_args(Some("git"), MatchMode::Terms, false),
@@ -4886,4 +4889,31 @@ fn the_inspector_shows_a_detached_accent_and_acceptance_keeps_it() {
             "{command:?}: accepted {action:?}"
         );
     }
+}
+
+#[test]
+fn recall_opens_in_the_commands_view_unless_the_user_chose_executions() {
+    let (_d, repo) = repo_with(&["suv update", "suv update", "suv uninstall"]);
+    let open = |config: &crate::config::Config, unique_flag: bool| {
+        super::build_search_app(
+            &repo,
+            &search_args(None, MatchMode::Terms, unique_flag),
+            config,
+        )
+        .expect("recall")
+    };
+
+    // A fresh setup: identical commands grouped.
+    let app = open(&crate::config::Config::default(), false);
+    assert!(app.view.unique_mode);
+    assert_eq!(app.pagination.total_items, 2, "two distinct commands");
+
+    // A saved preference for every run is kept.
+    let mut config = crate::config::Config::default();
+    config.search.show_unique_by_default = false;
+    let app = open(&config, false);
+    assert!(!app.view.unique_mode);
+    assert_eq!(app.pagination.total_items, 3, "three runs");
+    // ...and --unique still asks for grouping explicitly.
+    assert!(open(&config, true).view.unique_mode);
 }

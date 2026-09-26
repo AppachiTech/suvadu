@@ -69,7 +69,13 @@ impl Default for Config {
 pub struct SearchConfig {
     #[serde(default = "default_page_limit")]
     pub page_limit: usize,
-    #[serde(default = "default_false")]
+    /// Open recall in the Commands view — identical command text grouped
+    /// into one row with its last use and run count — rather than listing
+    /// every run. On by default: retrieving a command is the common task,
+    /// and repeated runs otherwise push the other candidates down. A value
+    /// written in `config.toml` (including by `suv settings`) is kept, so
+    /// only a config without the key gets this default. `^U` switches views.
+    #[serde(default = "default_true")]
     pub show_unique_by_default: bool,
     #[serde(default = "default_false")]
     pub filter_by_current_session_tag: bool,
@@ -113,7 +119,7 @@ impl Default for SearchConfig {
     fn default() -> Self {
         Self {
             page_limit: 50,
-            show_unique_by_default: false,
+            show_unique_by_default: true,
             filter_by_current_session_tag: false,
             context_boost: true,
             recall_show_agents: false,
@@ -890,6 +896,23 @@ unknown_mcp_key = 7
         assert!(!paused_from(Some("0")));
         assert!(!paused_from(Some("false")));
         assert!(!paused_from(Some("")));
+    }
+
+    #[test]
+    fn recall_groups_identical_commands_unless_a_config_says_otherwise() {
+        // No config, no [search] table, or a [search] table without the key:
+        // recall opens in the Commands view.
+        assert!(Config::default().search.show_unique_by_default);
+        let no_table: Config = toml::from_str("enabled = true").unwrap();
+        assert!(no_table.search.show_unique_by_default);
+        let no_key: Config = toml::from_str("[search]\npage_limit = 20").unwrap();
+        assert!(no_key.search.show_unique_by_default);
+
+        // A value written in the file is kept, whichever it is.
+        let every_run: Config = toml::from_str("[search]\nshow_unique_by_default = false").unwrap();
+        assert!(!every_run.search.show_unique_by_default);
+        let grouped: Config = toml::from_str("[search]\nshow_unique_by_default = true").unwrap();
+        assert!(grouped.search.show_unique_by_default);
     }
 
     #[test]

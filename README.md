@@ -161,13 +161,16 @@ results title says `searching…`.
 
 **Reading the list.** The characters your query matched are underlined and
 emphasised in every row, over the usual syntax colours, so it is clear why a
-command matched. `^U` switches between **Executions** — every recorded run,
-with its time, directory and outcome — and **Commands**, where identical
-commands share one row showing when the command last ran and how many runs
-matched; the results title says which you are looking at and counts in those
-units, and the command you had selected stays selected across the switch. A
-row too long for the list ends in `…`; the selected row wraps so all of it is
-visible.
+command matched. Recall opens in **Commands**, where identical commands share
+one row showing when the command last ran and how many runs matched, so a
+command you ran fifty times does not push every other candidate off the
+screen. `^U` switches to **Executions** — every recorded run, with its time,
+directory and outcome — and back; the results title says which you are
+looking at and counts in those units, and the command you had selected stays
+selected across the switch. To start in Executions instead, set
+`search.show_unique_by_default = false` (or turn off *Start in Commands View*
+in `suv settings`). A row too long
+for the list ends in `…`; the selected row wraps so all of it is visible.
 
 A command is grouped only with *exactly* the same text, so whitespace that
 would otherwise be invisible is drawn: `·` for a leading or trailing space,

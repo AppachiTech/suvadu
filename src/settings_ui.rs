@@ -1084,7 +1084,7 @@ fn render_content_panel(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) 
 const fn get_setting_description(tab: usize, item: usize) -> &'static str {
     match (tab, item) {
         (0, 0) => "Number of results to show per page in search (10-5000)",
-        (0, 1) => "Show only unique commands by default (deduplicate history)",
+        (0, 1) => "Open recall with identical commands grouped into one row, with when each last ran and how often. Off: list every run. Ctrl+U switches either way",
         (0, 2) => "Filter search results by the current session's tag",
         (0, 3) => "Boost results from the current directory higher in search (toggle with ^S)",
         (0, 4) => "Show the detail preview pane when opening search (toggle with Tab)",
@@ -1126,7 +1126,7 @@ fn render_search_tab(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             false,
         ),
         setting_toggle(
-            "Show Unique Commands by Default",
+            "Start in Commands View (group identical commands)",
             app.config.search.show_unique_by_default,
             app.selected_item == 1,
         ),
@@ -2287,10 +2287,10 @@ mod tests {
         app.handle_input(KeyEvent::from(KeyCode::Char('k')));
         assert_eq!(app.selected_item, 0);
 
-        // Space toggles (Item 1 is show_unique_by_default, default false)
+        // Space toggles (Item 1 is show_unique_by_default, default true)
         app.handle_input(KeyEvent::from(KeyCode::Down)); // item 1
         app.handle_input(KeyEvent::from(KeyCode::Char(' ')));
-        assert!(app.config.search.show_unique_by_default);
+        assert!(!app.config.search.show_unique_by_default);
     }
 
     #[test]
@@ -2690,18 +2690,18 @@ mod tests {
         let config = Config::default();
         let mut app = AppState::new(config);
 
-        // Tab Search, Item 1: show_unique_by_default (default false)
+        // Tab Search, Item 1: show_unique_by_default (default true)
         app.current_tab = SettingsTab::Search;
         app.selected_item = 1;
-        assert!(!app.config.search.show_unique_by_default);
+        assert!(app.config.search.show_unique_by_default);
 
         // Space toggles
         app.handle_input(KeyEvent::from(KeyCode::Char(' ')));
-        assert!(app.config.search.show_unique_by_default);
+        assert!(!app.config.search.show_unique_by_default);
 
         // Enter also toggles
         app.handle_input(KeyEvent::from(KeyCode::Enter));
-        assert!(!app.config.search.show_unique_by_default);
+        assert!(app.config.search.show_unique_by_default);
 
         // Tab Search, Item 3: context_boost (default true)
         app.selected_item = 3;

@@ -42,10 +42,11 @@ in exactly this directory. Nothing is boosted for having been run often or
 for having exited 0. literal, prefix and an empty query are not re-ranked at
 all: those come back newest first.
 ^S switches Smart rank (with the this-directory boost) and Recent (without
-it); ^U switches between Executions (every run) and Commands (identical
-commands grouped into one row, with when it last ran and how often). At most
-5000 matches are ranked, which bounds the ordering work, not how much history
-was searched.
+it). Recall opens in Commands: identical command text grouped into one row,
+with when it last ran and how often (set search.show_unique_by_default =
+false to start in Executions instead). ^U switches between Commands and
+Executions, every recorded run. At most 5000 matches are ranked, which bounds
+the ordering work, not how much history was searched.
 
 Enter puts the selected command on your prompt to edit or run (from Ctrl+R),
 or prints it (from suv search); it never runs anything itself.
@@ -327,7 +328,8 @@ pub enum Commands {
         #[arg(short, long)]
         query: Option<String>,
 
-        /// Start in the Commands view: identical commands grouped into one row
+        /// Start in the Commands view (identical commands grouped into one row),
+        /// even when `search.show_unique_by_default = false`
         #[arg(short, long)]
         unique: bool,
 
