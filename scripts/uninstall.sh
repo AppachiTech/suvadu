@@ -39,26 +39,60 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+# The real file a path names, every link followed (portable; see install.sh).
+resolve_path() {
+    local path="$1" target
+    while [ -L "$path" ]; do
+        target=$(readlink "$path")
+        case "$target" in
+            /*) path="$target" ;;
+            *) path="$(dirname "$path")/$target" ;;
+        esac
+    done
+    if [ -d "$(dirname "$path")" ]; then
+        echo "$(cd "$(dirname "$path")" && pwd -P)/$(basename "$path")"
+    else
+        echo "$path"
+    fi
+}
+
 if [ -z "$INSTALL_DIR" ]; then
     FOUND=$(command -v "$BIN_NAME" 2>/dev/null || true)
     if [ -n "$FOUND" ]; then
-        TARGET=$(readlink "$FOUND" 2>/dev/null || true)
-        case "$FOUND $TARGET" in
+        REAL=$(resolve_path "$FOUND")
+        case "$FOUND $REAL" in
             *"/Cellar/"*|*"/homebrew/"*|*"/linuxbrew/"*)
                 echo "suv at $FOUND is managed by Homebrew. Remove it with:"
                 echo "  suv uninstall      (or: brew uninstall suvadu)"
                 exit 1
                 ;;
-            *"/.cargo/bin/"*)
+            *"/.cargo/bin/"*|*"${CARGO_HOME:-/nonexistent-cargo-home}/bin/"*)
                 echo "suv at $FOUND was installed with Cargo. Remove it with:"
                 echo "  suv uninstall      (or: cargo uninstall suvadu)"
                 exit 1
                 ;;
         esac
-        INSTALL_DIR=$(dirname "$FOUND")
+        # Only a suv with the install script's suvadu link beside it is this
+        # script's to delete — the rule `suv uninstall` applies too.
+        LINK="$(dirname "$REAL")/$SYMLINK_NAME"
+        if [ ! -L "$LINK" ] || [ "$(resolve_path "$LINK")" != "$REAL" ]; then
+            echo "suv at $FOUND was not installed by the install script (there is no"
+            echo "$SYMLINK_NAME link beside it), so this script leaves it alone. Remove it the"
+            echo "way it was installed, or name its directory with --dir DIR."
+            exit 1
+        fi
+        INSTALL_DIR=$(dirname "$REAL")
     fi
 fi
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+case "$INSTALL_DIR" in
+    "~") INSTALL_DIR="$HOME" ;;
+    "~/"*) INSTALL_DIR="$HOME/${INSTALL_DIR#"~/"}" ;;
+esac
+case "$INSTALL_DIR" in
+    /*) ;;
+    *) INSTALL_DIR="$PWD/$INSTALL_DIR" ;;
+esac
 INSTALL_DIR="${INSTALL_DIR%/}"
 
 echo "Uninstalling Suvadu from $INSTALL_DIR..."

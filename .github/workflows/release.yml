@@ -187,7 +187,11 @@ jobs:
       # throwaway HOME: --dir, --user, in-place update, and leaving a
       # Homebrew-managed suv alone, none of which may call sudo.
       - name: Install the published build with the installer
-        run: scripts/test-install-local.sh
+        run: |
+          # With minisign present the installer verifies the signature, and
+          # the test checks that the published one verifies.
+          sudo apt-get install -y minisign || echo "minisign unavailable; that check will be skipped"
+          scripts/test-install-local.sh
 
   update-homebrew-tap:
     needs: build

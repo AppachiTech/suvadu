@@ -43,7 +43,17 @@ fail() {
 run_installer() {
     local home="$1" path="$2"
     shift 2
-    HOME="$home" PATH="$path" SHELL=/bin/zsh bash "$INSTALLER" "$@" </dev/null 2>&1
+    env -u SUVADU_INSTALL_DIR -u CARGO_HOME -u ZDOTDIR \
+        HOME="$home" PATH="$path" SHELL=/bin/zsh bash "$INSTALLER" "$@" </dev/null 2>&1
+}
+
+# old_script_install DIR — a suv reporting 0.0.1, laid out as the script
+# leaves it: suv plus a suvadu link beside it.
+old_script_install() {
+    mkdir -p "$1"
+    printf '#!/bin/sh\necho "suvadu 0.0.1"\n' >"$1/suv"
+    chmod +x "$1/suv"
+    ln -sf "$1/suv" "$1/suvadu"
 }
 
 # 1. Explicit --dir into a fresh directory: no sudo, both names, PATH hint.
@@ -59,22 +69,21 @@ else
     fail "--dir installs into a new directory without sudo" "$out"
 fi
 
-# 2. Same directory again: recognised as current, nothing re-downloaded.
+# 2. Same directory again: recognised as current, nothing re-downloaded, and
+#    a suvadu link that went missing is put back.
+rm -f "$WORK/opt/bin/suvadu"
 out=$(run_installer "$home1" "$BASE_PATH" --dir "$WORK/opt/bin")
-if [[ "$out" == *"Already on the latest version"* ]]; then
-    pass "re-running --dir on a current install does nothing"
+if [[ "$out" == *"Already on the latest version"* ]] && [[ "$out" != *"Downloading"* ]] \
+    && [ -L "$WORK/opt/bin/suvadu" ] && [[ "$out" == *"Restored the suvadu link"* ]]; then
+    pass "re-running on a current install downloads nothing and repairs the link"
 else
-    fail "re-running --dir on a current install does nothing" "$out"
+    fail "re-running on a current install downloads nothing and repairs the link" "$out"
 fi
 
 # 3. An older script install on PATH is updated where it is.
 home3="$WORK/home3"
-mkdir -p "$home3" "$WORK/old/bin"
-cat >"$WORK/old/bin/suv" <<'EOF'
-#!/bin/sh
-echo "suvadu 0.0.1"
-EOF
-chmod +x "$WORK/old/bin/suv"
+mkdir -p "$home3"
+old_script_install "$WORK/old/bin"
 out=$(run_installer "$home3" "$WORK/old/bin:$BASE_PATH")
 if grep -q "suvadu" <("$WORK/old/bin/suv" --version 2>/dev/null) \
     && ! "$WORK/old/bin/suv" --version 2>/dev/null | grep -q "0.0.1" \
@@ -83,6 +92,60 @@ if grep -q "suvadu" <("$WORK/old/bin/suv" --version 2>/dev/null) \
     pass "an existing script install is updated in place"
 else
     fail "an existing script install is updated in place" "$out"
+fi
+
+# 3b. A suv the script did not install (no suvadu link) is left alone.
+home3b="$WORK/home3b"
+mkdir -p "$home3b" "$WORK/foreign/bin"
+printf '#!/bin/sh\necho "suvadu 0.0.1"\n' >"$WORK/foreign/bin/suv"
+chmod +x "$WORK/foreign/bin/suv"
+out=$(run_installer "$home3b" "$WORK/foreign/bin:$BASE_PATH")
+status=$?
+if [ $status -ne 0 ] && [[ "$out" == *"not installed by this script"* ]] \
+    && [[ "$out" != *"Downloading"* ]] && grep -q "0.0.1" "$WORK/foreign/bin/suv" \
+    && [ ! -e "$WORK/foreign/bin/suvadu" ]; then
+    pass "a suv this script did not install is not overwritten"
+else
+    fail "a suv this script did not install is not overwritten" "$out"
+fi
+
+# 3c. A link on PATH to a script install elsewhere updates that install, and
+#     leaves the link alone.
+home3c="$WORK/home3c"
+mkdir -p "$home3c/bin"
+old_script_install "$WORK/real/bin"
+ln -s "$WORK/real/bin/suv" "$home3c/bin/suv"
+out=$(run_installer "$home3c" "$home3c/bin:$BASE_PATH")
+if [ -L "$home3c/bin/suv" ] && ! "$WORK/real/bin/suv" --version 2>/dev/null | grep -q "0.0.1" \
+    && [[ "$out" == *"Updating v0.0.1"* ]]; then
+    pass "a link to a script install updates the install it points at"
+else
+    fail "a link to a script install updates the install it points at" "$out"
+fi
+
+# 3d. A relative --dir is made absolute, so the suvadu link resolves.
+home3d="$WORK/home3d"
+mkdir -p "$home3d"
+out=$(cd "$WORK" && run_installer "$home3d" "$BASE_PATH" --dir relbin)
+if [ -x "$WORK/relbin/suvadu" ] && [ "$(readlink "$WORK/relbin/suvadu")" = "$WORK/relbin/suv" ] \
+    && [[ "$out" == *"export PATH=\"$WORK/relbin:"* ]]; then
+    pass "a relative --dir installs with an absolute link and PATH line"
+else
+    fail "a relative --dir installs with an absolute link and PATH line" "$out
+$(ls -la "$WORK/relbin" 2>&1)"
+fi
+
+# 3e. A suv under a custom CARGO_HOME is Cargo's.
+home3e="$WORK/home3e"
+mkdir -p "$home3e" "$WORK/cargo-home/bin"
+printf '#!/bin/sh\necho "suvadu 0.0.1"\n' >"$WORK/cargo-home/bin/suv"
+chmod +x "$WORK/cargo-home/bin/suv"
+out=$(CARGO_HOME="$WORK/cargo-home" HOME="$home3e" PATH="$WORK/cargo-home/bin:$BASE_PATH" \
+    SHELL=/bin/zsh bash "$INSTALLER" </dev/null 2>&1)
+if [[ "$out" == *"installed with Cargo"* ]] && grep -q "0.0.1" "$WORK/cargo-home/bin/suv"; then
+    pass "a suv under a custom CARGO_HOME is left to cargo"
+else
+    fail "a suv under a custom CARGO_HOME is left to cargo" "$out"
 fi
 
 # 4. A Homebrew-managed suv is left alone, with the brew command to use.
@@ -150,7 +213,8 @@ fi
 run_in_terminal() {
     local answer="$1" home="$2" path="$3"
     shift 3
-    HOME="$home" PATH="$path" SHELL=/bin/zsh SUVADU_INSTALL_OS=Linux ANSWER="$answer" \
+    env -u SUVADU_INSTALL_DIR -u CARGO_HOME -u ZDOTDIR \
+        HOME="$home" PATH="$path" SHELL=/bin/zsh SUVADU_INSTALL_OS=Linux ANSWER="$answer" \
         python3 - "$INSTALLER" "$@" <<'PY'
 import os, pty, select, sys
 pid, fd = pty.fork()
@@ -231,7 +295,7 @@ printf 'export EDITOR=vi\n  eval "$(suv init zsh)"\nalias ll="ls -l"\n' >"$home1
 printf 'export PS1=x\n' >"$home13/.bashrc"
 out=$(run_installer "$home13" "$BASE_PATH" --dir "$WORK/un/bin" --no-modify-rc)
 touch "$WORK/un/bin/other-tool"
-out=$(HOME="$home13" PATH="$BASE_PATH" bash "$UNINSTALLER" --dir "$WORK/un/bin" 2>&1)
+out=$(env -u SUVADU_INSTALL_DIR -u CARGO_HOME HOME="$home13" PATH="$BASE_PATH" bash "$UNINSTALLER" --dir "$WORK/un/bin" 2>&1)
 if [ ! -e "$WORK/un/bin/suv" ] && [ ! -L "$WORK/un/bin/suvadu" ] && [ -e "$WORK/un/bin/other-tool" ] \
     && [ "$(cat "$home13/.zshrc")" = "$(printf 'export EDITOR=vi\nalias ll="ls -l"')" ] \
     && grep -q 'suv init zsh' "$home13/.zshrc.suvadu-backup" \
@@ -242,12 +306,24 @@ else
 fi
 
 # 14. Running it again finds nothing to do and makes no new backups.
-out=$(HOME="$home13" PATH="$BASE_PATH" bash "$UNINSTALLER" --dir "$WORK/un/bin" 2>&1)
+out=$(env -u SUVADU_INSTALL_DIR -u CARGO_HOME HOME="$home13" PATH="$BASE_PATH" bash "$UNINSTALLER" --dir "$WORK/un/bin" 2>&1)
 if [[ "$out" == *"not found"* ]] && [ "$(ls -a "$home13" | grep -c suvadu-backup)" = 1 ]; then
     pass "a second uninstall is a no-op"
 else
     fail "a second uninstall is a no-op" "$out
 $(ls -a "$home13")"
+fi
+
+# 14b. Without --dir, uninstall.sh refuses a suv the install script did not
+#      put there, and deletes nothing.
+out=$(env -u SUVADU_INSTALL_DIR -u CARGO_HOME HOME="$home3b" PATH="$WORK/foreign/bin:$BASE_PATH" \
+    bash "$UNINSTALLER" 2>&1)
+status=$?
+if [ $status -ne 0 ] && [[ "$out" == *"not installed by the install script"* ]] \
+    && [ -x "$WORK/foreign/bin/suv" ]; then
+    pass "uninstall.sh leaves a suv it did not install alone"
+else
+    fail "uninstall.sh leaves a suv it did not install alone" "$out"
 fi
 
 # 15. An unknown option is an error, not a silent default install.

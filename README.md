@@ -44,8 +44,11 @@ cargo install suvadu
 The install script puts `suv` in `/usr/local/bin`, using sudo only when that
 directory is not writable; `--user` or `--dir DIR` (or `SUVADU_INSTALL_DIR`)
 choose another place. Re-running it updates a script-installed `suv` where it
-already is. If the `suv` on your PATH came from Homebrew or Cargo, it stops and
-names that package manager's update command rather than install a second copy.
+already is — recognised by the `suvadu` link the script puts beside it — and
+when nothing has changed it downloads nothing but still repairs that link. If
+the `suv` on your PATH came from Homebrew or Cargo, it stops and names that
+package manager's update command; any other `suv` it did not install is left
+alone, and `--user` or `--dir` installs a separate copy on purpose.
 Run at a terminal, it offers to add the shell hook below to `~/.zshrc` (or
 `~/.bashrc` on Linux): it shows the line first, writes nothing unless you type
 `y`, keeps a copy of the file as `.suvadu-backup`, and never adds the hook
