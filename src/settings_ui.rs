@@ -1192,17 +1192,18 @@ fn render_search_tab(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
         ),
     ];
 
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(t.border))
-                .title(" Search Preferences "),
-        )
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD).fg(t.primary))
-        .highlight_symbol(" > ");
-    f.render_widget(list, area);
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(t.border))
+            .title(" Search Preferences "),
+    );
+    // The rows mark their own selection (the `<<` arrow and brighter text);
+    // the list state is here only so that a terminal too short for all of
+    // them scrolls to keep the selected row in view.
+    let mut state = ListState::default().with_selected(Some(app.selected_item));
+    f.render_stateful_widget(list, area, &mut state);
 }
 
 fn render_shell_tab(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
@@ -3509,6 +3510,34 @@ mod tests {
         ] {
             assert!(screen.contains(row), "{row:?} is not on screen:\n{screen}");
         }
+    }
+
+    #[test]
+    fn the_selected_search_row_stays_visible_on_a_short_terminal() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let screen_for = |selected: usize| {
+            let mut app = AppState::new(Config::default());
+            app.selected_item = selected;
+            let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+            terminal.draw(|f| ui(f, &mut app)).unwrap();
+            let buf = terminal.backend().buffer().clone();
+            let area = buf.area();
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| buf.cell((x, y)).map_or(" ", ratatui::buffer::Cell::symbol))
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let bottom = screen_for(12);
+        assert!(
+            bottom.contains("Compact Recall (inline under the prompt) <<"),
+            "the selected last row scrolled out of view:\n{bottom}"
+        );
+        let top = screen_for(0);
+        assert!(top.contains("Page Limit:"), "{top}");
     }
 
     #[test]
