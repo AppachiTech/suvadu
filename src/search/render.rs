@@ -167,7 +167,25 @@ impl SearchApp {
 
         let width = area.width as usize;
         let segments = self.status_segments();
-        let shown = fit_prefix(&segments, width, StatusSegment::width);
+        let badges = self.active_filter_badges();
+        // An active filter restricts every result, so it is never the one
+        // that does not fit: room for the first badge — and a "+N" for any
+        // others — is set aside before the segments are fitted, and the
+        // least important segments give way instead.
+        let reserved = badges.first().map_or(0, |(text, _)| {
+            display_width(text)
+                + 1
+                + if badges.len() > 1 {
+                    MORE_FILTERS_WIDTH
+                } else {
+                    0
+                }
+        });
+        let shown = fit_prefix(
+            &segments,
+            width.saturating_sub(reserved),
+            StatusSegment::width,
+        );
 
         let mut spans: Vec<Span<'static>> = Vec::new();
         let mut used = 0usize;
@@ -182,9 +200,12 @@ impl SearchApp {
         // replaced by a "+N" marker instead of being clipped.
         let mut remaining = width.saturating_sub(used);
         let mut hidden = 0usize;
-        for (text, style) in self.active_filter_badges() {
+        let count = badges.len();
+        for (i, (text, style)) in badges.into_iter().enumerate() {
             let badge_width = display_width(&text) + 1;
-            if hidden == 0 && badge_width + MORE_FILTERS_WIDTH <= remaining {
+            // Keep room for a "+N" only while there are badges after this one.
+            let marker_room = if i + 1 < count { MORE_FILTERS_WIDTH } else { 0 };
+            if hidden == 0 && badge_width + marker_room <= remaining {
                 spans.push(Span::styled(text, style));
                 spans.push(Span::raw(" "));
                 remaining -= badge_width;
@@ -207,25 +228,25 @@ impl SearchApp {
     fn status_segments(&self) -> Vec<StatusSegment> {
         vec![
             // Scope (^P) and Match (^X) come first: they decide which entries
-            // are eligible at all. Rank and Show only reorder or collapse
-            // what those two already chose, so they are dropped first when
+            // are eligible at all. Agents is a restriction too. Rank only
+            // reorders what the others chose, so it is dropped first when
             // the terminal is narrow.
             StatusSegment::new("Scope", self.recall.scope.status_value()),
             StatusSegment::new("Match", self.recall.match_mode.label()),
-            StatusSegment::new(
-                "Rank",
-                if self.view.context_boost {
-                    "Smart"
-                } else {
-                    "Recent"
-                },
-            ),
             StatusSegment::new(
                 "Agents",
                 if self.filters.show_agents {
                     "Shown"
                 } else {
                     "Hidden"
+                },
+            ),
+            StatusSegment::new(
+                "Rank",
+                if self.view.context_boost {
+                    "Smart"
+                } else {
+                    "Recent"
                 },
             ),
         ]

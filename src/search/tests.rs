@@ -4112,7 +4112,7 @@ fn prod03_footer_snapshot_at_80x24() {
     );
     assert_eq!(
         lines[4],
-        " Scope  All history   Match  terms   Rank  Smart   Agents  Hidden               "
+        " Scope  All history   Match  terms   Agents  Hidden   Rank  Smart               "
     );
 }
 
@@ -4532,4 +4532,41 @@ fn the_selected_row_shows_every_character_at_any_wrap_boundary() {
             }
         }
     }
+}
+
+#[test]
+fn an_active_filter_is_always_announced_whatever_the_width() {
+    type Set = fn(&mut SearchApp);
+    let filters: [(&str, Set); 6] = [
+        ("date", |a| a.filters.after = Some(1)),
+        ("tag", |a| a.filters.tag_id = Some(1)),
+        ("exit", |a| a.filters.exit_code = Some(1)),
+        ("exec", |a| a.filters.executor_type = Some("ci".into())),
+        ("failed", |a| a.filters.failed_only = true),
+        ("marked", |a| a.filters.bookmarks_only = true),
+    ];
+    for (label, set) in filters {
+        for width in 30_u16..=120 {
+            let mut app = render_app();
+            set(&mut app);
+            let lines = render_lines(&mut app, width, 24);
+            assert!(
+                lines[4].contains(label),
+                "{width} cols: the {label} filter is active but not shown:\n{}",
+                lines[4]
+            );
+            // Scope still leads: it is the restriction every result shares.
+            assert!(lines[4].contains("Scope"), "{width} cols:\n{}", lines[4]);
+        }
+    }
+    // Two filters where only one fits: the other is counted, not dropped.
+    let mut app = render_app();
+    app.filters.failed_only = true;
+    app.filters.bookmarks_only = true;
+    let lines = render_lines(&mut app, 35, 24);
+    assert!(
+        lines[4].contains("failed") && lines[4].contains("+1"),
+        "{}",
+        lines[4]
+    );
 }
