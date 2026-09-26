@@ -49,9 +49,22 @@ pub struct Example {
 }
 
 impl Example {
+    /// It has a `<NAME>` part to fill in before it can be used.
     pub fn needs_input(&self) -> bool {
-        self.command.contains('<')
+        has_placeholder(self.command)
     }
+}
+
+/// Whether `text` holds a `<UPPER_CASE>` placeholder (not a redirection).
+pub fn has_placeholder(text: &str) -> bool {
+    text.split('<').skip(1).any(|rest| {
+        rest.split_once('>').is_some_and(|(name, _)| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, '_' | '-'))
+        })
+    })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -375,6 +388,8 @@ static FEATURES: &[Feature] = &[
             "suv replay prints commands in order. It shows them; it never runs them again.",
             "Without options it shows the current shell session. Dates take YYYY-MM-DD, \
              \"today\" or \"yesterday\".",
+            "Neither does suv guard, which assesses a command line; suv wrap is the one that \
+             runs a command, and records it.",
         ],
         examples: &[
             ex("suv replay --after today", "Everything since midnight"),
@@ -461,7 +476,7 @@ static FEATURES: &[Feature] = &[
         category: ORGANIZE,
         title: "Notes on commands",
         description: "Attach a note to one recorded command, such as why it worked.",
-        command: "suv note",
+        command: "suv note <ENTRY_ID>",
         synonyms: &[
             "note",
             "notes",
@@ -743,7 +758,7 @@ static FEATURES: &[Feature] = &[
         category: AI,
         title: "Import an AI transcript",
         description: "Add a Codex or Claude Code session that was not captured as it happened.",
-        command: "suv agent import-session",
+        command: "suv agent import-session <PATH>",
         synonyms: &[
             "import transcript",
             "transcript",
@@ -769,7 +784,7 @@ static FEATURES: &[Feature] = &[
         category: AI,
         title: "Delete a captured AI session",
         description: "Remove one captured AI session and everything recorded with it.",
-        command: "suv agent delete-session",
+        command: "suv agent delete-session <SESSION_ID>",
         synonyms: &[
             "delete session",
             "remove ai session",
@@ -796,7 +811,7 @@ static FEATURES: &[Feature] = &[
         category: AI,
         title: "Assess a command's risk",
         description: "Check a command line against Suvadu's risk rules before it runs.",
-        command: "suv guard",
+        command: "suv guard \"<COMMAND>\"",
         synonyms: &[
             "risk",
             "dangerous",
@@ -812,6 +827,7 @@ static FEATURES: &[Feature] = &[
              the command.",
             "A verdict is a rule match, not a guarantee: a command that passes can still do \
              damage.",
+            "To run a command and record it, use suv wrap; to see what already ran, suv replay.",
         ],
         examples: &[
             ex("suv guard \"rm -rf ./build\"", "Assess one command"),
@@ -977,7 +993,7 @@ static FEATURES: &[Feature] = &[
         title: "Record a wrapped command",
         description:
             "Run a command through Suvadu so it is recorded where no shell hook is loaded.",
-        command: "suv wrap",
+        command: "suv wrap -- <COMMAND>",
         synonyms: &[
             "wrap",
             "scripts",
@@ -989,8 +1005,10 @@ static FEATURES: &[Feature] = &[
         command_paths: &["wrap"],
         guide: &[
             "suv wrap runs the command you give it and records it — for scripts, CI and \
-                  agents that do not load shell hooks. It executes that command; Home only \
-                  shows how.",
+             agents that do not load shell hooks. It executes that command; Home only shows \
+             how.",
+            "It is the one of the three that runs anything: suv guard only assesses a command \
+             line, and suv replay only prints what was recorded.",
         ],
         examples: &[
             ex("suv wrap -- <COMMAND>", "Run and record a command"),
@@ -1205,7 +1223,7 @@ static FEATURES: &[Feature] = &[
         category: MANAGE,
         title: "Import history",
         description: "Bring in history from Zsh, Bash, an Atuin database or a Suvadu export.",
-        command: "suv import",
+        command: "suv import <FILE>",
         synonyms: &[
             "import",
             "atuin",
@@ -1245,7 +1263,7 @@ static FEATURES: &[Feature] = &[
         category: MANAGE,
         title: "Delete history",
         description: "Remove commands that contain some text, or match a pattern, for good.",
-        command: "suv delete",
+        command: "suv delete \"<TEXT>\" --dry-run",
         synonyms: &[
             "delete", "remove", "forget", "erase", "secret", "password", "purge", "leaked",
         ],
@@ -1300,7 +1318,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("version"),
         category: MANAGE,
         title: "Version",
-        description: "Show which Suvadu build is installed.",
+        description: "Show the version and build of this suv.",
         opens: "Shows the version and build here.",
         command: "suv version",
         synonyms: &["version", "build", "which version", "release"],
@@ -1841,6 +1859,172 @@ mod tests {
                     feature.id.0
                 );
             }
+        }
+    }
+
+    /// Split a command line the way a shell would for the simple quoting
+    /// the examples use.
+    fn shell_words(line: &str) -> Vec<String> {
+        let mut words = Vec::new();
+        let mut word = String::new();
+        let mut quote: Option<char> = None;
+        let mut started = false;
+        for c in line.chars() {
+            match (quote, c) {
+                (Some(q), c) if c == q => quote = None,
+                (None, '"' | '\'') => {
+                    quote = Some(c);
+                    started = true;
+                }
+                (None, ' ') => {
+                    if started || !word.is_empty() {
+                        words.push(std::mem::take(&mut word));
+                    }
+                    started = false;
+                }
+                (_, c) => word.push(c),
+            }
+        }
+        if started || !word.is_empty() {
+            words.push(word);
+        }
+        words
+    }
+
+    /// The `suv …` invocation inside an example: after `$(`, before a pipe,
+    /// a redirection or the closing parenthesis. `None` for other tools.
+    fn suv_invocation(example: &str) -> Option<String> {
+        let start = example.find("suv ")?;
+        let rest = &example[start..];
+        let end = rest.find(['|', '>', ')']).unwrap_or(rest.len());
+        Some(rest[..end].trim().to_string())
+    }
+
+    /// Stand-in values for the parts a reader fills in.
+    fn fill(line: &str) -> String {
+        let values = [
+            ("<ENTRY_ID>", "42"),
+            ("<SESSION_ID>", "abc123"),
+            ("<YYYY-MM-DD>", "2025-01-01"),
+            ("<PATH>", "/tmp/example"),
+            ("<FILE>", "history.jsonl"),
+            ("<COMMAND>", "git status"),
+            ("<REGEX>", "^git"),
+        ];
+        let mut out = line.to_string();
+        for (placeholder, value) in values {
+            out = out.replace(placeholder, value);
+        }
+        // Any other <NAME>-style value is a single word.
+        while let (Some(open), Some(close)) = (out.find('<'), out.find('>')) {
+            if close < open {
+                break;
+            }
+            out.replace_range(open..=close, "value");
+        }
+        out
+    }
+
+    /// Every suv command a feature shows — its command and each example,
+    /// with placeholders filled — is one the CLI accepts. Nothing is run.
+    #[test]
+    fn every_command_shown_is_one_the_cli_accepts() {
+        let mut checked = 0;
+        for feature in features() {
+            let shown =
+                std::iter::once(feature.command).chain(feature.examples.iter().map(|e| e.command));
+            for line in shown {
+                let Some(invocation) = suv_invocation(&fill(line)) else {
+                    continue;
+                };
+                let words = shell_words(&invocation);
+                // Asking for help or the version is a valid command line too.
+                let parsed =
+                    crate::cli::Cli::try_parse_from(&words)
+                        .map(|_| ())
+                        .or_else(|e| match e.kind() {
+                            clap::error::ErrorKind::DisplayHelp
+                            | clap::error::ErrorKind::DisplayVersion => Ok(()),
+                            _ => Err(e),
+                        });
+                assert!(
+                    parsed.is_ok(),
+                    "{}: {line:?} does not parse: {}",
+                    feature.id.0,
+                    parsed.err().map(|e| e.to_string()).unwrap_or_default()
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 60, "only {checked} commands checked");
+    }
+
+    #[test]
+    fn placeholders_are_told_apart_from_redirections() {
+        assert!(has_placeholder("suv note <ENTRY_ID> -c \"<TEXT>\""));
+        assert!(has_placeholder(
+            "suv export --after <YYYY-MM-DD> > recent.jsonl"
+        ));
+        assert!(!has_placeholder("suv export > history.jsonl"));
+        assert!(!has_placeholder("cat < file.md"));
+        assert!(!has_placeholder("echo <lower>"));
+        // An example needs input exactly when there is something to fill.
+        for feature in features() {
+            for example in feature.examples {
+                assert_eq!(
+                    example.needs_input(),
+                    fill(example.command) != example.command,
+                    "{}: {}",
+                    feature.id.0,
+                    example.command
+                );
+            }
+        }
+    }
+
+    /// Wording review, enforced: nothing claims an outcome Home cannot know.
+    #[test]
+    fn no_feature_text_claims_what_home_cannot_know() {
+        for feature in features() {
+            let text = [feature.description, feature.opens]
+                .into_iter()
+                .chain(feature.guide.iter().copied())
+                .chain(feature.note)
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase();
+            for claim in [
+                "is installed",
+                "are installed",
+                "is now paused",
+                "has been paused",
+                "is safe",
+                "guaranteed",
+                "was executed",
+                "has been run",
+                "verified",
+            ] {
+                assert!(!text.contains(claim), "{}: {claim:?}", feature.id.0);
+            }
+        }
+    }
+
+    #[test]
+    fn wrap_guard_and_replay_say_which_one_runs_commands() {
+        let guide = |id| feature(FeatureId(id)).unwrap().guide.join(" ");
+        assert!(guide("wrap").contains("runs the command"));
+        assert!(guide("guard").contains("never runs"));
+        assert!(guide("replay").contains("never runs"));
+        for id in ["wrap", "guard", "replay"] {
+            let others: Vec<&str> = ["wrap", "guard", "replay"]
+                .into_iter()
+                .filter(|o| *o != id)
+                .collect();
+            let text = guide(id);
+            assert!(
+                others.iter().all(|o| text.contains(&format!("suv {o}"))),
+                "{id} should point to {others:?}: {text}"
+            );
         }
     }
 
