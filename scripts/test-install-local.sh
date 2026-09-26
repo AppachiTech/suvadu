@@ -223,7 +223,34 @@ else
     printf 'skip  terminal prompts (python3 not installed)\n'
 fi
 
-# 13. An unknown option is an error, not a silent default install.
+# 13. uninstall.sh removes what the installer added, and nothing else.
+UNINSTALLER="$(dirname "$INSTALLER")/uninstall.sh"
+home13="$WORK/home13"
+mkdir -p "$home13"
+printf 'export EDITOR=vi\n  eval "$(suv init zsh)"\nalias ll="ls -l"\n' >"$home13/.zshrc"
+printf 'export PS1=x\n' >"$home13/.bashrc"
+out=$(run_installer "$home13" "$BASE_PATH" --dir "$WORK/un/bin" --no-modify-rc)
+touch "$WORK/un/bin/other-tool"
+out=$(HOME="$home13" PATH="$BASE_PATH" bash "$UNINSTALLER" --dir "$WORK/un/bin" 2>&1)
+if [ ! -e "$WORK/un/bin/suv" ] && [ ! -L "$WORK/un/bin/suvadu" ] && [ -e "$WORK/un/bin/other-tool" ] \
+    && [ "$(cat "$home13/.zshrc")" = "$(printf 'export EDITOR=vi\nalias ll="ls -l"')" ] \
+    && grep -q 'suv init zsh' "$home13/.zshrc.suvadu-backup" \
+    && [ ! -e "$home13/.bashrc.suvadu-backup" ] && [[ "$out" != *"sudo was called"* ]]; then
+    pass "uninstall.sh removes suv, its link and the hook line, keeping a backup"
+else
+    fail "uninstall.sh removes suv, its link and the hook line, keeping a backup" "$out"
+fi
+
+# 14. Running it again finds nothing to do and makes no new backups.
+out=$(HOME="$home13" PATH="$BASE_PATH" bash "$UNINSTALLER" --dir "$WORK/un/bin" 2>&1)
+if [[ "$out" == *"not found"* ]] && [ "$(ls -a "$home13" | grep -c suvadu-backup)" = 1 ]; then
+    pass "a second uninstall is a no-op"
+else
+    fail "a second uninstall is a no-op" "$out
+$(ls -a "$home13")"
+fi
+
+# 15. An unknown option is an error, not a silent default install.
 out=$(run_installer "$home1" "$BASE_PATH" --prefix /tmp/x)
 status=$?
 if [ $status -ne 0 ] && [[ "$out" == *"unknown option"* ]]; then
