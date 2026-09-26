@@ -183,6 +183,12 @@ jobs:
       - name: Verify every platform download resolves
         run: scripts/test-install-urls.sh
 
+      # Runs the published installer against the just-published build in a
+      # throwaway HOME: --dir, --user, in-place update, and leaving a
+      # Homebrew-managed suv alone, none of which may call sudo.
+      - name: Install the published build with the installer
+        run: scripts/test-install-local.sh
+
   update-homebrew-tap:
     needs: build
     runs-on: ubuntu-latest

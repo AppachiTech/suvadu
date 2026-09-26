@@ -5,9 +5,11 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **The install script can install without sudo** — `curl -fsSL https://downloads.appachi.tech/suvadu/install.sh | bash -s -- --user` installs into `~/.local/bin`, and `--dir DIR` (or `SUVADU_INSTALL_DIR=DIR`) into any directory; sudo is used only when the target directory is not writable, and the script says when that directory is not on your `PATH`. The default is still `/usr/local/bin`.
 - **Recall defaults in `suv settings`** — the Search tab now has *Default Match Mode* (`terms`/`literal`/`prefix`/`fuzzy`), *Starting Scope* (`all`/`directory`/`workspace`/`session`) and *Compact Recall*, the three choices that previously needed a hand edit of `config.toml`. Enter or Space cycles or toggles each one; saving writes the same words `--match` and `--scope` accept and keeps every other key in the file, including ones this build does not know.
 
 ### Fixed
+- **Re-running the install script no longer installs a second copy** — it now updates a script-installed `suv` in the directory it is already in, and when the `suv` on `PATH` belongs to Homebrew or Cargo it stops and prints `brew upgrade suvadu` or `cargo install suvadu` instead. Previously, whenever the `suv` on `PATH` was older than the latest release, it wrote `/usr/local/bin/suv` with sudo wherever that `suv` lived: on Apple Silicon that copy sat behind Homebrew's on `PATH`, and on Intel macOS it replaced Homebrew's own link.
 - **`fuzzy` search now folds non-ASCII case, as the help and README already said** — `terms` compared case with full Unicode lowercasing, but `fuzzy` folded ASCII only, so `suv search --match fuzzy ÉCHO` found nothing where `terms` found `echo écho`. Both modes now fold case the same way; `literal` and `prefix` are unchanged and still fold ASCII only, because SQLite's `LIKE` answers them.
 - **The Homebrew install note now covers Bash** — `brew install suvadu` printed only the Zsh hook line and linked the old `www.appachi.tech/suvadu/` homepage. It now gives the Zsh and Bash lines, says to open a new terminal and check with `suv status`, and links the setup guide on suvadu.sh.
 

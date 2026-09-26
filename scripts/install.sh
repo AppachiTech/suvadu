@@ -3,10 +3,53 @@ set -e
 
 # Suvadu installer — handles both fresh installs and updates.
 # Usage: curl -fsSL https://downloads.appachi.tech/suvadu/install.sh | bash
+#        curl -fsSL https://downloads.appachi.tech/suvadu/install.sh | bash -s -- --user
+#
+# Options:
+#   --user          Install into ~/.local/bin. No sudo.
+#   --dir DIR       Install into DIR. sudo is used only if DIR is not writable.
+#   -h, --help      Show this help.
+#
+# SUVADU_INSTALL_DIR=DIR is the same as --dir DIR.
+#
+# With no directory given, an existing script-installed suv is updated where
+# it is; otherwise suv goes to /usr/local/bin, as it always has.
 
 BIN_NAME="suv"
 SYMLINK_NAME="suvadu"
-INSTALL_DIR="/usr/local/bin"
+DEFAULT_INSTALL_DIR="/usr/local/bin"
+INSTALL_DIR="${SUVADU_INSTALL_DIR:-}"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --user) INSTALL_DIR="$HOME/.local/bin" ;;
+        --dir)
+            if [ -z "${2:-}" ]; then
+                echo "Error: --dir needs a directory."
+                exit 1
+            fi
+            INSTALL_DIR="$2"
+            shift
+            ;;
+        --dir=*) INSTALL_DIR="${1#--dir=}" ;;
+        -h|--help)
+            echo "Suvadu installer"
+            echo ""
+            echo "  curl -fsSL https://downloads.appachi.tech/suvadu/install.sh | bash -s -- [options]"
+            echo ""
+            echo "  --user          Install into ~/.local/bin. No sudo."
+            echo "  --dir DIR       Install into DIR. sudo is used only if DIR is not writable."
+            echo ""
+            echo "SUVADU_INSTALL_DIR=DIR is the same as --dir DIR."
+            exit 0
+            ;;
+        *)
+            echo "Error: unknown option '$1'. Run with --help to see the options."
+            exit 1
+            ;;
+    esac
+    shift
+done
 
 # Detect platform.
 #
@@ -52,11 +95,51 @@ fi
 echo "Suvadu installer"
 echo ""
 
-# Show current version if already installed
+# Which package manager, if any, owns the suv at this path. Homebrew links its
+# binary from a Cellar, so the link target is checked as well as the path:
+# on Intel macOS, /usr/local/bin/suv can be Homebrew's.
+managed_by() {
+    local target
+    target=$(readlink "$1" 2>/dev/null || true)
+    case "$1 $target" in
+        *"/Cellar/"*|*"/homebrew/"*|*"/linuxbrew/"*) echo "homebrew" ;;
+        *"/.cargo/bin/"*) echo "cargo" ;;
+    esac
+}
+
+# With no directory given, update the suv already on PATH in place — unless a
+# package manager owns it. Overwriting Homebrew's link would break brew, and a
+# second copy elsewhere on PATH would shadow one install with the other.
+if [ -z "$INSTALL_DIR" ]; then
+    FOUND=$(command -v "$BIN_NAME" 2>/dev/null || true)
+    if [ -n "$FOUND" ]; then
+        case "$(managed_by "$FOUND")" in
+            homebrew)
+                echo "suv at $FOUND is managed by Homebrew. Update it with:"
+                echo "  brew upgrade suvadu"
+                echo ""
+                echo "To install a separate copy anyway, pass --user or --dir DIR."
+                exit 0
+                ;;
+            cargo)
+                echo "suv at $FOUND was installed with Cargo. Update it with:"
+                echo "  cargo install suvadu"
+                echo ""
+                echo "To install a separate copy anyway, pass --user or --dir DIR."
+                exit 0
+                ;;
+            *) INSTALL_DIR=$(dirname "$FOUND") ;;
+        esac
+    fi
+fi
+INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
+INSTALL_DIR="${INSTALL_DIR%/}"
+
+# Show current version if already installed here
 CURRENT_VERSION=""
-if command -v "$BIN_NAME" &>/dev/null; then
-    CURRENT_VERSION=$("$BIN_NAME" version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "")
-    echo "Current version: ${CURRENT_VERSION:-unknown}"
+if [ -x "$INSTALL_DIR/$BIN_NAME" ]; then
+    CURRENT_VERSION=$("$INSTALL_DIR/$BIN_NAME" version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+    echo "Current version: ${CURRENT_VERSION:-unknown} ($INSTALL_DIR/$BIN_NAME)"
 fi
 
 echo "Platform: ${PLATFORM} ${ARCH}"
@@ -125,18 +208,45 @@ if [ ! -f "$TMPDIR/$BIN_NAME" ]; then
     exit 1
 fi
 
-# Install — remove first to avoid "Text file busy" on Linux
+# Install — remove first to avoid "Text file busy" on Linux. sudo only when
+# the directory cannot be written as this user.
 echo ""
-echo "Installing to $INSTALL_DIR (requires sudo)..."
-sudo rm -f "$INSTALL_DIR/$BIN_NAME"
-sudo cp "$TMPDIR/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
-sudo chmod 755 "$INSTALL_DIR/$BIN_NAME"
-sudo ln -sf "$INSTALL_DIR/$BIN_NAME" "$INSTALL_DIR/$SYMLINK_NAME"
+if mkdir -p "$INSTALL_DIR" 2>/dev/null && [ -w "$INSTALL_DIR" ]; then
+    SUDO=""
+    echo "Installing to $INSTALL_DIR..."
+else
+    if ! command -v sudo &>/dev/null; then
+        echo "Error: $INSTALL_DIR is not writable and sudo is not available."
+        echo "Install into your home directory instead:"
+        echo "  curl -fsSL https://downloads.appachi.tech/suvadu/install.sh | bash -s -- --user"
+        exit 1
+    fi
+    SUDO="sudo"
+    echo "Installing to $INSTALL_DIR (requires sudo; --user installs without it)..."
+    sudo mkdir -p "$INSTALL_DIR"
+fi
+$SUDO rm -f "$INSTALL_DIR/$BIN_NAME"
+$SUDO cp "$TMPDIR/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
+$SUDO chmod 755 "$INSTALL_DIR/$BIN_NAME"
+$SUDO ln -sf "$INSTALL_DIR/$BIN_NAME" "$INSTALL_DIR/$SYMLINK_NAME"
 
 echo ""
 NEW_VERSION=$("$INSTALL_DIR/$BIN_NAME" version 2>/dev/null || echo "installed")
 echo "Suvadu $NEW_VERSION"
 echo ""
+
+case ":$PATH:" in
+    *":$INSTALL_DIR:"*) ON_PATH=1 ;;
+    *) ON_PATH=0 ;;
+esac
+
+if [ "$ON_PATH" = 0 ]; then
+    echo "$INSTALL_DIR is not on your PATH. Add it in your shell startup file"
+    echo "(~/.zshrc or ~/.bashrc), above the Suvadu hook:"
+    echo ""
+    echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
+    echo ""
+fi
 
 # Check if shell integration is already set up
 if ! grep -q 'eval "$(suv init' "$HOME/.zshrc" 2>/dev/null && \

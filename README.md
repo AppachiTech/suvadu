@@ -34,9 +34,18 @@ brew tap AppachiTech/suvadu && brew install suvadu
 # Install script (macOS & Linux)
 curl -fsSL https://downloads.appachi.tech/suvadu/install.sh | bash
 
+# Install script, into ~/.local/bin without sudo
+curl -fsSL https://downloads.appachi.tech/suvadu/install.sh | bash -s -- --user
+
 # Cargo
 cargo install suvadu
 ```
+
+The install script puts `suv` in `/usr/local/bin`, using sudo only when that
+directory is not writable; `--user` or `--dir DIR` (or `SUVADU_INSTALL_DIR`)
+choose another place. Re-running it updates a script-installed `suv` where it
+already is. If the `suv` on your PATH came from Homebrew or Cargo, it stops and
+names that package manager's update command rather than install a second copy.
 
 Then add shell hooks:
 
