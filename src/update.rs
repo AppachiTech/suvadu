@@ -114,10 +114,7 @@ fn is_cargo_path_with(path: &str, cargo_home: Option<&std::ffi::OsStr>) -> bool 
         || cargo_home.is_some_and(|home| {
             let bin = std::path::Path::new(home).join("bin");
             let path = std::path::Path::new(path);
-            path.starts_with(&bin)
-                || bin
-                    .canonicalize()
-                    .is_ok_and(|real| path.starts_with(real))
+            path.starts_with(&bin) || bin.canonicalize().is_ok_and(|real| path.starts_with(real))
         })
 }
 
@@ -857,7 +854,10 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .filter(|n| n != "suv")
             .collect();
-        assert!(leftovers.is_empty(), "staging files left behind: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "staging files left behind: {leftovers:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -869,7 +869,10 @@ mod tests {
         std::os::unix::fs::symlink("/nowhere/suv", tmp.path().join("suvadu")).unwrap();
 
         relink_suvadu(&target).unwrap();
-        assert_eq!(std::fs::read_link(tmp.path().join("suvadu")).unwrap(), target);
+        assert_eq!(
+            std::fs::read_link(tmp.path().join("suvadu")).unwrap(),
+            target
+        );
     }
 
     #[test]
