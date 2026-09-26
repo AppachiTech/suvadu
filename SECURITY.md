@@ -329,7 +329,15 @@ subtree.
 - Binary downloads are served over **HTTPS** from `downloads.appachi.tech`
 - Downloads are verified with a **minisign signature** (the public key is compiled into the binary, so a compromised download server cannot forge updates) and a **SHA256 checksum**
 - Update files are written to a unique temporary directory to prevent TOCTOU attacks
-- Homebrew installs are handled through the official Homebrew tap
+- The new binary is written beside the old one and renamed over it, so a failed update leaves the previous version in place; sudo is used only when the install directory is not writable by you
+- Homebrew and Cargo installs are handled by their own package managers — `suv update` points you at `brew upgrade` or `cargo install` instead of replacing their files
+
+### Install script
+
+- `install.sh` always verifies the archive's **SHA256 checksum**, and also its **minisign signature** (with the same public key `suv update` uses) when `minisign` is installed; either failure aborts before anything is installed
+- It writes only `suv` and its `suvadu` link, to `/usr/local/bin`, `~/.local/bin` (`--user`) or a directory you name (`--dir`), using sudo only when that directory is not writable
+- Re-run without a directory, it updates only a `suv` it installed itself (recognised by its `suvadu` link); a `suv` from Homebrew, Cargo or anywhere else is left alone
+- It edits a shell startup file only if you type `y` at its prompt, after showing the exact line, and keeps the previous file as `.suvadu-backup`; `--no-modify-rc` turns the prompt off
 
 ### Shell Hooks — what a recorded command contains
 

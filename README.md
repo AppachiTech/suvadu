@@ -162,18 +162,24 @@ results title says `searching…`.
 **Reading the list.** The characters your query matched are underlined and
 emphasised in every row, over the usual syntax colours, so it is clear why a
 command matched. `^U` switches between **Executions** — every recorded run,
-with its time and outcome — and **Commands**, where identical commands share
-one row showing when the command last ran and how many runs matched; the
-results title says which you are looking at and counts in those units. A
-command is grouped only with *exactly* the same text, so whitespace that would
-otherwise be invisible is drawn: `·` for a leading or trailing space, `↵` and
-`⇥` for line breaks and tabs. When a command holds something that cannot be
-read off the screen — a tab, a zero-width space, a direction override — the
-detail pane adds its escaped *Raw* form. `^V` opens that raw view for any
-command, scrollable however long it is: every space drawn as `·`, every
-hidden character escaped, a line per line break, with its exact length. **Enter puts the command on your prompt** (or
-prints it, from `suv search`) — it never runs anything. The footer keeps to
-the core keys; `?` lists every shortcut.
+with its time, directory and outcome — and **Commands**, where identical
+commands share one row showing when the command last ran and how many runs
+matched; the results title says which you are looking at and counts in those
+units, and the command you had selected stays selected across the switch. A
+row too long for the list ends in `…`; the selected row wraps so all of it is
+visible.
+
+A command is grouped only with *exactly* the same text, so whitespace that
+would otherwise be invisible is drawn: `·` for a leading or trailing space,
+`↵` and `⇥` for line breaks and tabs. When a command holds something that
+cannot be read off the screen — a tab, a zero-width space, a direction
+override — the detail pane adds its escaped *Raw* form. `^V` opens that raw
+view for any command, scrollable however long it is: every space drawn as `·`,
+every hidden character escaped, a line per line break, with its exact length.
+
+**Enter puts the command on your prompt** (or prints it, from `suv search`) —
+it never runs anything. The footer keeps to the core keys; `?` lists every
+shortcut.
 
 Up/Down arrow recall is a different, simpler path: prefix match, newest
 first, no deduplication, with the current directory used only to break ties
@@ -409,7 +415,7 @@ See the [full integration guide](https://suvadu.sh/blog/track-ai-agent-commands-
 
 | Feature | Details |
 |---------|---------|
-| **Search** | Full-history search TUI with four [matching modes](#how-recall-matches-and-ranks) (`^X`) and four scopes (`^P`), your own commands by default (`Ctrl+A` shows agents, `Ctrl+E` failures only), filters, Smart rank, detail pane, bookmarks, and `--compact` inline recall |
+| **Search** | Full-history search TUI with four [matching modes](#how-recall-matches-and-ranks) (`^X`) and four scopes (`^P`), matches highlighted in each row, every run or identical commands grouped with last-used and run counts (`^U`), your own commands by default (`Ctrl+A` shows agents, `Ctrl+E` failures only), filters, Smart rank, detail pane, a raw inspector for exact text (`^V`), bookmarks, and `--compact` inline recall |
 | **History** | Non-interactive `suv history` with filters, `--json`, pipeable to other tools |
 | **Agent Dashboard** | Timeline, risk assessment, per-agent analytics, exportable reports; `suv agent report --fail-on <low\|medium\|high\|critical>` for local CI / git-hook gating |
 | **MCP Server** | 21 read-only tools, 8 resources and 6 prompts, plus two opt-in write tools that are off by default — agent session replay and incremental cross-agent summary checkpoints, project context, failure learning; one response convention with explicit provenance |
