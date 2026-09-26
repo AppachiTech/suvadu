@@ -4570,3 +4570,84 @@ fn an_active_filter_is_always_announced_whatever_the_width() {
         lines[4]
     );
 }
+
+fn selected(app: &SearchApp) -> Option<String> {
+    app.get_selected_command()
+}
+
+#[test]
+fn switching_between_commands_and_executions_keeps_the_selected_command() {
+    let (_d, repo) = repo_with(&[
+        "suv update",
+        "suv update",
+        "suv uninstall",
+        "suv update",
+        "suv status",
+        "suv update",
+    ]);
+    let mut app = app_for(&repo, "suv");
+    let row = app
+        .entries
+        .iter()
+        .position(|e| e.command == "suv uninstall")
+        .unwrap();
+    assert_ne!(
+        row, 0,
+        "the fixture must not start on the command under test"
+    );
+    app.table_state.select(Some(row));
+
+    for grouped in [true, false, true] {
+        let action = app.handle_input(ctrl_key('u'));
+        assert!(matches!(action, SearchAction::Reload));
+        app.reload_entries(&repo).unwrap();
+        assert_eq!(app.view.unique_mode, grouped);
+        assert_eq!(
+            selected(&app).as_deref(),
+            Some("suv uninstall"),
+            "grouped={grouped}"
+        );
+    }
+
+    // Changing the ranking reorders the same matches; the selection stays.
+    app.handle_input(ctrl_key('s'));
+    app.reload_entries(&repo).unwrap();
+    assert_eq!(selected(&app).as_deref(), Some("suv uninstall"));
+}
+
+#[test]
+fn the_kept_selection_follows_its_command_onto_a_later_page() {
+    let commands: Vec<String> = (0..9).map(|i| format!("echo item{i}")).collect();
+    let refs: Vec<&str> = commands.iter().map(String::as_str).collect();
+    let (_d, repo) = repo_with(&refs);
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+    app.pagination.page_size = 3;
+    app.query = "item".into();
+    app.reload_entries(&repo).unwrap();
+    // Page 3, second row.
+    app.set_page(&repo, 3).unwrap();
+    app.table_state.select(Some(1));
+    let target = selected(&app).unwrap();
+
+    app.handle_input(ctrl_key('u'));
+    app.reload_entries(&repo).unwrap();
+    assert_eq!(selected(&app), Some(target));
+    assert_eq!(app.pagination.page, 3);
+}
+
+#[test]
+fn typing_after_a_view_switch_starts_from_the_top_again() {
+    let (_d, repo) = repo_with(&["suv update", "suv uninstall", "suv update"]);
+    let mut app = app_for(&repo, "suv");
+    let row = app
+        .entries
+        .iter()
+        .position(|e| e.command == "suv uninstall")
+        .unwrap();
+    app.table_state.select(Some(row));
+    app.handle_input(ctrl_key('u'));
+    // A new query replaces the one the selection belonged to.
+    app.handle_input(KeyEvent::from(KeyCode::Char(' ')));
+    app.reload_entries(&repo).unwrap();
+    assert_eq!(app.table_state.selected(), Some(0));
+}

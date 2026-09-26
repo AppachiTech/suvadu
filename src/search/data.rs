@@ -375,6 +375,28 @@ impl SearchApp {
         } else {
             Some(0)
         });
+        if let Some(command) = self.reselect.take() {
+            self.select_command(&command);
+        }
+    }
+
+    /// Select `command` where the new result set has it: the page of the
+    /// ranked window it falls on, or else the page already shown. Its
+    /// first row is taken — in an executions list, its most recent run,
+    /// since equal commands keep their newest-first order. A command that
+    /// is not reachable leaves the first row selected.
+    fn select_command(&mut self, command: &str) {
+        let page_size = self.pagination.page_size.max(1);
+        if let Some(index) = self.ranked_window.iter().position(|e| e.command == command) {
+            let page = index / page_size + 1;
+            let start = (page - 1) * page_size;
+            let end = (start + page_size).min(self.ranked_window.len());
+            self.pagination.page = page;
+            self.entries = self.ranked_window[start..end].to_vec();
+            self.table_state.select(Some(index - start));
+        } else if let Some(row) = self.entries.iter().position(|e| e.command == command) {
+            self.table_state.select(Some(row));
+        }
     }
 
     /// Map entry id → occurrence count, for unique mode's badge.

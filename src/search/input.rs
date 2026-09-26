@@ -112,6 +112,7 @@ impl SearchApp {
                 }
                 let remaining = MAX_INPUT_LEN.saturating_sub(self.query.len());
                 self.query.extend(sanitized.chars().take(remaining));
+                self.reselect = None;
                 true
             }
         }
@@ -197,10 +198,12 @@ impl SearchApp {
             }
             KeyCode::Char(c) if self.query.len() + c.len_utf8() <= MAX_INPUT_LEN => {
                 self.query.push(c);
+                self.reselect = None;
                 return SearchAction::Reload;
             }
             KeyCode::Backspace => {
                 self.query.pop();
+                self.reselect = None;
                 return SearchAction::Reload;
             }
             KeyCode::Up => return self.move_result_up(),
@@ -342,6 +345,9 @@ impl SearchApp {
             KeyCode::Char('u') => {
                 self.view.unique_mode = !self.view.unique_mode;
                 self.pagination.page = 1;
+                // Grouping only changes how the same matches are shown, so
+                // the command being looked at stays selected.
+                self.reselect = self.get_selected_command();
                 return Some(SearchAction::Reload);
             }
             KeyCode::Char('f') => {
@@ -377,6 +383,7 @@ impl SearchApp {
             }
             KeyCode::Char('s') => {
                 self.view.context_boost = !self.view.context_boost;
+                self.reselect = self.get_selected_command();
                 self.status_message = Some((
                     if self.view.context_boost {
                         "Smart mode ON".into()

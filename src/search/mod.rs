@@ -208,6 +208,9 @@ pub struct SearchApp {
     /// A query for what is typed is still running on the worker, so the
     /// results on screen belong to an earlier query.
     searching: bool,
+    /// The command to select again once the reload in flight lands — set by
+    /// the toggles that only change how the same matches are shown.
+    reselect: Option<String>,
 }
 
 impl SearchApp {
@@ -285,6 +288,7 @@ impl SearchApp {
 
             status_message: None,
             searching: false,
+            reselect: None,
         };
         // Derive the directory filter from the scope, unless the caller
         // supplied an explicit one (`--cwd`), which always wins.
