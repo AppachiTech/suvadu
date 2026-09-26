@@ -704,7 +704,7 @@ impl SearchApp {
     }
 
     fn build_table_title(&self) -> String {
-        if self.pagination.total_items == 0 {
+        let counts = if self.pagination.total_items == 0 {
             "History (0/0)".to_string()
         } else {
             let start_index = (self.pagination.page - 1) * self.pagination.page_size + 1;
@@ -713,6 +713,13 @@ impl SearchApp {
                 "History ({}-{} / {})",
                 start_index, end_index, self.pagination.total_items
             )
+        };
+        // These rows answer an earlier query; say so until the current one
+        // arrives rather than pass them off as its results.
+        if self.searching {
+            format!("{counts} \u{b7} searching\u{2026}")
+        } else {
+            counts
         }
     }
 

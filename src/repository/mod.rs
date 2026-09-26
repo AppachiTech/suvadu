@@ -593,6 +593,22 @@ impl Repository {
         Ok(Self::new(conn))
     }
 
+    /// A read-only connection to the same database file, for recall's query
+    /// worker (see [`crate::db::open_search_reader`]). `None` for an
+    /// in-memory database, which a second connection cannot see.
+    pub fn search_reader(&self) -> Option<Self> {
+        let path = self.conn.path().filter(|p| !p.is_empty())?;
+        crate::db::open_search_reader(std::path::Path::new(path))
+            .ok()
+            .map(Self::new)
+    }
+
+    /// A handle that can abort whatever statement this connection is running,
+    /// from another thread.
+    pub fn interrupt_handle(&self) -> rusqlite::InterruptHandle {
+        self.conn.get_interrupt_handle()
+    }
+
     /// Open the database at `db_path` in **read-only** mode. No migrations
     /// are run. Used by the MCP server to prevent accidental writes; takes
     /// an explicit path so it can be exercised against a temp DB in tests.

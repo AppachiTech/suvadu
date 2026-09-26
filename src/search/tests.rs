@@ -4237,3 +4237,139 @@ fn executor_field_search_matches_the_executor_name_not_only_its_type() {
         );
     }
 }
+
+// ── Queries run off the UI thread ──────────────────────────────────────────
+
+fn app_for(repo: &crate::repository::Repository, query: &str) -> SearchApp {
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+    app.query = query.into();
+    app.reload_entries(repo).unwrap();
+    app
+}
+
+#[test]
+fn the_worker_answers_exactly_what_a_reload_on_the_ui_thread_does() {
+    let (_d, repo) = repo_with(MODE_CORPUS);
+    let worker = super::worker::QueryWorker::spawn(repo.search_reader().unwrap()).unwrap();
+
+    for (generation, (mode, query)) in (1..).zip([
+        (MatchMode::Terms, "git"),
+        (MatchMode::Fuzzy, "gco"),
+        (MatchMode::Literal, "cargo test"),
+        (MatchMode::Prefix, "go"),
+        (MatchMode::Terms, ""),
+    ]) {
+        let mut app = app_for(&repo, query);
+        app.recall.match_mode = mode;
+        app.reload_entries(&repo).unwrap();
+        let expected: Vec<String> = app.entries.iter().map(|e| e.command.clone()).collect();
+
+        worker.submit(generation, app.reload_request());
+        let result = worker.wait(generation).unwrap().unwrap();
+        assert_eq!(result.first_page_commands(), expected, "{mode:?} {query:?}");
+        let total = app.pagination.total_items;
+        app.apply_reload(result);
+        assert_eq!(app.pagination.total_items, total, "{mode:?} {query:?}");
+    }
+}
+
+#[test]
+fn a_superseded_query_never_reaches_the_screen() {
+    let (_d, repo) = repo_with(MODE_CORPUS);
+    let worker = super::worker::QueryWorker::spawn(repo.search_reader().unwrap()).unwrap();
+    let mut app = app_for(&repo, "");
+
+    // Typed "git", then "cargo" before the first answer was looked at.
+    app.query = "git".into();
+    worker.submit(1, app.reload_request());
+    app.query = "cargo".into();
+    worker.submit(2, app.reload_request());
+
+    let result = worker.wait(2).unwrap().unwrap();
+    assert_eq!(result.first_page_commands(), vec!["cargo test --offline"]);
+    // Whatever generation 1 produced was dropped on the way, never returned.
+    assert!(worker.try_take(1).is_none());
+}
+
+#[test]
+fn an_interrupted_statement_reads_as_cancelled_not_failed() {
+    let (_d, repo) = crate::test_utils::test_repo();
+    let interrupt = repo.interrupt_handle();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let runner = std::thread::spawn(move || {
+        // Counts to a billion: far longer than the test waits.
+        let result = repo.raw_execute_for_test(
+            "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 1000000000) \
+             SELECT count(*) FROM c",
+        );
+        tx.send(result.map(|_| ())).unwrap();
+    });
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    interrupt.interrupt();
+
+    let result = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the interrupt must stop the statement");
+    runner.join().unwrap();
+    let err = result.expect_err("an interrupted statement does not succeed");
+    assert!(crate::db::is_interrupted(&err), "{err}");
+}
+
+#[test]
+fn only_plain_typing_runs_ahead_of_a_query_in_flight() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+    let ctrl = |c| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+
+    // These change the query, and the next query replaces the running one.
+    for event in [
+        key(KeyCode::Char('g')),
+        Event::Key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT)),
+        key(KeyCode::Backspace),
+        Event::Paste("git status".into()),
+    ] {
+        assert!(app.edits_query(&event), "{event:?}");
+    }
+    // These act on the results, so they wait for the current ones.
+    for event in [
+        key(KeyCode::Enter),
+        key(KeyCode::Up),
+        key(KeyCode::Down),
+        key(KeyCode::Right),
+        key(KeyCode::Tab),
+        key(KeyCode::Esc),
+        key(KeyCode::Char('?')),
+        ctrl('x'),
+        ctrl('p'),
+        ctrl('y'),
+    ] {
+        assert!(!app.edits_query(&event), "{event:?}");
+    }
+
+    // In vim normal mode, letters navigate.
+    app.vim_enabled = true;
+    app.vim_mode = VimMode::Normal;
+    assert!(!app.edits_query(&key(KeyCode::Char('j'))));
+    app.vim_mode = VimMode::Insert;
+    assert!(app.edits_query(&key(KeyCode::Char('j'))));
+
+    // With a dialog open, nothing is typed into the search box.
+    app.dialog = DialogState::Help;
+    assert!(!app.edits_query(&key(KeyCode::Char('g'))));
+}
+
+#[test]
+fn results_still_waiting_on_their_query_say_so() {
+    let (_d, repo) = repo_with(MODE_CORPUS);
+    let mut app = app_for(&repo, "git");
+    let title = |app: &mut SearchApp| {
+        render_lines(app, 100, 30)
+            .into_iter()
+            .find(|l| l.contains("History ("))
+            .unwrap()
+    };
+    assert!(!title(&mut app).contains("searching"));
+    app.searching = true;
+    assert!(title(&mut app).contains("searching\u{2026}"));
+}

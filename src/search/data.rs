@@ -142,65 +142,38 @@ impl SearchApp {
         SearchAction::Reload
     }
 
-    /// Build the entry query for the current state.
+    /// Everything a reload of the current state reads, as an owned snapshot.
     ///
-    /// `query`/`prefix`/`tokens` come from [`MatchMode::plan`]: the matching
-    /// mode decides *what* SQL is asked for, the scope decides *where* it
-    /// looks, and the two never interfere.
-    fn build_query_filter<'a>(
-        &'a self,
-        query: Option<&'a str>,
-        tokens: &'a [String],
-        prefix: bool,
-    ) -> SessionScoped<'a> {
-        SessionScoped {
-            filter: QueryFilter {
-                query_tokens: tokens,
-                after: self.filters.after,
-                before: self.filters.before,
-                tag_id: self.filters.tag_id,
-                exit_code: self.filters.exit_code,
-                query,
-                prefix_match: prefix,
-                executor: self.filters.executor_type.as_deref(),
-                cwd: self.filters.cwd.as_deref(),
-                field: self.view.search_field,
-                exclude_agents: !self.filters.show_agents,
-                // "Workspace" means the whole project tree, not just its root
-                // directory; every other scope matches the directory exactly.
-                cwd_prefix: self.recall.scope == RecallScope::Workspace,
-                failed_only: self.filters.failed_only,
-                bookmarked_only: self.filters.bookmarks_only,
-                exclude_dirs: &[],
-            },
-            session_id: if self.recall.scope == RecallScope::Session {
-                self.recall.context.session_id.as_deref()
+    /// Taking the snapshot is what lets a query run on the worker thread
+    /// while the user keeps typing: later edits change `self`, never a
+    /// request already handed off.
+    pub(super) fn reload_request(&self) -> ReloadRequest {
+        ReloadRequest {
+            query: self.query.clone(),
+            match_mode: self.recall.match_mode,
+            scope: self.recall.scope,
+            session_id: self.recall.context.session_id.clone(),
+            after: self.filters.after,
+            before: self.filters.before,
+            tag_id: self.filters.tag_id,
+            exit_code: self.filters.exit_code,
+            executor_type: self.filters.executor_type.clone(),
+            cwd: self.filters.cwd.clone(),
+            show_agents: self.filters.show_agents,
+            failed_only: self.filters.failed_only,
+            bookmarks_only: self.filters.bookmarks_only,
+            search_field: self.view.search_field,
+            unique_mode: self.view.unique_mode,
+            boost_cwd: if self.view.context_boost {
+                self.view.current_cwd.clone()
             } else {
                 None
             },
+            length_threshold: self.view.length_threshold,
+            human_boost_percent: self.view.human_boost_percent,
+            cwd_boost_percent: self.view.cwd_boost_percent,
+            page_size: self.pagination.page_size.max(1),
         }
-    }
-
-    /// The query object for the current state, including the `fuzzy` mode's
-    /// subsequence rule, so SQL decides eligibility completely: what
-    /// `count_filtered` counts is exactly what `LIMIT`/`OFFSET` can walk.
-    fn build_matched_query<'a>(
-        &'a self,
-        plan: &'a super::matching::QueryPlan,
-        subsequence: Option<&'a str>,
-    ) -> crate::repository::Subsequence<'a, SessionScoped<'a>> {
-        crate::repository::Subsequence {
-            inner: self.build_query_filter(plan.query.as_deref(), &plan.tokens, plan.prefix),
-            needle: subsequence,
-            field: self.view.search_field,
-        }
-    }
-
-    /// The trimmed query when the mode matches by subsequence, else `None`.
-    fn subsequence_needle<'a>(&'a self, plan: &super::matching::QueryPlan) -> Option<&'a str> {
-        plan.allow_subsequence
-            .then(|| self.query.trim())
-            .filter(|q| !q.is_empty())
     }
 
     /// Rank with the default (`terms`) rule: a pure subsequence is not a match.
@@ -388,92 +361,38 @@ impl SearchApp {
     /// paged to.
     const RANK_WINDOW: usize = 5_000;
 
-    /// The ranking window rounded up to whole pages, so no single page ever
-    /// straddles the boundary between ranked results and the recency tail.
-    fn rank_window_size(&self) -> usize {
-        let page_size = self.pagination.page_size.max(1);
-        page_size * Self::RANK_WINDOW.div_ceil(page_size)
-    }
-
     /// Re-run the query: count every eligible match, rank the newest window
     /// of them, and show the first page.
     ///
     /// This is the one pipeline. Startup (`--query`), typing, editing, mode
     /// and scope changes and pagination all arrive here or at
-    /// [`Self::set_page`], so they cannot disagree about what matches.
+    /// [`Self::set_page`], so they cannot disagree about what matches. The
+    /// interactive loop runs the same [`ReloadRequest::run`] on a worker
+    /// thread instead and hands the result to [`Self::apply_reload`].
     pub(super) fn reload_entries(
         &mut self,
         repo: &Repository,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // The matching mode decides how the query becomes SQL; see
-        // `MatchMode::plan`. Every mode narrows *and decides* in the database,
-        // so how far back a match lives never decides whether it is found.
-        let plan = self.recall.match_mode.plan(&self.query);
-        let window = if plan.rerank {
-            self.rank_window_size()
+        let result = self
+            .reload_request()
+            .run(repo, &|| false)?
+            .expect("a reload that is never cancelled always finishes");
+        self.apply_reload(result);
+        Ok(())
+    }
+
+    /// Show what a reload found, on page 1.
+    pub(super) fn apply_reload(&mut self, result: ReloadResult) {
+        self.pagination.total_items = result.total;
+        self.pagination.page = 1;
+        self.ranked_window = result.ranked_window;
+        self.unique_counts = result.unique_counts;
+        self.entries = result.first_page;
+        self.table_state.select(if self.entries.is_empty() {
+            None
         } else {
-            0
-        };
-
-        // Borrow-only phase: everything that reads `self` through the query.
-        let (total, ranked, ranked_counts) = {
-            let qf = self.build_matched_query(&plan, self.subsequence_needle(&plan));
-
-            if window == 0 {
-                let total = usize::try_from(if self.view.unique_mode {
-                    repo.count_unique_filtered(&qf)?
-                } else {
-                    repo.count_filtered(&qf)?
-                })?;
-                (total, Vec::new(), std::collections::HashMap::new())
-            } else {
-                let boost_cwd = if self.view.context_boost {
-                    self.view.current_cwd.as_deref()
-                } else {
-                    None
-                };
-                let (candidates, counts) = if self.view.unique_mode {
-                    let rows = repo.get_unique_entries_filtered(window, 0, &qf, false)?;
-                    let (entries, counts): (Vec<Entry>, Vec<i64>) = rows.into_iter().unzip();
-                    let map = Self::count_map(&entries, &counts);
-                    (entries, map)
-                } else {
-                    (
-                        repo.get_entries_filtered(window, 0, &qf)?,
-                        std::collections::HashMap::new(),
-                    )
-                };
-                // A window that came back short *is* the whole match set, so
-                // the count is already known and the second query — the
-                // expensive half of a fuzzy reload — is skipped. Only a full
-                // window leaves anything to count.
-                let total = if candidates.len() < window {
-                    candidates.len()
-                } else {
-                    usize::try_from(if self.view.unique_mode {
-                        repo.count_unique_filtered(&qf)?
-                    } else {
-                        repo.count_filtered(&qf)?
-                    })?
-                };
-                let ranked = Self::fuzzy_score_mode(
-                    candidates,
-                    &self.query,
-                    boost_cwd,
-                    self.view.search_field,
-                    self.view.length_threshold,
-                    self.view.human_boost_percent,
-                    self.view.cwd_boost_percent,
-                    plan.allow_subsequence,
-                );
-                (total, ranked, counts)
-            }
-        };
-
-        self.pagination.total_items = total;
-        self.ranked_window = ranked;
-        self.unique_counts = ranked_counts;
-        self.set_page(repo, 1)
+            Some(0)
+        });
     }
 
     /// Map entry id → occurrence count, for unique mode's badge.
@@ -507,27 +426,10 @@ impl SearchApp {
             self.entries = self.ranked_window[offset..end].to_vec();
         } else {
             // Beyond the ranked window, or a mode that never ranks: the
-            // database answers directly. The plan must be the one
-            // `reload_entries` used, or page 2 would answer a different
-            // question from page 1.
-            let plan = self.recall.match_mode.plan(&self.query);
-            let (entries, counts) = {
-                let qf = self.build_matched_query(&plan, self.subsequence_needle(&plan));
-                if self.view.unique_mode {
-                    // `sort_alphabetically` must match the ordering the window
-                    // was drawn from, or a tail page could repeat or skip.
-                    let rows =
-                        repo.get_unique_entries_filtered(page_size, offset, &qf, !plan.rerank)?;
-                    let (entries, counts): (Vec<Entry>, Vec<i64>) = rows.into_iter().unzip();
-                    let map = Self::count_map(&entries, &counts);
-                    (entries, map)
-                } else {
-                    (
-                        repo.get_entries_filtered(page_size, offset, &qf)?,
-                        std::collections::HashMap::new(),
-                    )
-                }
-            };
+            // database answers directly, from the same request a reload
+            // would build, or page 2 would answer a different question from
+            // page 1.
+            let (entries, counts) = self.reload_request().page(repo, offset)?;
             if self.view.unique_mode {
                 self.unique_counts.extend(counts);
             }
@@ -540,5 +442,230 @@ impl SearchApp {
             Some(0)
         });
         Ok(())
+    }
+}
+
+/// One reload's inputs, owned: the query text, how it is matched, where it
+/// looks and how results are ranked and paged. See
+/// [`SearchApp::reload_request`].
+#[derive(Clone, Debug)]
+#[allow(clippy::struct_excessive_bools)]
+pub(super) struct ReloadRequest {
+    query: String,
+    match_mode: MatchMode,
+    scope: RecallScope,
+    session_id: Option<String>,
+    after: Option<i64>,
+    before: Option<i64>,
+    tag_id: Option<i64>,
+    exit_code: Option<i32>,
+    executor_type: Option<String>,
+    cwd: Option<String>,
+    show_agents: bool,
+    failed_only: bool,
+    bookmarks_only: bool,
+    search_field: SearchField,
+    unique_mode: bool,
+    /// The directory same-directory results are boosted for, when Smart rank
+    /// is on.
+    boost_cwd: Option<String>,
+    length_threshold: usize,
+    human_boost_percent: u32,
+    cwd_boost_percent: u32,
+    page_size: usize,
+}
+
+/// What a reload found: the count, the ranked window later pages inside it
+/// are served from, and page 1.
+#[derive(Debug)]
+pub(super) struct ReloadResult {
+    total: usize,
+    ranked_window: Vec<Entry>,
+    unique_counts: std::collections::HashMap<i64, i64>,
+    first_page: Vec<Entry>,
+}
+
+impl ReloadResult {
+    /// The commands on page 1, in order.
+    #[cfg(test)]
+    pub(super) fn first_page_commands(&self) -> Vec<String> {
+        self.first_page.iter().map(|e| e.command.clone()).collect()
+    }
+}
+
+impl ReloadRequest {
+    /// Build the entry query for this request.
+    ///
+    /// `query`/`prefix`/`tokens` come from [`MatchMode::plan`]: the matching
+    /// mode decides *what* SQL is asked for, the scope decides *where* it
+    /// looks, and the two never interfere.
+    fn query_filter<'a>(
+        &'a self,
+        query: Option<&'a str>,
+        tokens: &'a [String],
+        prefix: bool,
+    ) -> SessionScoped<'a> {
+        SessionScoped {
+            filter: QueryFilter {
+                query_tokens: tokens,
+                after: self.after,
+                before: self.before,
+                tag_id: self.tag_id,
+                exit_code: self.exit_code,
+                query,
+                prefix_match: prefix,
+                executor: self.executor_type.as_deref(),
+                cwd: self.cwd.as_deref(),
+                field: self.search_field,
+                exclude_agents: !self.show_agents,
+                // "Workspace" means the whole project tree, not just its root
+                // directory; every other scope matches the directory exactly.
+                cwd_prefix: self.scope == RecallScope::Workspace,
+                failed_only: self.failed_only,
+                bookmarked_only: self.bookmarks_only,
+                exclude_dirs: &[],
+            },
+            session_id: if self.scope == RecallScope::Session {
+                self.session_id.as_deref()
+            } else {
+                None
+            },
+        }
+    }
+
+    /// The query object for this request, including the `fuzzy` mode's
+    /// subsequence rule, so SQL decides eligibility completely: what
+    /// `count_filtered` counts is exactly what `LIMIT`/`OFFSET` can walk.
+    fn matched_query<'a>(
+        &'a self,
+        plan: &'a super::matching::QueryPlan,
+    ) -> crate::repository::Subsequence<'a, SessionScoped<'a>> {
+        crate::repository::Subsequence {
+            inner: self.query_filter(plan.query.as_deref(), &plan.tokens, plan.prefix),
+            // The trimmed query when the mode matches by subsequence.
+            needle: plan
+                .allow_subsequence
+                .then(|| self.query.trim())
+                .filter(|q| !q.is_empty()),
+            field: self.search_field,
+        }
+    }
+
+    /// The ranking window rounded up to whole pages, so no single page ever
+    /// straddles the boundary between ranked results and the recency tail.
+    const fn rank_window_size(&self) -> usize {
+        self.page_size * SearchApp::RANK_WINDOW.div_ceil(self.page_size)
+    }
+
+    /// Count every eligible match, rank the newest window of them, and fetch
+    /// page 1.
+    ///
+    /// `cancelled` is asked between queries; once it says yes the remaining
+    /// ones are skipped and the answer is `Ok(None)`. A statement already
+    /// running is stopped by interrupting its connection instead, which
+    /// surfaces as an error [`crate::db::is_interrupted`] recognises.
+    pub(super) fn run(
+        &self,
+        repo: &Repository,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<ReloadResult>, crate::db::DbError> {
+        // The matching mode decides how the query becomes SQL; see
+        // `MatchMode::plan`. Every mode narrows *and decides* in the database,
+        // so how far back a match lives never decides whether it is found.
+        let plan = self.match_mode.plan(&self.query);
+        let qf = self.matched_query(&plan);
+        let count = || -> Result<usize, crate::db::DbError> {
+            let n = if self.unique_mode {
+                repo.count_unique_filtered(&qf)?
+            } else {
+                repo.count_filtered(&qf)?
+            };
+            Ok(usize::try_from(n).unwrap_or(0))
+        };
+
+        let (total, ranked, mut unique_counts) = if plan.rerank {
+            let window = self.rank_window_size();
+            let (candidates, counts) = if self.unique_mode {
+                let rows = repo.get_unique_entries_filtered(window, 0, &qf, false)?;
+                let (entries, counts): (Vec<Entry>, Vec<i64>) = rows.into_iter().unzip();
+                let map = SearchApp::count_map(&entries, &counts);
+                (entries, map)
+            } else {
+                (
+                    repo.get_entries_filtered(window, 0, &qf)?,
+                    std::collections::HashMap::new(),
+                )
+            };
+            if cancelled() {
+                return Ok(None);
+            }
+            // A window that came back short *is* the whole match set, so
+            // the count is already known and the second query — the
+            // expensive half of a fuzzy reload — is skipped. Only a full
+            // window leaves anything to count.
+            let total = if candidates.len() < window {
+                candidates.len()
+            } else {
+                count()?
+            };
+            let ranked = SearchApp::fuzzy_score_mode(
+                candidates,
+                &self.query,
+                self.boost_cwd.as_deref(),
+                self.search_field,
+                self.length_threshold,
+                self.human_boost_percent,
+                self.cwd_boost_percent,
+                plan.allow_subsequence,
+            );
+            (total, ranked, counts)
+        } else {
+            (count()?, Vec::new(), std::collections::HashMap::new())
+        };
+        if cancelled() {
+            return Ok(None);
+        }
+
+        // Page 1 comes from the ranked window when there is one, and from the
+        // database otherwise — exactly as `SearchApp::set_page(1)` would.
+        let first_page = if ranked.is_empty() {
+            let (entries, counts) = self.page(repo, 0)?;
+            unique_counts.extend(counts);
+            entries
+        } else {
+            ranked[..self.page_size.min(ranked.len())].to_vec()
+        };
+        Ok(Some(ReloadResult {
+            total,
+            ranked_window: ranked,
+            unique_counts,
+            first_page,
+        }))
+    }
+
+    /// One page straight from the database, at `offset`, in recency order —
+    /// the rows past the ranked window, or every page of a mode that never
+    /// ranks. Returns the entries and, in unique mode, their counts.
+    pub(super) fn page(
+        &self,
+        repo: &Repository,
+        offset: usize,
+    ) -> Result<(Vec<Entry>, std::collections::HashMap<i64, i64>), crate::db::DbError> {
+        let plan = self.match_mode.plan(&self.query);
+        let qf = self.matched_query(&plan);
+        if self.unique_mode {
+            // `sort_alphabetically` must match the ordering the window was
+            // drawn from, or a tail page could repeat or skip.
+            let rows =
+                repo.get_unique_entries_filtered(self.page_size, offset, &qf, !plan.rerank)?;
+            let (entries, counts): (Vec<Entry>, Vec<i64>) = rows.into_iter().unzip();
+            let map = SearchApp::count_map(&entries, &counts);
+            Ok((entries, map))
+        } else {
+            Ok((
+                repo.get_entries_filtered(self.page_size, offset, &qf)?,
+                std::collections::HashMap::new(),
+            ))
+        }
     }
 }

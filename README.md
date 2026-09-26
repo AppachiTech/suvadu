@@ -148,6 +148,14 @@ matches and every page of it can be opened. Pages past the ranked window
 come back newest first — a relevance order computed from only part of the
 result set would be arbitrary there.
 
+**Typing never waits for a search.** Each query runs on a background thread
+with its own read-only connection. A keystroke that changes the query abandons
+the search still running — SQLite stops it mid-scan — and results that arrive
+for an older query are discarded. Enter, the arrow keys and every other key
+that acts on the results first waits for the results of what is typed now, so
+what you accept always matches the query on screen; until they arrive the
+results title says `searching…`.
+
 Up/Down arrow recall is a different, simpler path: prefix match, newest
 first, no deduplication, with the current directory used only to break ties
 between commands recorded at the same millisecond.

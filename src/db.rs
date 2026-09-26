@@ -296,6 +296,34 @@ fn migrate_v3(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Open `path` read-only for interactive search, with the SQL functions
+/// search queries call. No migrations run: the file is the one `init_db`
+/// already opened in this process.
+///
+/// Recall runs its queries on a second connection like this one, on a worker
+/// thread, so that the UI thread can keep reading keystrokes — and so that
+/// interrupting a superseded query never touches the connection that writes.
+pub fn open_search_reader(path: &std::path::Path) -> DbResult<Connection> {
+    let flags =
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(path, flags)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    register_regexp(&conn)?;
+    register_contains_ci(&conn)?;
+    register_subseq_ci(&conn)?;
+    Ok(conn)
+}
+
+/// Whether `err` is `SQLite` reporting that the statement was interrupted by
+/// `sqlite3_interrupt` — a query abandoned on purpose, not a failure.
+pub fn is_interrupted(err: &DbError) -> bool {
+    matches!(
+        err,
+        DbError::Sqlite(rusqlite::Error::SqliteFailure(e, _))
+            if e.code == rusqlite::ErrorCode::OperationInterrupted
+    )
+}
+
 /// Initialize the database with proper schema and settings.
 ///
 /// Migrations are tracked via a `schema_version` table so each

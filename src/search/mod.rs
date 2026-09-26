@@ -6,6 +6,7 @@ pub use matching::MatchMode;
 pub use scope::{RecallContext, RecallScope};
 mod input;
 mod render;
+mod worker;
 
 #[cfg(test)]
 mod tests;
@@ -203,6 +204,9 @@ pub struct SearchApp {
 
     // UI Feedback
     status_message: Option<(String, std::time::Instant)>,
+    /// A query for what is typed is still running on the worker, so the
+    /// results on screen belong to an earlier query.
+    searching: bool,
 }
 
 impl SearchApp {
@@ -279,6 +283,7 @@ impl SearchApp {
             ranked_window: Vec::new(),
 
             status_message: None,
+            searching: false,
         };
         // Derive the directory filter from the scope, unless the caller
         // supplied an explicit one (`--cwd`), which always wins.
@@ -298,10 +303,27 @@ impl SearchApp {
         terminal: &mut Terminal<crate::util::TtyCursorBackend<io::Stderr>>,
         repo: &Repository,
     ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        // Queries for what is being typed run on a worker with a read-only
+        // connection of its own, so a slow one never holds up the next
+        // keystroke (see `worker`). Without one — an in-memory database, or a
+        // thread that would not start — every reload runs here, as before.
+        let worker = repo
+            .search_reader()
+            .and_then(|reader| worker::QueryWorker::spawn(reader).ok());
+        let mut generation: u64 = 0;
+
         loop {
+            if self.searching {
+                if let Some(result) = worker.as_ref().and_then(|w| w.try_take(generation)) {
+                    self.finish_reload(result)?;
+                }
+            }
             self.render(terminal)?;
 
-            let timeout = if self.status_message.is_some() {
+            let timeout = if self.searching {
+                // Come back soon to show the result the worker is producing.
+                std::time::Duration::from_millis(15)
+            } else if self.status_message.is_some() {
                 std::time::Duration::from_secs(2)
             } else {
                 std::time::Duration::from_mins(1)
@@ -309,27 +331,99 @@ impl SearchApp {
             if !event::poll(timeout)? {
                 continue;
             }
-            match event::read()? {
+            let event = event::read()?;
+
+            // Typing may run ahead of an unfinished query — it replaces that
+            // query anyway. Anything else (Enter, navigation, paging, a mode
+            // or scope change, a dialog) acts on the results, so it first
+            // waits for the ones that match what is typed now.
+            if self.searching && !self.edits_query(&event) {
+                if let Some(result) = worker.as_ref().and_then(|w| w.wait(generation)) {
+                    self.finish_reload(result)?;
+                } else {
+                    self.searching = false;
+                    self.reload_entries(repo)?;
+                }
+            }
+
+            let reload = match event {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     match self.handle_input(key) {
                         SearchAction::Select(cmd) => return Ok(Some(cmd)),
                         SearchAction::Exit => return Ok(None),
-                        SearchAction::Reload => self.reload_entries(repo)?,
-                        SearchAction::SetPage(page) => self.set_page(repo, page)?,
+                        SearchAction::Reload => true,
+                        SearchAction::SetPage(page) => {
+                            self.set_page(repo, page)?;
+                            false
+                        }
                         SearchAction::SetPageLast(page) => {
                             self.set_page(repo, page)?;
                             if !self.entries.is_empty() {
                                 self.table_state.select(Some(self.entries.len() - 1));
                             }
+                            false
                         }
-                        other => self.dispatch_action(other, repo)?,
+                        other => {
+                            self.dispatch_action(other, repo)?;
+                            false
+                        }
                     }
                 }
-                Event::Paste(text) if self.handle_paste(&text) => {
+                Event::Paste(text) => self.handle_paste(&text),
+                _ => false,
+            };
+            if reload {
+                if let Some(worker) = &worker {
+                    generation += 1;
+                    worker.submit(generation, self.reload_request());
+                    self.searching = true;
+                } else {
                     self.reload_entries(repo)?;
                 }
-                _ => {}
             }
+        }
+    }
+
+    /// Show a result the worker produced for the current query.
+    fn finish_reload(
+        &mut self,
+        result: Result<data::ReloadResult, String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.searching = false;
+        self.apply_reload(result?);
+        Ok(())
+    }
+
+    /// Whether `event` only edits the query text in the search box — the one
+    /// kind of input allowed to run ahead of a query still in flight, because
+    /// it is about to replace that query.
+    pub(super) fn edits_query(&self, event: &Event) -> bool {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        if !matches!(self.dialog, DialogState::None) {
+            return false;
+        }
+        match event {
+            Event::Key(key) => {
+                // A release changes nothing here.
+                if key.kind != KeyEventKind::Press {
+                    return true;
+                }
+                // Vim normal mode turns letters into navigation.
+                if self.vim_enabled && self.vim_mode == VimMode::Normal {
+                    return false;
+                }
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                {
+                    return false;
+                }
+                // `?` opens help rather than typing itself.
+                matches!(key.code, KeyCode::Char(c) if c != '?') || key.code == KeyCode::Backspace
+            }
+            // A paste types into the box; resizes and focus changes only
+            // redraw.
+            _ => true,
         }
     }
 
