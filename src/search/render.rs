@@ -18,7 +18,7 @@ use super::format::{
     format_executor, format_exit_code, no_results_lines, ColumnLayout, DetailPlacement, Hint,
     NoResults, StatusSegment, DETAIL_BOTTOM_HEIGHT, SELECTION_SYMBOL,
 };
-use super::highlight::{command_text, match_mask, relative_age, CommandStyle, Fit};
+use super::highlight::{command_text, match_mask, raw_form, relative_age, CommandStyle, Fit};
 use super::{centered_rect, DialogState, RecallScope, SearchApp};
 
 /// Cells reserved for the `"+N"` marker that stands in for status-row filter
@@ -842,8 +842,16 @@ impl SearchApp {
                 entry.command.clone(),
                 Style::default().fg(t.primary),
             )]),
-            Line::from(""),
         ];
+        // Tabs, line breaks and edge spaces cannot be read off the text
+        // above; spell them out rather than leave two commands looking alike.
+        if let Some(raw) = raw_form(&entry.command) {
+            lines.push(Line::from(vec![
+                Span::styled("Raw      ", label_style),
+                Span::styled(raw, value_style),
+            ]));
+        }
+        lines.push(Line::from(""));
         if grouped {
             lines.push(Line::from(vec![
                 Span::styled("Runs     ", label_style),

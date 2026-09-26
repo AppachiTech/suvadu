@@ -343,59 +343,105 @@ struct Grapheme<'a> {
     space: bool,
 }
 
-/// Whitespace between words: spaces as stored, tabs and line breaks as
-/// visible markers, since a list row is a single line.
-fn inner_space(run: &[Grapheme<'_>], style: &CommandStyle) -> Piece {
-    if run.iter().all(|g| g.text == " ") {
-        let styled = if run.iter().any(|g| g.matched) {
-            style.matched
-        } else {
-            Style::default()
-        };
-        return Piece {
-            glyphs: run.iter().map(|_| Glyph::new(" ", styled)).collect(),
-            is_space: true,
-        };
-    }
-    let marker = if run.iter().any(|g| g.text.contains('\n')) {
+/// The marker drawn for a whitespace character that is not a plain space:
+/// every one gets its own, so two tabs never look like one.
+fn whitespace_marker(grapheme: &str) -> &'static str {
+    if grapheme.contains('\n') {
         "\u{21b5}"
-    } else {
+    } else if grapheme == "\t" {
         "\u{21e5}"
-    };
-    Piece {
-        glyphs: vec![
-            Glyph::new(" ", Style::default()),
-            Glyph::new(marker, Style::default().fg(style.marker)),
-            Glyph::new(" ", Style::default()),
-        ],
-        is_space: true,
+    } else {
+        // A carriage return, a non-breaking or other Unicode space: not a
+        // plain space, so it must not look like one.
+        "\u{b7}"
     }
 }
 
-/// Leading or trailing whitespace, one marker per character.
+/// Whitespace between words: plain spaces as stored, and one visible
+/// marker for every other whitespace character, since a list row is a
+/// single line.
+fn inner_space(run: &[Grapheme<'_>], style: &CommandStyle) -> Piece {
+    let marker = Style::default().fg(style.marker);
+    let emphasis = if run.iter().any(|g| g.matched) {
+        style.matched
+    } else {
+        Style::default()
+    };
+    let plain = run.iter().all(|g| g.text == " ");
+    Piece {
+        glyphs: run
+            .iter()
+            .map(|g| {
+                if g.text == " " {
+                    Glyph::new(" ", emphasis)
+                } else {
+                    Glyph::new(whitespace_marker(g.text), marker)
+                }
+            })
+            .collect(),
+        // A run carrying markers is content: a wrap must not swallow it.
+        is_space: plain,
+    }
+}
+
+/// Leading or trailing whitespace, one marker per character. A long run
+/// shows its first markers and how many more there are, so runs of
+/// different lengths never look the same.
 fn edge_markers(run: &[Grapheme<'_>], style: &CommandStyle) -> Piece {
     let marker = Style::default().fg(style.marker);
     let mut glyphs: Vec<Glyph> = run
         .iter()
         .take(MAX_EDGE_MARKERS)
         .map(|g| {
-            let symbol = if g.text.contains('\n') {
-                "\u{21b5}"
-            } else if g.text == "\t" {
-                "\u{21e5}"
-            } else {
+            let symbol = if g.text == " " {
                 "\u{b7}"
+            } else {
+                whitespace_marker(g.text)
             };
             Glyph::new(symbol, marker)
         })
         .collect();
     if run.len() > MAX_EDGE_MARKERS {
-        glyphs.push(Glyph::new("\u{2026}", marker));
+        glyphs.push(Glyph::new(
+            &format!("+{}", run.len() - MAX_EDGE_MARKERS),
+            marker,
+        ));
     }
     Piece {
         glyphs,
         is_space: false,
     }
+}
+
+/// The command written out with every character that does not display as
+/// itself escaped — `\t`, `\n`, `\r`, `\u{a0}` — inside quotes that show
+/// where it starts and ends. `None` when the command already displays
+/// exactly as stored: printable text, single-line, no edge whitespace.
+pub(super) fn raw_form(command: &str) -> Option<String> {
+    use std::fmt::Write as _;
+    let edges = command.starts_with(char::is_whitespace) || command.ends_with(char::is_whitespace);
+    let hidden = command
+        .chars()
+        .any(|c| c.is_control() || (c.is_whitespace() && c != ' '));
+    if !edges && !hidden {
+        return None;
+    }
+    let mut out = String::from("\"");
+    for c in command.chars() {
+        match c {
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            c if c.is_control() || (c.is_whitespace() && c != ' ') => {
+                let _ = write!(out, "\\u{{{:x}}}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    Some(out)
 }
 
 /// Lay pieces out on lines no wider than `width`. A word that would
@@ -654,7 +700,46 @@ mod tests {
         );
         assert_eq!(
             plain(&text),
-            vec!["for i in 1 2; do \u{21b5} echo $i \u{21b5} done"]
+            vec!["for i in 1 2; do\u{21b5}  echo $i\u{21b5}done"]
+        );
+    }
+
+    #[test]
+    fn every_whitespace_character_is_drawn_so_distinct_commands_differ() {
+        let draw = |c: &str| plain(&command_text(&[], c, Fit::Unlimited, &[], &style()));
+        for (a, b) in [
+            ("printf 'a\tb'", "printf 'a\t\tb'"),
+            ("printf 'a\nb'", "printf 'a\n\nb'"),
+            ("echo a\u{a0}b", "echo a b"),
+        ] {
+            assert_ne!(draw(a), draw(b), "{a:?} and {b:?} must not look alike");
+        }
+        // Long edge runs are counted, not cut to the same ellipsis.
+        let twelve = format!("ls{}", " ".repeat(12));
+        let thirteen = format!("ls{}", " ".repeat(13));
+        assert_ne!(draw(&twelve), draw(&thirteen));
+        assert_eq!(
+            draw(&twelve),
+            vec!["ls\u{b7}\u{b7}\u{b7}\u{b7}\u{b7}\u{b7}\u{b7}\u{b7}+4"]
+        );
+    }
+
+    #[test]
+    fn a_raw_form_is_offered_only_when_the_display_is_not_the_text() {
+        assert_eq!(raw_form("git status"), None);
+        assert_eq!(raw_form("git  status"), None, "spaces draw as themselves");
+        assert_eq!(
+            raw_form("printf 'a\tb'").as_deref(),
+            Some("\"printf 'a\\tb'\"")
+        );
+        assert_eq!(
+            raw_form("suv status  ").as_deref(),
+            Some("\"suv status  \"")
+        );
+        assert_eq!(raw_form("a\nb\\c").as_deref(), Some("\"a\\nb\\\\c\""));
+        assert_eq!(
+            raw_form("echo a\u{a0}b").as_deref(),
+            Some("\"echo a\\u{a0}b\"")
         );
     }
 

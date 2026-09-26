@@ -4669,3 +4669,20 @@ fn the_grouping_key_is_offered_beside_the_count_at_every_width() {
     let screen = render_lines(&mut app, 100, 24).join("\n");
     assert!(!screen.contains("^U group"), "{screen}");
 }
+
+#[test]
+fn the_detail_pane_spells_out_whitespace_the_list_can_only_mark() {
+    let detail_for = |command: &str| {
+        let mut app = SearchApp::new(test_search_config(vec![create_test_entry(command)], 1));
+        app.view.detail_pane_open = true;
+        app.table_state.select(Some(0));
+        render_lines(&mut app, 160, 30).join("\n")
+    };
+    let screen = detail_for("printf 'a\t\tb'");
+    assert!(screen.contains("Raw"), "{screen}");
+    assert!(screen.contains("\\t\\t"), "{screen}");
+    assert!(
+        !detail_for("git status").contains("Raw "),
+        "an ordinary command needs no raw form"
+    );
+}
