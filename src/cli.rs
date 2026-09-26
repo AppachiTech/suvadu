@@ -73,6 +73,9 @@ Total recall for your terminal. A high-performance, database-backed shell histor
 
 Usage: suv <COMMAND>
 
+Start here:
+  home         Find any feature by what you want to do, and open it (interactive)
+
 Setup:
   init         Set up shell hooks or AI tool integrations
   settings     Configure Suvadu (interactive UI)
@@ -138,8 +141,29 @@ Run `suv <command> --help` for a command's own flags and examples.\
     override_help = TOP_LEVEL_HELP
 )]
 pub struct Cli {
+    /// `None` for a bare `suv`: Home at a terminal when chosen, otherwise
+    /// the classic overview (see `home::startup`).
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
+}
+
+/// The grouped command overview — exactly what `suv --help` prints.
+pub fn overview() -> String {
+    Cli::command().render_help().to_string()
+}
+
+/// What a bare `suv` did before it could open Home, and still does without
+/// a terminal: clap's missing-subcommand error — the overview on stderr,
+/// exit 2. Rendered by clap itself rather than imitated.
+pub fn exit_missing_command() -> ! {
+    let mut command = Cli::command()
+        .subcommand_required(true)
+        .arg_required_else_help(true);
+    match command.try_get_matches_from_mut(std::env::args_os()) {
+        Err(err) => err.exit(),
+        // Unreachable with no subcommand given, but never run one silently.
+        Ok(_) => std::process::exit(2),
+    }
 }
 
 /// Export file format
@@ -320,6 +344,12 @@ pub enum Commands {
 
     /// Configure Suvadu (interactive UI)
     Settings,
+
+    /// Find any feature by what you want to do, and open it (interactive)
+    #[command(
+        after_help = "Home lists what Suvadu can do, grouped by task, with a search box for\nfeatures (not your history: Ctrl+R stays the fast way to recall a command).\nSelecting a feature shows its real command; Enter opens it. Nothing you\nfind is run in your shell.\n\nA bare `suv` prints the command overview unless you choose Home as the\nstartup screen in `suv settings`, or set it in config.toml:\n  [home]\n  startup = \"home\"   # or \"help\"\n\nKeys: type to search, Up/Down to move, Enter to open, Esc to go back,\nF1 for keys, F2 for the command reference."
+    )]
+    Home,
 
     /// Interactive search through history (Ctrl+R replacement)
     #[command(after_help = SEARCH_AFTER_HELP)]
@@ -1093,13 +1123,13 @@ mod tests {
     #[test]
     fn test_cli_parses_enable() {
         let cli = Cli::try_parse_from(["suv", "enable"]).unwrap();
-        assert!(matches!(cli.command, Commands::Enable));
+        assert!(matches!(cli.command.unwrap(), Commands::Enable));
     }
 
     #[test]
     fn test_cli_parses_search_with_args() {
         let cli = Cli::try_parse_from(["suv", "search", "-q", "git", "--unique"]).unwrap();
-        match cli.command {
+        match cli.command.unwrap() {
             Commands::Search { query, unique, .. } => {
                 assert_eq!(query, Some("git".to_string()));
                 assert!(unique);
@@ -1120,7 +1150,7 @@ mod tests {
             "claude-code",
         ])
         .unwrap();
-        match cli.command {
+        match cli.command.unwrap() {
             Commands::Agent(AgentCommands::Report {
                 format, executor, ..
             }) => {
@@ -1163,7 +1193,7 @@ mod tests {
     #[test]
     fn test_cli_parses_stats_defaults() {
         let cli = Cli::try_parse_from(["suv", "stats"]).unwrap();
-        match cli.command {
+        match cli.command.unwrap() {
             Commands::Stats {
                 days,
                 top,
@@ -1186,7 +1216,7 @@ mod tests {
     #[test]
     fn test_cli_parses_stats_with_tag() {
         let cli = Cli::try_parse_from(["suv", "stats", "--tag", "work"]).unwrap();
-        match cli.command {
+        match cli.command.unwrap() {
             Commands::Stats { tag, .. } => {
                 assert_eq!(tag, Some("work".to_string()));
             }
@@ -1214,7 +1244,7 @@ mod tests {
             "status",
         ])
         .unwrap();
-        match cli.command {
+        match cli.command.unwrap() {
             Commands::Wrap {
                 command,
                 executor_type,
@@ -1231,13 +1261,13 @@ mod tests {
     #[test]
     fn test_cli_parses_bare_skills_as_none() {
         let cli = Cli::try_parse_from(["suv", "skills"]).unwrap();
-        assert!(matches!(cli.command, Commands::Skills { command: None }));
+        assert!(matches!(cli.command.unwrap(), Commands::Skills { command: None }));
     }
 
     #[test]
     fn test_cli_parses_skills_list_unchanged() {
         let cli = Cli::try_parse_from(["suv", "skills", "list", "--json"]).unwrap();
-        match cli.command {
+        match cli.command.unwrap() {
             Commands::Skills {
                 command: Some(SkillsCommands::List { json, .. }),
             } => assert!(json),
@@ -1254,13 +1284,13 @@ mod tests {
     #[test]
     fn test_cli_parses_bare_bookmarks_as_none() {
         let cli = Cli::try_parse_from(["suv", "bookmarks"]).unwrap();
-        assert!(matches!(cli.command, Commands::Bookmarks { command: None }));
+        assert!(matches!(cli.command.unwrap(), Commands::Bookmarks { command: None }));
     }
 
     #[test]
     fn test_cli_parses_bookmarks_add_unchanged() {
         let cli = Cli::try_parse_from(["suv", "bookmarks", "add", "git status"]).unwrap();
-        match cli.command {
+        match cli.command.unwrap() {
             Commands::Bookmarks {
                 command: Some(BookmarksCommands::Add { command, .. }),
             } => assert_eq!(command, "git status"),
@@ -1271,7 +1301,7 @@ mod tests {
     #[test]
     fn test_cli_accepts_bookmark_singular_alias() {
         let cli = Cli::try_parse_from(["suv", "bookmark"]).unwrap();
-        assert!(matches!(cli.command, Commands::Bookmarks { command: None }));
+        assert!(matches!(cli.command.unwrap(), Commands::Bookmarks { command: None }));
     }
 
     #[test]
@@ -1282,13 +1312,13 @@ mod tests {
     #[test]
     fn test_cli_parses_bare_aliases_as_none() {
         let cli = Cli::try_parse_from(["suv", "aliases"]).unwrap();
-        assert!(matches!(cli.command, Commands::Aliases { command: None }));
+        assert!(matches!(cli.command.unwrap(), Commands::Aliases { command: None }));
     }
 
     #[test]
     fn test_cli_parses_aliases_add_unchanged() {
         let cli = Cli::try_parse_from(["suv", "aliases", "add", "gst", "git status"]).unwrap();
-        match cli.command {
+        match cli.command.unwrap() {
             Commands::Aliases {
                 command: Some(AliasesCommands::Add { name, command }),
             } => {
@@ -1302,13 +1332,13 @@ mod tests {
     #[test]
     fn test_cli_accepts_alias_singular_alias() {
         let cli = Cli::try_parse_from(["suv", "alias"]).unwrap();
-        assert!(matches!(cli.command, Commands::Aliases { command: None }));
+        assert!(matches!(cli.command.unwrap(), Commands::Aliases { command: None }));
     }
 
     #[test]
     fn test_cli_parses_bare_sessions() {
         let cli = Cli::try_parse_from(["suv", "sessions"]).unwrap();
-        match cli.command {
+        match cli.command.unwrap() {
             Commands::Sessions {
                 session_id,
                 list,
@@ -1326,7 +1356,7 @@ mod tests {
     #[test]
     fn test_cli_parses_explicit_sessions_limit() {
         let cli = Cli::try_parse_from(["suv", "sessions", "--limit", "125"]).unwrap();
-        match cli.command {
+        match cli.command.unwrap() {
             Commands::Sessions { limit, .. } => assert_eq!(limit, Some(125)),
             _ => panic!("Expected Sessions"),
         }
@@ -1335,7 +1365,7 @@ mod tests {
     #[test]
     fn test_cli_parses_sessions_with_id() {
         let cli = Cli::try_parse_from(["suv", "sessions", "abc123"]).unwrap();
-        match cli.command {
+        match cli.command.unwrap() {
             Commands::Sessions { session_id, .. } => {
                 assert_eq!(session_id.as_deref(), Some("abc123"));
             }
@@ -1346,7 +1376,7 @@ mod tests {
     #[test]
     fn test_cli_accepts_session_singular_alias() {
         let cli = Cli::try_parse_from(["suv", "session"]).unwrap();
-        assert!(matches!(cli.command, Commands::Sessions { .. }));
+        assert!(matches!(cli.command.unwrap(), Commands::Sessions { .. }));
     }
 
     #[test]
@@ -1359,7 +1389,7 @@ mod tests {
             "--directory",
             "/work",
         ]);
-        match cli.command {
+        match cli.command.unwrap() {
             Commands::HookOpencodeSession {
                 session_id,
                 directory,
@@ -1381,7 +1411,7 @@ mod tests {
             "--directory",
             "/work",
         ]);
-        match cli.command {
+        match cli.command.unwrap() {
             Commands::HookOpencodePrompt {
                 session_id,
                 directory,

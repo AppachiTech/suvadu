@@ -41,6 +41,8 @@ pub struct Config {
     pub agents: std::collections::HashMap<String, CustomAgent>,
     #[serde(default)]
     pub mcp: McpConfig,
+    #[serde(default)]
+    pub home: HomeConfig,
 }
 
 const fn default_enabled() -> bool {
@@ -60,6 +62,7 @@ impl Default for Config {
             auto_tags: std::collections::HashMap::new(),
             agents: std::collections::HashMap::new(),
             mcp: McpConfig::default(),
+            home: HomeConfig::default(),
         }
     }
 }
@@ -303,6 +306,49 @@ impl Default for McpConfig {
     }
 }
 
+/// What a bare `suv` at a terminal opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HomeStartup {
+    /// The interactive Home screen.
+    Home,
+    /// The classic command overview, as `suv --help` prints it.
+    Help,
+}
+
+/// Markers drawn beside Home's categories. ASCII works in every terminal
+/// and font; Unicode uses a few monochrome symbols.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HomeIcons {
+    #[default]
+    Ascii,
+    Unicode,
+}
+
+/// Preferences for the Home screen. They belong to the person, so only the
+/// global config sets them: a project's `.suvadu.toml` cannot.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HomeConfig {
+    /// Unset means "this release's default", and stays unset when other
+    /// settings are saved, so a later release can change the default for
+    /// everyone who never chose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup: Option<HomeStartup>,
+    #[serde(default)]
+    pub icons: HomeIcons,
+}
+
+impl HomeConfig {
+    /// What a bare `suv` opens for someone who has not chosen. Classic help
+    /// while Home is opt-in; `suv home` opens Home whatever this says.
+    pub const DEFAULT_STARTUP: HomeStartup = HomeStartup::Help;
+
+    pub fn effective_startup(&self) -> HomeStartup {
+        self.startup.unwrap_or(Self::DEFAULT_STARTUP)
+    }
+}
+
 const fn default_true() -> bool {
     true
 }
@@ -383,6 +429,39 @@ pub fn load_config() -> ConfigResult<Config> {
     let config: Config = toml::from_str(&contents)?;
     validate_config(&config)?;
     Ok(config)
+}
+
+/// Read one config file without creating, migrating or repairing anything:
+/// `Ok(None)` when it does not exist, an error (and the file left exactly as
+/// it is) when it cannot be read or parsed.
+pub fn read_config_file(path: &std::path::Path) -> ConfigResult<Option<Config>> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let config: Config = toml::from_str(&contents)?;
+    validate_config(&config)?;
+    Ok(Some(config))
+}
+
+/// The global config, read the way Home needs it: no directory is created,
+/// no older file is migrated, and no project overlay applies. On macOS a
+/// config still at the pre-migration location is read from there.
+pub fn read_global_config() -> ConfigResult<Option<Config>> {
+    let dirs = crate::util::project_dirs()
+        .ok_or_else(|| ConfigError::Path("Could not determine config directory".to_string()))?;
+    let path = dirs.config_dir().join("config.toml");
+    #[cfg(target_os = "macos")]
+    if !path.exists() {
+        if let Some(home) = std::env::var_os("HOME") {
+            let old = PathBuf::from(home).join("Library/Preferences/tech.appachi.suvadu/config.toml");
+            if old.exists() {
+                return read_config_file(&old);
+            }
+        }
+    }
+    read_config_file(&path)
 }
 
 /// Cached config with mtime for invalidation.
@@ -491,7 +570,12 @@ pub fn overlay_config_for_dir(base: &Config, dir: &std::path::Path) -> ConfigRes
     };
 
     let overlay_contents = std::fs::read_to_string(&overlay_path)?;
-    let overlay_value: toml::Value = toml::from_str(&overlay_contents)?;
+    let mut overlay_value: toml::Value = toml::from_str(&overlay_contents)?;
+    // Home preferences are the person's, not the project's; dropping the
+    // table also keeps an invalid value there from breaking every command.
+    if let Some(table) = overlay_value.as_table_mut() {
+        table.remove("home");
+    }
     let mut merged_value = toml::Value::try_from(base.clone())?;
     merge_toml_value(&mut merged_value, overlay_value);
     let merged: Config = merged_value.try_into()?;
@@ -913,6 +997,121 @@ unknown_mcp_key = 7
         assert!(!every_run.search.show_unique_by_default);
         let grouped: Config = toml::from_str("[search]\nshow_unique_by_default = true").unwrap();
         assert!(grouped.search.show_unique_by_default);
+    }
+
+    // ── Home preferences ─────────────────────────────────────
+
+    #[test]
+    fn home_preferences_default_to_classic_help_and_ascii_when_unset() {
+        for toml_str in ["", "enabled = true", "[home]"] {
+            let config: Config = toml::from_str(toml_str).unwrap();
+            assert_eq!(config.home.startup, None, "{toml_str:?}");
+            assert_eq!(config.home.effective_startup(), HomeStartup::Help);
+            assert_eq!(config.home.icons, HomeIcons::Ascii);
+        }
+        assert_eq!(Config::default().home, HomeConfig::default());
+    }
+
+    #[test]
+    fn home_preferences_read_both_startup_screens_and_icon_sets() {
+        let home: Config = toml::from_str("[home]\nstartup = \"home\"\nicons = \"unicode\"").unwrap();
+        assert_eq!(home.home.startup, Some(HomeStartup::Home));
+        assert_eq!(home.home.effective_startup(), HomeStartup::Home);
+        assert_eq!(home.home.icons, HomeIcons::Unicode);
+
+        let help: Config = toml::from_str("[home]\nstartup = \"help\"").unwrap();
+        assert_eq!(help.home.startup, Some(HomeStartup::Help));
+    }
+
+    #[test]
+    fn an_invalid_home_value_is_an_error_naming_the_choices() {
+        let err = toml::from_str::<Config>("[home]\nstartup = \"sideways\"")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("sideways"), "{err}");
+        assert!(err.contains("home") && err.contains("help"), "{err}");
+    }
+
+    /// `save_config` writes every known key. An unset startup screen must
+    /// stay unset, or saving any setting would pin today's default and a
+    /// later release could never change it for people who never chose.
+    #[test]
+    fn saving_other_settings_leaves_the_startup_screen_unset() {
+        with_config_file("[search]\npage_limit = 40\n", |path| {
+            let mut config = load_config().unwrap();
+            config.search.page_limit = 41;
+            save_config(&config).unwrap();
+
+            let value: toml::Value =
+                toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert!(
+                value.get("home").and_then(|h| h.get("startup")).is_none(),
+                "{value}"
+            );
+            assert_eq!(load_config().unwrap().home.startup, None);
+        });
+    }
+
+    #[test]
+    fn a_chosen_startup_screen_is_saved_beside_unknown_home_keys() {
+        with_config_file("[home]\nstartup = \"help\"\nfuture = 1\n", |path| {
+            let mut config = load_config().unwrap();
+            assert_eq!(config.home.startup, Some(HomeStartup::Help));
+            config.home.startup = Some(HomeStartup::Home);
+            save_config(&config).unwrap();
+
+            let value: toml::Value =
+                toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert_eq!(value["home"]["startup"].as_str(), Some("home"));
+            assert_eq!(value["home"]["future"].as_integer(), Some(1));
+        });
+    }
+
+    /// Home preferences belong to the person, not the directory they happen
+    /// to be in: a project's `.suvadu.toml` cannot change them — not even
+    /// break them with an invalid value — while its other keys still apply.
+    #[test]
+    fn a_project_overlay_cannot_change_home_preferences() {
+        let dir = TempDir::new().unwrap();
+        let base = Config {
+            home: HomeConfig {
+                startup: Some(HomeStartup::Help),
+                icons: HomeIcons::Ascii,
+            },
+            ..Config::default()
+        };
+        for overlay in [
+            "[home]\nstartup = \"home\"\nicons = \"unicode\"\n[search]\npage_limit = 7\n",
+            "[home]\nstartup = \"sideways\"\n[search]\npage_limit = 7\n",
+        ] {
+            std::fs::write(dir.path().join(".suvadu.toml"), overlay).unwrap();
+            let merged = overlay_config_for_dir(&base, dir.path()).unwrap();
+            assert_eq!(merged.home, base.home, "{overlay}");
+            assert_eq!(merged.search.page_limit, 7, "{overlay}");
+        }
+    }
+
+    #[test]
+    fn reading_a_missing_global_config_creates_nothing() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("not-yet").join("config.toml");
+        assert!(read_config_file(&path).unwrap().is_none());
+        assert!(!dir.path().join("not-yet").exists());
+    }
+
+    #[test]
+    fn reading_an_invalid_global_config_reports_it_and_leaves_it_alone() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "enabled = true\n[home]\nstartup = \"sideways\"\n";
+        std::fs::write(&path, original).unwrap();
+        let err = read_config_file(&path).unwrap_err().to_string();
+        assert!(err.contains("sideways"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+
+        std::fs::write(&path, "[home]\nstartup = \"home\"\n").unwrap();
+        let config = read_config_file(&path).unwrap().unwrap();
+        assert_eq!(config.home.startup, Some(HomeStartup::Home));
     }
 
     #[test]

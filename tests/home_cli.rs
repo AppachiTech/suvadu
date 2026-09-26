@@ -180,3 +180,56 @@ fn help_needs_neither_a_valid_config_nor_a_database() {
     }
     assert_eq!(sandbox.files(), before, "help created or removed files");
 }
+
+#[test]
+fn home_has_its_own_help() {
+    let output = Sandbox::new().run(&["home", "--help"]);
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    let help = text(&output.stdout);
+    assert!(help.contains("Usage: suv home"), "{help}");
+    assert!(!output.stdout.contains(&0x1b));
+}
+
+/// `suv home` is interactive by definition. Asked for without a terminal it
+/// says why in plain text and exits 2, rather than drawing into a pipe.
+#[test]
+fn home_without_a_terminal_is_refused_in_plain_text() {
+    let sandbox = Sandbox::new();
+    let before = sandbox.files();
+    let output = sandbox.run(&["home"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(!output.stderr.contains(&0x1b), "no escape sequences");
+    let stderr = text(&output.stderr);
+    assert!(stderr.contains("needs an interactive terminal"), "{stderr}");
+    assert!(stderr.contains("suv --help"), "{stderr}");
+    assert_eq!(sandbox.files(), before, "a refused Home created files");
+}
+
+/// A saved preference for Home changes only what a person at a terminal
+/// sees; a script running a bare `suv` keeps the old answer.
+#[test]
+fn a_home_preference_never_reaches_a_noninteractive_bare_suv() {
+    let sandbox = Sandbox::new();
+    let help = sandbox.run(&["--help"]);
+    for config in ["[home]\nstartup = \"home\"\n", "[home]\nstartup = \"sideways\"\n"] {
+        sandbox.write_config(config);
+        let bare = sandbox.run(&[]);
+        assert_eq!(bare.status.code(), Some(2), "config: {config}");
+        assert!(bare.stdout.is_empty());
+        assert_eq!(text(&bare.stderr), text(&help.stdout), "config: {config}");
+    }
+}
+
+#[test]
+fn a_dumb_terminal_never_opens_home() {
+    let sandbox = Sandbox::new();
+    let output = sandbox
+        .command(&["home"])
+        .env("TERM", "dumb")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!output.stderr.contains(&0x1b));
+    assert!(text(&output.stderr).contains("needs an interactive terminal"));
+}

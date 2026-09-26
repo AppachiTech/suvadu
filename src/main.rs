@@ -8,6 +8,7 @@ mod cli;
 mod commands;
 mod config;
 mod db;
+mod home;
 mod hooks;
 mod import_export;
 mod integrations;
@@ -50,19 +51,27 @@ fn main() {
 
     let cli = Cli::parse();
 
-    if let Err(e) = run(cli) {
+    // A bare `suv` and `suv home` are resolved before the shared setup below:
+    // Home decides from the terminal first, and must not create the config
+    // or data directory just by being looked at.
+    let result = match cli.command {
+        None => home::start(false),
+        Some(Commands::Home) => home::start(true),
+        Some(command) => run(command),
+    };
+    if let Err(e) = result {
         eprintln!("Error: {e}");
         process::exit(1);
     }
 }
 
-fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    print_setup_hint(&cli.command);
+fn run(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
+    print_setup_hint(&command);
 
     // Initialize theme only for user-facing commands.
     // Internal commands (Add, Get, hooks, etc.) don't render TUI,
     // so skip the config read + theme init on the hot path.
-    if is_user_facing_command(&cli.command) {
+    if is_user_facing_command(&command) {
         upgrade_notice::print_if_needed();
         // Project-aware: a .suvadu.toml found by walking up from the cwd
         // overrides the global config's matching fields (see config::
@@ -78,7 +87,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // session. Those arrive as free text with no working directory to
     // resolve a policy from, so the user's redaction and exclusion settings
     // are installed here, before the server starts answering calls.
-    if matches!(cli.command, Commands::McpServe) {
+    if matches!(command, Commands::McpServe) {
         let cfg = config::load_config_for_cwd().unwrap_or_default();
         // Custom risk rules and suppressions are the user's, so the
         // `assess_risk` tool must apply the same set an interactive
@@ -93,7 +102,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    run_command(cli.command)
+    run_command(command)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -132,6 +141,7 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
             include_agents,
         } => commands::search::handle_get(&query, offset, prefix, cwd.as_deref(), include_agents),
         Commands::Settings => commands::settings::handle_settings(),
+        Commands::Home => home::start(true),
         Commands::Status => commands::settings::handle_status(),
         Commands::Doctor => {
             commands::doctor::handle_doctor();
