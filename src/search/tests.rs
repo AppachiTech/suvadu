@@ -3835,7 +3835,7 @@ fn a_very_wide_terminal_keeps_the_footer_to_core_actions() {
     let footer = footer_text(&lines);
     assert_no_partial_hint(&footer, "300x40");
     assert_essential_hints(&footer, "300x40");
-    for expected in ["Mode", "Scope", "Group"] {
+    for expected in ["Mode", "Scope"] {
         assert!(
             footer.contains(expected),
             "300x40: core hint {expected:?} missing from {footer:?}"
@@ -4650,4 +4650,22 @@ fn typing_after_a_view_switch_starts_from_the_top_again() {
     app.handle_input(KeyEvent::from(KeyCode::Char(' ')));
     app.reload_entries(&repo).unwrap();
     assert_eq!(app.table_state.selected(), Some(0));
+}
+
+#[test]
+fn the_grouping_key_is_offered_beside_the_count_at_every_width() {
+    for width in [40_u16, 60, 80, 100, 200] {
+        let mut app = render_app();
+        let screen = render_lines(&mut app, width, 24).join("\n");
+        assert!(screen.contains("^U group"), "{width} cols:\n{screen}");
+        app.view.unique_mode = true;
+        let screen = render_lines(&mut app, width, 24).join("\n");
+        assert!(screen.contains("^U every run"), "{width} cols:\n{screen}");
+    }
+    // Where ^U scrolls instead, it is not offered.
+    let mut app = render_app();
+    app.vim_enabled = true;
+    app.vim_mode = VimMode::Normal;
+    let screen = render_lines(&mut app, 100, 24).join("\n");
+    assert!(!screen.contains("^U group"), "{screen}");
 }

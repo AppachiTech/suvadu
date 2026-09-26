@@ -439,8 +439,8 @@ impl SearchApp {
                 Hint::new("^P", "Scope"),
             ]
         } else {
-            // The two controls that decide what matches rank above the one
-            // that only groups it, so they survive on a narrower terminal.
+            // Grouping (^U) is offered in the results title, beside the
+            // count it changes, where no width can crowd it out.
             vec![
                 Hint::new("\u{21b5}", "Use"),
                 Hint::new("\u{2191}\u{2193}", "Nav"),
@@ -448,7 +448,6 @@ impl SearchApp {
                 Hint::new("Tab", "Detail"),
                 Hint::new("^X", "Mode"),
                 Hint::new("^P", "Scope"),
-                Hint::new("^U", "Group"),
             ]
         }
     }
@@ -731,8 +730,10 @@ impl SearchApp {
         Row::new(cells).height(height).style(styles.bg)
     }
 
-    /// `"Executions 1-50 of 558"`, or `"Commands 1-50 of 139"` when rows are
-    /// grouped by command — the count always says what it counts.
+    /// `"Executions 1-50 of 558 · ^U group"`, or
+    /// `"Commands 1-50 of 139 · ^U every run"` when rows are grouped by
+    /// command — the count says what it counts, and the key that switches
+    /// it sits beside it.
     fn build_table_title(&self) -> String {
         let noun = if self.view.unique_mode {
             "Commands"
@@ -751,11 +752,20 @@ impl SearchApp {
         };
         // These rows answer an earlier query; say so until the current one
         // arrives rather than pass them off as its results.
-        if self.searching {
-            format!("{counts} \u{b7} searching\u{2026}")
+        let searching = if self.searching {
+            " \u{b7} searching\u{2026}"
         } else {
-            counts
-        }
+            ""
+        };
+        // In vim normal mode ^U scrolls, so it is not offered there.
+        let switch = if self.vim_enabled && self.vim_mode == super::VimMode::Normal {
+            ""
+        } else if self.view.unique_mode {
+            " \u{b7} ^U every run"
+        } else {
+            " \u{b7} ^U group"
+        };
+        format!("{counts}{searching}{switch}")
     }
 
     // --- render_detail_pane (decomposed) ---
@@ -1918,7 +1928,7 @@ mod tests {
         };
         let app = super::SearchApp::new(config);
         let title = app.build_table_title();
-        assert_eq!(title, "Executions (none)");
+        assert_eq!(title, "Executions (none) \u{b7} ^U group");
     }
 
     #[test]
@@ -1964,7 +1974,7 @@ mod tests {
         };
         let app = super::SearchApp::new(config);
         let title = app.build_table_title();
-        assert_eq!(title, "Executions 1-50 of 100");
+        assert_eq!(title, "Executions 1-50 of 100 \u{b7} ^U group");
     }
 
     // ========================================================================
@@ -2033,7 +2043,7 @@ mod tests {
         let app = super::SearchApp::new(config);
         let title = app.build_table_title();
         // page=2, page_size=50: start_index = (2-1)*50+1 = 51, end_index = 51+50-1 = 100
-        assert_eq!(title, "Executions 51-100 of 120");
+        assert_eq!(title, "Executions 51-100 of 120 \u{b7} ^U group");
     }
 
     // --- build_table_title single item ---
@@ -2082,7 +2092,7 @@ mod tests {
         let app = super::SearchApp::new(config);
         let title = app.build_table_title();
         // page=1, page_size=50, 1 entry: start=1, end=1
-        assert_eq!(title, "Executions 1-1 of 1");
+        assert_eq!(title, "Executions 1-1 of 1 \u{b7} ^U group");
     }
 
     // --- build_table_title exact page boundary ---
@@ -2130,7 +2140,7 @@ mod tests {
         };
         let app = super::SearchApp::new(config);
         let title = app.build_table_title();
-        assert_eq!(title, "Executions 1-50 of 50");
+        assert_eq!(title, "Executions 1-50 of 50 \u{b7} ^U group");
     }
 
     // --- ColumnLayout::from_width boundary values ---
