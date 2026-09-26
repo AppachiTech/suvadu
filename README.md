@@ -204,8 +204,9 @@ restores it, then verifies afterwards that the Atuin file is byte-identical and
 that the entries it claims to have written are really there. Re-running the
 import adds nothing.
 
-Tested against Atuin 18.0.0 – 18.22.0 (history schema `20210422143411` –
-`20260818000000`). A database carrying a migration this release has not been
+Tested against Atuin 18.0.0 – 18.23.0 (history schema `20210422143411` –
+`20260818000000`); 18.23.0 by importing a database the real Atuin 18.23.0
+binary wrote, with [`scripts/test-atuin-import.sh`](scripts/test-atuin-import.sh). A database carrying a migration this release has not been
 tested against is rejected with the migration id rather than guessed at — run
 `suv update` and try again.
 

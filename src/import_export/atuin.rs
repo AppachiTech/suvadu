@@ -2,13 +2,13 @@
 //!
 //! # Why the database and not an export
 //!
-//! Atuin (checked against 18.22.0) has no export command. The closest thing is
-//! `atuin history list --format "…"`, whose variables are `{command}`,
+//! Atuin (checked against 18.23.0) has no dedicated export command. The closest
+//! thing is `atuin history list --format "…"`, whose variables are `{command}`,
 //! `{directory}`, `{duration}`, `{user}`, `{host}`, `{author}`, `{intent}`,
 //! `{exit}`, `{time}`, `{session}` and `{uuid}`. That output is lossy in ways
 //! we cannot repair: `{duration}` is humanised ("3s"), `{time}` is rendered in
-//! a configured timezone at second resolution, `{command}` is trimmed, and
-//! even with `--print0` there is no escaping *inside* a record, so a command
+//! a configured timezone at second resolution, `{command}` is trimmed, and even
+//! with `--print0` there is no escaping *inside* a record, so a command
 //! containing the field separator is ambiguous. Nanosecond timestamps and raw
 //! durations are simply not reachable through it.
 //!
@@ -43,7 +43,7 @@ use crate::repository::Repository;
 use super::{apply_recording_policy, print_dry_run_samples, RecordingPolicy};
 
 /// Every `_sqlx_migrations` version this importer has been tested against —
-/// the union of the migration sets shipped by Atuin 18.0.0 … 18.22.0. A
+/// the union of the migration sets shipped by Atuin 18.0.0 … 18.23.0. A
 /// database containing anything else is rejected, not guessed at.
 const KNOWN_MIGRATIONS: &[i64] = &[
     20_210_422_143_411, // create_history      (18.0+)
@@ -295,7 +295,7 @@ pub fn read_schema(conn: &Connection) -> Result<AtuinSchema, Box<dyn std::error:
         return Err(format!(
             "This Atuin database was written by a newer Atuin than this importer has been tested \
              against\n(unrecognised history schema migration {}).\n\
-             Tested: Atuin 18.0.0 – 18.22.0 (schema {} – {}).\n\
+             Tested: Atuin 18.0.0 – 18.23.0 (schema {} – {}).\n\
              Next step: run `suv update` and try again with a build that lists your Atuin \
              release,\nor report the migration id above at \
              https://github.com/AppachiTech/suvadu/issues.\n\
@@ -1065,7 +1065,7 @@ mod tests {
     use super::*;
     use rusqlite::params;
 
-    /// The `_sqlx_migrations` set an Atuin 18.22.0 database carries.
+    /// The `_sqlx_migrations` set an Atuin 18.22.0 or 18.23.0 database carries.
     const MIGRATIONS_18_22: &[i64] = KNOWN_MIGRATIONS;
     /// The set an Atuin 18.0.0 – 18.6.1 database carries (no author columns).
     const MIGRATIONS_18_0: &[i64] = &[

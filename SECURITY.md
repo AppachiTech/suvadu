@@ -393,7 +393,7 @@ there is no long-term support branch.
 | Surface | Tested against | Enforced at runtime |
 |---|---|---|
 | Shells | Zsh and Bash — the only two `suv init` generates hooks for | yes: `suv init` accepts no other shell |
-| Atuin database import | Atuin 18.0.0 – 18.22.0 (history schema `20210422143411` – `20260818000000`) | **yes** — an untested migration is rejected by id with a next step, never guessed at |
+| Atuin database import | Atuin 18.0.0 – 18.23.0 (history schema `20210422143411` – `20260818000000`) | **yes** — an untested migration is rejected by id with a next step, never guessed at |
 | Codex | CLI 0.153.4, for `UserPromptSubmit`, `PostToolUse`, `Stop` and `SessionEnd` hooks | no |
 | OpenCode | CLI 1.18.30, matching the published `@opencode-ai/plugin@1.18.30` types | no |
 | Claude Code, Cursor, pi.dev, Antigravity | not pinned to a version | no |

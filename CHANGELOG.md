@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **Atuin import is tested through Atuin 18.23.0** — 18.23.0 ships the same history schema as 18.22.0 (newest migration `20260818000000`), and a database written by the real Atuin 18.23.0 binary — plain, multi-line, failed, agent-authored, Unicode, deleted, never-finished and Bash-imported rows — imports completely, leaves the Atuin database, WAL and shared-memory file byte-identical, adds nothing on a second run, and rolls back with the printed backup. `scripts/test-atuin-import.sh <path/to/atuin>` repeats that check for any Atuin release.
+
 ### Added
 - **The install script can install without sudo** — `curl -fsSL https://downloads.appachi.tech/suvadu/install.sh | bash -s -- --user` installs into `~/.local/bin`, and `--dir DIR` (or `SUVADU_INSTALL_DIR=DIR`) into any directory; sudo is used only when the target directory is not writable, and the script says when that directory is not on your `PATH`. The default is still `/usr/local/bin`.
 - **The install script can add the shell hook for you** — run at a terminal, it shows the exact `eval "$(suv init zsh)"` line and the file it would go in (`~/.zshrc`, or `~/.bashrc` on Linux), and adds it only if you answer `y`, after saving the old file as `.suvadu-backup`. It never asks when a hook is already in any startup file, when the install directory is not on `PATH`, for bash on macOS (whose login shells may not read `~/.bashrc`), or with `--no-modify-rc`; `suv uninstall` removes the line again.
