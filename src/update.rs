@@ -86,7 +86,16 @@ fn is_homebrew_exe(exe: &std::path::Path) -> bool {
 }
 
 pub fn is_cargo_install() -> bool {
-    std::env::current_exe().is_ok_and(|exe| is_cargo_path(&exe.to_string_lossy()))
+    std::env::current_exe().is_ok_and(|exe| is_cargo_exe(&exe))
+}
+
+/// Whether `exe`, as run or once its links are resolved, is a `cargo install`
+/// binary — so a `~/.local/bin/suv` linked to Cargo's copy is still Cargo's.
+fn is_cargo_exe(exe: &std::path::Path) -> bool {
+    is_cargo_path(&exe.to_string_lossy())
+        || exe
+            .canonicalize()
+            .is_ok_and(|real| is_cargo_path(&real.to_string_lossy()))
 }
 
 /// Whether `path` is inside a Homebrew prefix or Cellar.
@@ -94,9 +103,22 @@ pub fn is_homebrew_path(path: &str) -> bool {
     path.contains("/Cellar/") || path.contains("/homebrew/") || path.contains("/linuxbrew/")
 }
 
-/// Whether `path` is where `cargo install` puts binaries.
+/// Whether `path` is where `cargo install` puts binaries: `~/.cargo/bin`, or
+/// `$CARGO_HOME/bin` when that is set.
 pub fn is_cargo_path(path: &str) -> bool {
+    is_cargo_path_with(path, std::env::var_os("CARGO_HOME").as_deref())
+}
+
+fn is_cargo_path_with(path: &str, cargo_home: Option<&std::ffi::OsStr>) -> bool {
     path.contains("/.cargo/bin/")
+        || cargo_home.is_some_and(|home| {
+            let bin = std::path::Path::new(home).join("bin");
+            let path = std::path::Path::new(path);
+            path.starts_with(&bin)
+                || bin
+                    .canonicalize()
+                    .is_ok_and(|real| path.starts_with(real))
+        })
 }
 
 pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
@@ -497,29 +519,43 @@ fn dir_is_writable(dir: &std::path::Path) -> bool {
         .is_ok()
 }
 
-/// Put `new` in place of `target` and point `suvadu` beside it at it, as the
-/// current user.
+/// Put `new` in place of `target`, as the current user.
+///
+/// The new binary is written beside the old one under a temporary name and
+/// renamed over it. A rename replaces the name in one step, so `suv` is
+/// always either the old binary or the whole new one: a copy that fails
+/// part-way (a full disk, an interrupted update) leaves the old binary
+/// untouched, and no running process's file is ever written to, which on
+/// Linux fails with "Text file busy".
 fn replace_binary_directly(new: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
-    fn remove_if_present(path: &std::path::Path) -> std::io::Result<()> {
-        match std::fs::remove_file(path) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
-        }
-    }
-    // Remove first: on Linux, writing over a running binary fails with
-    // "Text file busy", while unlinking keeps the old inode alive for this
-    // process.
-    remove_if_present(target)?;
-    std::fs::copy(new, target)?;
+    let dir = target
+        .parent()
+        .ok_or_else(|| std::io::Error::other("the install path has no directory"))?;
+    let mut staged = tempfile::Builder::new()
+        .prefix(".suv-update-")
+        .tempfile_in(dir)?;
+    std::io::copy(&mut std::fs::File::open(new)?, staged.as_file_mut())?;
+    staged.as_file().sync_all()?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755))?;
-        let link = target.with_file_name("suvadu");
-        remove_if_present(&link)?;
-        std::os::unix::fs::symlink(target, &link)?;
+        std::fs::set_permissions(staged.path(), std::fs::Permissions::from_mode(0o755))?;
     }
+    staged.persist(target).map_err(|e| e.error)?;
     Ok(())
+}
+
+/// Point the `suvadu` link beside `target` at it, replacing whatever link
+/// was there in one rename.
+#[cfg(unix)]
+fn relink_suvadu(target: &std::path::Path) -> std::io::Result<()> {
+    let link = target.with_file_name("suvadu");
+    let staged = target.with_file_name(format!(".suvadu-update-{}", std::process::id()));
+    let _ = std::fs::remove_file(&staged);
+    std::os::unix::fs::symlink(target, &staged)?;
+    std::fs::rename(&staged, &link).inspect_err(|_| {
+        let _ = std::fs::remove_file(&staged);
+    })
 }
 
 /// Install the new binary. Returns `true` if the user confirmed and the
@@ -551,32 +587,54 @@ fn install_binary(binary_path: &std::path::Path) -> Result<bool, Box<dyn std::er
     // --dir install must not end up with a root-owned binary.
     if dir_is_writable(install_dir) {
         println!("Installing update...");
-        replace_binary_directly(binary_path, &install_path)?;
-        return Ok(true);
+        match replace_binary_directly(binary_path, &install_path) {
+            Ok(()) => {
+                #[cfg(unix)]
+                if let Err(e) = relink_suvadu(&install_path) {
+                    eprintln!(
+                        "Updated suv, but could not point {} at it: {e}",
+                        symlink_path.display()
+                    );
+                }
+                return Ok(true);
+            }
+            // A writable directory can still refuse to replace a file owned
+            // by someone else (a sticky directory, an immutable flag). The old
+            // binary is untouched, so sudo can have its turn.
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("Could not replace {install_str} as this user ({e}).");
+            }
+            Err(e) => return Err(format!("Failed to install update: {e}").into()),
+        }
     }
 
     println!("Installing update (requires sudo)...");
 
-    // On Linux, `cp` over a running binary fails with "Text file busy".
-    // Removing first works because the kernel keeps the old inode alive
-    // until the running process exits, while freeing the directory entry
-    // for the new file.
-    let _ = std::process::Command::new("sudo")
-        .args(["rm", "-f", &*install_str])
-        .status();
-
-    let status_bin = std::process::Command::new("sudo")
-        .args(["cp", &binary_str, &*install_str])
-        .status()?;
-    let status_link = std::process::Command::new("sudo")
-        .args(["ln", "-sf", &*install_str, &*symlink_path.to_string_lossy()])
-        .status()?;
-
-    if status_bin.success() && status_link.success() {
-        Ok(true)
-    } else {
-        Err("Failed to install update.".into())
+    // Stage beside the old binary, then rename over it, for the same reasons
+    // as `replace_binary_directly`: a failed copy never leaves the user
+    // without a working `suv`, and nothing writes to a running binary.
+    let staged = install_dir.join(format!(".suv-update-{}", std::process::id()));
+    let staged_str = staged.to_string_lossy();
+    let sudo = |args: &[&str]| {
+        std::process::Command::new("sudo")
+            .args(args)
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    let placed = sudo(&["cp", &binary_str, &staged_str])
+        && sudo(&["chmod", "755", &staged_str])
+        && sudo(&["mv", "-f", &staged_str, &install_str]);
+    if !placed {
+        let _ = sudo(&["rm", "-f", &staged_str]);
+        return Err("Failed to install update; the previous version is still installed.".into());
     }
+    if !sudo(&["ln", "-sf", &install_str, &symlink_path.to_string_lossy()]) {
+        eprintln!(
+            "Updated suv, but could not point {} at it.",
+            symlink_path.display()
+        );
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -770,6 +828,7 @@ mod tests {
 
         assert!(dir_is_writable(tmp.path()));
         replace_binary_directly(&new, &target).unwrap();
+        relink_suvadu(&target).unwrap();
 
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
         let mode = std::fs::metadata(&target).unwrap().permissions().mode();
@@ -779,6 +838,60 @@ mod tests {
             target,
             "suvadu still points at suv"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_update_leaves_the_old_binary_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("suv");
+        std::fs::write(&target, "old").unwrap();
+
+        // The download vanished (or the copy failed part-way): nothing may
+        // have happened to the binary every shell hook runs.
+        let missing = tmp.path().join("no-such-download");
+        assert!(replace_binary_directly(&missing, &target).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "old");
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n != "suv")
+            .collect();
+        assert!(leftovers.is_empty(), "staging files left behind: {leftovers:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relinking_replaces_a_stale_suvadu_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("suv");
+        std::fs::write(&target, "new").unwrap();
+        std::os::unix::fs::symlink("/nowhere/suv", tmp.path().join("suvadu")).unwrap();
+
+        relink_suvadu(&target).unwrap();
+        assert_eq!(std::fs::read_link(tmp.path().join("suvadu")).unwrap(), target);
+    }
+
+    #[test]
+    fn cargo_installs_are_recognised_under_a_custom_cargo_home() {
+        let home = std::ffi::OsStr::new("/opt/rust/cargo");
+        assert!(is_cargo_path_with("/home/u/.cargo/bin/suv", None));
+        assert!(is_cargo_path_with("/opt/rust/cargo/bin/suv", Some(home)));
+        assert!(!is_cargo_path_with("/opt/rust/cargo/bin/suv", None));
+        assert!(!is_cargo_path_with("/opt/rust/cargo-bin/suv", Some(home)));
+        assert!(!is_cargo_path_with("/usr/local/bin/suv", Some(home)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_into_a_cargo_bin_is_cargos() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cargo_bin = tmp.path().join(".cargo/bin");
+        std::fs::create_dir_all(&cargo_bin).unwrap();
+        std::fs::write(cargo_bin.join("suv"), "cargo").unwrap();
+        std::os::unix::fs::symlink(cargo_bin.join("suv"), tmp.path().join("suv")).unwrap();
+
+        assert!(is_cargo_exe(&tmp.path().join("suv")));
     }
 
     #[cfg(unix)]
