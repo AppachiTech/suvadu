@@ -486,8 +486,9 @@ impl RawStyle {
 /// seen and counted: in quotes, with each space drawn as `·` (a literal `·`
 /// is escaped, so a dot always means a space), and `\t`, `\n`, `\r`, `\\`,
 /// `\"` and `\u{…}` for everything that does not display as itself —
-/// control and non-space whitespace characters, and invisible ones such as
-/// zero-width spaces, direction overrides and the joiners inside emoji.
+/// control and non-space whitespace characters, invisible ones such as
+/// zero-width spaces, direction overrides and the joiners inside emoji, and
+/// a combining mark whose base had to be replaced by a marker or escape.
 ///
 /// A line ends after each `\n`, and lines longer than `width` cells (0: no
 /// limit) are broken between graphemes, never at a character that would
@@ -515,6 +516,12 @@ pub(super) fn raw_view(command: &str, width: usize, style: &RawStyle) -> Vec<Lin
                 '\\' => escape("\\\\"),
                 '"' => escape("\\\""),
                 c if c == '\u{b7}' || needs_escape(c) => {
+                    escape(&format!("\\u{{{:x}}}", u32::from(c)))
+                }
+                // Split out of its cluster, a combining mark has no base left
+                // to draw on — the one it had became a marker or an escape —
+                // and a zero-width cell is simply not drawn. Escape it.
+                c if unicode_width::UnicodeWidthChar::width(c) == Some(0) => {
                     escape(&format!("\\u{{{:x}}}", u32::from(c)))
                 }
                 c => (Glyph::new(&c.to_string(), style.text), false),
@@ -861,6 +868,34 @@ mod tests {
         }
         // A combining accent is part of its letter, not an escape.
         assert_eq!(raw_text("cafe\u{301}", 0), vec!["\"cafe\u{301}\""]);
+    }
+
+    /// The raw view as a terminal would show it: rendered into a buffer.
+    fn raw_rendered(command: &str) -> String {
+        use ratatui::widgets::Widget;
+        let lines = raw_view(command, 0, &RawStyle::from_theme(crate::theme::theme()));
+        let area = ratatui::layout::Rect::new(0, 0, 60, 1);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        ratatui::widgets::Paragraph::new(lines).render(area, &mut buf);
+        visible(&buf)
+    }
+
+    #[test]
+    fn a_combining_mark_split_from_its_base_is_escaped_not_lost() {
+        // A space carrying a combining accent: the space becomes `·`, and the
+        // accent, left without a base to draw on, must still be seen.
+        let acute = raw_rendered("echo \u{301}x");
+        let circumflex = raw_rendered("echo \u{302}x");
+        assert_ne!(acute, circumflex, "two different commands look alike");
+        assert_eq!(acute, "\"echo\u{b7}\\u{301}x\"");
+        assert_eq!(circumflex, "\"echo\u{b7}\\u{302}x\"");
+        // The same after a quote or backslash, which are escaped too.
+        assert_eq!(raw_rendered("a\"\u{301}"), "\"a\\\"\\u{301}\"");
+        // An accented letter that needs no escaping keeps drawing as itself.
+        assert_eq!(
+            raw_rendered("caf\u{e9} cafe\u{301}"),
+            "\"caf\u{e9}\u{b7}cafe\u{301}\""
+        );
     }
 
     #[test]

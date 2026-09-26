@@ -4865,3 +4865,25 @@ fn every_detail_label_is_separated_from_its_value() {
         );
     }
 }
+
+#[test]
+fn the_inspector_shows_a_detached_accent_and_acceptance_keeps_it() {
+    for command in ["echo \u{301}x", "echo \u{302}x"] {
+        let mut app = SearchApp::new(test_search_config(vec![create_test_entry(command)], 1));
+        app.table_state.select(Some(0));
+        app.handle_input(ctrl_key('v'));
+        let screen = render_lines(&mut app, 80, 24).join("\n");
+        let escape = format!("\\u{{{:x}}}", u32::from(command.chars().nth(5).unwrap()));
+        assert!(
+            screen.contains(&escape),
+            "{command:?}: no {escape} in\n{screen}"
+        );
+
+        app.handle_input(KeyEvent::from(KeyCode::Esc));
+        let action = app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert!(
+            matches!(action, SearchAction::Select(ref c) if c.as_bytes() == command.as_bytes()),
+            "{command:?}: accepted {action:?}"
+        );
+    }
+}
