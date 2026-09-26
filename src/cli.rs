@@ -42,8 +42,13 @@ in exactly this directory. Nothing is boosted for having been run often or
 for having exited 0. literal, prefix and an empty query are not re-ranked at
 all: those come back newest first.
 ^S switches Smart rank (with the this-directory boost) and Recent (without
-it); ^U switches unique/all. At most 5000 matches are ranked, which bounds
-the ordering work, not how much history was searched.
+it); ^U switches between Executions (every run) and Commands (identical
+commands grouped into one row, with when it last ran and how often). At most
+5000 matches are ranked, which bounds the ordering work, not how much history
+was searched.
+
+Enter puts the selected command on your prompt to edit or run (from Ctrl+R),
+or prints it (from suv search); it never runs anything itself.
 
 Agent, bot, CI and script commands stay hidden unless --include-agents is
 given or ^A is pressed. Nothing ever includes them silently.
@@ -322,7 +327,7 @@ pub enum Commands {
         #[arg(short, long)]
         query: Option<String>,
 
-        /// Deduplicate results (only show unique commands)
+        /// Start in the Commands view: identical commands grouped into one row
         #[arg(short, long)]
         unique: bool,
 

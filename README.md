@@ -159,6 +159,18 @@ that acts on the results first waits for the results of what is typed now, so
 what you accept always matches the query on screen; until they arrive the
 results title says `searching…`.
 
+**Reading the list.** The characters your query matched are underlined and
+emphasised in every row, over the usual syntax colours, so it is clear why a
+command matched. `^U` switches between **Executions** — every recorded run,
+with its time and outcome — and **Commands**, where identical commands share
+one row showing when the command last ran and how many runs matched; the
+results title says which you are looking at and counts in those units. A
+command is grouped only with *exactly* the same text, so whitespace that would
+otherwise be invisible is drawn: `·` for a leading or trailing space, `↵` and
+`⇥` for line breaks and tabs. **Enter puts the command on your prompt** (or
+prints it, from `suv search`) — it never runs anything. The footer keeps to
+the core keys; `?` lists every shortcut.
+
 Up/Down arrow recall is a different, simpler path: prefix match, newest
 first, no deduplication, with the current directory used only to break ties
 between commands recorded at the same millisecond.

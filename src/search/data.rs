@@ -44,35 +44,17 @@ impl SearchApp {
             .and_then(|idx| self.entries.get(idx))
     }
 
-    pub(super) fn get_selected_command(&self) -> Option<String> {
-        self.get_selected_entry().map(|entry| entry.command.clone())
+    /// How many recorded runs a grouped row stands for (1 outside grouping,
+    /// or when the count is unknown).
+    pub(super) fn unique_count(&self, entry: &Entry) -> i64 {
+        self.unique_counts
+            .get(&entry.id.unwrap_or(0))
+            .copied()
+            .unwrap_or(1)
     }
 
-    /// Count active filters for badge display
-    pub(super) const fn active_filter_count(&self) -> usize {
-        let mut count = 0;
-        if self.filters.after.is_some() {
-            count += 1;
-        }
-        if self.filters.before.is_some() {
-            count += 1;
-        }
-        if self.filters.tag_id.is_some() {
-            count += 1;
-        }
-        if self.filters.exit_code.is_some() {
-            count += 1;
-        }
-        if self.filters.executor_type.is_some() {
-            count += 1;
-        }
-        if self.filters.failed_only {
-            count += 1;
-        }
-        if self.filters.bookmarks_only {
-            count += 1;
-        }
-        count
+    pub(super) fn get_selected_command(&self) -> Option<String> {
+        self.get_selected_entry().map(|entry| entry.command.clone())
     }
 
     /// Point `filters.cwd` at whatever the active scope means, so the query,

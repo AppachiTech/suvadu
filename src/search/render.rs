@@ -14,11 +14,12 @@ use ratatui::{
 use std::io;
 
 use super::format::{
-    build_command_text, detail_placement, display_width, entry_row_styles, fit_hints, fit_prefix,
+    command_prefix, detail_placement, display_width, entry_row_styles, fit_hints, fit_prefix,
     format_executor, format_exit_code, no_results_lines, ColumnLayout, DetailPlacement, Hint,
     NoResults, StatusSegment, DETAIL_BOTTOM_HEIGHT,
 };
-use super::{centered_rect, fill_text, DialogState, RecallScope, SearchApp};
+use super::highlight::{command_text, match_mask, relative_age, CommandStyle};
+use super::{centered_rect, DialogState, RecallScope, SearchApp};
 
 /// Cells reserved for the `"+N"` marker that stands in for status-row filter
 /// badges which do not fit.
@@ -65,22 +66,9 @@ impl SearchApp {
             chunks[0],
         );
 
-        // Dynamic Search Bar
-        let active_filters = self.active_filter_count();
-        let filter_badge = if active_filters > 0 {
-            format!(
-                " [{active_filters} filter{}]",
-                if active_filters > 1 { "s" } else { "" }
-            )
-        } else {
-            String::new()
-        };
-        let unique_badge = if self.view.unique_mode {
-            " [unique]"
-        } else {
-            ""
-        };
-
+        // Search bar. It holds only what was typed: active filters are
+        // listed once in the status row, and grouping is named in the
+        // results title, so neither can be mistaken for query text.
         // Any overlay (filter, help, delete, goto, tag, note) takes focus
         // away from the search box, so it renders dimmed while one is up.
         let overlay_focused = !matches!(self.dialog, DialogState::None);
@@ -97,8 +85,7 @@ impl SearchApp {
         } else {
             "Search (Typing)"
         };
-        let query_display = format!("{}{filter_badge}{unique_badge}", self.query);
-        let query = Paragraph::new(query_display)
+        let query = Paragraph::new(self.query.clone())
             .style(Style::default().fg(t.text))
             .block(
                 Block::default()
@@ -164,8 +151,10 @@ impl SearchApp {
 
     // --- persistent status row (PROD-03) ---
 
-    /// Scope, matching mode, result mode and agent visibility, as a compact
-    /// always-visible row between the search box and the results.
+    /// Scope, matching mode, ranking and agent visibility, as a compact
+    /// always-visible row between the search box and the results. Whether
+    /// rows are grouped by command is stated by the results title instead
+    /// ("Commands 1-50 of 139"), next to the count it changes.
     pub(super) fn render_status_row(&self, f: &mut ratatui::Frame, area: Rect) {
         let t = theme();
         let label_style = Style::default()
@@ -237,14 +226,6 @@ impl SearchApp {
                     "Shown"
                 } else {
                     "Hidden"
-                },
-            ),
-            StatusSegment::new(
-                "Show",
-                if self.view.unique_mode {
-                    "Unique"
-                } else {
-                    "All"
                 },
             ),
         ]
@@ -414,47 +395,41 @@ impl SearchApp {
         }
     }
 
-    /// Footer hints in priority order. Labels are fixed (the current state is
-    /// shown in the status row instead) so badges do not jump around as the
-    /// user toggles modes.
+    /// Footer hints in priority order: the few actions a recall needs.
+    /// Labels are fixed (the current state is shown in the status row and
+    /// the results title instead) so badges do not jump around as the user
+    /// toggles modes. Everything else — copy, bookmark, notes, tags, delete,
+    /// goto, agents, failed-only, reset, ranking — is in the help overlay
+    /// (`?`), however wide the terminal: width alone is no reason to spread
+    /// every capability along the bottom edge.
+    ///
+    /// Enter is "Use", not "Run": from Ctrl+R the command lands on the
+    /// prompt to edit or run, and `suv search` prints it. Nothing executes.
     fn footer_hints(&self) -> Vec<Hint> {
-        let mut hints = if self.vim_enabled && self.vim_mode == super::VimMode::Normal {
+        if self.vim_enabled && self.vim_mode == super::VimMode::Normal {
             vec![
                 Hint::new("j/k", "Nav"),
-                Hint::new("\u{21b5}", "Run"),
+                Hint::new("\u{21b5}", "Use"),
                 Hint::new("/", "Search"),
                 Hint::new("^F", "Filter"),
                 Hint::new("Tab", "Detail"),
                 Hint::new("^U/^D", "Scroll"),
+                Hint::new("^X", "Mode"),
+                Hint::new("^P", "Scope"),
             ]
         } else {
+            // The two controls that decide what matches rank above the one
+            // that only groups it, so they survive on a narrower terminal.
             vec![
-                Hint::new("\u{21b5}", "Run"),
+                Hint::new("\u{21b5}", "Use"),
                 Hint::new("\u{2191}\u{2193}", "Nav"),
                 Hint::new("^F", "Filter"),
                 Hint::new("Tab", "Detail"),
+                Hint::new("^X", "Mode"),
+                Hint::new("^P", "Scope"),
+                Hint::new("^U", "Group"),
             ]
-        };
-        // The two controls that decide what matches rank above the ones that
-        // only reorder it, so they survive on a narrow terminal.
-        hints.extend_from_slice(&[
-            Hint::new("^X", "Mode"),
-            Hint::new("^P", "Scope"),
-            Hint::new("^R", "Reset"),
-            Hint::new("^A", "Agents"),
-            Hint::new("^Y", "Copy"),
-            Hint::new("^B", "Bookmark"),
-            Hint::new("^U", "Unique"),
-            Hint::new("^L", "Here"),
-            Hint::new("^E", "Failed"),
-            Hint::new("^O", "Marked"),
-            Hint::new("^N", "Note"),
-            Hint::new("^T", "Tag"),
-            Hint::new("^D", "Delete"),
-            Hint::new("^G", "Goto"),
-            Hint::new("^S", "Rank"),
-        ]);
-        hints
+        }
     }
 
     /// `"2/7 (28%)"` — current page position.
@@ -493,11 +468,11 @@ impl SearchApp {
             ..area
         };
 
-        let layout = if self.view.unique_mode {
-            ColumnLayout::Compact
-        } else {
-            ColumnLayout::from_width(table_area.width)
-        };
+        let layout = ColumnLayout::for_view(
+            table_area.width,
+            self.view.unique_mode,
+            self.filters.show_agents,
+        );
         let command_col_width = layout.command_col_width(table_area.width);
         let selected = self.table_state.selected();
 
@@ -635,7 +610,6 @@ impl SearchApp {
         count
     }
 
-    #[allow(clippy::cast_precision_loss)]
     fn build_entry_row(
         &self,
         entry: &crate::models::Entry,
@@ -645,45 +619,50 @@ impl SearchApp {
     ) -> Row<'static> {
         let t = theme();
 
-        let duration_secs = entry.duration_ms as f64 / 1000.0;
         let ts_ms = crate::util::normalize_display_ms(entry.started_at);
         let time_str = Local.timestamp_millis_opt(ts_ms).single().map_or_else(
             || "??-?? ??:??".into(),
             |dt| dt.format("%m-%d %H:%M").to_string(),
         );
-        let duration_str = format!("{duration_secs:.1}s");
-
-        let session_short: String = entry.session_id.chars().take(8).collect();
-        let session_tag_display = entry.tag_name.as_ref().map_or_else(
-            || session_short.clone(),
-            |tag| format!("{session_short} ({tag})"),
-        );
-        let st_display = if is_selected {
-            fill_text(&session_tag_display, 25)
-        } else {
-            session_tag_display
-        };
 
         let path_display = std::path::Path::new(&entry.cwd)
             .file_name()
             .and_then(|n| n.to_str())
             .map_or_else(|| entry.cwd.clone(), |last| format!("../{last}"));
 
-        let executor_display = format_executor(entry);
-        let cmd_text = build_command_text(self, entry);
-        let command_display = if is_selected {
-            Self::highlight_command(&cmd_text, command_col_width as usize)
+        // A narrow grouped list has no Runs column, so the count rides in
+        // front of the command instead.
+        let prefix = command_prefix(
+            self,
+            entry,
+            self.view.unique_mode && matches!(layout, ColumnLayout::Compact),
+        );
+        let prefix = if prefix.is_empty() {
+            Vec::new()
         } else {
-            Self::highlight_command(&cmd_text, 0)
+            vec![Span::styled(prefix, Style::default().fg(t.text_secondary))]
         };
-
-        let cmd_height = u16::try_from(command_display.lines.len())
+        // Show why the row matched — only when the query searched the
+        // command text, not a directory, session or executor.
+        let mask = if self.view.search_field == crate::models::SearchField::Command {
+            match_mask(&entry.command, &self.query, self.recall.match_mode)
+        } else {
+            Vec::new()
+        };
+        let command_display = command_text(
+            prefix,
+            &entry.command,
+            if is_selected {
+                command_col_width as usize
+            } else {
+                0
+            },
+            &mask,
+            &CommandStyle::from_theme(t),
+        );
+        let height = u16::try_from(command_display.lines.len())
             .unwrap_or(1)
             .max(1);
-        let st_height = u16::try_from(st_display.lines().count())
-            .unwrap_or(1)
-            .max(1);
-        let height = cmd_height.max(st_height);
 
         let is_local = self.view.context_boost
             && self
@@ -695,40 +674,53 @@ impl SearchApp {
         let styles = entry_row_styles(t, is_selected, is_local);
         let (exit_display, exit_style_item) = format_exit_code(entry, styles.bg);
 
-        match *layout {
-            ColumnLayout::Compact => Row::new(vec![Cell::from(command_display)])
-                .height(height)
-                .style(styles.bg),
-            ColumnLayout::SemiCompact => Row::new(vec![
+        let cells = match *layout {
+            ColumnLayout::Compact => vec![Cell::from(command_display)],
+            ColumnLayout::SemiCompact => vec![
                 Cell::from(time_str).style(styles.time),
                 Cell::from(command_display),
                 Cell::from(exit_display).style(exit_style_item),
-            ])
-            .height(height)
-            .style(styles.bg),
-            ColumnLayout::Full => Row::new(vec![
+            ],
+            ColumnLayout::Full => vec![
                 Cell::from(time_str).style(styles.time),
                 Cell::from(command_display),
-                Cell::from(st_display).style(styles.session),
-                Cell::from(executor_display).style(styles.executor),
                 Cell::from(path_display).style(styles.path),
                 Cell::from(exit_display).style(exit_style_item),
-                Cell::from(duration_str).style(styles.duration),
-            ])
-            .height(height)
-            .style(styles.bg),
-        }
+            ],
+            ColumnLayout::FullWithAgents => vec![
+                Cell::from(time_str).style(styles.time),
+                Cell::from(command_display),
+                Cell::from(format_executor(entry)).style(styles.executor),
+                Cell::from(path_display).style(styles.path),
+                Cell::from(exit_display).style(exit_style_item),
+            ],
+            // The row stands for every matching run of this exact command;
+            // its time is the latest of them.
+            ColumnLayout::Grouped => vec![
+                Cell::from(command_display),
+                Cell::from(relative_age(Local::now().timestamp_millis(), ts_ms)).style(styles.time),
+                Cell::from(format!("{}\u{d7}", self.unique_count(entry))).style(styles.duration),
+            ],
+        };
+        Row::new(cells).height(height).style(styles.bg)
     }
 
+    /// `"Executions 1-50 of 558"`, or `"Commands 1-50 of 139"` when rows are
+    /// grouped by command — the count always says what it counts.
     fn build_table_title(&self) -> String {
+        let noun = if self.view.unique_mode {
+            "Commands"
+        } else {
+            "Executions"
+        };
         let counts = if self.pagination.total_items == 0 {
-            "History (0/0)".to_string()
+            format!("{noun} (none)")
         } else {
             let start_index = (self.pagination.page - 1) * self.pagination.page_size + 1;
             let end_index = start_index + self.entries.len().saturating_sub(1);
             format!(
-                "History ({}-{} / {})",
-                start_index, end_index, self.pagination.total_items
+                "{noun} {start_index}-{end_index} of {}",
+                self.pagination.total_items
             )
         };
         // These rows answer an earlier query; say so until the current one
@@ -799,6 +791,15 @@ impl SearchApp {
         let session_str = entry.session_id.clone();
         let tag_str = entry.tag_name.as_deref().unwrap_or("none").to_string();
 
+        // A grouped row stands for many runs; the details below are its
+        // latest matching one, and say so rather than imply every run went
+        // the same way.
+        let grouped = self.view.unique_mode;
+        let (time_label, exit_label) = if grouped {
+            ("Last run ", "Last exit")
+        } else {
+            ("Time     ", "Exit     ")
+        };
         let mut lines = vec![
             Line::from(vec![Span::styled("Command  ", label_style)]),
             Line::from(vec![Span::styled(
@@ -806,12 +807,23 @@ impl SearchApp {
                 Style::default().fg(t.primary),
             )]),
             Line::from(""),
+        ];
+        if grouped {
+            lines.push(Line::from(vec![
+                Span::styled("Runs     ", label_style),
+                Span::styled(
+                    format!("{} matching", self.unique_count(entry)),
+                    value_style,
+                ),
+            ]));
+        }
+        lines.extend([
             Line::from(vec![
                 Span::styled("Path     ", label_style),
                 Span::styled(entry.cwd.clone(), value_style),
             ]),
             Line::from(vec![
-                Span::styled("Time     ", label_style),
+                Span::styled(time_label, label_style),
                 Span::styled(time_str, value_style),
             ]),
             Line::from(vec![
@@ -819,7 +831,7 @@ impl SearchApp {
                 Span::styled(format!("{duration_secs:.2}s"), value_style),
             ]),
             Line::from(vec![
-                Span::styled("Exit     ", label_style),
+                Span::styled(exit_label, label_style),
                 Span::styled(exit_str, value_style),
             ]),
             Line::from(vec![
@@ -834,7 +846,7 @@ impl SearchApp {
                 Span::styled("Executor ", label_style),
                 Span::styled(executor_str, value_style),
             ]),
-        ];
+        ]);
 
         // Agent prompt (if present)
         if let Some(ctx) = &entry.context {
@@ -1418,10 +1430,6 @@ impl SearchApp {
         f.render_widget(Paragraph::new(left), columns[0]);
         f.render_widget(Paragraph::new(right), columns[1]);
     }
-
-    fn highlight_command(command: &str, width: usize) -> ratatui::text::Text<'static> {
-        crate::util::highlight_command(command, width)
-    }
 }
 
 fn help_section(title: &'static str, t: &crate::theme::Theme) -> Line<'static> {
@@ -1471,7 +1479,7 @@ fn build_help_columns(
         help_row("  ^G        ", "Go to page...", t),
         Line::from(""),
         help_section("\u{2500}\u{2500} Actions \u{2500}\u{2500}", t),
-        help_row("  Enter     ", "Run command", t),
+        help_row("  Enter     ", "Use command (to prompt)", t),
         help_row("  ^Y        ", "Copy to clipboard", t),
         help_row("  ^B        ", "Toggle bookmark", t),
         help_row("  ^N        ", "Add/edit note", t),
@@ -1505,7 +1513,7 @@ fn build_help_columns(
     }
     right.extend([
         help_section("\u{2500}\u{2500} Display \u{2500}\u{2500}", t),
-        help_row("  ^U        ", "Unique/all results", t),
+        help_row("  ^U        ", "Group by command", t),
         help_row("  ^S        ", "Rank smart/recent", t),
         help_row("  Tab       ", "Detail pane", t),
     ]);
@@ -1619,6 +1627,32 @@ mod tests {
     }
 
     #[test]
+    fn test_column_layout_for_view() {
+        // Grouped rows get their own columns, down to a narrow terminal.
+        assert!(matches!(
+            ColumnLayout::for_view(60, true, false),
+            ColumnLayout::Grouped
+        ));
+        assert!(matches!(
+            ColumnLayout::for_view(49, true, false),
+            ColumnLayout::Compact
+        ));
+        // Who ran a command is a column only when agent commands are shown.
+        assert!(matches!(
+            ColumnLayout::for_view(150, false, false),
+            ColumnLayout::Full
+        ));
+        assert!(matches!(
+            ColumnLayout::for_view(150, false, true),
+            ColumnLayout::FullWithAgents
+        ));
+        assert!(matches!(
+            ColumnLayout::for_view(100, false, true),
+            ColumnLayout::SemiCompact
+        ));
+    }
+
+    #[test]
     fn test_column_layout_constraints_compact() {
         let layout = ColumnLayout::Compact;
         let constraints = layout.constraints();
@@ -1629,7 +1663,9 @@ mod tests {
     fn test_column_layout_constraints_full() {
         let layout = ColumnLayout::Full;
         let constraints = layout.constraints();
-        assert_eq!(constraints.len(), 7);
+        assert_eq!(constraints.len(), 4);
+        assert_eq!(ColumnLayout::FullWithAgents.constraints().len(), 5);
+        assert_eq!(ColumnLayout::Grouped.constraints().len(), 3);
     }
 
     #[test]
@@ -1645,8 +1681,8 @@ mod tests {
     fn test_column_layout_header_full() {
         let layout = ColumnLayout::Full;
         let _header = layout.header_row();
-        // Full layout has 7 columns = 7 header cells
-        assert_eq!(layout.constraints().len(), 7);
+        // Full layout has 4 columns = 4 header cells
+        assert_eq!(layout.constraints().len(), 4);
     }
 
     #[test]
@@ -1657,8 +1693,12 @@ mod tests {
         // SemiCompact: table_width - (12 + 6) - 6 = table_width - 24
         assert_eq!(ColumnLayout::SemiCompact.command_col_width(100), 76);
 
-        // Full: table_width - 64 - 6 = table_width - 70
-        assert_eq!(ColumnLayout::Full.command_col_width(150), 80);
+        // Full: table_width - 38 - 6 = table_width - 44
+        assert_eq!(ColumnLayout::Full.command_col_width(150), 106);
+        // With agents: an extra 10-column executor
+        assert_eq!(ColumnLayout::FullWithAgents.command_col_width(150), 96);
+        // Grouped: table_width - 17 - 6
+        assert_eq!(ColumnLayout::Grouped.command_col_width(80), 57);
     }
 
     // --- build_command_text tests ---
@@ -1742,26 +1782,24 @@ mod tests {
     }
 
     #[test]
-    fn test_build_command_text_plain() {
+    fn test_command_prefix_plain() {
         let (app, entry) = make_search_app_for_build_text(false, false, false);
-        let text = build_command_text(&app, &entry);
-        assert_eq!(text, "cargo test");
+        assert_eq!(command_prefix(&app, &entry, false), "");
     }
 
     #[test]
-    fn test_build_command_text_bookmarked() {
+    fn test_command_prefix_bookmarked() {
         let (app, entry) = make_search_app_for_build_text(true, false, false);
-        let text = build_command_text(&app, &entry);
-        assert!(text.contains('★'));
-        assert!(text.contains("cargo test"));
+        assert_eq!(command_prefix(&app, &entry, false), "★ ");
     }
 
     #[test]
-    fn test_build_command_text_unique_mode() {
+    fn test_command_prefix_count_only_when_asked() {
         let (app, entry) = make_search_app_for_build_text(false, true, false);
-        let text = build_command_text(&app, &entry);
-        assert!(text.contains("(5)"));
-        assert!(text.contains("cargo test"));
+        // A narrow grouped list carries the run count in front of the
+        // command; a wide one has a Runs column instead.
+        assert_eq!(command_prefix(&app, &entry, true), "5\u{d7} ");
+        assert_eq!(command_prefix(&app, &entry, false), "");
     }
 
     // --- entry_row_styles tests ---
@@ -1826,7 +1864,7 @@ mod tests {
         };
         let app = super::SearchApp::new(config);
         let title = app.build_table_title();
-        assert_eq!(title, "History (0/0)");
+        assert_eq!(title, "Executions (none)");
     }
 
     #[test]
@@ -1872,138 +1910,27 @@ mod tests {
         };
         let app = super::SearchApp::new(config);
         let title = app.build_table_title();
-        assert_eq!(title, "History (1-50 / 100)");
+        assert_eq!(title, "Executions 1-50 of 100");
     }
 
     // ========================================================================
     // Additional tests
     // ========================================================================
 
-    // --- active_filter_count tests ---
-
-    fn make_search_app_with_filters(
-        after: Option<i64>,
-        before: Option<i64>,
-        tag_id: Option<i64>,
-        exit_code: Option<i32>,
-        executor_type: Option<String>,
-    ) -> super::SearchApp {
-        let config = super::super::SearchConfig {
-            entries: vec![],
-            initial_query: None,
-            total_items: 0,
-            page: 1,
-            page_size: 50,
-            tags: vec![],
-            executors: vec![],
-            unique_counts: std::collections::HashMap::new(),
-            filter_after: after,
-            filter_before: before,
-            filter_tag_id: tag_id,
-            filter_exit_code: exit_code,
-            filter_executor_type: executor_type,
-            show_agents: false,
-            failed_only: false,
-            start_date_input: None,
-            end_date_input: None,
-            tag_filter_input: None,
-            exit_code_input: None,
-            executor_filter_input: None,
-            bookmarked_commands: std::collections::HashSet::new(),
-            filter_cwd: None,
-            noted_entry_ids: std::collections::HashSet::new(),
-            show_risk_in_search: false,
-            vim_enabled: false,
-            view: super::super::ViewOptions {
-                unique_mode: false,
-                context_boost: false,
-                detail_pane_open: false,
-                search_field: crate::models::SearchField::Command,
-                current_cwd: None,
-                length_threshold: 80,
-                human_boost_percent: 33,
-                cwd_boost_percent: 50,
-            },
-            recall: super::super::RecallState::default(),
-        };
-        super::SearchApp::new(config)
-    }
-
-    #[test]
-    fn test_active_filter_count_none() {
-        let app = make_search_app_with_filters(None, None, None, None, None);
-        assert_eq!(app.active_filter_count(), 0);
-    }
-
-    #[test]
-    fn test_active_filter_count_one_after() {
-        let app = make_search_app_with_filters(Some(1_700_000_000), None, None, None, None);
-        assert_eq!(app.active_filter_count(), 1);
-    }
-
-    #[test]
-    fn test_active_filter_count_one_before() {
-        let app = make_search_app_with_filters(None, Some(1_700_000_000), None, None, None);
-        assert_eq!(app.active_filter_count(), 1);
-    }
-
-    #[test]
-    fn test_active_filter_count_one_tag() {
-        let app = make_search_app_with_filters(None, None, Some(1), None, None);
-        assert_eq!(app.active_filter_count(), 1);
-    }
-
-    #[test]
-    fn test_active_filter_count_one_exit_code() {
-        let app = make_search_app_with_filters(None, None, None, Some(0), None);
-        assert_eq!(app.active_filter_count(), 1);
-    }
-
-    #[test]
-    fn test_active_filter_count_one_executor() {
-        let app = make_search_app_with_filters(None, None, None, None, Some("human".to_string()));
-        assert_eq!(app.active_filter_count(), 1);
-    }
-
-    #[test]
-    fn test_active_filter_count_two() {
-        let app = make_search_app_with_filters(Some(1_700_000_000), None, Some(5), None, None);
-        assert_eq!(app.active_filter_count(), 2);
-    }
-
-    #[test]
-    fn test_active_filter_count_all_five() {
-        let app = make_search_app_with_filters(
-            Some(1_700_000_000),
-            Some(1_800_000_000),
-            Some(1),
-            Some(0),
-            Some("agent".to_string()),
-        );
-        assert_eq!(app.active_filter_count(), 5);
-    }
-
     // --- build_command_text with noted entry ---
 
     #[test]
-    fn test_build_command_text_noted() {
+    fn test_command_prefix_noted() {
         let (app, entry) = make_search_app_for_build_text(false, false, true);
-        let text = build_command_text(&app, &entry);
-        // The note prefix is "📝"
-        assert!(text.contains('📝'));
-        assert!(text.contains("cargo test"));
+        assert_eq!(command_prefix(&app, &entry, false), "📝");
     }
 
     // --- build_command_text with all three decorations ---
 
     #[test]
-    fn test_build_command_text_bookmarked_unique_noted() {
+    fn test_command_prefix_bookmarked_unique_noted() {
         let (app, entry) = make_search_app_for_build_text(true, true, true);
-        let text = build_command_text(&app, &entry);
-        assert!(text.contains('📝'));
-        assert!(text.contains('★'));
-        assert!(text.contains("(5)"));
-        assert!(text.contains("cargo test"));
+        assert_eq!(command_prefix(&app, &entry, true), "📝★ 5\u{d7} ");
     }
 
     // --- build_table_title page 2 ---
@@ -2052,7 +1979,7 @@ mod tests {
         let app = super::SearchApp::new(config);
         let title = app.build_table_title();
         // page=2, page_size=50: start_index = (2-1)*50+1 = 51, end_index = 51+50-1 = 100
-        assert_eq!(title, "History (51-100 / 120)");
+        assert_eq!(title, "Executions 51-100 of 120");
     }
 
     // --- build_table_title single item ---
@@ -2101,7 +2028,7 @@ mod tests {
         let app = super::SearchApp::new(config);
         let title = app.build_table_title();
         // page=1, page_size=50, 1 entry: start=1, end=1
-        assert_eq!(title, "History (1-1 / 1)");
+        assert_eq!(title, "Executions 1-1 of 1");
     }
 
     // --- build_table_title exact page boundary ---
@@ -2149,7 +2076,7 @@ mod tests {
         };
         let app = super::SearchApp::new(config);
         let title = app.build_table_title();
-        assert_eq!(title, "History (1-50 / 50)");
+        assert_eq!(title, "Executions 1-50 of 50");
     }
 
     // --- ColumnLayout::from_width boundary values ---
@@ -2423,9 +2350,8 @@ mod tests {
             recall: super::super::RecallState::default(),
         };
         let app = super::SearchApp::new(config);
-        let text = build_command_text(&app, &entry);
-        // Should just be the command, no decorations, and no panic
-        assert_eq!(text, "ls -la");
+        // No decorations, and no panic without an id.
+        assert_eq!(command_prefix(&app, &entry, false), "");
     }
 
     #[test]
@@ -2487,56 +2413,8 @@ mod tests {
             recall: super::super::RecallState::default(),
         };
         let app = super::SearchApp::new(config);
-        let text = build_command_text(&app, &entry);
-        // id=None → unwrap_or(0), unique_counts empty → unwrap_or(&1)
-        // Should show "(1) echo hello"
-        assert!(text.contains("(1)"));
-        assert!(text.contains("echo hello"));
-    }
-
-    // --- fill_text tests ---
-
-    #[test]
-    fn test_fill_text_empty_string() {
-        let result = fill_text("", 40);
-        assert_eq!(result, "");
-    }
-
-    #[test]
-    fn test_fill_text_shorter_than_width() {
-        let result = fill_text("hello world", 40);
-        // Fits in one line, no wrapping
-        assert_eq!(result, "hello world");
-    }
-
-    #[test]
-    fn test_fill_text_needs_wrapping() {
-        let result = fill_text("one two three four five", 10);
-        // Words should wrap at width boundary
-        assert!(result.contains('\n'));
-    }
-
-    #[test]
-    fn test_fill_text_width_zero() {
-        let result = fill_text("hello world", 0);
-        // width=0 returns the text as-is
-        assert_eq!(result, "hello world");
-    }
-
-    #[test]
-    fn test_fill_text_single_long_word() {
-        // A single word longer than width should still appear (no infinite loop)
-        let result = fill_text("superlongword", 5);
-        // The word doesn't split mid-word because split_inclusive(' ') won't break it
-        assert!(result.contains("superlongword"));
-    }
-
-    #[test]
-    fn test_fill_text_exact_width() {
-        // "hello " is 6 chars, "world" is 5 chars; total 11
-        let result = fill_text("hello world", 11);
-        // Should fit in one line
-        assert!(!result.contains('\n'));
+        // id=None → unwrap_or(0), unique_counts empty → a count of 1
+        assert_eq!(command_prefix(&app, &entry, true), "1\u{d7} ");
     }
 
     // --- command_col_width with narrow widths (saturating_sub) ---
@@ -2562,21 +2440,21 @@ mod tests {
 
     #[test]
     fn test_command_col_width_full_narrow() {
-        // Full: table_width.saturating_sub(64 + 6) = saturating_sub(70)
-        // width=50 → 0
-        assert_eq!(ColumnLayout::Full.command_col_width(50), 0);
+        // Full: table_width.saturating_sub(38 + 6) = saturating_sub(44)
+        // width=30 → 0
+        assert_eq!(ColumnLayout::Full.command_col_width(30), 0);
     }
 
     #[test]
     fn test_command_col_width_full_exact() {
-        // Full: 70 - 70 = 0
-        assert_eq!(ColumnLayout::Full.command_col_width(70), 0);
+        // Full: 44 - 44 = 0
+        assert_eq!(ColumnLayout::Full.command_col_width(44), 0);
     }
 
     #[test]
     fn test_command_col_width_full_one_over() {
-        // Full: 71 - 70 = 1
-        assert_eq!(ColumnLayout::Full.command_col_width(71), 1);
+        // Full: 45 - 44 = 1
+        assert_eq!(ColumnLayout::Full.command_col_width(45), 1);
     }
 
     // --- SemiCompact header row ---

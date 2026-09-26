@@ -15,12 +15,15 @@ use ratatui::{
 
 /// Describes the column layout mode based on terminal width.
 pub(super) enum ColumnLayout {
-    Compact,     // < 80 cols: command only
-    SemiCompact, // 80-129 cols: time + command + status
-    Full,        // 130+ cols: all columns
+    Compact,        // < 80 cols: command only
+    SemiCompact,    // 80-129 cols: time + command + status
+    Full,           // 130+ cols: time + command + path + status
+    FullWithAgents, // as Full, plus who ran it, when agent commands are shown
+    Grouped,        // grouped by command: command + last used + runs
 }
 
 impl ColumnLayout {
+    /// The executions layout for a table `width` columns wide.
     pub const fn from_width(width: u16) -> Self {
         if width < 80 {
             Self::Compact
@@ -31,13 +34,35 @@ impl ColumnLayout {
         }
     }
 
+    /// The layout for the current view. Grouped rows are one command each,
+    /// so their columns describe the group: when it last ran and how often.
+    /// An executor column only earns its width when agent commands are in
+    /// the list; with them hidden every row would say the same thing.
+    pub const fn for_view(width: u16, grouped: bool, agents_shown: bool) -> Self {
+        if grouped {
+            if width < 50 {
+                Self::Compact
+            } else {
+                Self::Grouped
+            }
+        } else {
+            match Self::from_width(width) {
+                Self::Full if agents_shown => Self::FullWithAgents,
+                layout => layout,
+            }
+        }
+    }
+
     pub const fn command_col_width(&self, table_width: u16) -> u16 {
-        const FULL_FIXED: u16 = 12 + 16 + 10 + 12 + 6 + 8; // 64
+        const FULL_FIXED: u16 = 12 + 20 + 6; // Time + Path + Status
         const SEMI_FIXED: u16 = 12 + 6; // Time + Status
+        const GROUPED_FIXED: u16 = 11 + 6; // Last used + Runs
         match self {
             Self::Compact => table_width.saturating_sub(6),
             Self::SemiCompact => table_width.saturating_sub(SEMI_FIXED + 6),
             Self::Full => table_width.saturating_sub(FULL_FIXED + 6),
+            Self::FullWithAgents => table_width.saturating_sub(FULL_FIXED + 10 + 6),
+            Self::Grouped => table_width.saturating_sub(GROUPED_FIXED + 6),
         }
     }
 
@@ -52,33 +77,33 @@ impl ColumnLayout {
             Self::Full => vec![
                 Constraint::Length(12),
                 Constraint::Min(10),
-                Constraint::Length(16),
-                Constraint::Length(10),
-                Constraint::Length(12),
+                Constraint::Length(20),
                 Constraint::Length(6),
-                Constraint::Length(8),
+            ],
+            Self::FullWithAgents => vec![
+                Constraint::Length(12),
+                Constraint::Min(10),
+                Constraint::Length(10),
+                Constraint::Length(20),
+                Constraint::Length(6),
+            ],
+            Self::Grouped => vec![
+                Constraint::Min(10),
+                Constraint::Length(11),
+                Constraint::Length(6),
             ],
         }
     }
 
     pub fn header_row(&self) -> Row<'static> {
-        match self {
-            Self::Compact => Row::new(vec!["Command".to_string()]),
-            Self::SemiCompact => Row::new(vec![
-                "Time".to_string(),
-                "Command".to_string(),
-                "Status".to_string(),
-            ]),
-            Self::Full => Row::new(vec![
-                "Time".to_string(),
-                "Command".to_string(),
-                "Session/Tag".to_string(),
-                "Executor".to_string(),
-                "Path".to_string(),
-                "Status".to_string(),
-                "Duration".to_string(),
-            ]),
-        }
+        let cells: &[&str] = match self {
+            Self::Compact => &["Command"],
+            Self::SemiCompact => &["Time", "Command", "Status"],
+            Self::Full => &["Time", "Command", "Path", "Status"],
+            Self::FullWithAgents => &["Time", "Command", "Ran by", "Path", "Status"],
+            Self::Grouped => &["Command", "Last used", "Runs"],
+        };
+        Row::new(cells.iter().map(|c| (*c).to_string()))
     }
 }
 
@@ -88,7 +113,6 @@ impl ColumnLayout {
 pub(super) struct EntryRowStyles {
     pub bg: Style,
     pub time: Style,
-    pub session: Style,
     pub executor: Style,
     pub path: Style,
     pub duration: Style,
@@ -104,7 +128,6 @@ pub(super) fn entry_row_styles(
         EntryRowStyles {
             bg: sel,
             time: sel.fg(t.selection_fg).add_modifier(Modifier::BOLD),
-            session: sel.fg(t.primary_dim).add_modifier(Modifier::BOLD),
             executor: sel.fg(t.badge_executor).add_modifier(Modifier::BOLD),
             path: if is_local {
                 sel.fg(t.badge_path).add_modifier(Modifier::BOLD)
@@ -118,7 +141,6 @@ pub(super) fn entry_row_styles(
         EntryRowStyles {
             bg: base,
             time: base.fg(t.text_muted),
-            session: base.fg(t.primary_dim),
             executor: base.fg(t.badge_executor),
             path: if is_local {
                 base.fg(t.badge_path)
@@ -163,31 +185,30 @@ pub(super) fn format_exit_code(entry: &crate::models::Entry, bg_style: Style) ->
     (display, style)
 }
 
-pub(super) fn build_command_text(app: &super::SearchApp, entry: &crate::models::Entry) -> String {
-    let count_display = if app.view.unique_mode {
-        format!(
-            "({}) ",
-            app.unique_counts.get(&entry.id.unwrap_or(0)).unwrap_or(&1)
-        )
+/// The markers drawn before a command: a note, a bookmark and — when the
+/// grouped view is too narrow for its Runs column — how many times the
+/// command ran (`26\u{d7} `).
+pub(super) fn command_prefix(
+    app: &super::SearchApp,
+    entry: &crate::models::Entry,
+    with_count: bool,
+) -> String {
+    let note = if entry.id.is_some_and(|id| app.noted_entry_ids.contains(&id)) {
+        "\u{1f4dd}"
+    } else {
+        ""
+    };
+    let bookmark = if app.bookmarked_commands.contains(&entry.command) {
+        "\u{2605} "
+    } else {
+        ""
+    };
+    let count = if with_count {
+        format!("{}\u{d7} ", app.unique_count(entry))
     } else {
         String::new()
     };
-
-    let bookmark_prefix = if app.bookmarked_commands.contains(&entry.command) {
-        "★ "
-    } else {
-        ""
-    };
-    let note_prefix = if entry.id.is_some_and(|id| app.noted_entry_ids.contains(&id)) {
-        "📝"
-    } else {
-        ""
-    };
-
-    format!(
-        "{}{}{}{}",
-        note_prefix, bookmark_prefix, count_display, entry.command
-    )
+    format!("{note}{bookmark}{count}")
 }
 
 // ── Footer hint layout (PROD-03) ───────────────────────────────

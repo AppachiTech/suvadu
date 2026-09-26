@@ -461,29 +461,6 @@ fn test_fuzzy_score_high_boost() {
 }
 
 #[test]
-fn test_active_filter_count() {
-    let entries = vec![create_test_entry("test")];
-    let mut app = SearchApp::new(test_search_config(entries, 1));
-
-    assert_eq!(app.active_filter_count(), 0);
-
-    app.filters.exit_code = Some(0);
-    assert_eq!(app.active_filter_count(), 1);
-
-    app.filters.after = Some(1000);
-    assert_eq!(app.active_filter_count(), 2);
-
-    app.filters.before = Some(2000);
-    assert_eq!(app.active_filter_count(), 3);
-
-    app.filters.tag_id = Some(1);
-    assert_eq!(app.active_filter_count(), 4);
-
-    app.filters.executor_type = Some("human".to_string());
-    assert_eq!(app.active_filter_count(), 5);
-}
-
-#[test]
 fn test_get_selected_entry() {
     let entries = vec![create_test_entry("first"), create_test_entry("second")];
     let mut app = SearchApp::new(test_search_config(entries, 2));
@@ -1358,7 +1335,10 @@ fn ctrl_r_resets_every_narrowing_to_all_history_in_one_action() {
     assert!(app.filters.cwd.is_none());
     assert!(!app.filters.failed_only);
     assert!(!app.filters.bookmarks_only);
-    assert_eq!(app.active_filter_count(), 0);
+    assert!(app.filters.after.is_none() && app.filters.before.is_none());
+    assert!(app.filters.tag_id.is_none());
+    assert!(app.filters.exit_code.is_none());
+    assert!(app.filters.executor_type.is_none());
 }
 
 #[test]
@@ -3689,7 +3669,7 @@ const FOOTER_KEY_TOKENS: &[&str] = &[
 
 /// Every hint label word the search footer is allowed to render.
 const FOOTER_LABEL_TOKENS: &[&str] = &[
-    "Quit", "Run", "Nav", "Filter", "Detail", "Help", "Copy", "Bookmark", "Unique", "Agents",
+    "Quit", "Use", "Nav", "Filter", "Detail", "Help", "Copy", "Bookmark", "Group", "Agents",
     "Scope", "Failed", "Marked", "Note", "Tag", "Delete", "Goto", "Scroll", "Search", "Normal",
     // PROD-09: "Mode" (^X) and "Scope" (^P) choose what matches; "Rank" (^S,
     // renamed from "Match") and the rest only reorder it.
@@ -3750,7 +3730,7 @@ fn assert_no_partial_hint(footer: &str, ctx: &str) {
 }
 
 fn assert_essential_hints(footer: &str, ctx: &str) {
-    for expected in ["Esc", "Quit", "Run", "Nav", "Filter", "Detail", "Help"] {
+    for expected in ["Esc", "Quit", "Use", "Nav", "Filter", "Detail", "Help"] {
         assert!(
             footer.contains(expected),
             "{ctx}: essential hint {expected:?} missing from footer {footer:?}"
@@ -3831,7 +3811,10 @@ fn prod03_status_area_reports_agent_visibility_and_scope() {
     let screen = lines.join("\n");
     assert!(screen.contains("Shown"), "agents shown state:\n{screen}");
     assert!(screen.contains("This dir"), "cwd scope state:\n{screen}");
-    assert!(screen.contains("Unique"), "unique mode state:\n{screen}");
+    assert!(
+        screen.contains("Commands 1-3 of 3"),
+        "grouped state, named with its count:\n{screen}"
+    );
 
     app.filters.show_agents = false;
     app.set_scope(RecallScope::All);
@@ -3846,16 +3829,33 @@ fn prod03_status_area_reports_agent_visibility_and_scope() {
 }
 
 #[test]
-fn prod03_very_wide_terminal_shows_secondary_hints() {
+fn a_very_wide_terminal_keeps_the_footer_to_core_actions() {
     let mut app = render_app();
     let lines = render_lines(&mut app, 300, 40);
     let footer = footer_text(&lines);
     assert_no_partial_hint(&footer, "300x40");
     assert_essential_hints(&footer, "300x40");
-    for expected in ["Copy", "Bookmark", "Note", "Tag", "Delete", "Goto"] {
+    for expected in ["Mode", "Scope", "Group"] {
         assert!(
             footer.contains(expected),
-            "300x40: secondary hint {expected:?} missing from {footer:?}"
+            "300x40: core hint {expected:?} missing from {footer:?}"
+        );
+    }
+    // Width is no reason to list every capability; the rest is behind `?`.
+    for secondary in [
+        "Copy", "Bookmark", "Note", "Tag", "Delete", "Goto", "Agents",
+    ] {
+        assert!(
+            !footer.contains(secondary),
+            "300x40: secondary hint {secondary:?} belongs in help, not {footer:?}"
+        );
+    }
+    app.dialog = DialogState::Help;
+    let help = render_lines(&mut app, 300, 40).join("\n");
+    for secondary in ["Copy", "bookmark", "note", "Tag", "Delete", "Go to page"] {
+        assert!(
+            help.contains(secondary),
+            "help lacks {secondary:?}:\n{help}"
         );
     }
 }
@@ -3976,7 +3976,7 @@ fn prod03_detail_pane_moves_below_results_when_side_by_side_would_clip() {
             .position(|l| l.contains("Detail"))
             .unwrap_or_else(|| panic!("{w}x{h}: detail pane must still be reachable:\n{screen}"));
         assert!(
-            !lines[detail_row].contains("History"),
+            !lines[detail_row].contains("Executions"),
             "{w}x{h}: detail pane must move below the results instead of squeezing them, row was {:?}",
             lines[detail_row]
         );
@@ -3995,7 +3995,7 @@ fn prod03_detail_pane_stays_beside_results_on_wide_terminals() {
         .position(|l| l.contains("Detail"))
         .expect("detail pane rendered");
     assert!(
-        lines[detail_row].contains("History"),
+        lines[detail_row].contains("Executions"),
         "160x40: detail pane should sit beside the results table, row was {:?}",
         lines[detail_row]
     );
@@ -4108,11 +4108,11 @@ fn prod03_footer_snapshot_at_80x24() {
     // the ranking segment to `Rank` so `Match` can mean the matching mode.
     assert_eq!(
         footer_text(&lines),
-        " Esc  Quit   \u{21b5}  Run   \u{2191}\u{2193}  Nav   ^F  Filter   Tab  Detail   ^X  Mode   ?  Help   "
+        " Esc  Quit   \u{21b5}  Use   \u{2191}\u{2193}  Nav   ^F  Filter   Tab  Detail   ^X  Mode   ?  Help   "
     );
     assert_eq!(
         lines[4],
-        " Scope  All history   Match  terms   Rank  Smart   Agents  Hidden   Show  All   "
+        " Scope  All history   Match  terms   Rank  Smart   Agents  Hidden               "
     );
 }
 
@@ -4122,7 +4122,7 @@ fn prod03_footer_snapshot_at_100x30() {
     let lines = render_lines(&mut app, 100, 30);
     assert_eq!(
         footer_text(&lines),
-        " Esc  Quit   \u{21b5}  Run   \u{2191}\u{2193}  Nav   ^F  Filter   Tab  Detail   ^X  Mode   ^P  Scope   ?  Help           "
+        " Esc  Quit   \u{21b5}  Use   \u{2191}\u{2193}  Nav   ^F  Filter   Tab  Detail   ^X  Mode   ^P  Scope   ?  Help           "
     );
 }
 
@@ -4378,7 +4378,7 @@ fn results_still_waiting_on_their_query_say_so() {
     let title = |app: &mut SearchApp| {
         render_lines(app, 100, 30)
             .into_iter()
-            .find(|l| l.contains("History ("))
+            .find(|l| l.contains("Executions "))
             .unwrap()
     };
     assert!(!title(&mut app).contains("searching"));
@@ -4393,7 +4393,7 @@ fn results_still_waiting_on_their_query_say_so() {
     // The results panel: from its title down to its bottom border.
     let panel: Vec<&String> = lines
         .iter()
-        .skip_while(|l| !l.contains("History ("))
+        .skip_while(|l| !l.contains("Executions ("))
         .take_while(|l| !l.starts_with('\u{2570}'))
         .collect();
     assert!(

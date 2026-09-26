@@ -4,6 +4,7 @@ pub mod matching;
 pub mod scope;
 pub use matching::MatchMode;
 pub use scope::{RecallContext, RecallScope};
+mod highlight;
 mod input;
 mod render;
 mod worker;
@@ -565,28 +566,6 @@ impl SearchApp {
         }
         Ok(())
     }
-}
-
-// Simple text wrapping helper
-fn fill_text(text: &str, width: usize) -> String {
-    if width == 0 {
-        return text.to_string();
-    }
-    let mut result = String::new();
-    let mut current_line_len = 0;
-
-    for word in text.split_inclusive(' ') {
-        let word_len = word.chars().count();
-        if current_line_len + word_len > width {
-            if !result.is_empty() {
-                result.push('\n');
-            }
-            current_line_len = 0;
-        }
-        result.push_str(word);
-        current_line_len += word_len;
-    }
-    result
 }
 
 use crate::util::centered_rect;
