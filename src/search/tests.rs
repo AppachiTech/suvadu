@@ -4156,6 +4156,7 @@ fn prod03_help_overlay_fits_an_80x24_terminal() {
         "Bookmarked only",
         "Rank smart/recent",
         "Go to page...",
+        "Raw (escaped) form",
         "Press any key to close",
     ] {
         assert!(
@@ -4798,4 +4799,46 @@ fn a_kept_selection_that_is_gone_is_reported_not_swapped() {
     assert_eq!(app.table_state.selected(), Some(0));
     let (message, _) = app.status_message.clone().expect("the miss is reported");
     assert!(message.contains("zz-select deleted"), "{message}");
+}
+
+#[test]
+fn ctrl_v_shows_the_raw_form_of_any_command_on_request() {
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("git status")], 1));
+    app.view.detail_pane_open = true;
+    app.table_state.select(Some(0));
+    let screen = |app: &mut SearchApp| render_lines(app, 160, 30).join("\n");
+    assert!(
+        !screen(&mut app).contains("Raw "),
+        "ordinary commands stay clean"
+    );
+
+    app.handle_input(ctrl_key('v'));
+    assert!(
+        screen(&mut app).contains("\"git status\""),
+        "{}",
+        screen(&mut app)
+    );
+    app.handle_input(ctrl_key('v'));
+    // (The status line says "Raw form hidden"; the escaped form is gone.)
+    assert!(!screen(&mut app).contains("\"git status\""));
+}
+
+#[test]
+fn every_detail_label_is_separated_from_its_value() {
+    let mut app = render_app();
+    app.view.unique_mode = true;
+    app.view.detail_pane_open = true;
+    app.show_raw = true;
+    app.table_state.select(Some(0));
+    let entry = app.get_selected_entry().unwrap().clone();
+    for line in app.build_detail_lines(&entry) {
+        if line.spans.len() < 2 {
+            continue;
+        }
+        let label = line.spans[0].content.as_ref();
+        assert!(
+            label.ends_with(' ') && !label.trim().is_empty(),
+            "label {label:?} runs into its value"
+        );
+    }
 }

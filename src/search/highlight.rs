@@ -413,19 +413,52 @@ fn edge_markers(run: &[Grapheme<'_>], style: &CommandStyle) -> Piece {
     }
 }
 
-/// The command written out with every character that does not display as
-/// itself escaped — `\t`, `\n`, `\r`, `\u{a0}` — inside quotes that show
-/// where it starts and ends. `None` when the command already displays
-/// exactly as stored: printable text, single-line, no edge whitespace.
-pub(super) fn raw_form(command: &str) -> Option<String> {
+/// Characters that draw as nothing at all: zero-width spaces, direction
+/// marks and overrides, the byte-order mark, soft hyphens and the like. Two
+/// commands differing only by one of these look identical.
+const fn is_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{ad}'
+            | '\u{34f}'
+            | '\u{61c}'
+            | '\u{115f}'..='\u{1160}'
+            | '\u{17b4}'..='\u{17b5}'
+            | '\u{180b}'..='\u{180f}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{3164}'
+            | '\u{fe00}'..='\u{fe0f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{e0000}'..='\u{e007f}'
+    )
+}
+
+/// Invisible characters that are part of how text is normally written —
+/// joiners inside emoji and scripts, emoji variation selectors, the tag
+/// characters of flag sequences — and so no reason on their own to offer a
+/// raw form. The explicit escaped view still spells them out.
+const fn is_ordinary_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200c}' | '\u{200d}' | '\u{fe00}'..='\u{fe0f}' | '\u{e0020}'..='\u{e007f}'
+    )
+}
+
+/// Whether `c` has to be escaped to be seen: anything that is not drawn as
+/// itself.
+fn needs_escape(c: char) -> bool {
+    c.is_control() || (c.is_whitespace() && c != ' ') || is_invisible(c)
+}
+
+/// The command in quotes, with every character that does not display as
+/// itself escaped — `\t`, `\n`, `\r`, and `\u{…}` for other control,
+/// whitespace and invisible characters — so the exact text can be read,
+/// including where it starts and ends.
+pub(super) fn escaped_form(command: &str) -> String {
     use std::fmt::Write as _;
-    let edges = command.starts_with(char::is_whitespace) || command.ends_with(char::is_whitespace);
-    let hidden = command
-        .chars()
-        .any(|c| c.is_control() || (c.is_whitespace() && c != ' '));
-    if !edges && !hidden {
-        return None;
-    }
     let mut out = String::from("\"");
     for c in command.chars() {
         match c {
@@ -434,14 +467,25 @@ pub(super) fn raw_form(command: &str) -> Option<String> {
             '\r' => out.push_str("\\r"),
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
-            c if c.is_control() || (c.is_whitespace() && c != ' ') => {
+            c if needs_escape(c) => {
                 let _ = write!(out, "\\u{{{:x}}}", u32::from(c));
             }
             c => out.push(c),
         }
     }
     out.push('"');
-    Some(out)
+    out
+}
+
+/// [`escaped_form`], when the command does not already display exactly as
+/// stored: edge whitespace, or anything that has to be escaped to be seen
+/// other than the joiners and selectors ordinary emoji and scripts use.
+pub(super) fn raw_form(command: &str) -> Option<String> {
+    let edges = command.starts_with(char::is_whitespace) || command.ends_with(char::is_whitespace);
+    let hidden = command
+        .chars()
+        .any(|c| needs_escape(c) && !is_ordinary_invisible(c));
+    (edges || hidden).then(|| escaped_form(command))
 }
 
 /// Lay pieces out on lines no wider than `width`. A word that would
@@ -722,6 +766,30 @@ mod tests {
             draw(&twelve),
             vec!["ls\u{b7}\u{b7}\u{b7}\u{b7}\u{b7}\u{b7}\u{b7}\u{b7}+4"]
         );
+    }
+
+    #[test]
+    fn invisible_format_characters_are_exposed_in_the_raw_form() {
+        // Zero-width space, a bidi override, a byte-order mark, a soft hyphen.
+        for (command, escape) in [
+            ("echo a\u{200b}b", "\\u{200b}"),
+            ("echo \u{202e}txt.exe", "\\u{202e}"),
+            ("\u{feff}ls", "\\u{feff}"),
+            ("echo co\u{ad}op", "\\u{ad}"),
+        ] {
+            let raw = raw_form(command).unwrap_or_else(|| panic!("{command:?} looks plain"));
+            assert!(raw.contains(escape), "{command:?} gave {raw}");
+        }
+        // Joiners and variation selectors are part of how emoji and some
+        // scripts are written: not a reason on their own for a raw form...
+        assert_eq!(
+            raw_form("echo \u{1f469}\u{200d}\u{1f4bb} \u{2764}\u{fe0f}"),
+            None
+        );
+        // ...but the explicit escaped view spells out every one of them.
+        let escaped = escaped_form("echo \u{1f469}\u{200d}\u{1f4bb}");
+        assert!(escaped.contains("\\u{200d}"), "{escaped}");
+        assert_eq!(escaped_form("git status"), "\"git status\"");
     }
 
     #[test]

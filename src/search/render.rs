@@ -18,12 +18,18 @@ use super::format::{
     format_executor, format_exit_code, no_results_lines, ColumnLayout, DetailPlacement, Hint,
     NoResults, StatusSegment, DETAIL_BOTTOM_HEIGHT, SELECTION_SYMBOL,
 };
-use super::highlight::{command_text, match_mask, raw_form, relative_age, CommandStyle, Fit};
+use super::highlight::{
+    command_text, escaped_form, match_mask, raw_form, relative_age, CommandStyle, Fit,
+};
 use super::{centered_rect, DialogState, RecallScope, SearchApp};
 
 /// Cells reserved for the `"+N"` marker that stands in for status-row filter
 /// badges which do not fit.
 const MORE_FILTERS_WIDTH: usize = 5;
+
+/// Width of a detail-pane label column: the longest label (`Last path`,
+/// `Last exit`) plus a space.
+const DETAIL_LABEL_WIDTH: usize = 10;
 
 /// Push one footer hint (`" ^F "` + `" Filter  "`) onto `spans`.
 fn push_hint(spans: &mut Vec<Span<'static>>, hint: Hint, key: Style, label: Style) {
@@ -797,7 +803,7 @@ impl SearchApp {
     }
 
     #[allow(clippy::cast_precision_loss)]
-    fn build_detail_lines(&self, entry: &crate::models::Entry) -> Vec<Line<'static>> {
+    pub(super) fn build_detail_lines(&self, entry: &crate::models::Entry) -> Vec<Line<'static>> {
         let t = theme();
         let label_style = Style::default()
             .fg(t.text_secondary)
@@ -832,13 +838,15 @@ impl SearchApp {
         // the same way.
         let grouped = self.view.unique_mode;
         let (path_label, exit_label, time_label) = if grouped {
-            ("Last path", "Last exit", "Last run ")
+            ("Last path", "Last exit", "Last run")
         } else {
-            ("Path     ", "Exit     ", "Time     ")
+            ("Path", "Exit", "Time")
         };
-        let field = |label: &'static str, value: String| {
+        // Labels are padded to one width with at least one space after the
+        // longest, so no label ever runs into its value.
+        let field = |label: &str, value: String| {
             Line::from(vec![
-                Span::styled(label, label_style),
+                Span::styled(format!("{label:<DETAIL_LABEL_WIDTH$}"), label_style),
                 Span::styled(value, value_style),
             ])
         };
@@ -851,8 +859,13 @@ impl SearchApp {
         ];
         // Tabs, line breaks and edge spaces cannot be read off the text
         // above; spell them out rather than leave two commands looking alike.
-        if let Some(raw) = raw_form(&entry.command) {
-            lines.push(field("Raw      ", raw));
+        let raw = if self.show_raw {
+            Some(escaped_form(&entry.command))
+        } else {
+            raw_form(&entry.command)
+        };
+        if let Some(raw) = raw {
+            lines.push(field("Raw", raw));
         }
         // Where it ran and how it ended lead: below the results the pane
         // shows only a few rows, and those two decide whether to reuse it.
@@ -861,15 +874,15 @@ impl SearchApp {
         lines.push(field(time_label, time_str));
         if grouped {
             lines.push(field(
-                "Runs     ",
+                "Runs",
                 format!("{} matching", self.unique_count(entry)),
             ));
         }
         lines.extend([
-            field("Duration ", format!("{duration_secs:.2}s")),
-            field("Session  ", session_str),
-            field("Tag      ", tag_str),
-            field("Executor ", executor_str),
+            field("Duration", format!("{duration_secs:.2}s")),
+            field("Session", session_str),
+            field("Tag", tag_str),
+            field("Executor", executor_str),
         ]);
 
         // Agent prompt (if present)
@@ -921,7 +934,7 @@ impl SearchApp {
                     .map_or(String::new(), |a| format!(" ({})", a.category))
             );
             lines.push(Line::from(vec![
-                Span::styled("Risk     ", label_style),
+                Span::styled(format!("{:<DETAIL_LABEL_WIDTH$}", "Risk"), label_style),
                 Span::styled(risk_text, Style::default().fg(risk_color)),
             ]));
         }
@@ -1509,7 +1522,7 @@ fn build_help_columns(
         help_row("  ^N        ", "Add/edit note", t),
         help_row("  ^D        ", "Delete entry", t),
         help_row("  ^T        ", "Tag session", t),
-        help_row("  Paste     ", "Paste into query", t),
+        help_row("  ^V        ", "Raw (escaped) form", t),
     ]);
     // `?/F1` moves here so the right column has room for the recall
     // controls; both columns must still fit 18 rows at 80x24.

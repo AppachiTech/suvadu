@@ -354,6 +354,18 @@ impl SearchApp {
                 self.dialog = DialogState::Filter;
                 self.filters.focus_index = 0;
             }
+            KeyCode::Char('v') => {
+                // Verbatim: the exact text, escapes and all, for any command.
+                self.show_raw = !self.show_raw;
+                self.status_message = Some((
+                    if self.show_raw {
+                        "Raw form shown in detail".into()
+                    } else {
+                        "Raw form hidden".into()
+                    },
+                    std::time::Instant::now(),
+                ));
+            }
             KeyCode::Char('y') => {
                 if let Some(cmd) = self.get_selected_command() {
                     return Some(SearchAction::Copy(cmd));
