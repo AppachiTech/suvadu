@@ -252,7 +252,11 @@ pub fn handle_uninstall() -> Result<(), Box<dyn std::error::Error>> {
         .map(|h| std::path::PathBuf::from(h).join(".cargo/bin/suv"))
         .is_some_and(|p| p.exists());
 
-    if !is_homebrew && !is_cargo {
+    let script_install = std::env::current_exe()
+        .ok()
+        .and_then(|exe| script_install_at(&exe));
+
+    if !is_homebrew && !is_cargo && script_install.is_none() {
         detect_fallback_binary();
         return Ok(());
     }
@@ -264,6 +268,9 @@ pub fn handle_uninstall() -> Result<(), Box<dyn std::error::Error>> {
     }
     if is_cargo {
         println!("  • Cargo (~/.cargo/bin/suv)");
+    }
+    if let Some(bin) = &script_install {
+        println!("  • Install script ({})", bin.display());
     }
     println!();
     if !crate::util::stdin_is_terminal() {
@@ -287,6 +294,10 @@ pub fn handle_uninstall() -> Result<(), Box<dyn std::error::Error>> {
 
     if is_cargo {
         all_ok &= uninstall_cargo();
+    }
+
+    if let Some(bin) = &script_install {
+        all_ok &= uninstall_script_install(bin);
     }
 
     cleanup_integrations();
@@ -335,7 +346,72 @@ fn uninstall_data_paths() -> Vec<String> {
     )
 }
 
-/// Detect a `suv` binary via `which` when neither Homebrew nor Cargo installs are found.
+/// The binary the install script put in place, if `exe` is one.
+///
+/// The script always links `suvadu` to `suv` in the same directory, and
+/// nothing else does: a Homebrew or Cargo binary is recognised by its path
+/// first, and a development build has no such link. This decides what
+/// `suv uninstall` deletes, so anything short of that layout is `None`.
+fn script_install_at(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let exe = exe.canonicalize().ok()?;
+    let shown = exe.to_string_lossy();
+    if crate::update::is_homebrew_path(&shown) || crate::update::is_cargo_path(&shown) {
+        return None;
+    }
+    let link = exe.parent()?.join("suvadu");
+    let is_link = std::fs::symlink_metadata(&link)
+        .ok()?
+        .file_type()
+        .is_symlink();
+    (is_link && link.canonicalize().ok()? == exe).then_some(exe)
+}
+
+/// Delete a script install's `suv` and the `suvadu` link beside it, and
+/// nothing else. Files already gone are not an error.
+fn remove_script_install_files(bin: &std::path::Path) -> std::io::Result<()> {
+    for path in [bin.with_file_name("suvadu"), bin.to_path_buf()] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Remove a script install. Tries as the current user first and uses sudo
+/// only when the directory is not writable — the install script's own rule.
+/// Returns `true` on success.
+fn uninstall_script_install(bin: &std::path::Path) -> bool {
+    print!("Removing {}... ", bin.display());
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    if remove_script_install_files(bin).is_ok() {
+        println!("✓");
+        return true;
+    }
+    println!("needs sudo");
+    let link = bin.with_file_name("suvadu");
+    let removed = std::process::Command::new("sudo")
+        .arg("rm")
+        .arg("-f")
+        .arg(&link)
+        .arg(bin)
+        .status()
+        .is_ok_and(|s| s.success());
+    if removed {
+        println!("  ✓ removed with sudo");
+    } else {
+        eprintln!(
+            "  Failed. Run manually: sudo rm -f {} {}",
+            link.display(),
+            bin.display()
+        );
+    }
+    removed
+}
+
+/// Detect a `suv` binary via `which` when no Homebrew, Cargo or install-script
+/// install is found.
 fn detect_fallback_binary() {
     let which_path = std::process::Command::new("which")
         .arg("suv")
@@ -569,6 +645,80 @@ mod tests {
         ))
         .join("\n");
         assert!(lines.contains("not proof"), "{lines}");
+    }
+
+    /// A directory laid out the way the install script leaves it.
+    #[cfg(unix)]
+    fn script_layout(dir: &std::path::Path) -> std::path::PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let bin = dir.join("suv");
+        std::fs::write(&bin, "binary").unwrap();
+        std::os::unix::fs::symlink(&bin, dir.join("suvadu")).unwrap();
+        bin.canonicalize().unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_script_install_is_recognised_by_its_suvadu_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = script_layout(&tmp.path().join("bin"));
+
+        assert_eq!(script_install_at(&bin), Some(bin.clone()));
+        // Run as `suvadu`, it still names the real binary to remove.
+        assert_eq!(
+            script_install_at(&tmp.path().join("bin").join("suvadu")),
+            Some(bin)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_binary_without_the_install_scripts_link_is_not_a_script_install() {
+        // A development build, or a copy placed by hand: nothing to delete.
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("suv");
+        std::fs::write(&bin, "binary").unwrap();
+        assert_eq!(script_install_at(&bin), None);
+
+        // A `suvadu` link that points somewhere else does not vouch for it.
+        let other = tmp.path().join("other");
+        std::fs::write(&other, "other").unwrap();
+        std::os::unix::fs::symlink(&other, tmp.path().join("suvadu")).unwrap();
+        assert_eq!(script_install_at(&bin), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_manager_paths_are_never_treated_as_script_installs() {
+        let tmp = tempfile::tempdir().unwrap();
+        for dir in [".cargo/bin", "Cellar/suvadu/0.4.2/bin", "homebrew/bin"] {
+            let bin = script_layout(&tmp.path().join(dir));
+            assert_eq!(
+                script_install_at(&bin),
+                None,
+                "{dir} belongs to a package manager"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_script_install_deletes_only_suv_and_its_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = script_layout(tmp.path());
+        let neighbour = tmp.path().join("other-tool");
+        std::fs::write(&neighbour, "keep").unwrap();
+
+        remove_script_install_files(&bin).unwrap();
+
+        assert!(!bin.exists());
+        assert!(std::fs::symlink_metadata(tmp.path().join("suvadu")).is_err());
+        assert!(
+            neighbour.exists(),
+            "nothing else in the directory is touched"
+        );
+        // Already gone is not an error: a second run has nothing to do.
+        remove_script_install_files(&bin).unwrap();
     }
 
     #[test]

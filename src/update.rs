@@ -72,21 +72,21 @@ const SUVADU_LOGO: &str = r"
 ";
 
 pub fn is_homebrew_install() -> bool {
-    if let Ok(exe) = std::env::current_exe() {
-        let path = exe.to_string_lossy();
-        return path.contains("/Cellar/")
-            || path.contains("/homebrew/")
-            || path.contains("/linuxbrew/");
-    }
-    false
+    std::env::current_exe().is_ok_and(|exe| is_homebrew_path(&exe.to_string_lossy()))
 }
 
 pub fn is_cargo_install() -> bool {
-    if let Ok(exe) = std::env::current_exe() {
-        let path = exe.to_string_lossy();
-        return path.contains("/.cargo/bin/");
-    }
-    false
+    std::env::current_exe().is_ok_and(|exe| is_cargo_path(&exe.to_string_lossy()))
+}
+
+/// Whether `path` is inside a Homebrew prefix or Cellar.
+pub fn is_homebrew_path(path: &str) -> bool {
+    path.contains("/Cellar/") || path.contains("/homebrew/") || path.contains("/linuxbrew/")
+}
+
+/// Whether `path` is where `cargo install` puts binaries.
+pub fn is_cargo_path(path: &str) -> bool {
+    path.contains("/.cargo/bin/")
 }
 
 pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
