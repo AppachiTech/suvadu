@@ -219,7 +219,7 @@ jobs:
           cat > "$FORMULA_PATH" <<EOF
           class Suvadu < Formula
             desc "Total recall for your terminal."
-            homepage "https://www.appachi.tech/suvadu/"
+            homepage "https://suvadu.sh/"
             version "${VERSION}"
 
             on_macos do
@@ -250,8 +250,12 @@ jobs:
 
             def caveats
               <<~EOS
-                To start recording history, add this to your .zshrc:
-                  eval "\$(suv init zsh)"
+                To start recording history, add the hook for your shell, then
+                open a new terminal:
+                  Zsh:  echo 'eval "\$(suv init zsh)"' >> ~/.zshrc
+                  Bash: echo 'eval "\$(suv init bash)"' >> ~/.bashrc
+                Check that commands are being recorded with: suv status
+                Setup guide: https://suvadu.sh/cli/installation/
               EOS
             end
 

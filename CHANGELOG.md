@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - **`fuzzy` search now folds non-ASCII case, as the help and README already said** — `terms` compared case with full Unicode lowercasing, but `fuzzy` folded ASCII only, so `suv search --match fuzzy ÉCHO` found nothing where `terms` found `echo écho`. Both modes now fold case the same way; `literal` and `prefix` are unchanged and still fold ASCII only, because SQLite's `LIKE` answers them.
+- **The Homebrew install note now covers Bash** — `brew install suvadu` printed only the Zsh hook line and linked the old `www.appachi.tech/suvadu/` homepage. It now gives the Zsh and Bash lines, says to open a new terminal and check with `suv status`, and links the setup guide on suvadu.sh.
 
 ## [0.4.2] - 2026-09-24
 
