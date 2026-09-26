@@ -22,15 +22,15 @@
 //!   entries whose terms appear contiguously and in query order rank higher,
 //!   but a scattered match is still a match.
 //! * **Case:** matching is always case-insensitive for ASCII, and how far it
-//!   goes beyond that depends on the mode. `terms` folds case with Rust's
-//!   full Unicode lowercasing — a non-ASCII term narrows through
-//!   `suvadu_contains_ci()` rather than `LIKE`, so `ÉCHO` does find `écho`.
-//!   `literal`, `prefix` and `fuzzy` fold ASCII only: the first two are
-//!   answered by `LIKE`, and `fuzzy` by `suvadu_subseq_ci()`, which is
-//!   [`MatchMode::matches`] itself.
-//!   [`MatchMode::matches`] below is the ASCII-only reference predicate used
-//!   by tests and, for `fuzzy`, the live rule; it is not the live filter for
-//!   `terms`, which folds more case than it does.
+//!   goes beyond that depends on the mode. `terms` and `fuzzy` fold case with
+//!   Rust's full Unicode lowercasing, so `ÉCHO` does find `écho` in both: a
+//!   non-ASCII term narrows through `suvadu_contains_ci()` rather than
+//!   `LIKE`, and `fuzzy` is decided by `suvadu_subseq_ci()`, which is
+//!   [`is_subsequence_ci`] itself. `literal` and `prefix` fold ASCII only,
+//!   because they are answered by `LIKE`.
+//!   [`MatchMode::matches`] below is the reference predicate used by tests
+//!   and, for `fuzzy`, the live rule. For `terms` it folds ASCII only, so it
+//!   is not the live filter there — that one folds more case than it does.
 //! * **Quoting:** there is no quoting syntax. `"` and `'` are ordinary
 //!   characters that must appear in the entry. To match a phrase that contains
 //!   spaces or punctuation exactly, use `literal` mode.
@@ -99,11 +99,12 @@ impl MatchMode {
         }
     }
 
-    /// The documented predicate for this mode, folding ASCII case only.
-    /// This mirrors what `literal` and `prefix` do in SQL exactly. It is the
-    /// reference the tests check against, and the subsequence check `fuzzy`
-    /// applies after SQL narrowing — it is *not* the live filter for `terms`,
-    /// which folds non-ASCII case too (see the module docs).
+    /// The documented predicate for this mode. `literal`, `prefix` and
+    /// `terms` fold ASCII case only, which mirrors what `literal` and `prefix`
+    /// do in SQL exactly; `fuzzy` folds Unicode case, because it *is* the
+    /// subsequence check the database applies. It is the reference the tests
+    /// check against — and *not* the live filter for `terms`, which folds
+    /// non-ASCII case too (see the module docs).
     pub fn matches(self, haystack: &str, query: &str) -> bool {
         let q = query.trim();
         if q.is_empty() {
@@ -249,12 +250,15 @@ mod tests {
     }
 
     #[test]
-    fn case_folds_ascii_only_as_documented() {
+    fn case_folding_per_mode_is_as_documented() {
         assert!(MatchMode::Literal.matches("cat README.md", "readme"));
         assert!(MatchMode::Literal.matches("cat readme.md", "README"));
         // Non-ASCII is compared case-sensitively — documented, not accidental.
         assert!(!MatchMode::Literal.matches("echo écho", "ÉCHO"));
         assert!(MatchMode::Literal.matches("echo écho", "écho"));
+        // fuzzy is the database's own subsequence rule, which folds Unicode.
+        assert!(MatchMode::Fuzzy.matches("echo écho", "ÉCHO"));
+        assert!(MatchMode::Fuzzy.matches("echo Émile", "eém"));
     }
 
     #[test]

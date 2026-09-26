@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **`fuzzy` search now folds non-ASCII case, as the help and README already said** — `terms` compared case with full Unicode lowercasing, but `fuzzy` folded ASCII only, so `suv search --match fuzzy ÉCHO` found nothing where `terms` found `echo écho`. Both modes now fold case the same way; `literal` and `prefix` are unchanged and still fold ASCII only, because SQLite's `LIKE` answers them.
+
 ## [0.4.2] - 2026-09-24
 
 ### Added

@@ -419,7 +419,7 @@ fn register_contains_ci(conn: &Connection) -> DbResult<()> {
 }
 
 /// Registers `suvadu_subseq_ci(haystack, needle)`: true when `needle`'s
-/// characters occur in `haystack` in order, gaps allowed, folding ASCII case.
+/// characters occur in `haystack` in order, gaps allowed, folding Unicode case.
 ///
 /// This is the `fuzzy` matching mode's documented rule, evaluated by the
 /// database so that counting and paginating a fuzzy query need no in-memory

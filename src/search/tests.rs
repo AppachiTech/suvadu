@@ -3275,6 +3275,24 @@ fn fuzzy_rejects_a_query_whose_words_are_present_but_out_of_order() {
 }
 
 #[test]
+fn fuzzy_folds_non_ascii_case_the_same_as_terms() {
+    let (_d, repo) = repo_with(&["echo écho", "echo Émile"]);
+
+    for mode in [MatchMode::Terms, MatchMode::Fuzzy] {
+        assert_eq!(
+            search_in_mode(&repo, mode, "ÉCHO"),
+            vec!["echo écho".to_string()],
+            "{mode:?} did not fold non-ASCII case"
+        );
+    }
+    // An abbreviation that crosses a non-ASCII letter, typed in the other case.
+    assert_eq!(
+        search_in_mode(&repo, MatchMode::Fuzzy, "eÉml"),
+        vec!["echo Émile".to_string()]
+    );
+}
+
+#[test]
 fn fuzzy_eligibility_does_not_depend_on_the_ranking_tier() {
     // Each of these queries has at least one literal token in the command, so
     // the ranking tier is non-zero — but none is a whole-query subsequence.
