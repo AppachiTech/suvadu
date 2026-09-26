@@ -104,7 +104,10 @@ impl SearchApp {
                 self.paste_into_filter_field(&sanitized);
                 false
             }
-            DialogState::Help | DialogState::Delete { .. } | DialogState::TagAssociation => false,
+            DialogState::Help
+            | DialogState::Delete { .. }
+            | DialogState::TagAssociation
+            | DialogState::RawView { .. } => false,
             DialogState::None => {
                 // In vim Normal mode, auto-switch to Insert mode on paste
                 if self.vim_enabled && self.vim_mode == VimMode::Normal {
@@ -142,6 +145,7 @@ impl SearchApp {
                 self.dialog = DialogState::None;
                 return SearchAction::Continue;
             }
+            DialogState::RawView { .. } => return self.handle_raw_view_input(key),
             DialogState::None => {}
         }
         self.handle_normal_input(key)
@@ -355,16 +359,14 @@ impl SearchApp {
                 self.filters.focus_index = 0;
             }
             KeyCode::Char('v') => {
-                // Verbatim: the exact text, escapes and all, for any command.
-                self.show_raw = !self.show_raw;
-                self.status_message = Some((
-                    if self.show_raw {
-                        "Raw form shown in detail".into()
-                    } else {
-                        "Raw form hidden".into()
-                    },
-                    std::time::Instant::now(),
-                ));
+                // Verbatim: the selected command's exact text, every
+                // character visible, however long it is.
+                if let Some(command) = self.get_selected_command() {
+                    self.dialog = DialogState::RawView { command, scroll: 0 };
+                } else {
+                    self.status_message =
+                        Some(("Nothing selected".into(), std::time::Instant::now()));
+                }
             }
             KeyCode::Char('y') => {
                 if let Some(cmd) = self.get_selected_command() {
@@ -543,6 +545,29 @@ impl SearchApp {
             KeyCode::Char('n') | KeyCode::Esc => {
                 self.dialog = DialogState::None;
             }
+            _ => {}
+        }
+        SearchAction::Continue
+    }
+
+    /// Keys in the raw view: scroll, or close. Nothing here accepts a
+    /// command — Enter closes it, back to the list the command came from.
+    fn handle_raw_view_input(&mut self, key: KeyEvent) -> SearchAction {
+        let DialogState::RawView { ref mut scroll, .. } = self.dialog else {
+            return SearchAction::Continue;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') if !ctrl => *scroll = scroll.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') if !ctrl => *scroll = scroll.saturating_add(1),
+            KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+            KeyCode::PageDown => *scroll = scroll.saturating_add(10),
+            KeyCode::Home => *scroll = 0,
+            KeyCode::End => *scroll = u16::MAX,
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                self.dialog = DialogState::None;
+            }
+            KeyCode::Char('v') if ctrl => self.dialog = DialogState::None,
             _ => {}
         }
         SearchAction::Continue

@@ -169,7 +169,9 @@ command is grouped only with *exactly* the same text, so whitespace that would
 otherwise be invisible is drawn: `·` for a leading or trailing space, `↵` and
 `⇥` for line breaks and tabs. When a command holds something that cannot be
 read off the screen — a tab, a zero-width space, a direction override — the
-detail pane adds its escaped *Raw* form; `^V` shows that form for any command. **Enter puts the command on your prompt** (or
+detail pane adds its escaped *Raw* form. `^V` opens that raw view for any
+command, scrollable however long it is: every space drawn as `·`, every
+hidden character escaped, a line per line break, with its exact length. **Enter puts the command on your prompt** (or
 prints it, from `suv search`) — it never runs anything. The footer keeps to
 the core keys; `?` lists every shortcut.
 

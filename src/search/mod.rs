@@ -58,6 +58,12 @@ pub enum DialogState {
         input: String,
     },
     Help,
+    /// The exact text of `command`, every character visible (`^V`),
+    /// scrolled down `scroll` lines.
+    RawView {
+        command: String,
+        scroll: u16,
+    },
 }
 
 /// Vim-style modal input mode for the search TUI.
@@ -173,9 +179,6 @@ pub struct SearchConfig {
     pub recall: RecallState,
 }
 
-// Independent on/off states of one screen (vim keys, risk badges, a search
-// in flight, the raw view), as in `SearchConfig`: not a state machine.
-#[allow(clippy::struct_excessive_bools)]
 pub struct SearchApp {
     query: String,
     entries: Vec<Entry>,
@@ -214,9 +217,6 @@ pub struct SearchApp {
     /// The command to select again once the reload in flight lands — set by
     /// the toggles that only change how the same matches are shown.
     reselect: Option<String>,
-    /// Show every command's escaped raw form in the detail pane (`^V`), not
-    /// only those whose text cannot be read off the screen.
-    show_raw: bool,
 }
 
 impl SearchApp {
@@ -295,7 +295,6 @@ impl SearchApp {
             status_message: None,
             searching: false,
             reselect: None,
-            show_raw: false,
         };
         // Derive the directory filter from the scope, unless the caller
         // supplied an explicit one (`--cwd`), which always wins.

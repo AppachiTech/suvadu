@@ -4156,7 +4156,7 @@ fn prod03_help_overlay_fits_an_80x24_terminal() {
         "Bookmarked only",
         "Rank smart/recent",
         "Go to page...",
-        "Raw (escaped) form",
+        "Inspect raw command",
         "Press any key to close",
     ] {
         assert!(
@@ -4802,25 +4802,47 @@ fn a_kept_selection_that_is_gone_is_reported_not_swapped() {
 }
 
 #[test]
-fn ctrl_v_shows_the_raw_form_of_any_command_on_request() {
-    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("git status")], 1));
-    app.view.detail_pane_open = true;
+fn ctrl_v_opens_a_scrollable_raw_view_of_any_command() {
+    // Long enough to need scrolling in an 80x24 overlay, with a space pair
+    // that must stay visible as two.
+    let command = format!("echo {}  end", "word ".repeat(400));
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry(&command)], 1));
     app.table_state.select(Some(0));
-    let screen = |app: &mut SearchApp| render_lines(app, 160, 30).join("\n");
-    assert!(
-        !screen(&mut app).contains("Raw "),
-        "ordinary commands stay clean"
-    );
 
     app.handle_input(ctrl_key('v'));
+    assert!(matches!(app.dialog, DialogState::RawView { .. }));
+    let top = render_lines(&mut app, 80, 24).join("\n");
+    assert!(top.contains("Raw command"), "{top}");
     assert!(
-        screen(&mut app).contains("\"git status\""),
-        "{}",
-        screen(&mut app)
+        top.contains(&format!("{} characters", command.chars().count())),
+        "{top}"
     );
+    assert!(top.contains("\"echo\u{b7}word\u{b7}"), "{top}");
+    assert!(
+        !top.contains("end\""),
+        "the end should be below the fold:\n{top}"
+    );
+
+    // Scrolling reaches the end, spaces still visible and uncollapsed.
+    app.handle_input(KeyEvent::from(KeyCode::End));
+    let bottom = render_lines(&mut app, 80, 24).join("\n");
+    assert!(bottom.contains("\u{b7}\u{b7}end\""), "{bottom}");
+
+    // Enter closes the view; it does not accept the command.
+    let action = app.handle_input(KeyEvent::from(KeyCode::Enter));
+    assert!(matches!(action, SearchAction::Continue), "{action:?}");
+    assert!(matches!(app.dialog, DialogState::None));
+    // What Enter then uses is the stored text, untouched.
+    let action = app.handle_input(KeyEvent::from(KeyCode::Enter));
+    assert!(matches!(action, SearchAction::Select(ref c) if *c == command));
+}
+
+#[test]
+fn ctrl_v_with_nothing_selected_says_so() {
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
     app.handle_input(ctrl_key('v'));
-    // (The status line says "Raw form hidden"; the escaped form is gone.)
-    assert!(!screen(&mut app).contains("\"git status\""));
+    assert!(matches!(app.dialog, DialogState::None));
+    assert!(app.status_message.is_some());
 }
 
 #[test]
@@ -4828,9 +4850,10 @@ fn every_detail_label_is_separated_from_its_value() {
     let mut app = render_app();
     app.view.unique_mode = true;
     app.view.detail_pane_open = true;
-    app.show_raw = true;
     app.table_state.select(Some(0));
-    let entry = app.get_selected_entry().unwrap().clone();
+    // Trailing spaces, so the Raw line is among the fields checked.
+    let mut entry = app.get_selected_entry().unwrap().clone();
+    entry.command.push_str("  ");
     for line in app.build_detail_lines(&entry) {
         if line.spans.len() < 2 {
             continue;

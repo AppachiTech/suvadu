@@ -453,39 +453,95 @@ fn needs_escape(c: char) -> bool {
     c.is_control() || (c.is_whitespace() && c != ' ') || is_invisible(c)
 }
 
-/// The command in quotes, with every character that does not display as
-/// itself escaped — `\t`, `\n`, `\r`, and `\u{…}` for other control,
-/// whitespace and invisible characters — so the exact text can be read,
-/// including where it starts and ends.
-pub(super) fn escaped_form(command: &str) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::from("\"");
-    for c in command.chars() {
-        match c {
-            '\t' => out.push_str("\\t"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            c if needs_escape(c) => {
-                let _ = write!(out, "\\u{{{:x}}}", u32::from(c));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+/// Whether the detail pane should offer the raw view on its own: the
+/// command has edge whitespace, or something that has to be escaped to be
+/// seen — other than the joiners and selectors ordinary emoji and scripts
+/// use. (`^V` shows it for any command.)
+pub(super) fn wants_raw(command: &str) -> bool {
+    command.starts_with(char::is_whitespace)
+        || command.ends_with(char::is_whitespace)
+        || command
+            .chars()
+            .any(|c| needs_escape(c) && !is_ordinary_invisible(c))
 }
 
-/// [`escaped_form`], when the command does not already display exactly as
-/// stored: edge whitespace, or anything that has to be escaped to be seen
-/// other than the joiners and selectors ordinary emoji and scripts use.
-pub(super) fn raw_form(command: &str) -> Option<String> {
-    let edges = command.starts_with(char::is_whitespace) || command.ends_with(char::is_whitespace);
-    let hidden = command
-        .chars()
-        .any(|c| needs_escape(c) && !is_ordinary_invisible(c));
-    (edges || hidden).then(|| escaped_form(command))
+/// Styles for the raw view's parts.
+pub(super) struct RawStyle {
+    pub text: Style,
+    pub escape: Style,
+    pub space: Style,
+}
+
+impl RawStyle {
+    pub(super) fn from_theme(t: &crate::theme::Theme) -> Self {
+        Self {
+            text: Style::default().fg(t.text),
+            escape: Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+            space: Style::default().fg(t.text_muted),
+        }
+    }
+}
+
+/// The command exactly as stored, in a form where every character can be
+/// seen and counted: in quotes, with each space drawn as `·` (a literal `·`
+/// is escaped, so a dot always means a space), and `\t`, `\n`, `\r`, `\\`,
+/// `\"` and `\u{…}` for everything that does not display as itself —
+/// control and non-space whitespace characters, and invisible ones such as
+/// zero-width spaces, direction overrides and the joiners inside emoji.
+///
+/// A line ends after each `\n`, and lines longer than `width` cells (0: no
+/// limit) are broken between graphemes, never at a character that would
+/// then be lost: there are no spaces left for a wrap to swallow.
+pub(super) fn raw_view(command: &str, width: usize, style: &RawStyle) -> Vec<Line<'static>> {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    // (glyph, whether a line ends after it)
+    let mut glyphs: Vec<(Glyph, bool)> = vec![(Glyph::new("\"", style.text), false)];
+    let escape = |text: &str| (Glyph::new(text, style.escape), false);
+    for g in command.graphemes(true) {
+        let special = g
+            .chars()
+            .any(|c| needs_escape(c) || matches!(c, ' ' | '\u{b7}' | '\\' | '"'));
+        if !special {
+            glyphs.push((Glyph::new(g, style.text), false));
+            continue;
+        }
+        for c in g.chars() {
+            glyphs.push(match c {
+                ' ' => (Glyph::new("\u{b7}", style.space), false),
+                '\n' => (Glyph::new("\\n", style.escape), true),
+                '\t' => escape("\\t"),
+                '\r' => escape("\\r"),
+                '\\' => escape("\\\\"),
+                '"' => escape("\\\""),
+                c if c == '\u{b7}' || needs_escape(c) => {
+                    escape(&format!("\\u{{{:x}}}", u32::from(c)))
+                }
+                c => (Glyph::new(&c.to_string(), style.text), false),
+            });
+        }
+    }
+    glyphs.push((Glyph::new("\"", style.text), false));
+
+    let mut lines: Vec<Vec<Glyph>> = Vec::new();
+    let mut line: Vec<Glyph> = Vec::new();
+    let mut used = 0;
+    for (glyph, breaks) in glyphs {
+        if width > 0 && used > 0 && used + glyph.width > width {
+            lines.push(std::mem::take(&mut line));
+            used = 0;
+        }
+        used += glyph.width;
+        line.push(glyph);
+        if breaks {
+            lines.push(std::mem::take(&mut line));
+            used = 0;
+        }
+    }
+    if !line.is_empty() || lines.is_empty() {
+        lines.push(line);
+    }
+    lines.into_iter().map(to_line).collect()
 }
 
 /// Lay pieces out on lines no wider than `width`. A word that would
@@ -768,47 +824,86 @@ mod tests {
         );
     }
 
+    /// The raw view as plain text, one string per line.
+    fn raw_text(command: &str, width: usize) -> Vec<String> {
+        raw_view(command, width, &RawStyle::from_theme(crate::theme::theme()))
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
     #[test]
-    fn invisible_format_characters_are_exposed_in_the_raw_form() {
-        // Zero-width space, a bidi override, a byte-order mark, a soft hyphen.
+    fn the_raw_view_escapes_what_does_not_draw_and_marks_every_space() {
+        assert_eq!(raw_text("git status", 0), vec!["\"git\u{b7}status\""]);
+        assert_eq!(
+            raw_text("git  status", 0),
+            vec!["\"git\u{b7}\u{b7}status\""]
+        );
+        // A dot always means a space, so a literal one is escaped.
+        assert_eq!(
+            raw_text("echo a\u{b7}b", 0),
+            vec!["\"echo\u{b7}a\\u{b7}b\""]
+        );
+        assert_eq!(
+            raw_text("printf 'a\tb'", 0),
+            vec!["\"printf\u{b7}'a\\tb'\""]
+        );
+        assert_eq!(raw_text("a\\\"b", 0), vec!["\"a\\\\\\\"b\""]);
+        // Invisible format characters, and the joiner inside an emoji.
         for (command, escape) in [
             ("echo a\u{200b}b", "\\u{200b}"),
             ("echo \u{202e}txt.exe", "\\u{202e}"),
             ("\u{feff}ls", "\\u{feff}"),
             ("echo co\u{ad}op", "\\u{ad}"),
+            ("echo \u{1f469}\u{200d}\u{1f4bb}", "\\u{200d}"),
         ] {
-            let raw = raw_form(command).unwrap_or_else(|| panic!("{command:?} looks plain"));
-            assert!(raw.contains(escape), "{command:?} gave {raw}");
+            assert!(raw_text(command, 0)[0].contains(escape), "{command:?}");
         }
-        // Joiners and variation selectors are part of how emoji and some
-        // scripts are written: not a reason on their own for a raw form...
-        assert_eq!(
-            raw_form("echo \u{1f469}\u{200d}\u{1f4bb} \u{2764}\u{fe0f}"),
-            None
-        );
-        // ...but the explicit escaped view spells out every one of them.
-        let escaped = escaped_form("echo \u{1f469}\u{200d}\u{1f4bb}");
-        assert!(escaped.contains("\\u{200d}"), "{escaped}");
-        assert_eq!(escaped_form("git status"), "\"git status\"");
+        // A combining accent is part of its letter, not an escape.
+        assert_eq!(raw_text("cafe\u{301}", 0), vec!["\"cafe\u{301}\""]);
     }
 
     #[test]
-    fn a_raw_form_is_offered_only_when_the_display_is_not_the_text() {
-        assert_eq!(raw_form("git status"), None);
-        assert_eq!(raw_form("git  status"), None, "spaces draw as themselves");
+    fn the_raw_view_breaks_after_each_line_break_and_wraps_without_loss() {
         assert_eq!(
-            raw_form("printf 'a\tb'").as_deref(),
-            Some("\"printf 'a\\tb'\"")
+            raw_text("for i in 1; do\n  echo $i\ndone", 0),
+            vec![
+                "\"for\u{b7}i\u{b7}in\u{b7}1;\u{b7}do\\n",
+                "\u{b7}\u{b7}echo\u{b7}$i\\n",
+                "done\"",
+            ]
         );
-        assert_eq!(
-            raw_form("suv status  ").as_deref(),
-            Some("\"suv status  \"")
-        );
-        assert_eq!(raw_form("a\nb\\c").as_deref(), Some("\"a\\nb\\\\c\""));
-        assert_eq!(
-            raw_form("echo a\u{a0}b").as_deref(),
-            Some("\"echo a\\u{a0}b\"")
-        );
+        // One space or two before `b`, right at a wrap point: the two must
+        // stay different, and nothing may be dropped at the break.
+        let one = format!("echo {} b", "a".repeat(77));
+        let two = format!("echo {}  b", "a".repeat(77));
+        let (a, b) = (raw_text(&one, 78), raw_text(&two, 78));
+        assert_ne!(a, b);
+        assert_eq!(a.concat(), raw_text(&one, 0).concat());
+        assert_eq!(b.concat(), raw_text(&two, 0).concat());
+        assert!(a
+            .iter()
+            .all(|l| super::super::format::display_width(l) <= 78));
+    }
+
+    #[test]
+    fn a_raw_line_is_offered_only_when_the_display_is_not_the_text() {
+        assert!(!wants_raw("git status"));
+        assert!(!wants_raw("git  status"), "spaces draw as themselves");
+        assert!(!wants_raw(
+            "echo \u{1f469}\u{200d}\u{1f4bb} \u{2764}\u{fe0f}"
+        ));
+        for command in [
+            "printf 'a\tb'",
+            "suv status  ",
+            " ls",
+            "a\nb",
+            "echo a\u{a0}b",
+            "echo a\u{200b}b",
+            "echo \u{202e}txt",
+        ] {
+            assert!(wants_raw(command), "{command:?}");
+        }
     }
 
     #[test]

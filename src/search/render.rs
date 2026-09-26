@@ -19,7 +19,7 @@ use super::format::{
     NoResults, StatusSegment, DETAIL_BOTTOM_HEIGHT, SELECTION_SYMBOL,
 };
 use super::highlight::{
-    command_text, escaped_form, match_mask, raw_form, relative_age, CommandStyle, Fit,
+    command_text, match_mask, raw_view, relative_age, wants_raw, CommandStyle, Fit, RawStyle,
 };
 use super::{centered_rect, DialogState, RecallScope, SearchApp};
 
@@ -119,6 +119,7 @@ impl SearchApp {
             DialogState::TagAssociation => self.render_tag_dialog(f, f.area()),
             DialogState::Note { .. } => self.render_note_dialog(f, f.area()),
             DialogState::Help => self.render_help_dialog(f, f.area()),
+            DialogState::RawView { .. } => self.render_raw_view(f, f.area()),
             DialogState::None => {}
         }
     }
@@ -859,13 +860,17 @@ impl SearchApp {
         ];
         // Tabs, line breaks and edge spaces cannot be read off the text
         // above; spell them out rather than leave two commands looking alike.
-        let raw = if self.show_raw {
-            Some(escaped_form(&entry.command))
-        } else {
-            raw_form(&entry.command)
-        };
-        if let Some(raw) = raw {
-            lines.push(field("Raw", raw));
+        if wants_raw(&entry.command) {
+            let raw = raw_view(&entry.command, 0, &RawStyle::from_theme(t));
+            for (i, raw_line) in raw.into_iter().enumerate() {
+                let label = if i == 0 { "Raw" } else { "" };
+                let mut spans = vec![Span::styled(
+                    format!("{label:<DETAIL_LABEL_WIDTH$}"),
+                    label_style,
+                )];
+                spans.extend(raw_line.spans);
+                lines.push(Line::from(spans));
+            }
         }
         // Where it ran and how it ended lead: below the results the pane
         // shows only a few rows, and those two decide whether to reuse it.
@@ -1439,6 +1444,51 @@ impl SearchApp {
         f.render_widget(hint, inner_layout[1]);
     }
 
+    /// The raw view (`^V`): the selected command with every character
+    /// visible, in a scrollable overlay so no length hides any of it.
+    pub(super) fn render_raw_view(&mut self, f: &mut ratatui::Frame, area: Rect) {
+        let t = theme();
+        let DialogState::RawView {
+            ref command,
+            ref mut scroll,
+        } = self.dialog
+        else {
+            return;
+        };
+        let popup = centered_rect(90, 80, area);
+        f.render_widget(Clear, popup);
+        let block = Block::default()
+            .title(" Raw command ")
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(t.primary))
+            .style(Style::default().bg(t.bg_elevated));
+        let inner = block.inner(popup);
+        f.render_widget(block, popup);
+        let [info, body] =
+            Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
+
+        let lines = raw_view(command, body.width as usize, &RawStyle::from_theme(t));
+        let max_scroll =
+            u16::try_from(lines.len().saturating_sub(body.height as usize)).unwrap_or(u16::MAX);
+        *scroll = (*scroll).min(max_scroll);
+        let summary = format!(
+            "{} characters, {} bytes  \u{b7} = space  \u{2191}\u{2193} PgUp/PgDn scroll  Esc close{}",
+            command.chars().count(),
+            command.len(),
+            if max_scroll > 0 {
+                format!("  (line {} of {})", *scroll + 1, lines.len())
+            } else {
+                String::new()
+            }
+        );
+        f.render_widget(
+            Paragraph::new(Span::styled(summary, Style::default().fg(t.text_muted))),
+            info,
+        );
+        f.render_widget(Paragraph::new(lines).scroll((*scroll, 0)), body);
+    }
+
     pub(super) fn render_help_dialog(&self, f: &mut ratatui::Frame, area: Rect) {
         // Use self to stay consistent with other dialog render methods.
         let _ = &self.dialog;
@@ -1522,7 +1572,7 @@ fn build_help_columns(
         help_row("  ^N        ", "Add/edit note", t),
         help_row("  ^D        ", "Delete entry", t),
         help_row("  ^T        ", "Tag session", t),
-        help_row("  ^V        ", "Raw (escaped) form", t),
+        help_row("  ^V        ", "Inspect raw command", t),
     ]);
     // `?/F1` moves here so the right column has room for the recall
     // controls; both columns must still fit 18 rows at 80x24.
