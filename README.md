@@ -143,11 +143,12 @@ between commands recorded at the same millisecond.
 taking over the screen, so the output you were reading stays visible.
 
 **Making a choice stick.** `search.match_mode`, `search.scope` and
-`search.compact` set the default for every recall. All three are
-**config-file only**: `suv settings` does not offer them. Put them in the
-`[search]` section of `config.toml`, in the config directory listed under
-[Data Storage](SECURITY.md#data-storage). All three default to the behaviour
-of earlier releases.
+`search.compact` set the default for every recall. Set them on the Search tab
+of `suv settings` (*Default Match Mode*, *Starting Scope*, *Compact Recall*),
+or in the `[search]` section of `config.toml`, in the config directory listed
+under [Data Storage](SECURITY.md#data-storage). Saving from `suv settings`
+keeps every other key in that file, including ones it does not recognise. All
+three default to the behaviour of earlier releases.
 
 ---
 

@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Recall defaults in `suv settings`** — the Search tab now has *Default Match Mode* (`terms`/`literal`/`prefix`/`fuzzy`), *Starting Scope* (`all`/`directory`/`workspace`/`session`) and *Compact Recall*, the three choices that previously needed a hand edit of `config.toml`. Enter or Space cycles or toggles each one; saving writes the same words `--match` and `--scope` accept and keeps every other key in the file, including ones this build does not know.
+
 ### Fixed
 - **`fuzzy` search now folds non-ASCII case, as the help and README already said** — `terms` compared case with full Unicode lowercasing, but `fuzzy` folded ASCII only, so `suv search --match fuzzy ÉCHO` found nothing where `terms` found `echo écho`. Both modes now fold case the same way; `literal` and `prefix` are unchanged and still fold ASCII only, because SQLite's `LIKE` answers them.
 

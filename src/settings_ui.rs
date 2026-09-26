@@ -87,7 +87,7 @@ impl SettingsTab {
 
     fn item_count(self, config: &Config) -> usize {
         match self {
-            Self::Search => 10,
+            Self::Search => 13,
             Self::Shell => 3,
             Self::Exclusions => config.exclusions.len(),
             Self::AutoTags => config.auto_tags.len(),
@@ -323,6 +323,26 @@ impl AppState {
             }
             (SettingsTab::Search, 9) => {
                 self.config.search.recall_show_agents = !self.config.search.recall_show_agents;
+                self.dirty = true;
+            }
+            (SettingsTab::Search, 10) => {
+                self.config.search.match_mode = self.config.search.match_mode.next();
+                self.dirty = true;
+                self.save_status = Some(format!(
+                    "Default match mode: {}",
+                    self.config.search.match_mode.label()
+                ));
+            }
+            (SettingsTab::Search, 11) => {
+                self.config.search.scope = self.config.search.scope.next();
+                self.dirty = true;
+                self.save_status = Some(format!(
+                    "Starting scope: {}",
+                    self.config.search.scope.label()
+                ));
+            }
+            (SettingsTab::Search, 12) => {
+                self.config.search.compact = !self.config.search.compact;
                 self.dirty = true;
             }
             (SettingsTab::Shell, 0) => {
@@ -1073,6 +1093,9 @@ const fn get_setting_description(tab: usize, item: usize) -> &'static str {
         (0, 7) => "Boost percentage for human-typed commands over agent commands. 0 = disabled (0-100)",
         (0, 8) => "Boost percentage for same-directory commands when Smart Mode is on. 0 = disabled (0-100)",
         (0, 9) => "Show AI-agent / bot / CI / script commands in Up-arrow and Ctrl+R recall. Off by default so recall shows what you typed (toggle live with Ctrl+A / Alt+A)",
+        (0, 10) => "How recall reads a query: terms (every word, any order), literal (exactly as typed), prefix (command starts with it), fuzzy (letters in order: gco finds git checkout). Cycle live with Ctrl+X; override per run with --match",
+        (0, 11) => "History recall opens on: all, directory (exactly this directory), workspace (this Git repository or worktree), session (this shell). Cycle live with Ctrl+P, reset with Ctrl+R; override per run with --scope",
+        (0, 12) => "Draw recall inline under the prompt instead of full screen, so the output you were reading stays visible. Also per run with --compact",
         (1, 0) => "Bind Up/Down arrow keys to cycle through command history",
         (1, 1) => "Show risk assessment badges in the search detail pane for agent commands",
         (1, 2) => "Color theme: dark (RGB for dark terminals), light (RGB for light terminals), terminal (ANSI 16 — adapts to your scheme). Changes apply immediately.",
@@ -1149,6 +1172,23 @@ fn render_search_tab(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             "Show AI Agent Commands in Recall",
             app.config.search.recall_show_agents,
             app.selected_item == 9,
+        ),
+        setting_item(
+            "Default Match Mode",
+            app.config.search.match_mode.label(),
+            app.selected_item == 10,
+            false,
+        ),
+        setting_item(
+            "Starting Scope",
+            app.config.search.scope.label(),
+            app.selected_item == 11,
+            false,
+        ),
+        setting_toggle(
+            "Compact Recall (inline under the prompt)",
+            app.config.search.compact,
+            app.selected_item == 12,
         ),
     ];
 
@@ -1885,6 +1925,12 @@ mod tests {
         app.next_item();
         assert_eq!(app.selected_item, 9);
         app.next_item();
+        assert_eq!(app.selected_item, 10);
+        app.next_item();
+        assert_eq!(app.selected_item, 11);
+        app.next_item();
+        assert_eq!(app.selected_item, 12);
+        app.next_item();
         assert_eq!(app.selected_item, 0); // Cycle back
     }
 
@@ -1999,12 +2045,12 @@ mod tests {
         let config = Config::default();
         let mut app = AppState::new(config);
 
-        // Tab 0 has 10 items; going prev from 0 wraps to 9
+        // Tab 0 has 13 items; going prev from 0 wraps to 12
         assert_eq!(app.selected_item, 0);
         app.prev_item();
-        assert_eq!(app.selected_item, 9);
+        assert_eq!(app.selected_item, 12);
 
-        // And going next from 9 wraps to 0
+        // And going next from 12 wraps to 0
         app.next_item();
         assert_eq!(app.selected_item, 0);
     }
@@ -3368,6 +3414,148 @@ mod tests {
             vec!["save_session_summary".to_string()]
         );
         assert!(!advertised_tool_names(&app.config.mcp).contains("save_session_summary"));
+    }
+
+    #[test]
+    fn search_tab_cycles_the_default_match_mode_through_every_mode() {
+        use crate::search::MatchMode;
+        let mut app = AppState::new(Config::default());
+        app.current_tab = SettingsTab::Search;
+        app.selected_item = 10;
+        assert_eq!(app.config.search.match_mode, MatchMode::Terms);
+
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            app.handle_input(KeyEvent::from(KeyCode::Enter));
+            seen.push(app.config.search.match_mode);
+        }
+        assert_eq!(
+            seen,
+            vec![
+                MatchMode::Literal,
+                MatchMode::Prefix,
+                MatchMode::Fuzzy,
+                MatchMode::Terms
+            ]
+        );
+        assert!(app.dirty);
+        assert_eq!(
+            app.save_status.as_deref(),
+            Some("Default match mode: terms")
+        );
+    }
+
+    #[test]
+    fn search_tab_cycles_the_starting_scope_through_every_scope() {
+        use crate::search::RecallScope;
+        let mut app = AppState::new(Config::default());
+        app.current_tab = SettingsTab::Search;
+        app.selected_item = 11;
+        assert_eq!(app.config.search.scope, RecallScope::All);
+
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            app.handle_input(KeyEvent::from(KeyCode::Char(' ')));
+            seen.push(app.config.search.scope);
+        }
+        assert_eq!(
+            seen,
+            vec![
+                RecallScope::Directory,
+                RecallScope::Workspace,
+                RecallScope::Session,
+                RecallScope::All
+            ]
+        );
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn search_tab_toggles_compact_recall() {
+        let mut app = AppState::new(Config::default());
+        app.current_tab = SettingsTab::Search;
+        app.selected_item = 12;
+        assert!(!app.config.search.compact);
+
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert!(app.config.search.compact);
+        assert!(app.dirty);
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert!(!app.config.search.compact);
+    }
+
+    #[test]
+    fn every_search_row_is_visible_at_80x24() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut app = AppState::new(Config::default());
+        app.selected_item = 12;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| ui(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let area = buf.area();
+        let screen: String = (0..area.height)
+            .flat_map(|y| {
+                (0..area.width)
+                    .map(move |x| buf.cell((x, y)).map_or(" ", ratatui::buffer::Cell::symbol))
+                    .chain(std::iter::once("\n"))
+            })
+            .collect();
+        for row in [
+            "Page Limit:",
+            "Show AI Agent Commands in Recall",
+            "Default Match Mode: terms",
+            "Starting Scope: all",
+            "Compact Recall (inline under the prompt) <<",
+        ] {
+            assert!(screen.contains(row), "{row:?} is not on screen:\n{screen}");
+        }
+    }
+
+    #[test]
+    fn saving_recall_defaults_keeps_unrelated_and_unknown_keys() {
+        use crate::search::{MatchMode, RecallScope};
+        let _guard = crate::config::config_file_test_lock();
+        let path = crate::config::get_config_path().unwrap();
+        let restore = std::fs::read_to_string(&path).ok();
+        std::fs::write(
+            &path,
+            "future_option = \"keep me\"\n\n[search]\npage_limit = 123\nunknown_search_key = 7\n",
+        )
+        .unwrap();
+
+        let mut app = AppState::new(crate::config::load_config().unwrap());
+        app.current_tab = SettingsTab::Search;
+        app.selected_item = 10;
+        for _ in 0..3 {
+            app.handle_input(KeyEvent::from(KeyCode::Enter)); // terms → fuzzy
+        }
+        app.selected_item = 11;
+        for _ in 0..2 {
+            app.handle_input(KeyEvent::from(KeyCode::Enter)); // all → workspace
+        }
+        app.selected_item = 12;
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        app.handle_input(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+        let saved_text = std::fs::read_to_string(&path).unwrap();
+        let reloaded = crate::config::load_config().unwrap();
+        match restore {
+            Some(contents) => std::fs::write(&path, contents).unwrap(),
+            None => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+
+        assert_eq!(reloaded.search.match_mode, MatchMode::Fuzzy);
+        assert_eq!(reloaded.search.scope, RecallScope::Workspace);
+        assert!(reloaded.search.compact);
+        assert_eq!(reloaded.search.page_limit, 123);
+        let value: toml::Value = toml::from_str(&saved_text).unwrap();
+        assert_eq!(value["future_option"].as_str(), Some("keep me"));
+        assert_eq!(value["search"]["unknown_search_key"].as_integer(), Some(7));
+        // Written as the same words `--match`/`--scope` and the docs use.
+        assert_eq!(value["search"]["match_mode"].as_str(), Some("fuzzy"));
+        assert_eq!(value["search"]["scope"].as_str(), Some("workspace"));
     }
 
     #[test]
