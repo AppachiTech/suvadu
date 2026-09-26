@@ -4686,3 +4686,37 @@ fn the_detail_pane_spells_out_whitespace_the_list_can_only_mark() {
         "an ordinary command needs no raw form"
     );
 }
+
+#[test]
+fn a_short_detail_pane_still_shows_where_and_how_the_run_went() {
+    for (grouped, width, height, place, outcome) in [
+        (true, 80_u16, 24_u16, "Last path", "Last exit"),
+        (true, 100, 30, "Last path", "Last exit"),
+        (false, 80, 24, "Path", "Exit"),
+        (false, 100, 30, "Path", "Exit"),
+    ] {
+        let mut app = render_app();
+        app.view.unique_mode = grouped;
+        app.view.detail_pane_open = true;
+        app.table_state.select(Some(0));
+        let lines = render_lines(&mut app, width, height);
+        let detail: Vec<&String> = lines
+            .iter()
+            .skip_while(|l| !l.contains("Detail"))
+            .take_while(|l| !l.starts_with('\u{2570}'))
+            .collect();
+        let pane = detail
+            .iter()
+            .map(|l| l.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            pane.contains(place),
+            "{width}x{height} grouped={grouped}:\n{pane}"
+        );
+        assert!(
+            pane.contains(outcome),
+            "{width}x{height} grouped={grouped}:\n{pane}"
+        );
+    }
+}

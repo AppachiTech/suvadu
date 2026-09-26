@@ -831,10 +831,16 @@ impl SearchApp {
         // latest matching one, and say so rather than imply every run went
         // the same way.
         let grouped = self.view.unique_mode;
-        let (time_label, exit_label) = if grouped {
-            ("Last run ", "Last exit")
+        let (path_label, exit_label, time_label) = if grouped {
+            ("Last path", "Last exit", "Last run ")
         } else {
-            ("Time     ", "Exit     ")
+            ("Path     ", "Exit     ", "Time     ")
+        };
+        let field = |label: &'static str, value: String| {
+            Line::from(vec![
+                Span::styled(label, label_style),
+                Span::styled(value, value_style),
+            ])
         };
         let mut lines = vec![
             Line::from(vec![Span::styled("Command  ", label_style)]),
@@ -846,50 +852,24 @@ impl SearchApp {
         // Tabs, line breaks and edge spaces cannot be read off the text
         // above; spell them out rather than leave two commands looking alike.
         if let Some(raw) = raw_form(&entry.command) {
-            lines.push(Line::from(vec![
-                Span::styled("Raw      ", label_style),
-                Span::styled(raw, value_style),
-            ]));
+            lines.push(field("Raw      ", raw));
         }
-        lines.push(Line::from(""));
+        // Where it ran and how it ended lead: below the results the pane
+        // shows only a few rows, and those two decide whether to reuse it.
+        lines.push(field(path_label, entry.cwd.clone()));
+        lines.push(field(exit_label, exit_str));
+        lines.push(field(time_label, time_str));
         if grouped {
-            lines.push(Line::from(vec![
-                Span::styled("Runs     ", label_style),
-                Span::styled(
-                    format!("{} matching", self.unique_count(entry)),
-                    value_style,
-                ),
-            ]));
+            lines.push(field(
+                "Runs     ",
+                format!("{} matching", self.unique_count(entry)),
+            ));
         }
         lines.extend([
-            Line::from(vec![
-                Span::styled("Path     ", label_style),
-                Span::styled(entry.cwd.clone(), value_style),
-            ]),
-            Line::from(vec![
-                Span::styled(time_label, label_style),
-                Span::styled(time_str, value_style),
-            ]),
-            Line::from(vec![
-                Span::styled("Duration ", label_style),
-                Span::styled(format!("{duration_secs:.2}s"), value_style),
-            ]),
-            Line::from(vec![
-                Span::styled(exit_label, label_style),
-                Span::styled(exit_str, value_style),
-            ]),
-            Line::from(vec![
-                Span::styled("Session  ", label_style),
-                Span::styled(session_str, value_style),
-            ]),
-            Line::from(vec![
-                Span::styled("Tag      ", label_style),
-                Span::styled(tag_str, value_style),
-            ]),
-            Line::from(vec![
-                Span::styled("Executor ", label_style),
-                Span::styled(executor_str, value_style),
-            ]),
+            field("Duration ", format!("{duration_secs:.2}s")),
+            field("Session  ", session_str),
+            field("Tag      ", tag_str),
+            field("Executor ", executor_str),
         ]);
 
         // Agent prompt (if present)
@@ -2598,7 +2578,16 @@ mod tests {
         );
         assert!(text.contains("human: zsh"), "should contain executor");
         assert!(text.contains("none"), "should contain tag none");
-        assert!(lines.len() >= 10, "should have at least 10 base lines");
+        // Command label and text, path, exit, time, duration, session, tag,
+        // executor — with where it ran and how it ended leading the fields.
+        assert_eq!(lines.len(), 9);
+        let path = text.find("/tmp").unwrap();
+        let exit = text.find("(success)").unwrap();
+        let session = text.find("Session").unwrap();
+        assert!(
+            path < exit && exit < session,
+            "path and exit come first:\n{text}"
+        );
     }
 
     #[test]
