@@ -19,50 +19,57 @@ use ratatui::text::{Line, Span, Text};
 use super::MatchMode;
 
 /// For each character of `command`, whether the query matched it under
-/// `mode`. Case is folded per character, which is what matching does for
-/// the characters people type; the database, not this, decides eligibility.
+/// `mode` — by the same case rule the database used to find the row:
+///
+/// * `terms` answers an ASCII word with `LIKE`, which folds ASCII case only,
+///   and a non-ASCII word with `suvadu_contains_ci`, which compares the full
+///   Unicode lowercase of both strings;
+/// * `literal` and `prefix` are `LIKE`, so ASCII case only;
+/// * `fuzzy` walks the full Unicode lowercase, as `is_subsequence_ci` does.
+///
+/// Unicode lowercasing can expand a character (`İ` becomes two) and depends
+/// on context (a final `Σ` becomes `ς`), so matches are found in the
+/// lowercased text and mapped back to the characters that produced them.
 pub(super) fn match_mask(command: &str, query: &str, mode: MatchMode) -> Vec<bool> {
-    let hay: Vec<char> = command.chars().map(fold).collect();
-    let mut mask = vec![false; hay.len()];
+    let chars: Vec<char> = command.chars().collect();
+    let mut mask = vec![false; chars.len()];
     let query = query.trim();
     if query.is_empty() {
         return mask;
     }
-    let mut mark_all = |needle: &str| {
-        let needle: Vec<char> = needle.chars().map(fold).collect();
-        if needle.is_empty() || needle.len() > hay.len() {
-            return;
-        }
-        for start in 0..=hay.len() - needle.len() {
-            if hay[start..start + needle.len()] == needle[..] {
-                mask[start..start + needle.len()].fill(true);
-            }
-        }
-    };
     match mode {
         MatchMode::Terms => {
             for term in query.split_whitespace() {
-                mark_all(term);
+                if term.is_ascii() {
+                    mark_ascii_folded(&chars, term, &mut mask);
+                } else {
+                    mark_unicode_folded(command, term, &mut mask);
+                }
             }
         }
-        MatchMode::Literal => mark_all(query),
+        MatchMode::Literal => mark_ascii_folded(&chars, query, &mut mask),
         MatchMode::Prefix => {
-            let needle: Vec<char> = query.chars().map(fold).collect();
-            if hay.starts_with(&needle) {
+            let needle: Vec<char> = query.chars().collect();
+            if chars.len() >= needle.len()
+                && chars
+                    .iter()
+                    .zip(&needle)
+                    .all(|(a, b)| a.eq_ignore_ascii_case(b))
+            {
                 mask[..needle.len()].fill(true);
             }
         }
         MatchMode::Fuzzy => {
-            // The same greedy walk `is_subsequence_ci` makes: each query
-            // character takes the first unused match after the previous one.
+            let (lower, owner) = lowercase_with_owners(command);
+            let lower: Vec<char> = lower.chars().collect();
             let mut from = 0;
-            for c in query.chars().map(fold) {
-                match hay[from..].iter().position(|&h| h == c) {
+            for c in query.to_lowercase().chars() {
+                match lower[from..].iter().position(|&h| h == c) {
                     Some(offset) => {
-                        mask[from + offset] = true;
+                        mask[owner[from + offset]] = true;
                         from += offset + 1;
                     }
-                    None => return vec![false; hay.len()],
+                    None => return vec![false; chars.len()],
                 }
             }
         }
@@ -70,8 +77,65 @@ pub(super) fn match_mask(command: &str, query: &str, mode: MatchMode) -> Vec<boo
     mask
 }
 
-fn fold(c: char) -> char {
-    c.to_lowercase().next().unwrap_or(c)
+/// Mark every occurrence of `needle`, comparing ASCII letters without case
+/// and everything else exactly — what `LIKE` does.
+fn mark_ascii_folded(chars: &[char], needle: &str, mask: &mut [bool]) {
+    let needle: Vec<char> = needle.chars().collect();
+    if needle.is_empty() || needle.len() > chars.len() {
+        return;
+    }
+    for start in 0..=chars.len() - needle.len() {
+        if chars[start..start + needle.len()]
+            .iter()
+            .zip(&needle)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        {
+            mask[start..start + needle.len()].fill(true);
+        }
+    }
+}
+
+/// Mark every occurrence of `needle` in the full Unicode lowercase of
+/// `command`, crediting the original characters that produced it.
+fn mark_unicode_folded(command: &str, needle: &str, mask: &mut [bool]) {
+    let (lower, owner) = lowercase_with_owners(command);
+    let needle = needle.to_lowercase();
+    if needle.is_empty() {
+        return;
+    }
+    // `owner` is indexed by character; find each match's character span.
+    let char_at_byte: Vec<usize> = {
+        let mut map = vec![0; lower.len() + 1];
+        for (k, (byte, _)) in lower.char_indices().enumerate() {
+            map[byte] = k;
+        }
+        map[lower.len()] = lower.chars().count();
+        map
+    };
+    for (byte, found) in lower.match_indices(&needle) {
+        let (first, last) = (char_at_byte[byte], char_at_byte[byte + found.len()]);
+        for &original in &owner[first..last] {
+            mask[original] = true;
+        }
+    }
+}
+
+/// `command.to_lowercase()`, and for each of its characters the index of
+/// the original character it came from. Context changes a character's
+/// lowercase (final sigma) but never how many characters it produces, so
+/// the per-character expansion lines up with the whole-string result.
+fn lowercase_with_owners(command: &str) -> (String, Vec<usize>) {
+    let lower = command.to_lowercase();
+    let mut owner = Vec::with_capacity(lower.len());
+    for (i, c) in command.chars().enumerate() {
+        owner.extend(std::iter::repeat_n(i, c.to_lowercase().count()));
+    }
+    debug_assert_eq!(owner.len(), lower.chars().count());
+    owner.resize(
+        lower.chars().count(),
+        command.chars().count().saturating_sub(1),
+    );
+    (lower, owner)
 }
 
 /// Syntax colours for a command, emphasis for matched characters, and
@@ -144,6 +208,11 @@ struct Piece {
 /// Draw `command` after `prefix` (bookmark/note/count markers), emphasising
 /// the characters `mask` marks. With `wrap_width > 0` the command wraps at
 /// word boundaries, as the selected row does.
+///
+/// Everything is laid out by grapheme cluster, the unit a terminal draws: a
+/// span boundary inside `e` + combining accent, or inside a joined emoji,
+/// would split what is one visible character. A grapheme any part of which
+/// matched is emphasised whole.
 pub(super) fn command_text(
     prefix: Vec<Span<'static>>,
     command: &str,
@@ -151,13 +220,24 @@ pub(super) fn command_text(
     mask: &[bool],
     style: &CommandStyle,
 ) -> Text<'static> {
-    let chars: Vec<char> = command.chars().collect();
-    let matched = |i: usize| mask.get(i).copied().unwrap_or(false);
-    let lead = chars.iter().take_while(|c| c.is_whitespace()).count();
-    let trail = if lead == chars.len() {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let mut graphemes: Vec<Grapheme<'_>> = Vec::new();
+    let mut char_index = 0;
+    for g in command.graphemes(true) {
+        let len = g.chars().count();
+        graphemes.push(Grapheme {
+            text: g,
+            matched: (char_index..char_index + len).any(|i| mask.get(i).copied().unwrap_or(false)),
+            space: g.chars().all(char::is_whitespace),
+        });
+        char_index += len;
+    }
+    let lead = graphemes.iter().take_while(|g| g.space).count();
+    let trail = if lead == graphemes.len() {
         0
     } else {
-        chars.iter().rev().take_while(|c| c.is_whitespace()).count()
+        graphemes.iter().rev().take_while(|g| g.space).count()
     };
 
     let mut pieces: Vec<Piece> = Vec::new();
@@ -173,82 +253,80 @@ pub(super) fn command_text(
         });
     }
     if lead > 0 {
-        pieces.push(edge_markers(&chars[..lead], style));
+        pieces.push(edge_markers(&graphemes[..lead], style));
     }
 
-    let body_end = chars.len() - trail;
+    let body_end = graphemes.len() - trail;
     let mut i = lead;
     let mut word_index = 0;
     while i < body_end {
         let start = i;
-        if chars[i].is_whitespace() {
-            while i < body_end && chars[i].is_whitespace() {
-                i += 1;
-            }
-            pieces.push(inner_space(&chars[start..i], start, &matched, style));
-        } else {
-            while i < body_end && !chars[i].is_whitespace() {
-                i += 1;
-            }
-            let word: String = chars[start..i].iter().collect();
-            let base = style.word(word_index, &word);
-            word_index += 1;
-            let mut spans = Vec::new();
-            let mut run = String::new();
-            let mut run_matched = matched(start);
-            for (offset, c) in word.chars().enumerate() {
-                let m = matched(start + offset);
-                if m != run_matched && !run.is_empty() {
-                    spans.push(Span::styled(
-                        std::mem::take(&mut run),
-                        if run_matched { style.matched } else { base },
-                    ));
-                }
-                run_matched = m;
-                run.push(c);
-            }
-            if !run.is_empty() {
-                spans.push(Span::styled(
-                    run,
-                    if run_matched { style.matched } else { base },
-                ));
-            }
-            pieces.push(Piece {
-                spans,
-                width: super::format::display_width(&word),
-                is_space: false,
-            });
+        let space = graphemes[i].space;
+        while i < body_end && graphemes[i].space == space {
+            i += 1;
         }
+        let run = &graphemes[start..i];
+        if space {
+            pieces.push(inner_space(run, style));
+            continue;
+        }
+        let word: String = run.iter().map(|g| g.text).collect();
+        let base = style.word(word_index, &word);
+        word_index += 1;
+        let mut spans = Vec::new();
+        let mut text = String::new();
+        let mut matched = run[0].matched;
+        for g in run {
+            if g.matched != matched {
+                spans.push(Span::styled(
+                    std::mem::take(&mut text),
+                    if matched { style.matched } else { base },
+                ));
+                matched = g.matched;
+            }
+            text.push_str(g.text);
+        }
+        spans.push(Span::styled(
+            text,
+            if matched { style.matched } else { base },
+        ));
+        pieces.push(Piece {
+            spans,
+            width: super::format::display_width(&word),
+            is_space: false,
+        });
     }
     if trail > 0 {
-        pieces.push(edge_markers(&chars[body_end..], style));
+        pieces.push(edge_markers(&graphemes[body_end..], style));
     }
 
     wrap(pieces, wrap_width)
 }
 
+/// One grapheme cluster of the command, and what the renderer needs to
+/// know about it.
+struct Grapheme<'a> {
+    text: &'a str,
+    matched: bool,
+    space: bool,
+}
+
 /// Whitespace between words: spaces as stored, tabs and line breaks as
 /// visible markers, since a list row is a single line.
-fn inner_space(
-    run: &[char],
-    start: usize,
-    matched: &impl Fn(usize) -> bool,
-    style: &CommandStyle,
-) -> Piece {
-    if run.iter().all(|&c| c == ' ') {
-        let text = " ".repeat(run.len());
-        let styled = if (start..start + run.len()).any(matched) {
+fn inner_space(run: &[Grapheme<'_>], style: &CommandStyle) -> Piece {
+    if run.iter().all(|g| g.text == " ") {
+        let styled = if run.iter().any(|g| g.matched) {
             style.matched
         } else {
             Style::default()
         };
         return Piece {
             width: run.len(),
-            spans: vec![Span::styled(text, styled)],
+            spans: vec![Span::styled(" ".repeat(run.len()), styled)],
             is_space: true,
         };
     }
-    let marker = if run.contains(&'\n') {
+    let marker = if run.iter().any(|g| g.text.contains('\n')) {
         "\u{21b5}"
     } else {
         "\u{21e5}"
@@ -265,14 +343,18 @@ fn inner_space(
 }
 
 /// Leading or trailing whitespace, one marker per character.
-fn edge_markers(run: &[char], style: &CommandStyle) -> Piece {
+fn edge_markers(run: &[Grapheme<'_>], style: &CommandStyle) -> Piece {
     let mut text: String = run
         .iter()
         .take(MAX_EDGE_MARKERS)
-        .map(|&c| match c {
-            '\n' => '\u{21b5}',
-            '\t' => '\u{21e5}',
-            _ => '\u{b7}',
+        .map(|g| {
+            if g.text.contains('\n') {
+                '\u{21b5}'
+            } else if g.text == "\t" {
+                '\u{21e5}'
+            } else {
+                '\u{b7}'
+            }
         })
         .collect();
     if run.len() > MAX_EDGE_MARKERS {
@@ -374,6 +456,22 @@ mod tests {
     }
 
     #[test]
+    fn highlighting_follows_each_modes_own_case_rule() {
+        // Non-ASCII terms fold with full Unicode lowercasing, as
+        // `suvadu_contains_ci` does — including expansions and context.
+        assert_eq!(marked("echo İ", "i\u{307}", MatchMode::Terms), ".....İ");
+        assert_eq!(marked("echo ΟΣ", "ος", MatchMode::Terms), ".....ΟΣ");
+        // ASCII terms, literal and prefix are answered by LIKE, which folds
+        // ASCII only: a non-ASCII letter in another case is not a match.
+        assert_eq!(marked("echo É é", "é", MatchMode::Literal), ".......é");
+        assert_eq!(marked("echo \u{212a}", "k", MatchMode::Terms), "......");
+        assert_eq!(marked("Echo x", "ECH", MatchMode::Prefix), "ECH...");
+        // fuzzy walks the whole-string Unicode lowercase, like
+        // `is_subsequence_ci`.
+        assert_eq!(marked("ÉCHO", "éh", MatchMode::Fuzzy), "É.H.");
+    }
+
+    #[test]
     fn an_empty_query_marks_nothing() {
         assert!(match_mask("ls -la", "  ", MatchMode::Terms)
             .iter()
@@ -399,6 +497,67 @@ mod tests {
         assert_eq!(plain(&b), vec!["suv status\u{b7}\u{b7}"]);
         let c = command_text(vec![], " suv  status", 0, &[], &style());
         assert_eq!(plain(&c), vec!["\u{b7}suv  status"]);
+    }
+
+    /// What a terminal would show: `text` rendered into a real buffer.
+    fn rendered(text: Text<'static>, width: u16) -> ratatui::buffer::Buffer {
+        use ratatui::widgets::Widget;
+        let area = ratatui::layout::Rect::new(0, 0, width, 1);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        ratatui::widgets::Paragraph::new(text).render(area, &mut buf);
+        buf
+    }
+
+    /// The row as a terminal shows it: a wide character's second cell is
+    /// its continuation, not a character of its own.
+    fn visible(buf: &ratatui::buffer::Buffer) -> String {
+        let mut out = String::new();
+        let mut skip = 0;
+        for cell in &buf.content {
+            if skip > 0 {
+                skip -= 1;
+                continue;
+            }
+            out.push_str(cell.symbol());
+            skip = super::super::format::display_width(cell.symbol()).saturating_sub(1);
+        }
+        out.trim_end().to_string()
+    }
+
+    #[test]
+    fn emphasis_never_splits_a_grapheme() {
+        let s = style();
+        for (command, query, mode) in [
+            // A decomposed accent: `e` plus a combining acute.
+            ("echo cafe\u{301}", "e", MatchMode::Terms),
+            ("echo cafe\u{301}", "cafe", MatchMode::Literal),
+            // A joined emoji, matched on its first scalar.
+            (
+                "echo \u{1f469}\u{200d}\u{1f4bb}",
+                "\u{1f469}",
+                MatchMode::Terms,
+            ),
+            // Wide characters, matched in the middle.
+            (
+                "echo \u{65e5}\u{672c}\u{8a9e}",
+                "\u{672c}",
+                MatchMode::Terms,
+            ),
+        ] {
+            let mask = match_mask(command, query, mode);
+            let buf = rendered(command_text(vec![], command, 0, &mask, &s), 40);
+            assert_eq!(visible(&buf), command, "{command:?} / {query:?}");
+        }
+
+        // The grapheme a match touches is emphasised whole.
+        let mask = match_mask("echo cafe\u{301}", "cafe", MatchMode::Literal);
+        let buf = rendered(command_text(vec![], "echo cafe\u{301}", 0, &mask, &s), 40);
+        let accented = buf
+            .content
+            .iter()
+            .find(|c| c.symbol() == "e\u{301}")
+            .unwrap();
+        assert_eq!(accented.style().fg, s.matched.fg);
     }
 
     #[test]

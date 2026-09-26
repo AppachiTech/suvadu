@@ -4428,3 +4428,43 @@ fn a_stopped_worker_is_reported_rather_than_waited_on() {
     ));
     assert!(worker.wait(2).is_none());
 }
+
+#[test]
+fn what_is_highlighted_is_what_the_database_matched() {
+    use super::highlight::match_mask;
+    let (_d, repo) = repo_with(&["echo \u{130}", "echo \u{39f}\u{3a3}", "echo \u{c9} \u{e9}"]);
+    let marked = |command: &str, query: &str, mode: MatchMode| -> String {
+        command
+            .chars()
+            .zip(match_mask(command, query, mode))
+            .map(|(c, m)| if m { c } else { '.' })
+            .collect()
+    };
+
+    // Found, and the characters that made it a match are the ones marked.
+    for (command, query, mode, expected) in [
+        ("echo \u{130}", "i\u{307}", MatchMode::Terms, ".....\u{130}"),
+        (
+            "echo \u{39f}\u{3a3}",
+            "\u{3bf}\u{3c2}",
+            MatchMode::Terms,
+            ".....\u{39f}\u{3a3}",
+        ),
+        (
+            "echo \u{c9} \u{e9}",
+            "\u{e9}",
+            MatchMode::Literal,
+            ".......\u{e9}",
+        ),
+    ] {
+        assert!(
+            search_in_mode(&repo, mode, query).contains(&command.to_string()),
+            "{query:?} should find {command:?} in {mode:?}"
+        );
+        assert_eq!(
+            marked(command, query, mode),
+            expected,
+            "{query:?} in {mode:?}"
+        );
+    }
+}
