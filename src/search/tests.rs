@@ -4720,3 +4720,82 @@ fn a_short_detail_pane_still_shows_where_and_how_the_run_went() {
         );
     }
 }
+
+/// One rare command, then 80 newer runs of a frequent one: in every-run
+/// order the rare one sits on page two.
+fn duplicate_heavy_repo() -> (tempfile::TempDir, crate::repository::Repository) {
+    let mut commands = vec!["zz-select rare"];
+    commands.extend(std::iter::repeat_n("zz-select frequent", 80));
+    repo_with(&commands)
+}
+
+#[test]
+fn view_switches_keep_the_selection_in_unranked_results_too() {
+    let (_d, repo) = duplicate_heavy_repo();
+    // Empty, literal and prefix queries come back in database order with
+    // no ranked window; terms is the ranked control.
+    for (mode, query) in [
+        (MatchMode::Terms, ""),
+        (MatchMode::Literal, "zz-select"),
+        (MatchMode::Prefix, "zz-sel"),
+        (MatchMode::Terms, "zz-select"),
+    ] {
+        let ctx = format!("{mode:?} {query:?}");
+        let mut app = SearchApp::new(test_search_config(vec![], 0));
+        app.recall.match_mode = mode;
+        app.query = query.into();
+        app.view.unique_mode = true;
+        app.reload_entries(&repo).unwrap();
+        let row = app
+            .entries
+            .iter()
+            .position(|e| e.command == "zz-select rare")
+            .unwrap_or_else(|| panic!("{ctx}: rare group on page one"));
+        app.table_state.select(Some(row));
+
+        // Commands → Executions: the rare command's run is on page two.
+        app.handle_input(ctrl_key('u'));
+        app.reload_entries(&repo).unwrap();
+        assert!(!app.view.unique_mode);
+        assert_eq!(selected(&app).as_deref(), Some("zz-select rare"), "{ctx}");
+        assert!(app.pagination.page > 1, "{ctx}: expected a later page");
+
+        // Changing the ranking from that later page keeps it too.
+        app.handle_input(ctrl_key('s'));
+        app.reload_entries(&repo).unwrap();
+        assert_eq!(
+            selected(&app).as_deref(),
+            Some("zz-select rare"),
+            "{ctx} after ^S"
+        );
+
+        // Enter right away takes what is selected.
+        let action = app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert!(
+            matches!(action, SearchAction::Select(ref c) if c == "zz-select rare"),
+            "{ctx}: Enter took {action:?}"
+        );
+
+        // Executions → Commands: back to its group.
+        app.handle_input(ctrl_key('u'));
+        app.reload_entries(&repo).unwrap();
+        assert!(app.view.unique_mode);
+        assert_eq!(
+            selected(&app).as_deref(),
+            Some("zz-select rare"),
+            "{ctx} regrouped"
+        );
+    }
+}
+
+#[test]
+fn a_kept_selection_that_is_gone_is_reported_not_swapped() {
+    let (_d, repo) = duplicate_heavy_repo();
+    let mut app = app_for(&repo, "zz");
+    // As if the selected command was deleted between the switch and reload.
+    app.reselect = Some("zz-select deleted".into());
+    app.reload_entries(&repo).unwrap();
+    assert_eq!(app.table_state.selected(), Some(0));
+    let (message, _) = app.status_message.clone().expect("the miss is reported");
+    assert!(message.contains("zz-select deleted"), "{message}");
+}

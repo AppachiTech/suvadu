@@ -155,6 +155,7 @@ impl SearchApp {
             human_boost_percent: self.view.human_boost_percent,
             cwd_boost_percent: self.view.cwd_boost_percent,
             page_size: self.pagination.page_size.max(1),
+            reselect: self.reselect.clone(),
         }
     }
 
@@ -375,27 +376,33 @@ impl SearchApp {
         } else {
             Some(0)
         });
-        if let Some(command) = self.reselect.take() {
-            self.select_command(&command);
-        }
-    }
-
-    /// Select `command` where the new result set has it: the page of the
-    /// ranked window it falls on, or else the page already shown. Its
-    /// first row is taken — in an executions list, its most recent run,
-    /// since equal commands keep their newest-first order. A command that
-    /// is not reachable leaves the first row selected.
-    fn select_command(&mut self, command: &str) {
-        let page_size = self.pagination.page_size.max(1);
-        if let Some(index) = self.ranked_window.iter().position(|e| e.command == command) {
-            let page = index / page_size + 1;
-            let start = (page - 1) * page_size;
-            let end = (start + page_size).min(self.ranked_window.len());
-            self.pagination.page = page;
-            self.entries = self.ranked_window[start..end].to_vec();
-            self.table_state.select(Some(index - start));
-        } else if let Some(row) = self.entries.iter().position(|e| e.command == command) {
-            self.table_state.select(Some(row));
+        let wanted = self.reselect.take();
+        match result.reselected {
+            Some(Reselected::Found {
+                page,
+                entries,
+                counts,
+                row,
+            }) => {
+                self.pagination.page = page;
+                if let Some(entries) = entries {
+                    self.entries = entries;
+                    self.unique_counts.extend(counts);
+                }
+                self.table_state.select(Some(row));
+            }
+            // Only a view switch asks for this, and it keeps the same
+            // matches, so a miss means the history itself changed. Say so,
+            // rather than quietly put a different command under the cursor.
+            Some(Reselected::Missing) => {
+                if let Some(command) = wanted {
+                    self.status_message = Some((
+                        format!("\"{command}\" is no longer in these results"),
+                        std::time::Instant::now(),
+                    ));
+                }
+            }
+            None => {}
         }
     }
 
@@ -477,6 +484,10 @@ pub(super) struct ReloadRequest {
     human_boost_percent: u32,
     cwd_boost_percent: u32,
     page_size: usize,
+    /// A command to keep selected across this reload — set by the view
+    /// switches that show the same matches differently. Where it lands is
+    /// worked out here, off the UI thread, since it can take a query.
+    reselect: Option<String>,
 }
 
 /// What a reload found: the count, the ranked window later pages inside it
@@ -487,6 +498,23 @@ pub(super) struct ReloadResult {
     ranked_window: Vec<Entry>,
     unique_counts: std::collections::HashMap<i64, i64>,
     first_page: Vec<Entry>,
+    /// Where the requested selection landed, if one was requested.
+    reselected: Option<Reselected>,
+}
+
+/// Where a command kept selected across a reload ended up.
+#[derive(Debug)]
+pub(super) enum Reselected {
+    /// On `page`, at `row`. `entries` is that page when it is not page one
+    /// (with its unique counts); page one is already in the result.
+    Found {
+        page: usize,
+        entries: Option<Vec<Entry>>,
+        counts: std::collections::HashMap<i64, i64>,
+        row: usize,
+    },
+    /// Not among these results at all.
+    Missing,
 }
 
 impl ReloadResult {
@@ -639,12 +667,86 @@ impl ReloadRequest {
         } else {
             ranked[..self.page_size.min(ranked.len())].to_vec()
         };
+        if cancelled() {
+            return Ok(None);
+        }
+        let reselected = match &self.reselect {
+            Some(command) => Some(self.locate(repo, &plan, &ranked, &first_page, command)?),
+            None => None,
+        };
         Ok(Some(ReloadResult {
             total,
             ranked_window: ranked,
             unique_counts,
             first_page,
+            reselected,
         }))
+    }
+
+    /// Find `command` in these results: in the ranked window when it is
+    /// there, and otherwise at its exact position in the database order the
+    /// remaining pages follow — its most recent run in the executions list,
+    /// its group in the grouped one. That page is fetched so the selection
+    /// can land on it; nothing is read beyond it.
+    fn locate(
+        &self,
+        repo: &Repository,
+        plan: &super::matching::QueryPlan,
+        ranked: &[Entry],
+        first_page: &[Entry],
+        command: &str,
+    ) -> Result<Reselected, crate::db::DbError> {
+        let page_size = self.page_size;
+        let (page, row) = if let Some(index) = ranked.iter().position(|e| e.command == command) {
+            (index / page_size + 1, index % page_size)
+        } else {
+            // Outside the ranked window (or with none), pages come straight
+            // from the database, so its offset there is its place.
+            let qf = self.matched_query(plan);
+            let offset = if self.unique_mode {
+                repo.position_of_command_group(&qf, command, !plan.rerank)?
+            } else {
+                repo.position_of_command(&qf, command)?
+            };
+            let Some(offset) = offset else {
+                return Ok(Reselected::Missing);
+            };
+            (offset / page_size + 1, offset % page_size)
+        };
+        if page == 1 {
+            return Ok(
+                if first_page.get(row).is_some_and(|e| e.command == command) {
+                    Reselected::Found {
+                        page,
+                        entries: None,
+                        counts: std::collections::HashMap::new(),
+                        row,
+                    }
+                } else {
+                    Reselected::Missing
+                },
+            );
+        }
+        let start = (page - 1) * page_size;
+        let (entries, counts) = if start < ranked.len() {
+            let end = (start + page_size).min(ranked.len());
+            (
+                ranked[start..end].to_vec(),
+                std::collections::HashMap::new(),
+            )
+        } else {
+            self.page(repo, start)?
+        };
+        Ok(if entries.get(row).is_some_and(|e| e.command == command) {
+            Reselected::Found {
+                page,
+                entries: Some(entries),
+                counts,
+                row,
+            }
+        } else {
+            Reselected::Missing
+        })
     }
 
     /// One page straight from the database, at `offset`, in recency order —

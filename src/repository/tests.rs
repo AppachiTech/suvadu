@@ -2988,3 +2988,95 @@ fn deleting_entries_removes_their_notes_and_leaves_the_session_row_behind() {
         "the session row stays behind and is only cleaned up on request"
     );
 }
+
+/// A history with repeats, same-millisecond ties and a command the filter
+/// excludes, for checking computed positions against real paging.
+fn position_fixture() -> (tempfile::TempDir, Repository) {
+    let (dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 1);
+    repo.insert_session(&session).unwrap();
+    let rows: &[(&str, i64)] = &[
+        ("zz rare", 100),
+        ("zz frequent", 200),
+        ("zz frequent", 200), // same millisecond as the row before
+        ("zz other", 200),
+        ("zz frequent", 300),
+        ("zz tie-b", 400),
+        ("zz tie-a", 400),
+        ("unrelated", 500),
+        ("zz other", 600),
+        ("zz frequent", 700),
+    ];
+    for (command, at) in rows {
+        repo.insert_entry(&Entry::new(
+            session.id.clone(),
+            (*command).to_string(),
+            "/w".into(),
+            Some(0),
+            *at,
+            *at,
+        ))
+        .unwrap();
+    }
+    (dir, repo)
+}
+
+#[test]
+fn a_commands_position_is_where_paging_really_finds_it() {
+    let (_d, repo) = position_fixture();
+    let tokens = vec!["zz".to_string()];
+    let filter = QueryFilter {
+        query_tokens: &tokens,
+        ..Default::default()
+    };
+    let all = repo.get_entries_filtered(1000, 0, &filter).unwrap();
+    for command in ["zz rare", "zz frequent", "zz other", "zz tie-a", "zz tie-b"] {
+        let expected = all.iter().position(|e| e.command == command);
+        assert_eq!(
+            repo.position_of_command(&filter, command).unwrap(),
+            expected,
+            "{command}"
+        );
+        // And paging to that offset really lands on it.
+        let offset = expected.unwrap();
+        let page = repo.get_entries_filtered(1, offset, &filter).unwrap();
+        assert_eq!(page[0].command, command);
+    }
+    assert_eq!(
+        repo.position_of_command(&filter, "unrelated").unwrap(),
+        None
+    );
+    assert_eq!(
+        repo.position_of_command(&filter, "zz missing").unwrap(),
+        None
+    );
+}
+
+#[test]
+fn a_groups_position_is_where_grouped_paging_really_finds_it() {
+    let (_d, repo) = position_fixture();
+    let tokens = vec!["zz".to_string()];
+    let filter = QueryFilter {
+        query_tokens: &tokens,
+        ..Default::default()
+    };
+    for alphabetical in [true, false] {
+        let all = repo
+            .get_unique_entries_filtered(1000, 0, &filter, alphabetical)
+            .unwrap();
+        for command in ["zz rare", "zz frequent", "zz other", "zz tie-a", "zz tie-b"] {
+            let expected = all.iter().position(|(e, _)| e.command == command);
+            assert_eq!(
+                repo.position_of_command_group(&filter, command, alphabetical)
+                    .unwrap(),
+                expected,
+                "{command}, alphabetical={alphabetical}"
+            );
+        }
+        assert_eq!(
+            repo.position_of_command_group(&filter, "unrelated", alphabetical)
+                .unwrap(),
+            None
+        );
+    }
+}

@@ -6,7 +6,7 @@
 
 use crate::db::DbResult;
 use crate::models::{Entry, SessionSummary};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 use super::{entry_from_row, FilterBuilder, Repository, ENTRY_COLUMNS, ENTRY_JOINS};
 
@@ -156,8 +156,10 @@ impl Repository {
     ) -> DbResult<Vec<Entry>> {
         let mut fb = filter.entry_filter_builder();
 
+        // `e.id` breaks ties between runs recorded in the same millisecond,
+        // so the order — and so any position computed in it — is total.
         let sql = format!(
-            "SELECT {ENTRY_COLUMNS} {ENTRY_JOINS}{} ORDER BY e.started_at DESC LIMIT ? OFFSET ?",
+            "SELECT {ENTRY_COLUMNS} {ENTRY_JOINS}{} ORDER BY e.started_at DESC, e.id DESC LIMIT ? OFFSET ?",
             fb.build_where()
         );
         fb.push_param(Box::new(limit as i64));
@@ -169,6 +171,110 @@ impl Repository {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(entries)
+    }
+
+    /// The offset at which `command` first appears when paging through
+    /// `get_entries_filtered` with `filter`: the position of its most recent
+    /// matching run. `None` when no matching run has exactly that text.
+    ///
+    /// Two indexed queries instead of reading pages until it turns up: the
+    /// newest matching run of `command`, then how many matching runs sort
+    /// ahead of it.
+    pub fn position_of_command(
+        &self,
+        filter: &impl super::EntryQuery,
+        command: &str,
+    ) -> DbResult<Option<usize>> {
+        let mut fb = filter.entry_filter_builder();
+        let sql = format!(
+            "SELECT e.started_at, e.id {ENTRY_JOINS}{} AND e.command = ? \
+             ORDER BY e.started_at DESC, e.id DESC LIMIT 1",
+            fb.build_where()
+        );
+        fb.push_param(Box::new(command.to_string()));
+        let newest: Option<(i64, i64)> = self
+            .conn
+            .query_row(&sql, fb.params_refs().as_slice(), |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .optional()?;
+        let Some((started_at, id)) = newest else {
+            return Ok(None);
+        };
+
+        let mut fb = filter.entry_filter_builder();
+        let sql = format!(
+            "SELECT COUNT(*) {ENTRY_JOINS}{} \
+             AND (e.started_at > ? OR (e.started_at = ? AND e.id > ?))",
+            fb.build_where()
+        );
+        fb.push_param(Box::new(started_at));
+        fb.push_param(Box::new(started_at));
+        fb.push_param(Box::new(id));
+        let ahead: i64 = self
+            .conn
+            .query_row(&sql, fb.params_refs().as_slice(), |row| row.get(0))?;
+        Ok(Some(usize::try_from(ahead).unwrap_or(0)))
+    }
+
+    /// The offset of `command`'s row when paging through
+    /// `get_unique_entries_filtered` with `filter` and the same
+    /// `sort_alphabetically`. `None` when no matching run has exactly that
+    /// text.
+    pub fn position_of_command_group(
+        &self,
+        filter: &impl super::EntryQuery,
+        command: &str,
+        sort_alphabetically: bool,
+    ) -> DbResult<Option<usize>> {
+        // This group's size and the recency of its representative row.
+        let mut fb = filter.entry_filter_builder();
+        let sql = format!(
+            "SELECT g.n, x.started_at FROM \
+             (SELECT COUNT(*) AS n, MAX(e.id) AS mid {ENTRY_JOINS}{} AND e.command = ?) g \
+             LEFT JOIN entries x ON x.id = g.mid",
+            fb.build_where()
+        );
+        fb.push_param(Box::new(command.to_string()));
+        let (size, recent): (i64, Option<i64>) =
+            self.conn
+                .query_row(&sql, fb.params_refs().as_slice(), |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?;
+        let Some(recent) = recent.filter(|_| size > 0) else {
+            return Ok(None);
+        };
+
+        // How many groups sort ahead of it, by the same keys the listing uses.
+        let mut fb = filter.entry_filter_builder();
+        let groups = format!(
+            "SELECT e.command AS command, COUNT(*) AS n, MAX(e.id) AS mid \
+             {ENTRY_JOINS}{} GROUP BY e.command",
+            fb.build_where()
+        );
+        fb.push_param(Box::new(size));
+        fb.push_param(Box::new(size));
+        let sql = if sort_alphabetically {
+            fb.push_param(Box::new(command.to_string()));
+            format!(
+                "SELECT COUNT(*) FROM ({groups}) g \
+                 WHERE g.n > ? OR (g.n = ? AND g.command < ?)"
+            )
+        } else {
+            fb.push_param(Box::new(recent));
+            fb.push_param(Box::new(size));
+            fb.push_param(Box::new(recent));
+            fb.push_param(Box::new(command.to_string()));
+            format!(
+                "SELECT COUNT(*) FROM ({groups}) g JOIN entries x ON x.id = g.mid \
+                 WHERE g.n > ? OR (g.n = ? AND x.started_at > ?) \
+                 OR (g.n = ? AND x.started_at = ? AND g.command < ?)"
+            )
+        };
+        let ahead: i64 = self
+            .conn
+            .query_row(&sql, fb.params_refs().as_slice(), |row| row.get(0))?;
+        Ok(Some(usize::try_from(ahead).unwrap_or(0)))
     }
 
     /// Get entries in chronological order for replay.
@@ -225,10 +331,12 @@ impl Repository {
     ) -> DbResult<Vec<(Entry, i64)>> {
         let mut fb = filter.entry_filter_builder();
 
+        // The last key makes each order total, so a group's position in it
+        // is well defined (see `position_of_command_group`).
         let order = if sort_alphabetically {
             "g.occurrence_count DESC, e.command ASC"
         } else {
-            "g.occurrence_count DESC, recent_start DESC"
+            "g.occurrence_count DESC, recent_start DESC, e.command ASC"
         };
 
         // Use a subquery to deterministically select the most recent row per command.
