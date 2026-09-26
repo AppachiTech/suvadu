@@ -665,6 +665,18 @@ mod tests {
     }
 
     #[test]
+    fn install_script_verifies_with_the_same_public_key() {
+        // scripts/install.sh checks signatures with its own copy of the key.
+        // Rotating the key here without it would make every scripted install
+        // with minisign present fail verification.
+        let script = include_str!("../scripts/install.sh");
+        assert!(
+            script.contains(&format!("MINISIGN_PUBLIC_KEY=\"{MINISIGN_PUBLIC_KEY}\"")),
+            "scripts/install.sh must carry the same MINISIGN_PUBLIC_KEY as src/update.rs"
+        );
+    }
+
+    #[test]
     fn test_valid_public_key_parses() {
         // A well-formed minisign public key should parse without error.
         // This uses a throwaway test key (not the real release key).

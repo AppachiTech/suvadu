@@ -200,6 +200,27 @@ if [ "$EXPECTED" != "$ACTUAL" ]; then
 fi
 echo "SHA256 checksum verified: ${ACTUAL:0:16}"
 
+# A checksum fetched from the same server only proves the download was not
+# damaged. The minisign signature proves the maintainers built it; `suv update`
+# always checks it with the key compiled into suv. This key must equal
+# MINISIGN_PUBLIC_KEY in src/update.rs — a unit test there compares them.
+MINISIGN_PUBLIC_KEY="RWSnsbPkvYdmk4EtxJ9WjItHLwx/GkmnBFNjeUhGWT2Z2efNdLTNMBy5"
+if command -v minisign &>/dev/null; then
+    if ! curl --proto '=https' -fsSL -m 30 -o "$TMPDIR/$ARCHIVE.minisig" "${URL}.minisig"; then
+        echo "Error: could not fetch the release signature. Aborting for security."
+        exit 1
+    fi
+    if ! minisign -Vm "$TMPDIR/$ARCHIVE" -x "$TMPDIR/$ARCHIVE.minisig" \
+        -P "$MINISIGN_PUBLIC_KEY" >/dev/null 2>&1; then
+        echo "Error: signature verification FAILED."
+        echo "The download was not signed by the Suvadu maintainers. Aborting."
+        exit 1
+    fi
+    echo "Signature verified (minisign)"
+else
+    echo "Signature not checked: minisign is not installed (suv update always checks it)."
+fi
+
 # Extract
 tar --no-same-owner -xzf "$TMPDIR/$ARCHIVE" -C "$TMPDIR"
 

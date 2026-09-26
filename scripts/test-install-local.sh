@@ -119,7 +119,33 @@ else
     fail "no startup file is written without a terminal to ask on" "$(ls -la "$home1" "$home5")"
 fi
 
-# 7. An unknown option is an error, not a silent default install.
+# 7. With minisign present, a signature it rejects stops the install.
+mkdir -p "$WORK/minisign-bad"
+printf '#!/bin/sh\necho "Signature verification failed" >&2\nexit 1\n' >"$WORK/minisign-bad/minisign"
+chmod +x "$WORK/minisign-bad/minisign"
+out=$(run_installer "$home1" "$WORK/minisign-bad:$BASE_PATH" --dir "$WORK/signed-bad/bin")
+status=$?
+if [ $status -ne 0 ] && [[ "$out" == *"signature verification FAILED"* ]] \
+    && [ ! -e "$WORK/signed-bad/bin/suv" ]; then
+    pass "a signature minisign rejects aborts before anything is installed"
+else
+    fail "a signature minisign rejects aborts before anything is installed" "$out"
+fi
+
+# 8. A real minisign, if the caller has one, accepts the published signature.
+if command -v minisign >/dev/null 2>&1; then
+    real_minisign_dir=$(dirname "$(command -v minisign)")
+    out=$(run_installer "$home1" "$real_minisign_dir:$BASE_PATH" --dir "$WORK/signed/bin")
+    if [[ "$out" == *"Signature verified (minisign)"* ]] && [ -x "$WORK/signed/bin/suv" ]; then
+        pass "minisign verifies the published signature"
+    else
+        fail "minisign verifies the published signature" "$out"
+    fi
+else
+    printf 'skip  minisign verifies the published signature (minisign not installed)\n'
+fi
+
+# 9. An unknown option is an error, not a silent default install.
 out=$(run_installer "$home1" "$BASE_PATH" --prefix /tmp/x)
 status=$?
 if [ $status -ne 0 ] && [[ "$out" == *"unknown option"* ]]; then

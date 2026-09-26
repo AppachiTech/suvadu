@@ -31,11 +31,14 @@ for combo in "${COMBINATIONS[@]}"; do
 
     archive_status=$(curl -s -o /dev/null -w '%{http_code}' -I "$url")
     checksum_status=$(curl -s -o /dev/null -w '%{http_code}' -I "$url.sha256")
+    signature_status=$(curl -s -o /dev/null -w '%{http_code}' -I "$url.minisig")
 
-    if [ "$archive_status" = "200" ] && [ "$checksum_status" = "200" ]; then
+    if [ "$archive_status" = "200" ] && [ "$checksum_status" = "200" ] \
+        && [ "$signature_status" = "200" ]; then
         printf 'ok    %-16s %s\n' "$os $arch" "$url"
     else
-        printf 'FAIL  %-16s %s (archive %s, checksum %s)\n' "$os $arch" "$url" "$archive_status" "$checksum_status"
+        printf 'FAIL  %-16s %s (archive %s, checksum %s, signature %s)\n' "$os $arch" "$url" \
+            "$archive_status" "$checksum_status" "$signature_status"
         failures=$((failures + 1))
     fi
 done

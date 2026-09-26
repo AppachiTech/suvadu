@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 - **The install script can install without sudo** — `curl -fsSL https://downloads.appachi.tech/suvadu/install.sh | bash -s -- --user` installs into `~/.local/bin`, and `--dir DIR` (or `SUVADU_INSTALL_DIR=DIR`) into any directory; sudo is used only when the target directory is not writable, and the script says when that directory is not on your `PATH`. The default is still `/usr/local/bin`.
+- **The install script checks the release signature when it can** — with `minisign` installed, it now verifies the archive's minisign signature against the same public key `suv update` uses, and aborts before installing anything if verification fails. Without `minisign` it says the signature was not checked; the SHA-256 checksum is verified either way.
 - **Recall defaults in `suv settings`** — the Search tab now has *Default Match Mode* (`terms`/`literal`/`prefix`/`fuzzy`), *Starting Scope* (`all`/`directory`/`workspace`/`session`) and *Compact Recall*, the three choices that previously needed a hand edit of `config.toml`. Enter or Space cycles or toggles each one; saving writes the same words `--match` and `--scope` accept and keeps every other key in the file, including ones this build does not know.
 
 ### Fixed
