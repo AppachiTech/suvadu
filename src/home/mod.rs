@@ -2,6 +2,14 @@
 //! (and, when chosen, by a bare `suv`). It is a discovery layer: every
 //! feature it opens is the existing command, run as its own process.
 
+// The catalog, model and reference are built before the controller that
+// drives them; this allowance goes when the controller lands.
+#[allow(dead_code)]
+pub mod catalog;
+#[allow(dead_code)]
+pub mod model;
+#[allow(dead_code)]
+pub mod reference;
 pub mod startup;
 
 use std::io::IsTerminal;
