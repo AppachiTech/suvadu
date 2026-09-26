@@ -197,26 +197,63 @@ impl CommandStyle {
 /// Most whitespace markers drawn at either end before the rest is summed up.
 const MAX_EDGE_MARKERS: usize = 8;
 
-/// One unit the line wrapper places: a word (never split across lines) or
-/// the whitespace between words.
-struct Piece {
-    spans: Vec<Span<'static>>,
+/// How a command is fitted to its column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Fit {
+    /// One line, as long as it is (the caller clips).
+    Unlimited,
+    /// Wrap at word boundaries within this many cells, breaking a word that
+    /// is wider than a whole line between graphemes — the selected row,
+    /// which must show every character.
+    Wrap(usize),
+    /// One line within this many cells, ending in `…` when anything had to
+    /// be cut, so a clipped row never looks complete.
+    Truncate(usize),
+}
+
+/// One drawn grapheme: its text, its style and how many terminal cells it
+/// occupies.
+#[derive(Clone)]
+struct Glyph {
+    text: String,
+    style: Style,
     width: usize,
+}
+
+impl Glyph {
+    fn new(text: &str, style: Style) -> Self {
+        Self {
+            text: text.to_string(),
+            style,
+            width: super::format::display_width(text),
+        }
+    }
+}
+
+/// One unit the line wrapper places: a word (kept whole unless it is wider
+/// than a line) or the whitespace between words.
+struct Piece {
+    glyphs: Vec<Glyph>,
     is_space: bool,
 }
 
+impl Piece {
+    fn width(&self) -> usize {
+        self.glyphs.iter().map(|g| g.width).sum()
+    }
+}
+
 /// Draw `command` after `prefix` (bookmark/note/count markers), emphasising
-/// the characters `mask` marks. With `wrap_width > 0` the command wraps at
-/// word boundaries, as the selected row does.
+/// the characters `mask` marks, fitted to its column by `fit`.
 ///
 /// Everything is laid out by grapheme cluster, the unit a terminal draws: a
 /// span boundary inside `e` + combining accent, or inside a joined emoji,
 /// would split what is one visible character. A grapheme any part of which
 /// matched is emphasised whole.
 pub(super) fn command_text(
-    prefix: Vec<Span<'static>>,
+    prefix: &[Span<'static>],
     command: &str,
-    wrap_width: usize,
+    fit: Fit,
     mask: &[bool],
     style: &CommandStyle,
 ) -> Text<'static> {
@@ -242,13 +279,17 @@ pub(super) fn command_text(
 
     let mut pieces: Vec<Piece> = Vec::new();
     if !prefix.is_empty() {
-        let width = prefix
+        let glyphs = prefix
             .iter()
-            .map(|s| super::format::display_width(&s.content))
-            .sum();
+            .flat_map(|span| {
+                span.content
+                    .graphemes(true)
+                    .map(|g| Glyph::new(g, span.style))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
         pieces.push(Piece {
-            spans: prefix,
-            width,
+            glyphs,
             is_space: false,
         });
     }
@@ -273,26 +314,11 @@ pub(super) fn command_text(
         let word: String = run.iter().map(|g| g.text).collect();
         let base = style.word(word_index, &word);
         word_index += 1;
-        let mut spans = Vec::new();
-        let mut text = String::new();
-        let mut matched = run[0].matched;
-        for g in run {
-            if g.matched != matched {
-                spans.push(Span::styled(
-                    std::mem::take(&mut text),
-                    if matched { style.matched } else { base },
-                ));
-                matched = g.matched;
-            }
-            text.push_str(g.text);
-        }
-        spans.push(Span::styled(
-            text,
-            if matched { style.matched } else { base },
-        ));
         pieces.push(Piece {
-            spans,
-            width: super::format::display_width(&word),
+            glyphs: run
+                .iter()
+                .map(|g| Glyph::new(g.text, if g.matched { style.matched } else { base }))
+                .collect(),
             is_space: false,
         });
     }
@@ -300,7 +326,13 @@ pub(super) fn command_text(
         pieces.push(edge_markers(&graphemes[body_end..], style));
     }
 
-    wrap(pieces, wrap_width)
+    let ellipsis = Glyph::new("\u{2026}", Style::default().fg(style.marker));
+    let lines = match fit {
+        Fit::Wrap(width) if width > 0 => wrap(pieces, width),
+        Fit::Truncate(width) if width > 0 => vec![truncate(pieces, width, ellipsis)],
+        _ => vec![pieces.into_iter().flat_map(|p| p.glyphs).collect()],
+    };
+    Text::from(lines.into_iter().map(to_line).collect::<Vec<_>>())
 }
 
 /// One grapheme cluster of the command, and what the renderer needs to
@@ -321,8 +353,7 @@ fn inner_space(run: &[Grapheme<'_>], style: &CommandStyle) -> Piece {
             Style::default()
         };
         return Piece {
-            width: run.len(),
-            spans: vec![Span::styled(" ".repeat(run.len()), styled)],
+            glyphs: run.iter().map(|_| Glyph::new(" ", styled)).collect(),
             is_space: true,
         };
     }
@@ -332,68 +363,117 @@ fn inner_space(run: &[Grapheme<'_>], style: &CommandStyle) -> Piece {
         "\u{21e5}"
     };
     Piece {
-        spans: vec![
-            Span::raw(" "),
-            Span::styled(marker, Style::default().fg(style.marker)),
-            Span::raw(" "),
+        glyphs: vec![
+            Glyph::new(" ", Style::default()),
+            Glyph::new(marker, Style::default().fg(style.marker)),
+            Glyph::new(" ", Style::default()),
         ],
-        width: 3,
         is_space: true,
     }
 }
 
 /// Leading or trailing whitespace, one marker per character.
 fn edge_markers(run: &[Grapheme<'_>], style: &CommandStyle) -> Piece {
-    let mut text: String = run
+    let marker = Style::default().fg(style.marker);
+    let mut glyphs: Vec<Glyph> = run
         .iter()
         .take(MAX_EDGE_MARKERS)
         .map(|g| {
-            if g.text.contains('\n') {
-                '\u{21b5}'
+            let symbol = if g.text.contains('\n') {
+                "\u{21b5}"
             } else if g.text == "\t" {
-                '\u{21e5}'
+                "\u{21e5}"
             } else {
-                '\u{b7}'
-            }
+                "\u{b7}"
+            };
+            Glyph::new(symbol, marker)
         })
         .collect();
     if run.len() > MAX_EDGE_MARKERS {
-        text.push('\u{2026}');
+        glyphs.push(Glyph::new("\u{2026}", marker));
     }
-    let width = super::format::display_width(&text);
     Piece {
-        spans: vec![Span::styled(text, Style::default().fg(style.marker))],
-        width,
+        glyphs,
         is_space: false,
     }
 }
 
-/// Lay pieces out on lines no wider than `wrap_width` (0: one line), moving
-/// a word that would overflow to the next line and dropping the whitespace
-/// the break replaces.
-fn wrap(pieces: Vec<Piece>, wrap_width: usize) -> Text<'static> {
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut width = 0;
+/// Lay pieces out on lines no wider than `width`. A word that would
+/// overflow moves to the next line, and the whitespace the break replaces
+/// is dropped; a word wider than a whole line is broken between graphemes,
+/// so nothing is ever cut off.
+fn wrap(pieces: Vec<Piece>, width: usize) -> Vec<Vec<Glyph>> {
+    let mut lines: Vec<Vec<Glyph>> = Vec::new();
+    let mut line: Vec<Glyph> = Vec::new();
+    let mut used = 0;
+    let close = |line: &mut Vec<Glyph>, used: &mut usize, lines: &mut Vec<Vec<Glyph>>| {
+        while line.last().is_some_and(|g| g.text.trim().is_empty()) {
+            line.pop();
+        }
+        lines.push(std::mem::take(line));
+        *used = 0;
+    };
     for piece in pieces {
-        if wrap_width > 0 && !piece.is_space && width > 0 && width + piece.width > wrap_width {
-            // Trailing whitespace on the line being closed is the break.
-            while spans.last().is_some_and(|s| s.content.trim().is_empty()) {
-                spans.pop();
+        if piece.is_space {
+            if used == 0 && !lines.is_empty() {
+                continue;
             }
-            lines.push(Line::from(std::mem::take(&mut spans)));
-            width = 0;
+        } else if used > 0 && used + piece.width() > width {
+            close(&mut line, &mut used, &mut lines);
         }
-        if piece.is_space && width == 0 && !lines.is_empty() {
-            continue;
+        for glyph in piece.glyphs {
+            if used > 0 && used + glyph.width > width {
+                close(&mut line, &mut used, &mut lines);
+            }
+            used += glyph.width;
+            line.push(glyph);
         }
-        width += piece.width;
-        spans.extend(piece.spans);
     }
-    if !spans.is_empty() || lines.is_empty() {
-        lines.push(Line::from(spans));
+    if !line.is_empty() || lines.is_empty() {
+        lines.push(line);
     }
-    Text::from(lines)
+    lines
+}
+
+/// Everything on one line within `width` cells, ending in `ellipsis` when
+/// something had to be cut.
+fn truncate(pieces: Vec<Piece>, width: usize, ellipsis: Glyph) -> Vec<Glyph> {
+    let glyphs: Vec<Glyph> = pieces.into_iter().flat_map(|p| p.glyphs).collect();
+    if glyphs.iter().map(|g| g.width).sum::<usize>() <= width {
+        return glyphs;
+    }
+    let room = width.saturating_sub(ellipsis.width);
+    let mut used = 0;
+    let mut line: Vec<Glyph> = glyphs
+        .into_iter()
+        .take_while(|g| {
+            used += g.width;
+            used <= room
+        })
+        .collect();
+    line.push(ellipsis);
+    line
+}
+
+/// Merge neighbouring glyphs of the same style into spans.
+fn to_line(glyphs: Vec<Glyph>) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut text = String::new();
+    let mut current: Option<Style> = None;
+    for glyph in glyphs {
+        if current.is_some_and(|style| style != glyph.style) {
+            spans.push(Span::styled(
+                std::mem::take(&mut text),
+                current.unwrap_or_default(),
+            ));
+        }
+        current = Some(glyph.style);
+        text.push_str(&glyph.text);
+    }
+    if let Some(style) = current {
+        spans.push(Span::styled(text, style));
+    }
+    Line::from(spans)
 }
 
 /// `"just now"`, `"5m ago"`, `"3h ago"`, `"yesterday"`, `"4d ago"`,
@@ -491,11 +571,11 @@ mod tests {
 
     #[test]
     fn trailing_whitespace_is_visible_so_distinct_commands_never_look_alike() {
-        let a = command_text(vec![], "suv status", 0, &[], &style());
-        let b = command_text(vec![], "suv status  ", 0, &[], &style());
+        let a = command_text(&[], "suv status", Fit::Unlimited, &[], &style());
+        let b = command_text(&[], "suv status  ", Fit::Unlimited, &[], &style());
         assert_eq!(plain(&a), vec!["suv status"]);
         assert_eq!(plain(&b), vec!["suv status\u{b7}\u{b7}"]);
-        let c = command_text(vec![], " suv  status", 0, &[], &style());
+        let c = command_text(&[], " suv  status", Fit::Unlimited, &[], &style());
         assert_eq!(plain(&c), vec!["\u{b7}suv  status"]);
     }
 
@@ -545,13 +625,16 @@ mod tests {
             ),
         ] {
             let mask = match_mask(command, query, mode);
-            let buf = rendered(command_text(vec![], command, 0, &mask, &s), 40);
+            let buf = rendered(command_text(&[], command, Fit::Unlimited, &mask, &s), 40);
             assert_eq!(visible(&buf), command, "{command:?} / {query:?}");
         }
 
         // The grapheme a match touches is emphasised whole.
         let mask = match_mask("echo cafe\u{301}", "cafe", MatchMode::Literal);
-        let buf = rendered(command_text(vec![], "echo cafe\u{301}", 0, &mask, &s), 40);
+        let buf = rendered(
+            command_text(&[], "echo cafe\u{301}", Fit::Unlimited, &mask, &s),
+            40,
+        );
         let accented = buf
             .content
             .iter()
@@ -563,9 +646,9 @@ mod tests {
     #[test]
     fn line_breaks_and_tabs_inside_a_command_are_marked() {
         let text = command_text(
-            vec![],
+            &[],
             "for i in 1 2; do\n  echo $i\ndone",
-            0,
+            Fit::Unlimited,
             &[],
             &style(),
         );
@@ -579,7 +662,7 @@ mod tests {
     fn matched_characters_take_the_emphasis_style() {
         let s = style();
         let mask = match_mask("git checkout", "check", MatchMode::Terms);
-        let text = command_text(vec![], "git checkout", 0, &mask, &s);
+        let text = command_text(&[], "git checkout", Fit::Unlimited, &mask, &s);
         let emphasised: String = text.lines[0]
             .spans
             .iter()
@@ -592,7 +675,13 @@ mod tests {
     #[test]
     fn wrapping_breaks_between_words_and_keeps_the_prefix() {
         let prefix = vec![Span::raw("26\u{d7} ")];
-        let text = command_text(prefix, "docker compose up --build web", 16, &[], &style());
+        let text = command_text(
+            &prefix,
+            "docker compose up --build web",
+            Fit::Wrap(16),
+            &[],
+            &style(),
+        );
         assert_eq!(
             plain(&text),
             vec!["26\u{d7} docker", "compose up", "--build web"]

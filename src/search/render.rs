@@ -16,9 +16,9 @@ use std::io;
 use super::format::{
     command_prefix, detail_placement, display_width, entry_row_styles, fit_hints, fit_prefix,
     format_executor, format_exit_code, no_results_lines, ColumnLayout, DetailPlacement, Hint,
-    NoResults, StatusSegment, DETAIL_BOTTOM_HEIGHT,
+    NoResults, StatusSegment, DETAIL_BOTTOM_HEIGHT, SELECTION_SYMBOL,
 };
-use super::highlight::{command_text, match_mask, relative_age, CommandStyle};
+use super::highlight::{command_text, match_mask, relative_age, CommandStyle, Fit};
 use super::{centered_rect, DialogState, RecallScope, SearchApp};
 
 /// Cells reserved for the `"+N"` marker that stands in for status-row filter
@@ -528,7 +528,7 @@ impl SearchApp {
                     .border_style(Style::default().fg(t.border))
                     .title(title),
             )
-            .highlight_symbol(" > ");
+            .highlight_symbol(SELECTION_SYMBOL);
 
         f.render_stateful_widget(table, table_area, &mut self.table_state);
 
@@ -649,13 +649,18 @@ impl SearchApp {
         } else {
             Vec::new()
         };
+        // The selected row wraps so every character of it can be read;
+        // the others stay one line and say so when they are cut short.
         let command_display = command_text(
-            prefix,
+            &prefix,
             &entry.command,
-            if is_selected {
-                command_col_width as usize
+            if command_col_width == 0 {
+                // No room at all: let the cell clip, as it would anyway.
+                Fit::Unlimited
+            } else if is_selected {
+                Fit::Wrap(command_col_width as usize)
             } else {
-                0
+                Fit::Truncate(command_col_width as usize)
             },
             &mask,
             &CommandStyle::from_theme(t),
@@ -1626,6 +1631,50 @@ mod tests {
         assert!(matches!(layout, ColumnLayout::Full));
     }
 
+    /// The command column's width as a real `Table` draws it: a row whose
+    /// command cell holds more `x`s than can fit, counted in the buffer.
+    fn drawn_command_width(layout: &ColumnLayout, table_width: u16) -> u16 {
+        use ratatui::{buffer::Buffer, widgets::StatefulWidget, widgets::TableState};
+        let cells: Vec<Cell> = (0..layout.constraints().len())
+            .map(|i| {
+                if i == layout.command_column() {
+                    Cell::from("x".repeat(400))
+                } else {
+                    Cell::from("")
+                }
+            })
+            .collect();
+        let table = Table::new(vec![Row::new(cells)], layout.constraints())
+            .block(Block::default().borders(Borders::ALL))
+            .highlight_symbol(SELECTION_SYMBOL);
+        let area = Rect::new(0, 0, table_width, 3);
+        let mut buf = Buffer::empty(area);
+        let mut state = TableState::default().with_selected(Some(0));
+        StatefulWidget::render(table, area, &mut buf, &mut state);
+        let count = buf.content.iter().filter(|c| c.symbol() == "x").count();
+        u16::try_from(count).unwrap()
+    }
+
+    #[test]
+    fn command_width_is_the_width_the_table_really_draws() {
+        let layouts = [
+            ColumnLayout::Compact,
+            ColumnLayout::SemiCompact,
+            ColumnLayout::Full,
+            ColumnLayout::FullWithAgents,
+            ColumnLayout::Grouped,
+        ];
+        for layout in &layouts {
+            for width in [0_u16, 3, 30, 50, 60, 79, 80, 99, 111, 130, 150, 200] {
+                assert_eq!(
+                    layout.command_col_width(width),
+                    drawn_command_width(layout, width),
+                    "{layout:?} at a {width}-cell table"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_column_layout_for_view() {
         // Grouped rows get their own columns, down to a narrow terminal.
@@ -1683,22 +1732,6 @@ mod tests {
         let _header = layout.header_row();
         // Full layout has 4 columns = 4 header cells
         assert_eq!(layout.constraints().len(), 4);
-    }
-
-    #[test]
-    fn test_column_layout_command_width() {
-        // Compact: table_width - 6
-        assert_eq!(ColumnLayout::Compact.command_col_width(80), 74);
-
-        // SemiCompact: table_width - (12 + 6) - 6 = table_width - 24
-        assert_eq!(ColumnLayout::SemiCompact.command_col_width(100), 76);
-
-        // Full: table_width - 38 - 6 = table_width - 44
-        assert_eq!(ColumnLayout::Full.command_col_width(150), 106);
-        // With agents: an extra 10-column executor
-        assert_eq!(ColumnLayout::FullWithAgents.command_col_width(150), 96);
-        // Grouped: table_width - 17 - 6
-        assert_eq!(ColumnLayout::Grouped.command_col_width(80), 57);
     }
 
     // --- build_command_text tests ---
@@ -2418,44 +2451,6 @@ mod tests {
     }
 
     // --- command_col_width with narrow widths (saturating_sub) ---
-
-    #[test]
-    fn test_command_col_width_compact_narrow() {
-        // Compact: table_width.saturating_sub(6)
-        // width=3 → 3-6 would underflow, saturating_sub gives 0
-        assert_eq!(ColumnLayout::Compact.command_col_width(3), 0);
-    }
-
-    #[test]
-    fn test_command_col_width_compact_zero() {
-        assert_eq!(ColumnLayout::Compact.command_col_width(0), 0);
-    }
-
-    #[test]
-    fn test_command_col_width_semi_narrow() {
-        // SemiCompact: table_width.saturating_sub(12 + 6 + 6) = saturating_sub(24)
-        // width=10 → 0
-        assert_eq!(ColumnLayout::SemiCompact.command_col_width(10), 0);
-    }
-
-    #[test]
-    fn test_command_col_width_full_narrow() {
-        // Full: table_width.saturating_sub(38 + 6) = saturating_sub(44)
-        // width=30 → 0
-        assert_eq!(ColumnLayout::Full.command_col_width(30), 0);
-    }
-
-    #[test]
-    fn test_command_col_width_full_exact() {
-        // Full: 44 - 44 = 0
-        assert_eq!(ColumnLayout::Full.command_col_width(44), 0);
-    }
-
-    #[test]
-    fn test_command_col_width_full_one_over() {
-        // Full: 45 - 44 = 1
-        assert_eq!(ColumnLayout::Full.command_col_width(45), 1);
-    }
 
     // --- SemiCompact header row ---
 

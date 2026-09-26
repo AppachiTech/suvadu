@@ -4468,3 +4468,68 @@ fn what_is_highlighted_is_what_the_database_matched() {
         );
     }
 }
+
+/// The results table's rows as drawn: the rows inside its border, cut at
+/// its right edge so a detail pane beside it is not counted.
+fn table_rows(lines: &[String]) -> Vec<String> {
+    let top = lines
+        .iter()
+        .position(|l| l.contains("Executions") || l.contains("Commands"))
+        .expect("results table drawn");
+    let right = lines[top].chars().position(|c| c == '\u{256e}').unwrap();
+    lines[top + 1..]
+        .iter()
+        .take_while(|l| !l.starts_with('\u{2570}'))
+        .map(|l| l.chars().take(right).collect())
+        .collect()
+}
+
+#[test]
+fn the_selected_row_shows_every_character_at_any_wrap_boundary() {
+    // (grouped, agents shown, detail pane, terminal width)
+    let views = [
+        (true, false, false, 80_u16),
+        (true, false, true, 80),
+        (true, false, false, 60),
+        (false, false, false, 80),
+        (false, false, false, 100),
+        (false, false, true, 160),
+        (false, true, false, 200),
+        (false, true, true, 200),
+    ];
+    for (grouped, agents, detail, width) in views {
+        // Letters that appear in no header, date, age or status cell.
+        for (unit, repeat) in [("q", 20..=140), ("\u{65e5}", 10..=70)] {
+            for n in repeat {
+                let selected = format!("echo {}", unit.repeat(n));
+                let other = format!("echo {}", "k".repeat(n));
+                let mut app = SearchApp::new(test_search_config(
+                    vec![create_test_entry(&selected), create_test_entry(&other)],
+                    2,
+                ));
+                app.view.unique_mode = grouped;
+                app.filters.show_agents = agents;
+                app.view.detail_pane_open = detail;
+                app.table_state.select(Some(0));
+                let rows = table_rows(&render_lines(&mut app, width, 30));
+                let ctx = format!("grouped={grouped} agents={agents} detail={detail} {width} cols, {n}\u{d7}{unit}");
+
+                let shown = rows.iter().map(|r| r.matches(unit).count()).sum::<usize>();
+                assert_eq!(
+                    shown,
+                    n,
+                    "{ctx}: the selected command lost characters:\n{}",
+                    rows.join("\n")
+                );
+
+                // The other row is one line; when it is cut, it says so.
+                let other_row = rows.iter().find(|r| r.contains('k')).unwrap();
+                let ks = other_row.matches('k').count();
+                assert!(
+                    ks == n || other_row.contains('\u{2026}'),
+                    "{ctx}: an unselected row was clipped without an ellipsis:\n{other_row}"
+                );
+            }
+        }
+    }
+}

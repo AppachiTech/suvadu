@@ -6,14 +6,19 @@
 
 use crate::theme::theme;
 use ratatui::{
-    layout::Constraint,
+    layout::{Constraint, Flex, Layout, Rect},
     style::{Modifier, Style},
     widgets::Row,
 };
 
+/// The results table's selection marker. Its width is part of the geometry
+/// `ColumnLayout::command_col_width` reproduces, so it is defined once here.
+pub(super) const SELECTION_SYMBOL: &str = " > ";
+
 // ── Column layout ──────────────────────────────────────────────
 
 /// Describes the column layout mode based on terminal width.
+#[derive(Debug)]
 pub(super) enum ColumnLayout {
     Compact,        // < 80 cols: command only
     SemiCompact,    // 80-129 cols: time + command + status
@@ -53,17 +58,31 @@ impl ColumnLayout {
         }
     }
 
-    pub const fn command_col_width(&self, table_width: u16) -> u16 {
-        const FULL_FIXED: u16 = 12 + 20 + 6; // Time + Path + Status
-        const SEMI_FIXED: u16 = 12 + 6; // Time + Status
-        const GROUPED_FIXED: u16 = 11 + 6; // Last used + Runs
+    /// Which column holds the command.
+    pub const fn command_column(&self) -> usize {
         match self {
-            Self::Compact => table_width.saturating_sub(6),
-            Self::SemiCompact => table_width.saturating_sub(SEMI_FIXED + 6),
-            Self::Full => table_width.saturating_sub(FULL_FIXED + 6),
-            Self::FullWithAgents => table_width.saturating_sub(FULL_FIXED + 10 + 6),
-            Self::Grouped => table_width.saturating_sub(GROUPED_FIXED + 6),
+            Self::Compact | Self::Grouped => 0,
+            Self::SemiCompact | Self::Full | Self::FullWithAgents => 1,
         }
+    }
+
+    /// The width, in cells, the command column really gets in a results
+    /// table `table_width` cells wide — computed the way `Table` lays out
+    /// its columns: inside the two borders, after the selection marker,
+    /// with the columns solved from `constraints()` flush left and one cell
+    /// between neighbours. A wrap width guessed from a fixed overhead drifted
+    /// from this per layout and clipped the selected row's last characters.
+    pub fn command_col_width(&self, table_width: u16) -> u16 {
+        const BORDERS: u16 = 2;
+        let selection = u16::try_from(display_width(SELECTION_SYMBOL)).unwrap_or(3);
+        let inside = Rect::new(0, 0, table_width.saturating_sub(BORDERS), 1);
+        let [_, columns] =
+            Layout::horizontal([Constraint::Length(selection), Constraint::Fill(0)]).areas(inside);
+        Layout::horizontal(self.constraints())
+            .flex(Flex::Start)
+            .spacing(1)
+            .split(columns)[self.command_column()]
+        .width
     }
 
     pub fn constraints(&self) -> Vec<Constraint> {
