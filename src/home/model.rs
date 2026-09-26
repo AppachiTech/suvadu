@@ -154,7 +154,8 @@ pub struct HomeState {
     focus: Focus,
     detail_scroll: u16,
     views: Vec<View>,
-    notice: Option<String>,
+    /// A one-line message for the status row, and whether it is an error.
+    notice: Option<(String, bool)>,
     viewport: (u16, u16),
     topics: Vec<Topic>,
     /// Largest useful scroll for the detail pane and the top view, as the
@@ -163,6 +164,8 @@ pub struct HomeState {
     view_scroll_limit: Cell<u16>,
     pub icons: HomeIcons,
     pub status: HomeStatus,
+    /// `NO_COLOR` is set: draw without colour, keep every label.
+    pub no_color: bool,
 }
 
 impl Default for HomeState {
@@ -190,6 +193,7 @@ impl HomeState {
             view_scroll_limit: Cell::new(u16::MAX),
             icons: HomeIcons::default(),
             status: HomeStatus::default(),
+            no_color: false,
         }
     }
 
@@ -216,7 +220,11 @@ impl HomeState {
     }
 
     pub fn notice(&self) -> Option<&str> {
-        self.notice.as_deref()
+        self.notice.as_ref().map(|(text, _)| text.as_str())
+    }
+
+    pub fn notice_is_error(&self) -> bool {
+        self.notice.as_ref().is_some_and(|(_, error)| *error)
     }
 
     pub fn view(&self) -> Option<&View> {
@@ -319,11 +327,15 @@ impl HomeState {
         self.insert(query);
     }
 
-    /// The renderer reports how far the detail pane and the top view can
-    /// scroll, so keys never scroll past the end.
-    pub fn set_scroll_limits(&self, detail: u16, view: u16) {
-        self.detail_scroll_limit.set(detail);
-        self.view_scroll_limit.set(view);
+    /// The renderer reports how far the detail pane can scroll, so keys
+    /// never scroll past the end.
+    pub fn set_detail_scroll_limit(&self, limit: u16) {
+        self.detail_scroll_limit.set(limit);
+    }
+
+    /// As [`Self::set_detail_scroll_limit`], for the open view.
+    pub fn set_view_scroll_limit(&self, limit: u16) {
+        self.view_scroll_limit.set(limit);
     }
 
     /// Show what a launched feature returned.
@@ -339,9 +351,15 @@ impl HomeState {
     /// Report a clipboard write. Success is claimed only after it happened.
     pub fn copied(&mut self, _text: &str, result: &Result<(), String>) {
         self.notice = Some(match result {
-            Ok(()) => "Copied to the clipboard. It has not been run.".to_string(),
-            Err(e) => format!(
-                "Could not copy ({e}). Select the text on screen with your terminal instead."
+            Ok(()) => (
+                "Copied to the clipboard. It has not been run.".to_string(),
+                false,
+            ),
+            Err(e) => (
+                format!(
+                    "Could not copy ({e}). Select the text on screen with your terminal instead."
+                ),
+                true,
             ),
         });
     }
@@ -754,8 +772,11 @@ impl HomeState {
         let incoming: Vec<&str> = text.graphemes(true).collect();
         let piece: String = incoming.iter().take(room).copied().collect();
         if incoming.len() > room {
-            self.notice = Some(format!(
-                "Feature search is limited to {MAX_QUERY_GRAPHEMES} characters; the rest was not added."
+            self.notice = Some((
+                format!(
+                    "Feature search is limited to {MAX_QUERY_GRAPHEMES} characters; the rest was not added."
+                ),
+                true,
             ));
         }
         self.query.insert_str(self.cursor, &piece);

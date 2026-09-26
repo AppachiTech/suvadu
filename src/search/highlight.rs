@@ -457,7 +457,7 @@ fn needs_escape(c: char) -> bool {
 /// command has edge whitespace, or something that has to be escaped to be
 /// seen — other than the joiners and selectors ordinary emoji and scripts
 /// use. (`^V` shows it for any command.)
-pub(super) fn wants_raw(command: &str) -> bool {
+pub fn wants_raw(command: &str) -> bool {
     command.starts_with(char::is_whitespace)
         || command.ends_with(char::is_whitespace)
         || command
@@ -466,14 +466,14 @@ pub(super) fn wants_raw(command: &str) -> bool {
 }
 
 /// Styles for the raw view's parts.
-pub(super) struct RawStyle {
+pub struct RawStyle {
     pub text: Style,
     pub escape: Style,
     pub space: Style,
 }
 
 impl RawStyle {
-    pub(super) fn from_theme(t: &crate::theme::Theme) -> Self {
+    pub fn from_theme(t: &crate::theme::Theme) -> Self {
         Self {
             text: Style::default().fg(t.text),
             escape: Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
@@ -493,7 +493,7 @@ impl RawStyle {
 /// A line ends after each `\n`, and lines longer than `width` cells (0: no
 /// limit) are broken between graphemes, never at a character that would
 /// then be lost: there are no spaces left for a wrap to swallow.
-pub(super) fn raw_view(command: &str, width: usize, style: &RawStyle) -> Vec<Line<'static>> {
+pub fn raw_view(command: &str, width: usize, style: &RawStyle) -> Vec<Line<'static>> {
     use unicode_segmentation::UnicodeSegmentation;
 
     // (glyph, whether a line ends after it)

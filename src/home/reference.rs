@@ -34,6 +34,26 @@ pub fn topics() -> Vec<Topic> {
     out
 }
 
+/// The help for one topic: the grouped overview for the empty path,
+/// otherwise the command's long help (`suv <path> --help`), rendered by
+/// clap as plain text. Hidden or unknown commands are an error to show.
+pub fn command_help(path: &[&str]) -> Result<String, String> {
+    if path.is_empty() {
+        return Ok(crate::cli::overview());
+    }
+    let unknown = || format!("There is no public command `suv {}`.", path.join(" "));
+    let mut root = crate::cli::Cli::command().bin_name("suv");
+    root.build();
+    let mut current = &mut root;
+    for part in path {
+        current = current
+            .find_subcommand_mut(part)
+            .filter(|c| !c.is_hide_set())
+            .ok_or_else(unknown)?;
+    }
+    Ok(current.render_long_help().to_string())
+}
+
 /// Where the reference opens for a command path; the overview when the path
 /// is not a topic.
 pub fn topic_index(topics: &[Topic], path: &[&str]) -> usize {
@@ -76,6 +96,32 @@ mod tests {
             );
             assert!(!topic.path.iter().any(|p| p == "help"), "{:?}", topic.path);
         }
+    }
+
+    #[test]
+    fn the_overview_is_exactly_what_suv_help_prints() {
+        assert_eq!(command_help(&[]).unwrap(), crate::cli::overview());
+    }
+
+    #[test]
+    fn a_command_topic_is_its_own_long_help() {
+        let search = command_help(&["search"]).unwrap();
+        assert!(search.contains("Usage: suv search"), "{search}");
+        assert!(
+            search.contains("Matching modes"),
+            "the after-help is included"
+        );
+        assert!(!search.contains('\x1b'), "plain text");
+        let nested = command_help(&["tag", "create"]).unwrap();
+        assert!(nested.contains("Usage: suv tag create"), "{nested}");
+    }
+
+    #[test]
+    fn unknown_or_hidden_commands_are_a_readable_error() {
+        let err = command_help(&["nope"]).unwrap_err();
+        assert!(err.contains("suv nope"), "{err}");
+        assert!(command_help(&["mcp-serve"]).is_err());
+        assert!(command_help(&["tag", "nope"]).is_err());
     }
 
     #[test]

@@ -4,7 +4,7 @@ pub mod matching;
 pub mod scope;
 pub use matching::MatchMode;
 pub use scope::{RecallContext, RecallScope};
-mod highlight;
+pub mod highlight;
 mod input;
 mod render;
 mod worker;

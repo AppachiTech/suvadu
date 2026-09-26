@@ -122,7 +122,7 @@ static CATEGORIES: [Category; 7] = [
         id: SESSION,
         title: "Review a session",
         description: "Follow what happened in a shell or AI session",
-        ascii: ">",
+        ascii: "~",
         unicode: "◷",
     },
     Category {

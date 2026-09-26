@@ -11,6 +11,8 @@ pub mod model;
 #[allow(dead_code)]
 pub mod reference;
 pub mod startup;
+#[allow(dead_code)]
+pub mod ui;
 
 use std::io::IsTerminal;
 
