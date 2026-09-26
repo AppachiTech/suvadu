@@ -56,13 +56,20 @@ pub fn start(explicit_home: bool) -> Result<(), Box<dyn std::error::Error>> {
 /// One line from a config error, which for TOML is a multi-line snippet:
 /// where it is, then what is wrong (`line 2, column 11: unknown variant …`).
 fn concise_error(error: &str) -> String {
-    let lines: Vec<&str> = error.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let lines: Vec<&str> = error
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     let reason = lines.last().copied().unwrap_or("unknown error");
     let location = lines
         .first()
         .and_then(|first| first.find("line ").map(|at| &first[at..]))
         .filter(|location| lines.len() > 1 && *location != reason);
-    location.map_or_else(|| reason.to_string(), |location| format!("{location}: {reason}"))
+    location.map_or_else(
+        || reason.to_string(),
+        |location| format!("{location}: {reason}"),
+    )
 }
 
 #[cfg(test)]

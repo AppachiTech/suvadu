@@ -1261,7 +1261,10 @@ mod tests {
     #[test]
     fn test_cli_parses_bare_skills_as_none() {
         let cli = Cli::try_parse_from(["suv", "skills"]).unwrap();
-        assert!(matches!(cli.command.unwrap(), Commands::Skills { command: None }));
+        assert!(matches!(
+            cli.command.unwrap(),
+            Commands::Skills { command: None }
+        ));
     }
 
     #[test]
@@ -1284,7 +1287,10 @@ mod tests {
     #[test]
     fn test_cli_parses_bare_bookmarks_as_none() {
         let cli = Cli::try_parse_from(["suv", "bookmarks"]).unwrap();
-        assert!(matches!(cli.command.unwrap(), Commands::Bookmarks { command: None }));
+        assert!(matches!(
+            cli.command.unwrap(),
+            Commands::Bookmarks { command: None }
+        ));
     }
 
     #[test]
@@ -1301,7 +1307,10 @@ mod tests {
     #[test]
     fn test_cli_accepts_bookmark_singular_alias() {
         let cli = Cli::try_parse_from(["suv", "bookmark"]).unwrap();
-        assert!(matches!(cli.command.unwrap(), Commands::Bookmarks { command: None }));
+        assert!(matches!(
+            cli.command.unwrap(),
+            Commands::Bookmarks { command: None }
+        ));
     }
 
     #[test]
@@ -1312,7 +1321,10 @@ mod tests {
     #[test]
     fn test_cli_parses_bare_aliases_as_none() {
         let cli = Cli::try_parse_from(["suv", "aliases"]).unwrap();
-        assert!(matches!(cli.command.unwrap(), Commands::Aliases { command: None }));
+        assert!(matches!(
+            cli.command.unwrap(),
+            Commands::Aliases { command: None }
+        ));
     }
 
     #[test]
@@ -1332,7 +1344,10 @@ mod tests {
     #[test]
     fn test_cli_accepts_alias_singular_alias() {
         let cli = Cli::try_parse_from(["suv", "alias"]).unwrap();
-        assert!(matches!(cli.command.unwrap(), Commands::Aliases { command: None }));
+        assert!(matches!(
+            cli.command.unwrap(),
+            Commands::Aliases { command: None }
+        ));
     }
 
     #[test]

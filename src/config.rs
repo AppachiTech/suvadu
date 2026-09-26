@@ -455,7 +455,8 @@ pub fn read_global_config() -> ConfigResult<Option<Config>> {
     #[cfg(target_os = "macos")]
     if !path.exists() {
         if let Some(home) = std::env::var_os("HOME") {
-            let old = PathBuf::from(home).join("Library/Preferences/tech.appachi.suvadu/config.toml");
+            let old =
+                PathBuf::from(home).join("Library/Preferences/tech.appachi.suvadu/config.toml");
             if old.exists() {
                 return read_config_file(&old);
             }
@@ -1014,7 +1015,8 @@ unknown_mcp_key = 7
 
     #[test]
     fn home_preferences_read_both_startup_screens_and_icon_sets() {
-        let home: Config = toml::from_str("[home]\nstartup = \"home\"\nicons = \"unicode\"").unwrap();
+        let home: Config =
+            toml::from_str("[home]\nstartup = \"home\"\nicons = \"unicode\"").unwrap();
         assert_eq!(home.home.startup, Some(HomeStartup::Home));
         assert_eq!(home.home.effective_startup(), HomeStartup::Home);
         assert_eq!(home.home.icons, HomeIcons::Unicode);

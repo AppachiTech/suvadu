@@ -212,7 +212,10 @@ fn home_without_a_terminal_is_refused_in_plain_text() {
 fn a_home_preference_never_reaches_a_noninteractive_bare_suv() {
     let sandbox = Sandbox::new();
     let help = sandbox.run(&["--help"]);
-    for config in ["[home]\nstartup = \"home\"\n", "[home]\nstartup = \"sideways\"\n"] {
+    for config in [
+        "[home]\nstartup = \"home\"\n",
+        "[home]\nstartup = \"sideways\"\n",
+    ] {
         sandbox.write_config(config);
         let bare = sandbox.run(&[]);
         assert_eq!(bare.status.code(), Some(2), "config: {config}");
