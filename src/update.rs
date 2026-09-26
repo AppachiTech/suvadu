@@ -72,7 +72,17 @@ const SUVADU_LOGO: &str = r"
 ";
 
 pub fn is_homebrew_install() -> bool {
-    std::env::current_exe().is_ok_and(|exe| is_homebrew_path(&exe.to_string_lossy()))
+    std::env::current_exe().is_ok_and(|exe| is_homebrew_exe(&exe))
+}
+
+/// Whether `exe`, as run or once its links are resolved, is Homebrew's. On
+/// Intel macOS Homebrew's prefix is `/usr/local`, so `/usr/local/bin/suv` is
+/// its link into the Cellar and only the resolved path says so.
+fn is_homebrew_exe(exe: &std::path::Path) -> bool {
+    is_homebrew_path(&exe.to_string_lossy())
+        || exe
+            .canonicalize()
+            .is_ok_and(|real| is_homebrew_path(&real.to_string_lossy()))
 }
 
 pub fn is_cargo_install() -> bool {
@@ -471,12 +481,55 @@ fn verify_checksum(
 
 // ── Install ──────────────────────────────────────────────
 
+/// The file an update replaces: the running binary with its links resolved.
+/// On macOS `current_exe` is the path as invoked, so running as `suvadu`
+/// would otherwise overwrite the link instead of `suv`.
+fn update_target(exe: &std::path::Path) -> std::path::PathBuf {
+    exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf())
+}
+
+/// Whether this user can create files in `dir` — asked of the filesystem
+/// directly, so ACLs, read-only mounts and root are all answered correctly.
+fn dir_is_writable(dir: &std::path::Path) -> bool {
+    tempfile::Builder::new()
+        .prefix(".suv-update-")
+        .tempfile_in(dir)
+        .is_ok()
+}
+
+/// Put `new` in place of `target` and point `suvadu` beside it at it, as the
+/// current user.
+fn replace_binary_directly(new: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    fn remove_if_present(path: &std::path::Path) -> std::io::Result<()> {
+        match std::fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    }
+    // Remove first: on Linux, writing over a running binary fails with
+    // "Text file busy", while unlinking keeps the old inode alive for this
+    // process.
+    remove_if_present(target)?;
+    std::fs::copy(new, target)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755))?;
+        let link = target.with_file_name("suvadu");
+        remove_if_present(&link)?;
+        std::os::unix::fs::symlink(target, &link)?;
+    }
+    Ok(())
+}
+
 /// Install the new binary. Returns `true` if the user confirmed and the
 /// install succeeded, `false` if the user cancelled.
 fn install_binary(binary_path: &std::path::Path) -> Result<bool, Box<dyn std::error::Error>> {
     let binary_str = binary_path.to_string_lossy().to_string();
-    let install_path =
-        std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/usr/local/bin/suv"));
+    let install_path = std::env::current_exe().map_or_else(
+        |_| std::path::PathBuf::from("/usr/local/bin/suv"),
+        |exe| update_target(&exe),
+    );
     let install_str = install_path.to_string_lossy();
     let install_dir = install_path
         .parent()
@@ -492,6 +545,14 @@ fn install_binary(binary_path: &std::path::Path) -> Result<bool, Box<dyn std::er
     if input.trim().to_lowercase() != "y" {
         println!("Update cancelled.");
         return Ok(false);
+    }
+
+    // sudo only when this user cannot write the directory — a --user or
+    // --dir install must not end up with a root-owned binary.
+    if dir_is_writable(install_dir) {
+        println!("Installing update...");
+        replace_binary_directly(binary_path, &install_path)?;
+        return Ok(true);
     }
 
     println!("Installing update (requires sudo)...");
@@ -662,6 +723,79 @@ mod tests {
             PublicKey::from_base64(MINISIGN_PUBLIC_KEY).is_ok(),
             "Embedded MINISIGN_PUBLIC_KEY must be a valid minisign public key"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_update_target_is_the_real_binary_even_when_run_as_suvadu() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("suv");
+        std::fs::write(&bin, "old").unwrap();
+        std::os::unix::fs::symlink(&bin, tmp.path().join("suvadu")).unwrap();
+
+        let real = bin.canonicalize().unwrap();
+        assert_eq!(update_target(&tmp.path().join("suvadu")), real);
+        assert_eq!(update_target(&bin), real);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_homebrew_link_outside_a_homebrew_path_is_still_homebrew() {
+        // Intel macOS: /usr/local/bin/suv is Homebrew's link into its Cellar.
+        let tmp = tempfile::tempdir().unwrap();
+        let cellar = tmp.path().join("Cellar/suvadu/0.4.2/bin");
+        std::fs::create_dir_all(&cellar).unwrap();
+        std::fs::write(cellar.join("suv"), "brew").unwrap();
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::os::unix::fs::symlink("../Cellar/suvadu/0.4.2/bin/suv", bin_dir.join("suv")).unwrap();
+
+        assert!(is_homebrew_exe(&bin_dir.join("suv")));
+        // A plain binary beside it is nobody's but its own.
+        std::fs::write(bin_dir.join("plain"), "script install").unwrap();
+        assert!(!is_homebrew_exe(&bin_dir.join("plain")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_writable_install_is_replaced_without_sudo() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("suv");
+        std::fs::write(&target, "old").unwrap();
+        std::os::unix::fs::symlink(&target, tmp.path().join("suvadu")).unwrap();
+        let download = tempfile::tempdir().unwrap();
+        let new = download.path().join("suv");
+        std::fs::write(&new, "new").unwrap();
+
+        assert!(dir_is_writable(tmp.path()));
+        replace_binary_directly(&new, &target).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
+        assert_eq!(
+            std::fs::read_link(tmp.path().join("suvadu")).unwrap(),
+            target,
+            "suvadu still points at suv"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_access_is_judged_on_the_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let locked = tmp.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // root can write anywhere; the check must then say so rather than lie.
+        let root = std::fs::write(locked.join("probe"), "x").is_ok();
+        assert_eq!(dir_is_writable(&locked), root);
+        assert!(dir_is_writable(tmp.path()));
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[test]
