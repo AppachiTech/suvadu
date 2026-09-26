@@ -25,6 +25,14 @@ use crate::repository::Repository;
 type Job = (u64, ReloadRequest);
 type Done = (u64, Result<ReloadResult, String>);
 
+/// Where a requested generation's result stands.
+pub(super) enum Poll {
+    Ready(Result<ReloadResult, String>),
+    Pending,
+    /// The worker thread has stopped; the caller must query itself.
+    Gone,
+}
+
 pub(super) struct QueryWorker {
     jobs: mpsc::Sender<Job>,
     done: mpsc::Receiver<Done>,
@@ -55,21 +63,27 @@ impl QueryWorker {
 
     /// Ask for `request` as `generation`, which must be larger than any
     /// generation asked for before. Whatever an older one was doing stops.
-    pub(super) fn submit(&self, generation: u64, request: ReloadRequest) {
+    /// `false` means the worker has stopped and nothing was asked.
+    pub(super) fn submit(&self, generation: u64, request: ReloadRequest) -> bool {
         self.latest.store(generation, Ordering::SeqCst);
-        // A send only fails if the worker has gone, which `wait` reports.
-        let _ = self.jobs.send((generation, request));
+        let sent = self.jobs.send((generation, request)).is_ok();
         self.interrupt.interrupt();
+        sent
     }
 
-    /// `generation`'s result, if it has arrived. Older results are dropped.
-    pub(super) fn try_take(&self, generation: u64) -> Option<Result<ReloadResult, String>> {
-        while let Ok((g, result)) = self.done.try_recv() {
-            if g == generation {
-                return Some(result);
+    /// `generation`'s result, waiting at most `wait` for it. Older results
+    /// are dropped on the way.
+    pub(super) fn poll(&self, generation: u64, wait: std::time::Duration) -> Poll {
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match self.done.recv_timeout(left) {
+                Ok((g, result)) if g == generation => return Poll::Ready(result),
+                Ok(_) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => return Poll::Pending,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Poll::Gone,
             }
         }
-        None
     }
 
     /// Block until `generation`'s result arrives, dropping older ones on the
@@ -82,6 +96,15 @@ impl QueryWorker {
                 Err(_) => return None,
             }
         }
+    }
+}
+
+#[cfg(test)]
+impl QueryWorker {
+    /// Stop the worker thread the way a crash would: its request channel
+    /// closes, it exits, and its result channel closes behind it.
+    pub(super) fn stop_thread_for_test(&mut self) {
+        self.jobs = mpsc::channel().0;
     }
 }
 

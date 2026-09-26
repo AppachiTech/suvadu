@@ -515,7 +515,24 @@ impl SearchApp {
         let title = self.build_table_title();
 
         if self.entries.is_empty() {
-            self.render_no_results(f, area, &title);
+            if self.searching {
+                // An empty result from an earlier query says nothing about
+                // this one; do not explain it as if it did.
+                let panel = Paragraph::new(Line::from(Span::styled(
+                    "  Searching\u{2026}",
+                    Style::default().fg(t.text_secondary),
+                )))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(t.border))
+                        .title(title),
+                );
+                f.render_widget(panel, area);
+            } else {
+                self.render_no_results(f, area, &title);
+            }
             return;
         }
 

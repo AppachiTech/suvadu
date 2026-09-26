@@ -4264,7 +4264,7 @@ fn the_worker_answers_exactly_what_a_reload_on_the_ui_thread_does() {
         app.reload_entries(&repo).unwrap();
         let expected: Vec<String> = app.entries.iter().map(|e| e.command.clone()).collect();
 
-        worker.submit(generation, app.reload_request());
+        assert!(worker.submit(generation, app.reload_request()));
         let result = worker.wait(generation).unwrap().unwrap();
         assert_eq!(result.first_page_commands(), expected, "{mode:?} {query:?}");
         let total = app.pagination.total_items;
@@ -4281,14 +4281,17 @@ fn a_superseded_query_never_reaches_the_screen() {
 
     // Typed "git", then "cargo" before the first answer was looked at.
     app.query = "git".into();
-    worker.submit(1, app.reload_request());
+    assert!(worker.submit(1, app.reload_request()));
     app.query = "cargo".into();
-    worker.submit(2, app.reload_request());
+    assert!(worker.submit(2, app.reload_request()));
 
     let result = worker.wait(2).unwrap().unwrap();
     assert_eq!(result.first_page_commands(), vec!["cargo test --offline"]);
     // Whatever generation 1 produced was dropped on the way, never returned.
-    assert!(worker.try_take(1).is_none());
+    assert!(matches!(
+        worker.poll(1, std::time::Duration::ZERO),
+        super::worker::Poll::Pending
+    ));
 }
 
 #[test]
@@ -4304,19 +4307,24 @@ fn an_interrupted_statement_reads_as_cancelled_not_failed() {
         );
         tx.send(result.map(|_| ())).unwrap();
     });
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    interrupt.interrupt();
-
-    let result = rx
-        .recv_timeout(std::time::Duration::from_secs(10))
-        .expect("the interrupt must stop the statement");
+    // SQLite ignores an interrupt that arrives before the statement starts,
+    // so keep asking until one lands.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let result = loop {
+        interrupt.interrupt();
+        match rx.recv_timeout(std::time::Duration::from_millis(10)) {
+            Ok(result) => break result,
+            Err(_) if std::time::Instant::now() < deadline => {}
+            Err(e) => panic!("the interrupt must stop the statement: {e}"),
+        }
+    };
     runner.join().unwrap();
     let err = result.expect_err("an interrupted statement does not succeed");
     assert!(crate::db::is_interrupted(&err), "{err}");
 }
 
 #[test]
-fn only_plain_typing_runs_ahead_of_a_query_in_flight() {
+fn only_typing_and_leaving_run_ahead_of_a_query_in_flight() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
     let ctrl = |c| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
@@ -4328,8 +4336,9 @@ fn only_plain_typing_runs_ahead_of_a_query_in_flight() {
         Event::Key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT)),
         key(KeyCode::Backspace),
         Event::Paste("git status".into()),
+        key(KeyCode::Esc),
     ] {
-        assert!(app.edits_query(&event), "{event:?}");
+        assert!(app.can_run_ahead(&event), "{event:?}");
     }
     // These act on the results, so they wait for the current ones.
     for event in [
@@ -4338,25 +4347,28 @@ fn only_plain_typing_runs_ahead_of_a_query_in_flight() {
         key(KeyCode::Down),
         key(KeyCode::Right),
         key(KeyCode::Tab),
-        key(KeyCode::Esc),
         key(KeyCode::Char('?')),
         ctrl('x'),
         ctrl('p'),
         ctrl('y'),
     ] {
-        assert!(!app.edits_query(&event), "{event:?}");
+        assert!(!app.can_run_ahead(&event), "{event:?}");
     }
 
     // In vim normal mode, letters navigate.
     app.vim_enabled = true;
     app.vim_mode = VimMode::Normal;
-    assert!(!app.edits_query(&key(KeyCode::Char('j'))));
+    assert!(!app.can_run_ahead(&key(KeyCode::Char('j'))));
+    assert!(
+        app.can_run_ahead(&key(KeyCode::Char('q'))),
+        "quitting needs no results"
+    );
     app.vim_mode = VimMode::Insert;
-    assert!(app.edits_query(&key(KeyCode::Char('j'))));
+    assert!(app.can_run_ahead(&key(KeyCode::Char('j'))));
 
     // With a dialog open, nothing is typed into the search box.
     app.dialog = DialogState::Help;
-    assert!(!app.edits_query(&key(KeyCode::Char('g'))));
+    assert!(!app.can_run_ahead(&key(KeyCode::Char('g'))));
 }
 
 #[test]
@@ -4372,4 +4384,47 @@ fn results_still_waiting_on_their_query_say_so() {
     assert!(!title(&mut app).contains("searching"));
     app.searching = true;
     assert!(title(&mut app).contains("searching\u{2026}"));
+
+    // An empty result for an earlier query is not presented as this one's.
+    let mut empty = app_for(&repo, "no-such-command-anywhere");
+    empty.searching = true;
+    let lines = render_lines(&mut empty, 100, 30);
+    let screen = lines.join("\n");
+    // The results panel: from its title down to its bottom border.
+    let panel: Vec<&String> = lines
+        .iter()
+        .skip_while(|l| !l.contains("History ("))
+        .take_while(|l| !l.starts_with('\u{2570}'))
+        .collect();
+    assert!(
+        panel.iter().any(|l| l.contains("Searching\u{2026}")),
+        "{screen}"
+    );
+    assert!(
+        !panel.iter().any(|l| l.contains("no-such-command-anywhere")),
+        "the panel explains an earlier query's empty result as this one's:\n{screen}"
+    );
+}
+
+#[test]
+fn a_stopped_worker_is_reported_rather_than_waited_on() {
+    let (_d, repo) = repo_with(MODE_CORPUS);
+    let mut worker = super::worker::QueryWorker::spawn(repo.search_reader().unwrap()).unwrap();
+    let app = app_for(&repo, "git");
+    assert!(worker.submit(1, app.reload_request()));
+    assert!(matches!(
+        worker.poll(1, std::time::Duration::from_secs(10)),
+        super::worker::Poll::Ready(Ok(_))
+    ));
+
+    worker.stop_thread_for_test();
+    // Once the thread is gone, asking fails and polling says so — it must
+    // not look like a search that is merely slow, or typing would appear
+    // frozen behind it.
+    assert!(!worker.submit(2, app.reload_request()));
+    assert!(matches!(
+        worker.poll(2, std::time::Duration::from_secs(10)),
+        super::worker::Poll::Gone
+    ));
+    assert!(worker.wait(2).is_none());
 }

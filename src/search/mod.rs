@@ -305,18 +305,17 @@ impl SearchApp {
     ) -> Result<Option<String>, Box<dyn std::error::Error>> {
         // Queries for what is being typed run on a worker with a read-only
         // connection of its own, so a slow one never holds up the next
-        // keystroke (see `worker`). Without one — an in-memory database, or a
-        // thread that would not start — every reload runs here, as before.
-        let worker = repo
+        // keystroke (see `worker`). Without one — an in-memory database, a
+        // thread that would not start, or one that has stopped — every reload
+        // runs here, as before.
+        let mut worker = repo
             .search_reader()
             .and_then(|reader| worker::QueryWorker::spawn(reader).ok());
         let mut generation: u64 = 0;
 
         loop {
             if self.searching {
-                if let Some(result) = worker.as_ref().and_then(|w| w.try_take(generation)) {
-                    self.finish_reload(result)?;
-                }
+                self.collect(&mut worker, generation, std::time::Duration::ZERO, repo)?;
             }
             self.render(terminal)?;
 
@@ -334,13 +333,15 @@ impl SearchApp {
             let event = event::read()?;
 
             // Typing may run ahead of an unfinished query — it replaces that
-            // query anyway. Anything else (Enter, navigation, paging, a mode
-            // or scope change, a dialog) acts on the results, so it first
-            // waits for the ones that match what is typed now.
-            if self.searching && !self.edits_query(&event) {
+            // query anyway — and so may leaving. Anything else (Enter,
+            // navigation, paging, a mode or scope change, a dialog) acts on
+            // the results, so it first waits for the ones that match what is
+            // typed now.
+            if self.searching && !self.can_run_ahead(&event) {
                 if let Some(result) = worker.as_ref().and_then(|w| w.wait(generation)) {
                     self.finish_reload(result)?;
                 } else {
+                    worker = None;
                     self.searching = false;
                     self.reload_entries(repo)?;
                 }
@@ -373,13 +374,48 @@ impl SearchApp {
                 _ => false,
             };
             if reload {
-                if let Some(worker) = &worker {
+                let submitted = worker.as_ref().is_some_and(|w| {
                     generation += 1;
-                    worker.submit(generation, self.reload_request());
+                    w.submit(generation, self.reload_request())
+                });
+                if submitted {
                     self.searching = true;
+                    // A quick query lands before the next frame, so the
+                    // results change without a "searching" flash in between.
+                    self.collect(
+                        &mut worker,
+                        generation,
+                        std::time::Duration::from_millis(25),
+                        repo,
+                    )?;
                 } else {
+                    worker = None;
                     self.reload_entries(repo)?;
                 }
+            }
+        }
+    }
+
+    /// Show `generation`'s result if it arrives within `wait`. A worker that
+    /// has stopped is dropped and the query is answered here instead, so the
+    /// screen never waits on a thread that will not reply.
+    fn collect(
+        &mut self,
+        worker: &mut Option<worker::QueryWorker>,
+        generation: u64,
+        wait: std::time::Duration,
+        repo: &Repository,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(w) = worker.as_ref() else {
+            return Ok(());
+        };
+        match w.poll(generation, wait) {
+            worker::Poll::Ready(result) => self.finish_reload(result),
+            worker::Poll::Pending => Ok(()),
+            worker::Poll::Gone => {
+                *worker = None;
+                self.searching = false;
+                self.reload_entries(repo)
             }
         }
     }
@@ -394,10 +430,11 @@ impl SearchApp {
         Ok(())
     }
 
-    /// Whether `event` only edits the query text in the search box — the one
-    /// kind of input allowed to run ahead of a query still in flight, because
-    /// it is about to replace that query.
-    pub(super) fn edits_query(&self, event: &Event) -> bool {
+    /// Whether `event` may be handled while a query is still in flight:
+    /// text typed into the search box, which is about to replace that query,
+    /// and leaving recall, which needs no results at all. Everything else
+    /// acts on the results and waits for the current ones.
+    pub(super) fn can_run_ahead(&self, event: &Event) -> bool {
         use crossterm::event::{KeyCode, KeyModifiers};
         if !matches!(self.dialog, DialogState::None) {
             return false;
@@ -408,9 +445,14 @@ impl SearchApp {
                 if key.kind != KeyEventKind::Press {
                     return true;
                 }
-                // Vim normal mode turns letters into navigation.
+                if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+                    // Exits, or leaves vim insert mode: neither reads results.
+                    return true;
+                }
+                // Vim normal mode turns letters into navigation; only `q`
+                // (quit) needs no results.
                 if self.vim_enabled && self.vim_mode == VimMode::Normal {
-                    return false;
+                    return key.code == KeyCode::Char('q') && key.modifiers.is_empty();
                 }
                 if key
                     .modifiers
