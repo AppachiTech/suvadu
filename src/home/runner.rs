@@ -461,13 +461,21 @@ mod tests {
             &format!("sleep 30 &\necho $! > '{}'\nwait", pid_file.display()),
         );
         let request = request("doctor", &[], LaunchMode::Report);
-        let result = run_with(&exe, &request, Duration::from_millis(500)).unwrap();
+        // The fixture must get as far as starting its grandchild before the
+        // deadline. On a loaded machine, or the first run of a new script,
+        // that can take longer than a short deadline, so each attempt allows
+        // more; only a run that really started the grandchild is judged.
+        let (result, pid) = [500, 2_000, 8_000]
+            .into_iter()
+            .find_map(|millis| {
+                let _ = std::fs::remove_file(&pid_file);
+                let result = run_with(&exe, &request, Duration::from_millis(millis)).unwrap();
+                let pid = std::fs::read_to_string(&pid_file).unwrap_or_default();
+                let pid = pid.trim().to_string();
+                (!pid.is_empty()).then_some((result, pid))
+            })
+            .expect("the fixture never started its grandchild");
         assert!(result.timed_out);
-        let pid = std::fs::read_to_string(&pid_file)
-            .unwrap()
-            .trim()
-            .to_string();
-        assert!(!pid.is_empty());
         let alive = || {
             std::process::Command::new("kill")
                 .args(["-0", &pid])
