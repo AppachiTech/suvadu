@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Suvadu Home** — `suv home` opens a searchable map of everything Suvadu does, grouped by task (find a command, review a session, organize commands, understand your activity, review AI activity, connect tools, manage Suvadu). Typing searches the features, not your history, and each one shows what it does and the real command behind it. Enter opens a screen (settings, sessions, stats, the agent screens, …) and returns to the same place afterwards; opens a picker (search, bookmarks) and shows the chosen command with a *Copy command* button — it is never run; or shows a short report (status, doctor, version, history, tags, the agent report) inside Home. Anything that changes data or your shell — imports, deletion, updates, uninstalling, pausing, shell setup — is explained with copyable examples instead of run. `F1` lists the keys and `F2` opens the command reference, rendered from the same definitions as `suv --help`. It works at any size down to 40×10, honours `NO_COLOR`, needs no database or valid config to browse, and writes nothing while you browse.
+- **A startup screen for a bare `suv`** — *Startup Screen* in `suv settings` (or `[home] startup = "home"` in `config.toml`) makes a bare `suv` at a terminal open Home. Until you choose, a bare `suv` prints the command overview as before, and scripts, pipes and `TERM=dumb` always get the overview, on stderr with exit status 2 exactly as before. The setting is read from your own config only; a project's `.suvadu.toml` cannot set it. *Home Icons* chooses ASCII or Unicode category markers.
+
+### Changed
+- **`suv --help` starts with `home`** — the overview has a *Start here* group listing `suv home`. A mistyped command's error now shows `Usage: suv [COMMAND]`, since a bare `suv` is itself valid.
+
+### Fixed
+- **Recall restores the terminal when it cannot finish setting it up** — if a terminal accepted raw mode but refused a later step (the alternate screen or bracketed paste), `Ctrl+R` returned an error and left raw mode on, so the shell stopped echoing. Every step already taken is now undone before the error is shown.
+
 ## [0.4.3] - 2026-09-26
 
 ### Added
