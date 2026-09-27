@@ -88,7 +88,7 @@ impl SettingsTab {
     fn item_count(self, config: &Config) -> usize {
         match self {
             Self::Search => 13,
-            Self::Shell => 3,
+            Self::Shell => 5,
             Self::Exclusions => config.exclusions.len(),
             Self::AutoTags => config.auto_tags.len(),
             Self::Agents => config.agents.len(),
@@ -360,6 +360,24 @@ impl AppState {
                 // Apply immediately so the UI reflects the new theme
                 crate::theme::init_theme(self.config.theme);
                 self.save_status = Some(format!("Theme set to '{}'", self.config.theme));
+            }
+            (SettingsTab::Shell, 3) => {
+                use crate::config::HomeStartup;
+                // Unset means the overview, so the first switch is to Home.
+                self.config.home.startup = Some(match self.config.home.effective_startup() {
+                    HomeStartup::Help => HomeStartup::Home,
+                    HomeStartup::Home => HomeStartup::Help,
+                });
+                self.dirty = true;
+                self.save_status = Some(format!("Startup screen: {}", startup_label(&self.config)));
+            }
+            (SettingsTab::Shell, 4) => {
+                use crate::config::HomeIcons;
+                self.config.home.icons = match self.config.home.icons {
+                    HomeIcons::Ascii => HomeIcons::Unicode,
+                    HomeIcons::Unicode => HomeIcons::Ascii,
+                };
+                self.dirty = true;
             }
             _ => {}
         }
@@ -1099,6 +1117,8 @@ const fn get_setting_description(tab: usize, item: usize) -> &'static str {
         (1, 0) => "Bind Up/Down arrow keys to cycle through command history",
         (1, 1) => "Show risk assessment badges in the search detail pane for agent commands",
         (1, 2) => "Color theme: dark (RGB for dark terminals), light (RGB for light terminals), terminal (ANSI 16 — adapts to your scheme). Changes apply immediately.",
+        (1, 3) => "What a bare suv opens at a terminal: home (the Home screen, to find any feature) or help (the command overview). suv home always opens Home, and scripts and pipes always get the overview. Applies from the next suv",
+        (1, 4) => "Category markers in Home: ascii (works in every terminal and font) or unicode (a few monochrome symbols). The labels are the same either way",
         (4, _) => "Custom agent detection rules. When an env var is set, suvadu tags commands with that agent name and type. Custom agents are checked before built-in agents. Restart your shell (source ~/.zshrc) after adding or removing agents.",
         (5, 0) => "Default time window in days for MCP tools (1-365). Agents use this when they don't specify a date range.",
         (5, 1) => "Default result limit for MCP tools (1-500). Agents use this when they don't specify a limit.",
@@ -1206,6 +1226,18 @@ fn render_search_tab(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
+/// The Startup Screen row's value, in the words `config.toml` uses; an
+/// unset choice shows the default it falls back to.
+const fn startup_label(config: &Config) -> &'static str {
+    use crate::config::{HomeConfig, HomeStartup};
+    match (config.home.startup, HomeConfig::DEFAULT_STARTUP) {
+        (None, HomeStartup::Help) => "help (default)",
+        (None, HomeStartup::Home) => "home (default)",
+        (Some(HomeStartup::Help), _) => "help",
+        (Some(HomeStartup::Home), _) => "home",
+    }
+}
+
 fn render_shell_tab(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     let t = theme();
     let items: Vec<ListItem> = vec![
@@ -1223,6 +1255,21 @@ fn render_shell_tab(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             "Theme",
             app.config.theme.as_str(),
             app.selected_item == 2,
+            false,
+        ),
+        setting_item(
+            "Startup Screen",
+            startup_label(&app.config),
+            app.selected_item == 3,
+            false,
+        ),
+        setting_item(
+            "Home Icons",
+            match app.config.home.icons {
+                crate::config::HomeIcons::Ascii => "ascii",
+                crate::config::HomeIcons::Unicode => "unicode",
+            },
+            app.selected_item == 4,
             false,
         ),
     ];
@@ -1957,6 +2004,50 @@ mod tests {
         app.selected_item = 0;
         app.toggle_bool();
         assert!(!app.config.shell.enable_arrow_navigation);
+    }
+
+    #[test]
+    fn startup_screen_row_switches_between_home_and_the_overview() {
+        use crate::config::HomeStartup;
+        let mut app = AppState::new(Config::default());
+        app.current_tab = SettingsTab::Shell;
+        app.selected_item = 3;
+        assert_eq!(app.config.home.startup, None, "unset until chosen");
+        assert_eq!(startup_label(&app.config), "help (default)");
+
+        app.toggle_bool();
+        assert_eq!(app.config.home.startup, Some(HomeStartup::Home));
+        assert!(app.dirty);
+        assert_eq!(startup_label(&app.config), "home");
+
+        app.toggle_bool();
+        assert_eq!(app.config.home.startup, Some(HomeStartup::Help));
+        assert_eq!(startup_label(&app.config), "help");
+    }
+
+    #[test]
+    fn home_icons_row_switches_between_ascii_and_unicode() {
+        use crate::config::HomeIcons;
+        let mut app = AppState::new(Config::default());
+        app.current_tab = SettingsTab::Shell;
+        app.selected_item = 4;
+        assert_eq!(app.config.home.icons, HomeIcons::Ascii);
+        app.toggle_bool();
+        assert_eq!(app.config.home.icons, HomeIcons::Unicode);
+        assert!(app.dirty);
+        app.toggle_bool();
+        assert_eq!(app.config.home.icons, HomeIcons::Ascii);
+    }
+
+    #[test]
+    fn the_home_rows_are_listed_and_explained() {
+        assert_eq!(SettingsTab::Shell.item_count(&Config::default()), 5);
+        let startup = get_setting_description(1, 3);
+        assert!(
+            startup.contains("suv home") && startup.contains("scripts"),
+            "{startup}"
+        );
+        assert!(get_setting_description(1, 4).contains("unicode"));
     }
 
     #[test]

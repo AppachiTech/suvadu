@@ -319,6 +319,11 @@ fn set_size(fd: RawFd, cols: u16, rows: u16) {
 
 impl Session {
     fn start(home: &Path, args: &[&str]) -> Self {
+        Self::start_with(home, home, args, &[])
+    }
+
+    /// Start with extra environment variables, in `cwd`.
+    fn start_with(home: &Path, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Self {
         let (cols, rows) = (100, 30);
         let mut master: RawFd = -1;
         let mut slave: RawFd = -1;
@@ -361,7 +366,8 @@ impl Session {
             .args(args)
             .env_clear()
             .envs(private_env(home))
-            .current_dir(home)
+            .envs(env.iter().map(|(k, v)| (*k, *v)))
+            .current_dir(cwd)
             .stdin(stdin)
             .stdout(stdout)
             .stderr(stderr);
@@ -757,4 +763,299 @@ fn a_bare_suv_without_a_choice_prints_the_overview() {
         0,
         "no screen was taken over"
     );
+}
+
+// ── Preferences and missing or broken state ─────────────────────
+
+/// Both places the config can live, whichever this platform uses.
+fn config_paths(home: &Path) -> [PathBuf; 2] {
+    [
+        home.join("Library/Application Support/tech.appachi.suvadu/config.toml"),
+        home.join("config/suvadu/config.toml"),
+    ]
+}
+
+fn write_config(home: &Path, contents: &str) {
+    for path in config_paths(home) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+}
+
+/// The config file suv itself reads and writes on this platform.
+fn live_config(home: &Path) -> String {
+    let [mac, xdg] = config_paths(home);
+    let path = if cfg!(target_os = "macos") { mac } else { xdg };
+    std::fs::read_to_string(path).unwrap_or_default()
+}
+
+/// Every file and directory under `root`, with its size and permissions.
+fn snapshot(root: &Path) -> Vec<(PathBuf, u64, u32)> {
+    use std::os::unix::fs::PermissionsExt;
+    fn walk(dir: &Path, out: &mut Vec<(PathBuf, u64, u32)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Ok(meta) = std::fs::symlink_metadata(&path) {
+                out.push((path.clone(), meta.len(), meta.permissions().mode()));
+                if meta.is_dir() {
+                    walk(&path, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, &mut out);
+    out.sort();
+    out
+}
+
+/// Open settings from wherever the screen is, move to the Startup Screen
+/// row (Shell tab, fourth row) and switch it once.
+fn switch_startup_screen(session: &mut Session) {
+    session.wait_text("SUVADU SETTINGS");
+    session.send(b"\t");
+    session.wait_text("Startup Screen");
+    for _ in 0..3 {
+        session.send(b"\x1b[B");
+    }
+    session.send(ENTER);
+}
+
+fn bare_suv_opens_home(home: &Path) -> bool {
+    let mut session = Session::start(home, &[]);
+    let status_or_home = {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            session.pump();
+            if session.screen.text().contains("SUVADU HOME") {
+                break true;
+            }
+            if session.status.is_some() || Instant::now() > deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    if status_or_home {
+        assert!(quit(&mut session).success());
+        session.left_the_terminal_as_found();
+    } else {
+        assert!(session.wait_exit().success());
+        let shown = String::from_utf8_lossy(&session.output).replace("\r\n", "\n");
+        assert!(
+            shown.contains("Start here:"),
+            "neither Home nor the overview:\n{shown}"
+        );
+    }
+    status_or_home
+}
+
+/// Choosing Home in settings — opened from Home itself — keeps Home open,
+/// makes the next bare suv open Home, and leaves other keys alone.
+#[test]
+fn a_startup_choice_made_in_settings_applies_to_the_next_bare_suv() {
+    let dir = tempfile::tempdir().unwrap();
+    write_config(
+        dir.path(),
+        "future_option = \"keep me\"\n\n[search]\npage_limit = 77\n",
+    );
+    assert!(
+        !bare_suv_opens_home(dir.path()),
+        "the overview until chosen"
+    );
+
+    let mut session = Session::start(dir.path(), &["home"]);
+    session.wait_text("SUVADU HOME");
+    type_text(&mut session, "settings");
+    session.wait_text("Features matching “settings”");
+    session.send(ENTER);
+    switch_startup_screen(&mut session);
+    session.wait_text("Startup Screen: home");
+    session.send(b"\x13"); // Ctrl+S
+    session.wait_text("saved");
+    std::thread::sleep(Duration::from_millis(1100));
+    session.send(ESC);
+    session.wait_for("Home, still open", |s| {
+        s.contains("SUVADU HOME") && s.contains("Features matching “settings”")
+    });
+    assert!(quit(&mut session).success());
+    session.left_the_terminal_as_found();
+
+    let saved = live_config(dir.path());
+    assert!(saved.contains("startup = \"home\""), "{saved}");
+    assert!(saved.contains("future_option = \"keep me\""), "{saved}");
+    assert!(saved.contains("page_limit = 77"), "{saved}");
+    assert!(bare_suv_opens_home(dir.path()));
+}
+
+/// A change abandoned at settings' save question is not saved; a saved
+/// choice of the overview still leaves suv home opening Home.
+#[test]
+fn a_discarded_change_is_not_saved_and_suv_home_overrides_help() {
+    let dir = tempfile::tempdir().unwrap();
+    write_config(dir.path(), "[home]\nstartup = \"home\"\n");
+
+    let mut settings = Session::start(dir.path(), &["settings"]);
+    switch_startup_screen(&mut settings);
+    settings.wait_text("Startup Screen: help");
+    settings.send(ESC); // unsaved: settings asks
+    settings.send(b"n"); // leave without saving
+    assert!(settings.wait_exit().success());
+    assert!(live_config(dir.path()).contains("startup = \"home\""));
+    assert!(bare_suv_opens_home(dir.path()));
+
+    let mut settings = Session::start(dir.path(), &["settings"]);
+    switch_startup_screen(&mut settings);
+    settings.wait_text("Startup Screen: help");
+    settings.send(b"\x13"); // Ctrl+S
+    settings.wait_text("saved");
+    settings.send(ESC);
+    assert!(settings.wait_exit().success());
+    assert!(live_config(dir.path()).contains("startup = \"help\""));
+    assert!(!bare_suv_opens_home(dir.path()));
+
+    let mut home = Session::start(dir.path(), &["home"]);
+    home.wait_text("SUVADU HOME");
+    assert!(quit(&mut home).success());
+    home.left_the_terminal_as_found();
+}
+
+/// Browse a little: search, a guide page, the keys, the reference.
+fn browse(session: &mut Session) {
+    type_text(session, "backup");
+    session.wait_text("Features matching “backup”");
+    session.send(ENTER);
+    session.wait_text("Copy example");
+    session.send(ESC);
+    session.send(b"\x1bOP"); // F1
+    session.wait_text("Home keys");
+    session.send(ESC);
+    session.send(b"\x1bOQ"); // F2: the reference, at the selected feature
+    session.wait_text("Usage: suv backup");
+    session.send(ESC);
+}
+
+/// Home is useful, and writes nothing at all, whatever state it finds:
+/// no config or database, a config it cannot parse or read, recording
+/// switched off, a paused shell, or a data directory it cannot write.
+#[test]
+fn browsing_home_writes_nothing_whatever_state_it_finds() {
+    use std::os::unix::fs::PermissionsExt;
+    struct Case {
+        name: &'static str,
+        setup: fn(&Path),
+        env: &'static [(&'static str, &'static str)],
+        status: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "fresh",
+            setup: |_| {},
+            env: &[],
+            status: "Recording: enabled",
+        },
+        Case {
+            name: "invalid config",
+            setup: |h| write_config(h, "this is = = not toml\n"),
+            env: &[],
+            status: "Config:",
+        },
+        Case {
+            name: "unreadable config",
+            setup: |h| {
+                write_config(h, "enabled = true\n");
+                for path in config_paths(h) {
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+                }
+            },
+            env: &[],
+            status: "Config:",
+        },
+        Case {
+            name: "recording off",
+            setup: |h| write_config(h, "enabled = false\n"),
+            env: &[],
+            status: "Recording: disabled",
+        },
+        Case {
+            name: "paused shell",
+            setup: |_| {},
+            env: &[("SUVADU_PAUSED", "1")],
+            status: "This shell: paused",
+        },
+        Case {
+            name: "read-only data directory",
+            setup: |h| {
+                for dir in [
+                    h.join("Library/Application Support/tech.appachi.suvadu"),
+                    h.join("data/suvadu"),
+                ] {
+                    std::fs::create_dir_all(&dir).unwrap();
+                    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+                }
+            },
+            env: &[],
+            status: "Recording: enabled",
+        },
+    ];
+    for Case {
+        name,
+        setup,
+        env,
+        status,
+    } in cases
+    {
+        let dir = tempfile::tempdir().unwrap();
+        setup(dir.path());
+        let before = snapshot(dir.path());
+        let mut session = Session::start_with(dir.path(), dir.path(), &["home"], env);
+        session.wait_text("SUVADU HOME");
+        let screen = session.screen.text();
+        assert!(
+            screen.contains(status),
+            "{name}: wanted {status:?}\n{screen}"
+        );
+        browse(&mut session);
+        assert!(quit(&mut session).success(), "{name}");
+        session.left_the_terminal_as_found();
+        assert_eq!(
+            snapshot(dir.path()),
+            before,
+            "{name}: browsing Home changed files"
+        );
+        // Let the temporary directory clean itself up.
+        for path in config_paths(dir.path()) {
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+        for sub in [
+            "Library/Application Support/tech.appachi.suvadu",
+            "data/suvadu",
+        ] {
+            let _ = std::fs::set_permissions(
+                dir.path().join(sub),
+                std::fs::Permissions::from_mode(0o700),
+            );
+        }
+    }
+}
+
+#[test]
+fn home_keeps_working_after_its_directory_is_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let gone = dir.path().join("gone");
+    std::fs::create_dir(&gone).unwrap();
+    let mut session = Session::start_with(dir.path(), &gone, &["home"], &[]);
+    session.wait_text("SUVADU HOME");
+    std::fs::remove_dir(&gone).unwrap();
+    browse(&mut session);
+    session.send(b"\x15"); // Ctrl+U: clear the search
+    type_text(&mut session, "version");
+    session.wait_text("Features matching “version”");
+    session.send(ENTER);
+    session.wait_text(&format!("suvadu v{}", env!("CARGO_PKG_VERSION")));
+    assert!(quit(&mut session).success());
+    session.left_the_terminal_as_found();
 }
