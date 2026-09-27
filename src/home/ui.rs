@@ -649,14 +649,85 @@ fn draw_scrolled(
     let block = p.block(title, true);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let [body, buttons] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+    let width = usize::from(inner.width);
+    // The buttons come first: every one is always shown whole, on as many
+    // rows as the width needs. What Copy example takes comes next; the text
+    // scrolls in whatever room is left.
+    let button_rows = button_lines(state, width, p);
+    let buttons_height = u16::try_from(button_rows.len())
+        .unwrap_or(u16::MAX)
+        .min(inner.height);
+    let preview = copy_preview(state, width, p);
+    let preview_height = u16::try_from(preview.len())
+        .unwrap_or(u16::MAX)
+        .min(inner.height.saturating_sub(buttons_height));
+    let [body, preview_area, buttons] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(preview_height),
+        Constraint::Length(buttons_height),
+    ])
+    .areas(inner);
     let lines = content(usize::from(body.width));
     let limit =
         u16::try_from(lines.len().saturating_sub(usize::from(body.height))).unwrap_or(u16::MAX);
     state.set_view_scroll_limit(limit);
     frame.render_widget(Paragraph::new(lines).scroll((scroll.min(limit), 0)), body);
-    frame.render_widget(Paragraph::new(button_line(state, p)), buttons);
+    frame.render_widget(Paragraph::new(preview), preview_area);
+    frame.render_widget(Paragraph::new(button_rows), buttons);
+}
+
+/// The buttons of the open view, laid out on as few rows as `width`
+/// allows, each label whole.
+fn button_lines(state: &HomeState, width: usize, p: &Palette) -> Vec<Line<'static>> {
+    let focused = state.button();
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut used = 0;
+    for (n, button) in state.buttons().into_iter().enumerate() {
+        let label = format!("[ {} ]", button_label(button, state));
+        let needed = if used == 0 {
+            label.width()
+        } else {
+            2 + label.width()
+        };
+        if used > 0 && used + needed > width {
+            rows.push(Line::from(std::mem::take(&mut spans)));
+            used = 0;
+        }
+        if used > 0 {
+            spans.push(Span::raw("  "));
+            used += 2;
+        }
+        let style = if focused == Some(n) {
+            p.selected()
+        } else {
+            fg(p.secondary)
+        };
+        used += label.width();
+        spans.push(Span::styled(label, style));
+    }
+    if !spans.is_empty() {
+        rows.push(Line::from(spans));
+    }
+    rows
+}
+
+/// On a guide with examples: exactly what Copy example would copy, so it
+/// is visible even when the examples are below the fold.
+fn copy_preview(state: &HomeState, width: usize, p: &Palette) -> Vec<Line<'static>> {
+    let Some(View::Page {
+        feature, example, ..
+    }) = state.view()
+    else {
+        return Vec::new();
+    };
+    let Some(chosen) = catalog::feature(*feature).and_then(|f| f.examples.get(*example)) else {
+        return Vec::new();
+    };
+    let mut doc = Doc::new(width.max(1), p);
+    doc.exact("Copies: ", chosen.command, fg(p.primary));
+    doc.lines.truncate(3);
+    doc.lines
 }
 
 fn button_label(button: Button, state: &HomeState) -> String {
@@ -677,24 +748,6 @@ fn button_label(button: Button, state: &HomeState) -> String {
         }
         Button::Back => "Back".to_string(),
     }
-}
-
-fn button_line(state: &HomeState, p: &Palette) -> Line<'static> {
-    let focused = state.button();
-    let mut spans = Vec::new();
-    for (n, button) in state.buttons().into_iter().enumerate() {
-        let style = if focused == Some(n) {
-            p.selected()
-        } else {
-            fg(p.secondary)
-        };
-        spans.push(Span::styled(
-            format!("[ {} ]", button_label(button, state)),
-            style,
-        ));
-        spans.push(Span::raw("  "));
-    }
-    Line::from(spans)
 }
 
 fn draw_reference(
@@ -1580,6 +1633,62 @@ mod tests {
                 "{width}: status cut: {status:?}"
             );
         }
+    }
+
+    /// Every button stays visible whole, whichever has focus, at every
+    /// supported size — including when the terminal shrinks mid-way.
+    #[test]
+    fn the_focused_button_is_always_on_screen_whole() {
+        let mut views: Vec<(String, HomeState)> = Vec::new();
+        for feature in super::super::catalog::features() {
+            if feature.action != super::super::catalog::Action::Guide {
+                continue;
+            }
+            let mut state = HomeState::new();
+            state.set_query(feature.title);
+            key(&mut state, KeyCode::Enter);
+            views.push((feature.title.to_string(), state));
+        }
+        let mut result = HomeState::new();
+        result.show_outcome(FeatureId("search"), Outcome::Selected("git status".into()));
+        views.push(("result".into(), result));
+        let mut keys = HomeState::new();
+        key(&mut keys, KeyCode::F(1));
+        views.push(("keys".into(), keys));
+
+        for (name, mut state) in views {
+            let count = state.buttons().len();
+            for (width, height) in [(40, 10), (40, 18), (60, 18), (80, 24)] {
+                for _ in 0..count {
+                    let focused = state.buttons()[state.button().unwrap()];
+                    let label = format!("[ {} ]", button_label(focused, &state));
+                    let screen = text(&render(&mut state, width, height));
+                    assert!(
+                        screen.contains(&label),
+                        "{name} at {width}x{height}: {label} not visible\n{screen}"
+                    );
+                    key(&mut state, KeyCode::Tab);
+                }
+            }
+        }
+    }
+
+    /// On a guide, the example Copy would take is visible beside the
+    /// buttons, even when the examples themselves are below the fold.
+    #[test]
+    fn the_example_to_copy_is_shown_next_to_the_buttons() {
+        let mut state = HomeState::new();
+        state.set_query("Import history");
+        key(&mut state, KeyCode::Enter);
+        for _ in 0..2 {
+            key(&mut state, KeyCode::Down); // the third example
+        }
+        let screen = text(&render(&mut state, 40, 18));
+        assert!(
+            screen.contains("suv import --from bash-history"),
+            "{screen}"
+        );
+        assert!(screen.contains("Copies"), "{screen}");
     }
 
     #[test]
