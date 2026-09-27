@@ -377,7 +377,9 @@ impl HomeState {
     pub fn on_event(&mut self, event: Event) -> HomeAction {
         match event {
             Event::Key(key) => self.on_key(key),
-            Event::Paste(text) if self.views.is_empty() => {
+            Event::Paste(text)
+                if self.views.is_empty() && self.layout() != LayoutClass::TooSmall =>
+            {
                 self.notice = None;
                 self.insert(&clean_paste(&text));
                 HomeAction::Redraw
@@ -397,6 +399,15 @@ impl HomeState {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && matches!(key.code, KeyCode::Char('c' | 'C')) {
             return HomeAction::Interrupt;
+        }
+        // Too small to show anything but a request for room: Esc leaves, as
+        // that screen says, and nothing else acts where it cannot be seen.
+        if self.layout() == LayoutClass::TooSmall {
+            return if key.code == KeyCode::Esc && key.kind == KeyEventKind::Press {
+                HomeAction::Exit
+            } else {
+                HomeAction::None
+            };
         }
         // A held key may keep moving or editing, never keep opening things.
         if key.kind == KeyEventKind::Repeat && !repeatable(key.code) {
@@ -1296,6 +1307,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Below 40×10 Home shows only a request for room, so nothing it
+    /// cannot show may happen: every key but Esc (exit) and Ctrl+C is
+    /// ignored, and the place is kept for when the terminal grows.
+    #[test]
+    fn a_too_small_terminal_only_quits() {
+        let mut state = wide();
+        state.on_event(key(KeyCode::Enter));
+        typed(&mut state, "back");
+        state.set_viewport(30, 8);
+        for code in [
+            KeyCode::Char('x'),
+            KeyCode::Enter,
+            KeyCode::Down,
+            KeyCode::Tab,
+            KeyCode::F(1),
+            KeyCode::F(2),
+            KeyCode::Backspace,
+        ] {
+            assert_eq!(state.on_event(key(code)), HomeAction::None, "{code:?}");
+        }
+        assert_eq!(state.on_event(ctrl('r')), HomeAction::None);
+        assert_eq!(state.on_event(Event::Paste("x\n".into())), HomeAction::None);
+        assert_eq!(state.query(), "back");
+        assert!(state.view().is_none());
+        assert_eq!(state.category(), Some(CategoryId("find")));
+        assert_eq!(state.on_event(ctrl('c')), HomeAction::Interrupt);
+        state.on_event(Event::Resize(120, 40));
+        assert_eq!(state.query(), "back");
+        state.set_viewport(30, 8);
+        assert_eq!(state.on_event(key(KeyCode::Esc)), HomeAction::Exit);
     }
 
     #[test]

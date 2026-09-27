@@ -893,12 +893,16 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, state: &HomeState, p: &Palette
                 None => "unknown",
             };
             // A pause matters most when there is one, so it leads.
-            let text = if state.status.paused {
-                format!("This shell: paused · Recording: {recording} · Capture: not checked")
+            let recording = format!("Recording: {recording}");
+            let segments: Vec<&str> = if state.status.paused {
+                vec!["This shell: paused", &recording, "Capture: not checked"]
             } else {
-                format!("Recording: {recording} · Capture: not checked · Shell: not paused")
+                vec![&recording, "Capture: not checked", "Shell: not paused"]
             };
-            Span::styled(text, fg(p.muted))
+            Span::styled(
+                fit_segments(&segments, usize::from(area.width)),
+                fg(p.muted),
+            )
         }
     };
     frame.render_widget(Paragraph::new(Line::from(span)), area);
@@ -911,11 +915,10 @@ fn draw_footer(
     class: LayoutClass,
     p: &Palette,
 ) {
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut badge = |key: &str, label: &str| {
-        spans.push(Span::styled(format!(" {key} "), p.badge()));
-        spans.push(Span::styled(format!(" {label}  "), fg(p.secondary)));
-    };
+    // Badges in priority order; the ones that do not fit whole are left
+    // out, never cut.
+    let mut badges: Vec<(String, String)> = Vec::new();
+    let mut badge = |key: &str, label: &str| badges.push((key.to_string(), label.to_string()));
     match state.view() {
         None => {
             let at_top = state.category().is_none()
@@ -937,8 +940,8 @@ fn draw_footer(
             } else {
                 "Details"
             };
-            badge("Tab", tab);
             badge("F1", "Keys");
+            badge("Tab", tab);
             badge("F2", "Reference");
             badge("^R", "History");
         }
@@ -963,10 +966,40 @@ fn draw_footer(
             badge("F2", "Reference");
         }
     }
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut used = 0;
+    for (key, label) in badges {
+        let (key, label) = (format!(" {key} "), format!(" {label}  "));
+        let width = key.width() + label.trim_end().width() + 1;
+        if used + width > usize::from(area.width) {
+            break;
+        }
+        used += key.width() + label.width();
+        spans.push(Span::styled(key, p.badge()));
+        spans.push(Span::styled(label, fg(p.secondary)));
+    }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 // ── Text helpers ──────────────────────────────────────────────
+
+/// Join `segments` with " · ", keeping only the whole segments that fit in
+/// `width`, from the first.
+fn fit_segments(segments: &[&str], width: usize) -> String {
+    let mut out = String::new();
+    for segment in segments {
+        let next = if out.is_empty() {
+            (*segment).to_string()
+        } else {
+            format!("{out} · {segment}")
+        };
+        if next.width() > width {
+            break;
+        }
+        out = next;
+    }
+    out
+}
 
 /// Word-wrap to `width` display cells. A word wider than a line is broken
 /// between graphemes, so nothing is cut off; line breaks are kept.
@@ -1490,6 +1523,40 @@ mod tests {
                 }
             }
             assert!(screen.contains("Search history"), "{screen}");
+        }
+    }
+
+    /// Narrow terminals drop whole footer badges and status segments, in
+    /// priority order, rather than cutting one mid-word; F1 (every key)
+    /// always survives.
+    #[test]
+    fn narrow_footers_and_status_lines_keep_whole_parts() {
+        for (width, height) in [(40, 10), (50, 12), (60, 18), (80, 24)] {
+            let mut state = HomeState::new();
+            state.status.recording = Some(true);
+            let screen = text(&render(&mut state, width, height));
+            let lines: Vec<&str> = screen.lines().collect();
+            let footer = lines[lines.len() - 1];
+            let status = lines[lines.len() - 2];
+            assert!(footer.contains("F1  Keys"), "{width}: {footer:?}");
+            let labels = [
+                "Quit",
+                "Back",
+                "Browse",
+                "Keys",
+                "Details",
+                "Reference",
+                "History",
+            ];
+            assert!(
+                labels.iter().any(|l| footer.trim_end().ends_with(l)),
+                "{width}: footer cut: {footer:?}"
+            );
+            let segments = ["enabled", "not checked", "not paused"];
+            assert!(
+                segments.iter().any(|s| status.trim_end().ends_with(s)),
+                "{width}: status cut: {status:?}"
+            );
         }
     }
 
