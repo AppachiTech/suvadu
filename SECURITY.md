@@ -328,6 +328,7 @@ subtree.
 ### Self-Update
 
 - Binary downloads are served over **HTTPS** from `downloads.appachi.tech`
+- `suv update` also requests the release's notes from GitHub's API (`api.github.com/repos/AppachiTech/suvadu/releases/tags/<tag>`); the tag names the release and nothing about you is sent. Turning update notices off does not change what an explicit `suv update` requests
 - Downloads are verified with a **minisign signature** (the public key is compiled into the binary, so a compromised download server cannot forge updates) and a **SHA256 checksum**
 - Update files are written to a unique temporary directory to prevent TOCTOU attacks
 - The new binary is written beside the old one and renamed over it, so a failed update leaves the previous version in place; sudo is used only when the install directory is not writable by you
