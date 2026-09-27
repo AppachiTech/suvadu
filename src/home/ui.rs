@@ -29,15 +29,18 @@ use crate::search::highlight::{raw_view, wants_raw, RawStyle};
 /// Widest the list screen, pages and results get, centred on the terminal.
 const MAX_WIDTH: u16 = 140;
 
-/// Tallest the list and detail panes get.
-const PANE_ROWS: u16 = 24;
+/// Tallest Home gets: title, search box, crumb, 24 rows of list and
+/// detail panes, status and keys.
+const MAX_HEIGHT: u16 = 31;
 
-/// `area`, no wider than [`MAX_WIDTH`], centred.
-fn column(area: Rect) -> Rect {
+/// `area`, no wider than [`MAX_WIDTH`] (centred) and no taller than
+/// [`MAX_HEIGHT`] (from the top).
+fn bounded(area: Rect) -> Rect {
     let width = area.width.min(MAX_WIDTH);
     Rect {
         x: area.x + (area.width - width) / 2,
         width,
+        height: area.height.min(MAX_HEIGHT),
         ..area
     }
 }
@@ -143,21 +146,21 @@ pub fn draw(frame: &mut Frame<'_>, state: &HomeState) {
         draw_too_small(frame, area, &p);
         return;
     }
+    // On a very large terminal everything but the reference keeps to one
+    // readable block, with status and keys right under the content rather
+    // than at the far bottom of the window.
+    let frame_area = if matches!(state.view(), Some(View::Reference { .. })) {
+        area
+    } else {
+        bounded(area)
+    };
     let [title, body, status, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
-    .areas(area);
-    // On a very large terminal everything but the reference keeps to a
-    // readable column, so a few rows of content are not stretched across
-    // the whole window.
-    let (body, status, footer) = if matches!(state.view(), Some(View::Reference { .. })) {
-        (body, status, footer)
-    } else {
-        (column(body), column(status), column(footer))
-    };
+    .areas(frame_area);
     frame.render_widget(
         Paragraph::new(Span::styled("SUVADU HOME", bold(p.primary))).alignment(Alignment::Center),
         title,
@@ -203,11 +206,6 @@ fn draw_main(
         Constraint::Min(0),
     ])
     .areas(area);
-    // The list and details need no more than this; the rest stays empty.
-    let content = Rect {
-        height: content.height.min(PANE_ROWS),
-        ..content
-    };
     draw_search(frame, search, state, p);
     draw_crumb(frame, crumb, state, p);
     match class {
@@ -1634,7 +1632,10 @@ mod tests {
             ..HomeStatus::default()
         };
         let screen = text(&render(&mut state, 120, 40));
-        let status = screen.lines().rev().nth(1).unwrap();
+        let status = screen
+            .lines()
+            .find(|line| line.contains("Recording:"))
+            .unwrap();
         assert!(
             status.starts_with("suvadu 0.6.0 available: suv update"),
             "{status}"
@@ -1679,11 +1680,35 @@ mod tests {
             .filter(|y| row(&buffer, *y).contains('╰'))
             .max()
             .unwrap();
-        assert!(pane_bottom <= 29, "panes end at row {pane_bottom}");
-        let screen = text(&buffer);
+        assert!(pane_bottom <= 28, "panes end at row {pane_bottom}");
+        // Status and keys sit right under the panes, not at the far bottom.
+        assert!(row(&buffer, pane_bottom + 1).contains("Recording:"));
+        assert!(row(&buffer, pane_bottom + 2).contains("Esc"));
+        for y in pane_bottom + 3..60 {
+            assert!(row(&buffer, y).trim().is_empty(), "row {y} is not empty");
+        }
+    }
+
+    /// Pages and results keep the same frame, so the footer does not jump
+    /// when one opens; the reference still uses the whole terminal.
+    #[test]
+    fn pages_share_the_frame_and_the_reference_uses_the_whole_terminal() {
+        let mut page = HomeState::new();
+        page.set_query("backup");
+        key(&mut page, KeyCode::Enter);
+        let buffer = render(&mut page, 200, 60);
+        let footer = (0..60)
+            .rev()
+            .find(|y| row(&buffer, *y).contains("Esc"))
+            .unwrap();
+        assert_eq!(footer, 30, "page footer row");
+
+        let mut reference = HomeState::new();
+        key(&mut reference, KeyCode::F(2));
+        let buffer = render(&mut reference, 200, 60);
         assert!(
-            screen.lines().last().unwrap().contains("Esc"),
-            "footer kept"
+            row(&buffer, 59).contains("Esc"),
+            "reference footer at the bottom"
         );
     }
 
