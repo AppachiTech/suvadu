@@ -66,3 +66,5 @@ multiple_crate_versions = "allow"
 
 [lints.rust]
 unsafe_code = "warn"
+# `cargo tarpaulin` sets this cfg so timing-sensitive tests can skip coverage runs.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }

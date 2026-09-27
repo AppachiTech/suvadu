@@ -2149,7 +2149,10 @@ mod tests {
         }
     }
 
+    /// Coverage instrumentation slows every line it counts, so the timing
+    /// means nothing under `cargo tarpaulin`; ordinary test runs still check it.
     #[test]
+    #[cfg_attr(tarpaulin, ignore)]
     fn searching_five_hundred_features_is_fast() {
         let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
         let many: Vec<Feature> = (0..500)
@@ -2163,17 +2166,24 @@ mod tests {
                 ..features()[0]
             })
             .collect();
-        let started = std::time::Instant::now();
-        for query in [
-            "synthetic",
-            "feature 499",
-            "beta gamma",
-            "nothing here",
-            "a",
-        ] {
-            let _ = search_in(&many, query);
-        }
-        let per_query = started.elapsed() / 5;
+        // The fastest of several rounds, so a busy machine pausing the test
+        // mid-round is not mistaken for a slow search.
+        let per_query = (0..5)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                for query in [
+                    "synthetic",
+                    "feature 499",
+                    "beta gamma",
+                    "nothing here",
+                    "a",
+                ] {
+                    let _ = search_in(&many, query);
+                }
+                started.elapsed() / 5
+            })
+            .min()
+            .unwrap();
         assert!(per_query.as_millis() < 16, "{per_query:?} per query");
     }
 }
