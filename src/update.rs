@@ -991,7 +991,7 @@ mod tests {
     fn checksum_mismatch_detected() {
         let expected = "abc123";
         let actual = "def456";
-        assert!(expected != actual);
+        assert_ne!(expected, actual);
     }
 
     #[test]
