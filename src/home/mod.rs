@@ -267,6 +267,8 @@ fn apply_config(state: &mut HomeState, loaded: Result<Option<Config>, ConfigErro
                 recording: Some(config.enabled),
                 paused,
                 warning: None,
+                // Only what an earlier check saved: Home never checks.
+                update: crate::update_check::available_notice(config.update.check),
             };
         }
         Err(e) => {
@@ -277,6 +279,7 @@ fn apply_config(state: &mut HomeState, loaded: Result<Option<Config>, ConfigErro
                     "{} (left unchanged; defaults in use)",
                     concise_error(&e.to_string())
                 )),
+                update: None,
             };
         }
     }

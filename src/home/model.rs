@@ -139,6 +139,8 @@ pub struct HomeStatus {
     pub recording: Option<bool>,
     pub paused: bool,
     pub warning: Option<String>,
+    /// A newer release already known from the last update check.
+    pub update: Option<String>,
 }
 
 pub struct HomeState {

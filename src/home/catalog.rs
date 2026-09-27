@@ -1343,12 +1343,23 @@ static FEATURES: &[Feature] = &[
         title: "Update Suvadu",
         description: "Install the latest release.",
         command: "suv update",
-        synonyms: &["update", "upgrade", "latest", "new version"],
+        synonyms: &[
+            "update",
+            "upgrade",
+            "latest",
+            "new version",
+            "update check",
+            "update available",
+        ],
         command_paths: &["update"],
         guide: &[
             "Run suv update from your shell: Home never replaces the program it is \
-                  running. Homebrew and Cargo installs are updated by those tools, and \
-                  suv update says which command to use.",
+             running. Homebrew and Cargo installs are updated by those tools, and \
+             suv update says which command to use.",
+            "Suvadu looks for a newer release once a day, in the background, and mentions \
+             it before a command you run at a terminal, and here in Home. The request only \
+             reads the latest version number. Turn it off with Check for Updates in suv \
+             settings, [update] check = false in config.toml, or SUVADU_NO_UPDATE_CHECK=1.",
         ],
         examples: &[
             ex("suv update", "Direct installs"),
@@ -1587,6 +1598,8 @@ mod tests {
             ("diagnose", &["doctor"]),
             ("help", &["reference"]),
             ("options", &["reference"]),
+            ("new version", &["update"]),
+            ("update check", &["update"]),
         ];
         for (query, wanted) in cases {
             let found = ids(query);
@@ -2074,6 +2087,14 @@ mod tests {
             "{guide}"
         );
         assert!(guide.contains("MCP"), "{guide}");
+    }
+
+    #[test]
+    fn the_update_guide_explains_the_notice_and_how_to_turn_it_off() {
+        let guide = feature(FeatureId("update")).unwrap().guide.join(" ");
+        assert!(guide.contains("once a day"), "{guide}");
+        assert!(guide.contains("Check for Updates"), "{guide}");
+        assert!(guide.contains("SUVADU_NO_UPDATE_CHECK"), "{guide}");
     }
 
     #[test]

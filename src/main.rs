@@ -30,6 +30,7 @@ mod suggest_ui;
 mod test_utils;
 mod theme;
 mod update;
+mod update_check;
 mod upgrade_notice;
 mod util;
 
@@ -78,6 +79,9 @@ fn run(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
         // load_config_for_cwd).
         let cfg = config::load_config_for_cwd().unwrap_or_default();
         theme::init_theme(cfg.theme);
+        if announces_updates(&command) {
+            update_check::before_command(cfg.update.check);
+        }
         // Apply user risk-ignore suppressions and extra flag patterns to all risk assessment.
         risk::set_ignore_patterns(&cfg.agent.risk_ignore_patterns);
         risk::set_extra_patterns(&cfg.agent.risk_extra_patterns);
@@ -228,6 +232,10 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Commands::Update => update::handle_update(),
+        Commands::UpdateCheck => {
+            update_check::run_check();
+            Ok(())
+        }
         Commands::Wrap {
             command,
             executor_type,
@@ -446,6 +454,17 @@ const fn is_user_facing_command(cmd: &Commands) -> bool {
             | Commands::Completions { .. }
             | Commands::Man
             | Commands::Wrap { .. }
+            | Commands::UpdateCheck
+    )
+}
+
+/// Commands that may mention a newer release. Recall runs inside the
+/// shell's Ctrl+R widget, `pause` prints shell code to eval, and `update`
+/// is already the answer.
+const fn announces_updates(cmd: &Commands) -> bool {
+    !matches!(
+        cmd,
+        Commands::Search { .. } | Commands::Pause | Commands::Update
     )
 }
 

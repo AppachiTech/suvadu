@@ -43,6 +43,8 @@ pub struct Config {
     pub mcp: McpConfig,
     #[serde(default)]
     pub home: HomeConfig,
+    #[serde(default)]
+    pub update: UpdateConfig,
 }
 
 const fn default_enabled() -> bool {
@@ -63,6 +65,7 @@ impl Default for Config {
             agents: std::collections::HashMap::new(),
             mcp: McpConfig::default(),
             home: HomeConfig::default(),
+            update: UpdateConfig::default(),
         }
     }
 }
@@ -350,6 +353,20 @@ impl HomeConfig {
     }
 }
 
+/// Whether Suvadu looks for a newer release, once a day, and says so. Like
+/// the Home preferences, only the global config sets it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateConfig {
+    #[serde(default = "default_true")]
+    pub check: bool,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self { check: true }
+    }
+}
+
 const fn default_true() -> bool {
     true
 }
@@ -573,10 +590,12 @@ pub fn overlay_config_for_dir(base: &Config, dir: &std::path::Path) -> ConfigRes
 
     let overlay_contents = std::fs::read_to_string(&overlay_path)?;
     let mut overlay_value: toml::Value = toml::from_str(&overlay_contents)?;
-    // Home preferences are the person's, not the project's; dropping the
-    // table also keeps an invalid value there from breaking every command.
+    // Home and update-check preferences are the person's, not the
+    // project's; dropping the tables also keeps an invalid value there
+    // from breaking every command.
     if let Some(table) = overlay_value.as_table_mut() {
         table.remove("home");
+        table.remove("update");
     }
     let mut merged_value = toml::Value::try_from(base.clone())?;
     merge_toml_value(&mut merged_value, overlay_value);
@@ -1092,6 +1111,32 @@ unknown_mcp_key = 7
             assert_eq!(merged.home, base.home, "{overlay}");
             assert_eq!(merged.search.page_limit, 7, "{overlay}");
         }
+    }
+
+    #[test]
+    fn update_checks_are_on_unless_turned_off() {
+        for toml_str in ["", "[update]"] {
+            let config: Config = toml::from_str(toml_str).unwrap();
+            assert!(config.update.check, "{toml_str:?}");
+        }
+        assert!(Config::default().update.check);
+        let off: Config = toml::from_str("[update]\ncheck = false").unwrap();
+        assert!(!off.update.check);
+    }
+
+    /// Whether Suvadu contacts the network is the person's choice: a
+    /// project's `.suvadu.toml` cannot turn update checks on or off.
+    #[test]
+    fn a_project_overlay_cannot_change_update_checks() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join(".suvadu.toml"),
+            "[update]\ncheck = false\n[search]\npage_limit = 9\n",
+        )
+        .unwrap();
+        let merged = overlay_config_for_dir(&Config::default(), dir.path()).unwrap();
+        assert!(merged.update.check);
+        assert_eq!(merged.search.page_limit, 9);
     }
 
     #[test]

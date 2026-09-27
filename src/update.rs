@@ -216,7 +216,7 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
 
 // ── Version check ────────────────────────────────────────
 
-fn fetch_latest_version() -> Option<String> {
+pub fn fetch_latest_version() -> Option<String> {
     let output = std::process::Command::new("curl")
         .args(["--proto", "=https", "-fsSL", "-m", "10", VERSION_URL])
         .output()

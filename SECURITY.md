@@ -15,8 +15,9 @@ We aim to acknowledge reports within 48 hours and provide a fix timeline within 
 ### Data Storage
 
 - All history is stored **locally** in a SQLite database (WAL mode)
-- **No data is transmitted to external servers**
+- **No history or other data is transmitted to external servers**
 - **No telemetry or analytics** are collected
+- The only request Suvadu makes on its own is the once-a-day release check below, which reads a version number and sends nothing about you
 
 Every path below is resolved at runtime from the `tech.appachi.suvadu`
 application identifier, except the agent hook scripts, which are written to
@@ -331,6 +332,14 @@ subtree.
 - Update files are written to a unique temporary directory to prevent TOCTOU attacks
 - The new binary is written beside the old one and renamed over it, so a failed update leaves the previous version in place; sudo is used only when the install directory is not writable by you
 - Homebrew and Cargo installs are handled by their own package managers — `suv update` points you at `brew upgrade` or `cargo install` instead of replacing their files
+
+### Update notices
+
+- At most once a day, a user-facing command run at a terminal starts a background `suv update-check`, which fetches `https://downloads.appachi.tech/version.txt` over HTTPS with `curl` — a plain GET with no identifier, history or configuration attached — and saves the answer as `update-check.json` in the data directory
+- The command you ran never waits for it; a failed or unexpected answer (anything that is not a version number) is ignored
+- A newer version is mentioned in one line on stderr at most once a day, and in Home's status line; nothing is downloaded or installed until you run the update yourself
+- Shell hooks, recall (`Ctrl+R`, Up/Down, `suv search`), `suv pause`, the MCP server, scripts and pipes (stdout or stderr not a terminal) and CI (`CI` set) never check or print
+- Off with *Check for Updates* in `suv settings`, `[update] check = false` in the global `config.toml` (a project's `.suvadu.toml` cannot change it), or `SUVADU_NO_UPDATE_CHECK=1`
 
 ### Install script
 

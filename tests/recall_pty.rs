@@ -132,6 +132,7 @@ fn env_for(home: &Path) -> Vec<(String, String)> {
         ),
         ("TERM".into(), "xterm-256color".into()),
         ("NO_COLOR".into(), "1".into()),
+        ("SUVADU_NO_UPDATE_CHECK".into(), "1".into()),
     ]
 }
 

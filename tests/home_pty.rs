@@ -276,6 +276,8 @@ fn private_env(home: &Path) -> Vec<(String, String)> {
         ("TERM".into(), "xterm-256color".into()),
         ("NO_COLOR".into(), "1".into()),
         ("PATH".into(), "/usr/bin:/bin".into()),
+        // No test may start a real update check over the network.
+        ("SUVADU_NO_UPDATE_CHECK".into(), "1".into()),
     ]
 }
 

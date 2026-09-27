@@ -657,6 +657,11 @@ pub enum Commands {
     /// Update to the latest version
     Update,
 
+    /// Look up the newest release and save it (started in the background
+    /// by suv itself, at most once a day)
+    #[command(name = "update-check", hide = true)]
+    UpdateCheck,
+
     /// Export history to a file (JSON, JSONL, or CSV format)
     #[command(
         after_help = "Examples:\n  suv export --format json > history.json\n  suv export > history.jsonl\n  suv export --format csv > history.csv\n  suv export --after 2025-01-01 > recent.jsonl"

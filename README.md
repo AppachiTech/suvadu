@@ -19,7 +19,7 @@
 - **AI agent tracking** — full session capture for Claude Code, Codex and OpenCode; commands and prompts for Cursor and pi.dev; command tagging alone for Antigravity, Windsurf, Aider, Continue and Copilot ([what each tier means](#what-each-agent-actually-gives-you))
 - **Prompt Explorer** — trace every recorded command back to the prompt that triggered it
 - **MCP Server** — **21 read-only tools, 8 resources and 6 prompts, all read-only by default.** The two write tools stay off until you turn their opt-in on. Agent session discovery, project context, failure learning, risk assessment, a shared skills library. Configurable via `suv settings`
-- **100% local** — no cloud, no telemetry, no account. MIT licensed.
+- **100% local** — no cloud, no telemetry, no account. The only request Suvadu makes on its own is a once-a-day check for a newer release, which you can turn off. MIT licensed.
 
 > **Website & Docs:** [suvadu.sh](https://suvadu.sh) &middot; **CLI Reference:** [suvadu.sh/cli](https://suvadu.sh/cli/) &middot; **Blog:** [suvadu.sh/blog](https://suvadu.sh/blog/) &middot; **What's new:** [CHANGELOG](CHANGELOG.md)
 
@@ -65,6 +65,15 @@ echo 'eval "$(suv init bash)"' >> ~/.bashrc && source ~/.bashrc
 ```
 
 Verify: `suv status`
+
+**Staying up to date.** Once a day, in the background, Suvadu looks up the
+newest release number (the same `version.txt` that `suv update` reads) and,
+when there is a newer one, says so in one line before a command you run at a
+terminal — at most once a day, with the update command for how you installed
+it (`brew upgrade suvadu`, `cargo install suvadu` or `suv update`). Nothing
+about you or your history is sent. It never runs in shell hooks, recall,
+scripts, pipes or CI. Turn it off with *Check for Updates* in `suv settings`,
+`[update] check = false` in `config.toml`, or `SUVADU_NO_UPDATE_CHECK=1`.
 
 ---
 

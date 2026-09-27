@@ -55,7 +55,11 @@ pub fn run_with(
 ) -> std::io::Result<LaunchResult> {
     let started = Instant::now();
     let mut command = Command::new(executable);
-    command.args(&request.args);
+    // Home shows a known update itself: the feature it opens must neither
+    // print the notice over its own screen nor start a check.
+    command
+        .args(&request.args)
+        .env(crate::update_check::OPT_OUT_ENV, "1");
     match request.mode {
         LaunchMode::Interactive => {
             let status = command.status()?;
@@ -419,6 +423,18 @@ mod tests {
                 truncated: false,
             })
         );
+    }
+
+    /// Home shows a known update itself; a feature it opens must not print
+    /// the same notice over its own screen, or start a check of its own.
+    #[test]
+    fn features_opened_from_home_never_announce_updates() {
+        let (result, _dir) = run(
+            r#"printf '%s' "$SUVADU_NO_UPDATE_CHECK""#,
+            &[],
+            LaunchMode::Report,
+        );
+        assert_eq!(result.stdout, b"1");
     }
 
     #[test]

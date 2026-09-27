@@ -894,11 +894,15 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, state: &HomeState, p: &Palette
             };
             // A pause matters most when there is one, so it leads.
             let recording = format!("Recording: {recording}");
-            let segments: Vec<&str> = if state.status.paused {
+            let mut segments: Vec<&str> = if state.status.paused {
                 vec!["This shell: paused", &recording, "Capture: not checked"]
             } else {
                 vec![&recording, "Capture: not checked", "Shell: not paused"]
             };
+            // A newer release leads: it is the one thing that asks for action.
+            if let Some(update) = &state.status.update {
+                segments.insert(0, update);
+            }
             Span::styled(
                 fit_segments(&segments, usize::from(area.width)),
                 fg(p.muted),
@@ -1456,6 +1460,7 @@ mod tests {
             recording: Some(true),
             paused: false,
             warning: None,
+            update: None,
         };
         let screen = text(&render(&mut state, 120, 40));
         assert!(screen.contains("Recording: enabled"), "{screen}");
@@ -1491,6 +1496,23 @@ mod tests {
             wrap_help_line(&unbroken, 50).concat().matches('x').count(),
             120
         );
+    }
+
+    #[test]
+    fn a_known_update_leads_the_status_line() {
+        let mut state = HomeState::new();
+        state.status = HomeStatus {
+            recording: Some(true),
+            update: Some("suvadu 0.6.0 available: suv update".into()),
+            ..HomeStatus::default()
+        };
+        let screen = text(&render(&mut state, 120, 40));
+        let status = screen.lines().rev().nth(1).unwrap();
+        assert!(
+            status.starts_with("suvadu 0.6.0 available: suv update"),
+            "{status}"
+        );
+        assert!(status.contains("Recording: enabled"), "{status}");
     }
 
     #[test]
