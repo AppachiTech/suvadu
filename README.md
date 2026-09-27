@@ -85,7 +85,7 @@ More at [suvadu.sh/cli/shell-integration](https://suvadu.sh/cli/shell-integratio
 ## Quick Start
 
 ```bash
-suv home                    # Find any feature by what you want to do
+suv                         # Home: find any feature by what you want to do (also suv home)
 suv search                  # Interactive search TUI (also Ctrl+R)
 suv history                 # Print last 25 commands (pipeable)
 suv history --json -n 100   # Last 100 commands as JSONL
@@ -103,9 +103,10 @@ suv skills sync             # Materialize skills into Claude Code/Cursor/Codex
 
 ---
 
-## Find a feature: `suv home`
+## Find a feature: `suv`
 
-`suv home` opens a searchable map of what Suvadu can do, grouped by task:
+Run `suv` on its own (or `suv home`) to open Home: a searchable map of what
+Suvadu can do, grouped by task:
 find a command, review a session, organize commands, understand your
 activity, review AI activity, connect tools, and manage Suvadu. Type to
 search the features — not your history — with words like *failed*,
@@ -127,19 +128,20 @@ Enter opens what is selected, and never runs anything in your shell:
 `F1` lists the keys and `F2` opens the command reference: the overview
 `suv --help` prints and every command's own help.
 
-A bare `suv` prints the command overview, as it always has. To open Home
-instead, choose it as the *Startup Screen* in `suv settings`, or set it in
-your `config.toml`:
+To have a bare `suv` print the classic command overview instead, set the
+*Startup Screen* to `help` in `suv settings`, or in your `config.toml`:
 
 ```toml
 [home]
-startup = "home"   # or "help" for the overview
+startup = "help"   # or "home" (the default)
 icons = "ascii"    # or "unicode" for the category markers
 ```
 
 This is read from your own config only — a project's `.suvadu.toml` cannot
-change it — and scripts, pipes and `TERM=dumb` always get the overview.
-`suv home` opens Home whatever the setting says.
+change it. Scripts, pipes and `TERM=dumb` always get the overview, on
+stderr with exit status 2 as before, so nothing that runs a bare `suv`
+non-interactively changes. `suv home` opens Home whatever the setting says,
+and `suv --help` always prints the overview.
 
 ---
 
@@ -459,7 +461,7 @@ See the [full integration guide](https://suvadu.sh/blog/track-ai-agent-commands-
 
 | Feature | Details |
 |---------|---------|
-| **Home** | `suv home` — search Suvadu's features by task, see the real command behind each, open screens, pickers and reports, or read copyable instructions for anything that changes data; a bare `suv` can open it too (*Startup Screen* in `suv settings`) |
+| **Home** | A bare `suv` (or `suv home`) — search Suvadu's features by task, see the real command behind each, open screens, pickers and reports, or read copyable instructions for anything that changes data; *Startup Screen* in `suv settings` brings back the classic overview |
 | **Search** | Full-history search TUI with four [matching modes](#how-recall-matches-and-ranks) (`^X`) and four scopes (`^P`), matches highlighted in each row, every run or identical commands grouped with last-used and run counts (`^U`), your own commands by default (`Ctrl+A` shows agents, `Ctrl+E` failures only), filters, Smart rank, detail pane, a raw inspector for exact text (`^V`), bookmarks, and `--compact` inline recall |
 | **History** | Non-interactive `suv history` with filters, `--json`, pipeable to other tools |
 | **Agent Dashboard** | Timeline, risk assessment, per-agent analytics, exportable reports; `suv agent report --fail-on <low\|medium\|high\|critical>` for local CI / git-hook gating |

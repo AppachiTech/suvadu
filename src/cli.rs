@@ -347,7 +347,7 @@ pub enum Commands {
 
     /// Find any feature by what you want to do, and open it (interactive)
     #[command(
-        after_help = "Home lists what Suvadu can do, grouped by task, with a search box for\nfeatures (not your history: Ctrl+R stays the fast way to recall a command).\nSelecting a feature shows its real command; Enter opens it. Nothing you\nfind is run in your shell.\n\nA bare `suv` prints the command overview unless you choose Home as the\nstartup screen in `suv settings`, or set it in config.toml:\n  [home]\n  startup = \"home\"   # or \"help\"\n\nKeys: type to search, Up/Down to move, Enter to open, Esc to go back,\nF1 for keys, F2 for the command reference."
+        after_help = "Home lists what Suvadu can do, grouped by task, with a search box for\nfeatures (not your history: Ctrl+R stays the fast way to recall a command).\nSelecting a feature shows its real command; Enter opens it. Nothing you\nfind is run in your shell.\n\nA bare `suv` at a terminal opens Home too. To have it print the command\noverview instead, set the startup screen in `suv settings`, or in config.toml:\n  [home]\n  startup = \"help\"   # or \"home\" (the default)\nScripts and pipes always get the overview.\n\nKeys: type to search, Up/Down to move, Enter to open, Esc to go back,\nF1 for keys, F2 for the command reference."
     )]
     Home,
 

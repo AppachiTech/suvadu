@@ -340,9 +340,10 @@ pub struct HomeConfig {
 }
 
 impl HomeConfig {
-    /// What a bare `suv` opens for someone who has not chosen. Classic help
-    /// while Home is opt-in; `suv home` opens Home whatever this says.
-    pub const DEFAULT_STARTUP: HomeStartup = HomeStartup::Help;
+    /// What a bare `suv` at a terminal opens for someone who has not
+    /// chosen: Home. `startup = "help"` keeps the classic overview, and
+    /// scripts and pipes always get the overview whatever this says.
+    pub const DEFAULT_STARTUP: HomeStartup = HomeStartup::Home;
 
     pub fn effective_startup(&self) -> HomeStartup {
         self.startup.unwrap_or(Self::DEFAULT_STARTUP)
@@ -1003,11 +1004,11 @@ unknown_mcp_key = 7
     // ── Home preferences ─────────────────────────────────────
 
     #[test]
-    fn home_preferences_default_to_classic_help_and_ascii_when_unset() {
+    fn home_preferences_default_to_home_and_ascii_when_unset() {
         for toml_str in ["", "enabled = true", "[home]"] {
             let config: Config = toml::from_str(toml_str).unwrap();
             assert_eq!(config.home.startup, None, "{toml_str:?}");
-            assert_eq!(config.home.effective_startup(), HomeStartup::Help);
+            assert_eq!(config.home.effective_startup(), HomeStartup::Home);
             assert_eq!(config.home.icons, HomeIcons::Ascii);
         }
         assert_eq!(Config::default().home, HomeConfig::default());

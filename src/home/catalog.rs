@@ -1379,11 +1379,12 @@ static FEATURES: &[Feature] = &[
         ],
         command_paths: &["home"],
         guide: &[
-            "suv home always opens Home. What a bare suv shows is your choice: set Startup \
-             Screen in suv settings, or put this in your config.toml:",
-            "[home]\nstartup = \"home\"   # or \"help\" for the command overview",
-            "Until you choose, a bare suv prints the command overview. Scripts and pipes \
-             always get the overview, whatever you choose.",
+            "A bare suv at a terminal opens Home, and so does suv home. To have a bare suv \
+             print the command overview instead, set Startup Screen to help in suv \
+             settings, or put this in your config.toml:",
+            "[home]\nstartup = \"help\"   # or \"home\", the default",
+            "suv home opens Home whatever you choose, suv --help always prints the \
+             overview, and scripts and pipes always get the overview.",
         ],
         examples: &[
             ex("suv home", "Open Home"),

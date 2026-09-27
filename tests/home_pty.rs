@@ -750,19 +750,21 @@ fn a_bare_suv_with_home_chosen_opens_home() {
     session.left_the_terminal_as_found();
 }
 
+/// Without a choice — a fresh install, or an older config with no
+/// `[home]` section — a bare `suv` at a terminal opens Home.
 #[test]
-fn a_bare_suv_without_a_choice_prints_the_overview() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut session = Session::start(dir.path(), &[]);
-    let status = session.wait_exit();
-    assert!(status.success(), "{status:?}");
-    let shown = String::from_utf8_lossy(&session.output).replace("\r\n", "\n");
-    assert!(shown.contains("Start here:") && shown.contains("Usage: suv <COMMAND>"));
-    assert_eq!(
-        session.written("\u{1b}[?1049h"),
-        0,
-        "no screen was taken over"
-    );
+fn a_bare_suv_without_a_choice_opens_home() {
+    for config in [None, Some("[search]\npage_limit = 20\n")] {
+        let dir = tempfile::tempdir().unwrap();
+        if let Some(config) = config {
+            write_config(dir.path(), config);
+        }
+        let mut session = Session::start(dir.path(), &[]);
+        session.wait_text("SUVADU HOME");
+        session.wait_text("Find a command");
+        assert!(quit(&mut session).success(), "{config:?}");
+        session.left_the_terminal_as_found();
+    }
 }
 
 // ── Preferences and missing or broken state ─────────────────────
@@ -853,8 +855,9 @@ fn bare_suv_opens_home(home: &Path) -> bool {
     status_or_home
 }
 
-/// Choosing Home in settings — opened from Home itself — keeps Home open,
-/// makes the next bare suv open Home, and leaves other keys alone.
+/// Choosing the overview in settings — opened from the Home a bare suv
+/// started — keeps that Home open, makes the next bare suv print the
+/// overview, leaves suv home opening Home, and keeps other keys.
 #[test]
 fn a_startup_choice_made_in_settings_applies_to_the_next_bare_suv() {
     let dir = tempfile::tempdir().unwrap();
@@ -863,17 +866,17 @@ fn a_startup_choice_made_in_settings_applies_to_the_next_bare_suv() {
         "future_option = \"keep me\"\n\n[search]\npage_limit = 77\n",
     );
     assert!(
-        !bare_suv_opens_home(dir.path()),
-        "the overview until chosen"
+        bare_suv_opens_home(dir.path()),
+        "Home until chosen otherwise"
     );
 
-    let mut session = Session::start(dir.path(), &["home"]);
+    let mut session = Session::start(dir.path(), &[]);
     session.wait_text("SUVADU HOME");
     type_text(&mut session, "settings");
     session.wait_text("Features matching “settings”");
     session.send(ENTER);
     switch_startup_screen(&mut session);
-    session.wait_text("Startup Screen: home");
+    session.wait_text("Startup Screen: help");
     session.send(b"\x13"); // Ctrl+S
     session.wait_text("saved");
     std::thread::sleep(Duration::from_millis(1100));
@@ -885,10 +888,15 @@ fn a_startup_choice_made_in_settings_applies_to_the_next_bare_suv() {
     session.left_the_terminal_as_found();
 
     let saved = live_config(dir.path());
-    assert!(saved.contains("startup = \"home\""), "{saved}");
+    assert!(saved.contains("startup = \"help\""), "{saved}");
     assert!(saved.contains("future_option = \"keep me\""), "{saved}");
     assert!(saved.contains("page_limit = 77"), "{saved}");
-    assert!(bare_suv_opens_home(dir.path()));
+    assert!(!bare_suv_opens_home(dir.path()), "the overview once chosen");
+
+    let mut home = Session::start(dir.path(), &["home"]);
+    home.wait_text("SUVADU HOME");
+    assert!(quit(&mut home).success());
+    home.left_the_terminal_as_found();
 }
 
 /// A change abandoned at settings' save question is not saved; a saved

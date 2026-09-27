@@ -2013,16 +2013,16 @@ mod tests {
         app.current_tab = SettingsTab::Shell;
         app.selected_item = 3;
         assert_eq!(app.config.home.startup, None, "unset until chosen");
-        assert_eq!(startup_label(&app.config), "help (default)");
-
-        app.toggle_bool();
-        assert_eq!(app.config.home.startup, Some(HomeStartup::Home));
-        assert!(app.dirty);
-        assert_eq!(startup_label(&app.config), "home");
+        assert_eq!(startup_label(&app.config), "home (default)");
 
         app.toggle_bool();
         assert_eq!(app.config.home.startup, Some(HomeStartup::Help));
+        assert!(app.dirty);
         assert_eq!(startup_label(&app.config), "help");
+
+        app.toggle_bool();
+        assert_eq!(app.config.home.startup, Some(HomeStartup::Home));
+        assert_eq!(startup_label(&app.config), "home");
     }
 
     #[test]
