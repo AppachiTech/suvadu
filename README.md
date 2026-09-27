@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="demo/hero.gif" alt="Suvadu — search history, browse AI agent prompts" width="700">
+  <img src="demo/hero.gif" alt="Suvadu 0.5.0 — Ctrl+R search with fictional command history" width="700">
 </p>
 
 **Suvadu** replaces your shell history with a SQLite-backed store. Every command gets structured context — exit code, duration, directory, executor, session. AI agents can query it via MCP. 100% local.
@@ -492,27 +492,25 @@ Full feature documentation at [suvadu.sh/cli](https://suvadu.sh/cli/).
 <details>
 <summary><strong>More demos</strong></summary>
 
-<p><em>These recordings predate the current search footer, status row and
-session picker columns. They still show the shape of each screen, not its
-exact chrome.</em></p>
+<p><em>Recorded in Suvadu 0.5.0 with fictional data. The search demo above
+shows Ctrl+R recall; the demos below cover feature discovery and AI sessions.
+The AI example uses staged records, not a live agent run.</em></p>
 
 <p align="center">
-  <img src="demo/suvadu-search.gif" alt="Suvadu search TUI" width="700">
+  <img src="demo/suvadu-home.gif" alt="Suvadu Home — browse features, find failed commands, and open filtered history" width="960">
   <br>
-  <em>Search, stats & settings</em>
+  <em>Discover features — run suv, search by task, and open a tool</em>
 </p>
 
 <p align="center">
-  <img src="demo/suvadu-agent.gif" alt="Suvadu agent dashboard" width="700">
+  <img src="demo/suvadu-ai.gif" alt="Suvadu AI session — read a prompt, inspect a failed test and successful retry, then read the recorded response" width="960">
   <br>
-  <em>Agent dashboard — track what your AI agents execute</em>
+  <em>AI activity — follow the prompt, commands, exit status, and response in one timeline</em>
 </p>
 
-<p align="center">
-  <img src="demo/suvadu-prompts.gif" alt="Suvadu prompt explorer" width="700">
-  <br>
-  <em>Prompt Explorer — trace commands back to the prompt that triggered them</em>
-</p>
+Watch the [video versions](https://suvadu.sh/#demo), or read the
+[Home guide](https://suvadu.sh/cli/home/) and
+[session guide](https://suvadu.sh/cli/sessions/).
 
 </details>
 
