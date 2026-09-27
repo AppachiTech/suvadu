@@ -7,7 +7,8 @@
 //! - Selection: the child draws on the terminal; its stdout — the picked
 //!   command — is captured, drained as it arrives and capped at 1 MiB.
 //! - Report: no terminal at all; stdout and stderr are drained side by side,
-//!   each capped at 1 MiB, and the child is stopped after five seconds.
+//!   each capped at 1 MiB, and after five seconds the child and everything
+//!   it started are stopped.
 
 use std::io::Read;
 use std::path::Path;
@@ -77,6 +78,14 @@ pub fn run_with(
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            // Its own process group, so a timeout can stop everything it
+            // started. A report never uses the terminal, so leaving the
+            // foreground group costs nothing; screens and pickers stay in it.
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                command.process_group(0);
+            }
         }
     }
     let mut child = command.spawn()?;
@@ -140,12 +149,31 @@ fn wait_with_deadline(
             return Ok((status, false));
         }
         if Instant::now() >= deadline {
+            kill_group(child);
             let _ = child.kill();
             return Ok((child.wait()?, true));
         }
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+
+/// Stop a report child and every process it started: it leads its own
+/// process group, so the whole group is signalled.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn kill_group(child: &std::process::Child) {
+    if let Ok(pid) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: killpg only sends a signal. `pid` is the group this child
+        // leads (it was started with process_group(0)) and has not been
+        // reaped yet, so the group cannot belong to anything else.
+        unsafe {
+            libc::killpg(pid, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_group(_child: &std::process::Child) {}
 
 /// What to show for a finished launch; `None` when a screen simply closed.
 pub fn outcome(request: &LaunchRequest, result: &LaunchResult) -> Option<Outcome> {
@@ -408,6 +436,42 @@ mod tests {
             message.contains("5 seconds") || message.contains("stopped"),
             "{message}"
         );
+    }
+
+    /// A report that hangs in a process it started (doctor's shell probe,
+    /// say) is stopped whole: nothing it started is left running.
+    #[test]
+    fn a_timed_out_report_leaves_no_process_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("grandchild.pid");
+        let exe = fixture(
+            &dir,
+            &format!("sleep 30 &\necho $! > '{}'\nwait", pid_file.display()),
+        );
+        let request = request("doctor", &[], LaunchMode::Report);
+        let result = run_with(&exe, &request, Duration::from_millis(500)).unwrap();
+        assert!(result.timed_out);
+        let pid = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .to_string();
+        assert!(!pid.is_empty());
+        let alive = || {
+            std::process::Command::new("kill")
+                .args(["-0", &pid])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while alive() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(), "grandchild {pid} is still running");
+
+        // And the next report runs at once.
+        let (again, _dir) = run("echo ok", &[], LaunchMode::Report);
+        assert_eq!(again.stdout, b"ok\n");
     }
 
     #[test]
