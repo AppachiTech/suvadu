@@ -80,7 +80,14 @@ fn run(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
         let cfg = config::load_config_for_cwd().unwrap_or_default();
         theme::init_theme(cfg.theme);
         if announces_updates(&command) {
-            update_check::before_command(cfg.update.check);
+            // Contacting the network is the person's own choice, so it comes
+            // from the global config alone: a broken project .suvadu.toml
+            // (which makes the merged config above fall back to defaults)
+            // must not turn an opt-out back on, and an unreadable global
+            // config is not consent to the default.
+            let enabled = config::read_global_config()
+                .is_ok_and(|found| found.unwrap_or_default().update.check);
+            update_check::before_command(enabled);
         }
         // Apply user risk-ignore suppressions and extra flag patterns to all risk assessment.
         risk::set_ignore_patterns(&cfg.agent.risk_ignore_patterns);

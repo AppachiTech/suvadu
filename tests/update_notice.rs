@@ -180,3 +180,66 @@ fn recall_and_pause_never_announce() {
         assert!(!shown.contains("is available"), "{args:?}: {shown}");
     }
 }
+
+fn write_global_config(home: &Path, contents: &str) {
+    for path in [
+        home.join("Library/Application Support/tech.appachi.suvadu/config.toml"),
+        home.join("config/suvadu/config.toml"),
+    ] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+}
+
+/// Whether Suvadu may contact the network is the global config's answer
+/// alone: a broken project `.suvadu.toml` must never turn a global opt-out
+/// back on, and an unreadable global config means no check at all.
+#[test]
+fn only_the_global_config_decides_and_a_broken_one_means_no() {
+    use std::os::unix::fs::PermissionsExt;
+    fn invalid_syntax(path: &Path) {
+        std::fs::write(path, "this is = = not toml\n").unwrap();
+    }
+    fn invalid_value(path: &Path) {
+        std::fs::write(path, "[search]\npage_limit = 0\n").unwrap();
+    }
+    fn unreadable(path: &Path) {
+        std::fs::write(path, "[search]\npage_limit = 20\n").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    type BreakProject = fn(&Path);
+    let broken_projects: [(&str, BreakProject); 3] = [
+        ("invalid syntax", invalid_syntax),
+        ("invalid value", invalid_value),
+        ("unreadable", unreadable),
+    ];
+    for (name, break_project) in broken_projects {
+        let home = tempfile::tempdir().unwrap();
+        seed(home.path(), FUTURE);
+        write_global_config(home.path(), "[update]\ncheck = false\n");
+        let project = home.path().join(".suvadu.toml");
+        break_project(&project);
+        let before = states(home.path());
+        let shown = at_terminal(home.path(), &["version"], &[]);
+        assert!(!shown.contains("is available"), "{name}: {shown}");
+        assert_eq!(states(home.path()), before, "{name}: state changed");
+        let _ = std::fs::set_permissions(&project, std::fs::Permissions::from_mode(0o600));
+    }
+
+    // A global config that cannot be read is not consent to the default.
+    let home = tempfile::tempdir().unwrap();
+    seed(home.path(), FUTURE);
+    write_global_config(home.path(), "this is = = not toml\n");
+    let shown = at_terminal(home.path(), &["version"], &[]);
+    assert!(
+        !shown.contains("is available"),
+        "unreadable global: {shown}"
+    );
+
+    // With no global config the default (on) holds, whatever the project.
+    let home = tempfile::tempdir().unwrap();
+    seed(home.path(), FUTURE);
+    std::fs::write(home.path().join(".suvadu.toml"), "this is = = not toml\n").unwrap();
+    let shown = at_terminal(home.path(), &["version"], &[]);
+    assert!(shown.contains("is available"), "global default: {shown}");
+}
