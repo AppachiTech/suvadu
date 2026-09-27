@@ -291,7 +291,9 @@ const fn kind(feature: &Feature) -> &'static str {
     }
 }
 
-fn list_item(row: Row, state: &HomeState, p: &Palette) -> ListItem<'static> {
+/// A list row. `width` is the room for its text; a kind tag that would not
+/// fit there whole is left out rather than cut.
+fn list_item(row: Row, state: &HomeState, width: usize, p: &Palette) -> ListItem<'static> {
     match row {
         Row::Category(id) => {
             let title = catalog::category(id).map_or("", |c| c.title);
@@ -310,10 +312,12 @@ fn list_item(row: Row, state: &HomeState, p: &Palette) -> ListItem<'static> {
                     Span::styled(feature.title, fg(p.text)),
                 ]));
             }
-            let title = Line::from(vec![
-                Span::styled(feature.title, fg(p.text)),
-                Span::styled(format!("  {}", kind(feature)), fg(p.muted)),
-            ]);
+            let tag = format!("  {}", kind(feature));
+            let mut spans = vec![Span::styled(feature.title, fg(p.text))];
+            if feature.title.width() + tag.width() <= width {
+                spans.push(Span::styled(tag, fg(p.muted)));
+            }
+            let title = Line::from(spans);
             if !state.searching() {
                 return ListItem::new(title);
             }
@@ -353,7 +357,12 @@ fn draw_list(frame: &mut Frame<'_>, area: Rect, state: &HomeState, p: &Palette) 
         );
         return;
     }
-    let items: Vec<ListItem> = rows.iter().map(|row| list_item(*row, state, p)).collect();
+    // Borders and the " > " selection marker take five columns.
+    let room = usize::from(area.width).saturating_sub(5);
+    let items: Vec<ListItem> = rows
+        .iter()
+        .map(|row| list_item(*row, state, room, p))
+        .collect();
     let selected = state
         .selected_row()
         .and_then(|s| rows.iter().position(|r| *r == s));
@@ -1457,6 +1466,31 @@ mod tests {
         let screen = text(&render(&mut state, 39, 12));
         assert!(screen.contains("too small"), "{screen}");
         assert!(screen.contains("Esc"), "{screen}");
+    }
+
+    /// A kind tag that does not fit beside its title is left out, never
+    /// cut into a fragment such as "pic".
+    #[test]
+    fn list_tags_are_whole_or_absent() {
+        for (width, height) in [(100, 24), (80, 24), (60, 18), (40, 10)] {
+            let mut state = HomeState::new();
+            key(&mut state, KeyCode::Enter);
+            let screen = text(&render(&mut state, width, height));
+            for line in screen.lines() {
+                for fragment in [
+                    "  p│",
+                    "  pi│",
+                    "  pic│",
+                    "  pick│",
+                    "  picke│",
+                    "  rep│",
+                    "  re│",
+                ] {
+                    assert!(!line.contains(fragment), "{width}x{height}: {line}");
+                }
+            }
+            assert!(screen.contains("Search history"), "{screen}");
+        }
     }
 
     #[test]
