@@ -67,14 +67,56 @@ pub fn start(explicit_home: bool) -> Result<(), Box<dyn std::error::Error>> {
             print!("{}", crate::cli::overview());
             Ok(())
         }
-        StartupRoute::Home => run(loaded.unwrap_or(Ok(None))),
+        StartupRoute::Home => match run(loaded.unwrap_or(Ok(None))) {
+            Err(HomeError::Setup(e)) => match after_setup_failure(explicit_home, &e.to_string()) {
+                SetupFallback::Overview(warning) => {
+                    eprintln!("{warning}");
+                    print!("{}", crate::cli::overview());
+                    Ok(())
+                }
+                SetupFallback::Error(message) => Err(message.into()),
+            },
+            Err(HomeError::Other(e)) => Err(e),
+            Ok(()) => Ok(()),
+        },
+    }
+}
+
+/// Why Home stopped: it could not take the terminal at all, or something
+/// failed once it was running.
+enum HomeError {
+    Setup(Box<dyn std::error::Error>),
+    Other(Box<dyn std::error::Error>),
+}
+
+impl<E: Into<Box<dyn std::error::Error>>> From<E> for HomeError {
+    fn from(e: E) -> Self {
+        Self::Other(e.into())
+    }
+}
+
+enum SetupFallback {
+    /// Print this warning, then the overview, and exit successfully.
+    Overview(String),
+    Error(String),
+}
+
+/// When the terminal cannot be set up for Home, a bare suv still helps by
+/// showing the overview; an explicit suv home reports what failed.
+fn after_setup_failure(explicit_home: bool, error: &str) -> SetupFallback {
+    if explicit_home {
+        SetupFallback::Error(format!("suv home could not set up the terminal: {error}"))
+    } else {
+        SetupFallback::Overview(format!(
+            "suv: could not set up the terminal for Home ({error}); showing the command overview."
+        ))
     }
 }
 
 /// Home's loop: draw and handle keys with the terminal, give the terminal
 /// up entirely while a screen or picker it opened runs, then take it back
 /// exactly where the person left off.
-fn run(loaded: Result<Option<Config>, ConfigError>) -> Result<(), Box<dyn std::error::Error>> {
+fn run(loaded: Result<Option<Config>, ConfigError>) -> Result<(), HomeError> {
     let mut state = HomeState::new();
     state.no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
     apply_config(&mut state, loaded);
@@ -82,9 +124,16 @@ fn run(loaded: Result<Option<Config>, ConfigError>) -> Result<(), Box<dyn std::e
     // features rather than whichever suv is first on PATH.
     let executable = std::env::current_exe()?;
     let mut clipboard = SystemClipboard::default();
+    let mut first = true;
     loop {
         let action = {
-            let _guard = crate::util::TerminalGuardStderr::new()?;
+            let _guard = match crate::util::TerminalGuardStderr::new() {
+                Ok(guard) => guard,
+                // Home never started: the caller can still fall back.
+                Err(e) if first => return Err(HomeError::Setup(e)),
+                Err(e) => return Err(HomeError::Other(e)),
+            };
+            first = false;
             // Buffered, so a frame reaches the terminal in a few writes
             // rather than one per changed cell; ratatui flushes each frame.
             let backend = ratatui::backend::CrosstermBackend::new(
@@ -324,6 +373,26 @@ mod tests {
         assert!(state.notice_is_error());
         assert!(!notice.contains("Copied"), "{notice}");
         assert!(notice.contains("no clipboard service"), "{notice}");
+    }
+
+    /// A bare suv that cannot set up the terminal still helps: it shows the
+    /// overview with the reason. suv home says plainly what failed.
+    #[test]
+    fn a_terminal_that_cannot_be_set_up_falls_back_to_the_overview() {
+        match after_setup_failure(false, "Operation not supported") {
+            SetupFallback::Overview(warning) => {
+                assert!(warning.contains("Operation not supported"), "{warning}");
+                assert!(warning.contains("overview"), "{warning}");
+            }
+            SetupFallback::Error(e) => panic!("bare suv gave an error: {e}"),
+        }
+        match after_setup_failure(true, "Operation not supported") {
+            SetupFallback::Error(e) => {
+                assert!(e.contains("suv home could not set up the terminal"), "{e}");
+                assert!(e.contains("Operation not supported"), "{e}");
+            }
+            SetupFallback::Overview(_) => panic!("suv home should report the failure"),
+        }
     }
 
     #[test]
