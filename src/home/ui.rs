@@ -246,16 +246,23 @@ fn draw_search(frame: &mut Frame<'_>, area: Rect, state: &HomeState, p: &Palette
             "Type to find a feature"
         };
         frame.render_widget(Paragraph::new(Span::styled(hint, fg(p.secondary))), inner);
-        if inner.width > 0 && inner.height > 0 {
-            frame.set_cursor_position((inner.x, inner.y));
-        }
-        return;
+    } else {
+        let (shown, _) = visible_query(state.query(), state.cursor(), width);
+        frame.render_widget(Paragraph::new(Span::styled(shown, fg(p.text))), inner);
     }
-    let (shown, cursor_x) = visible_query(state.query(), state.cursor(), width);
-    frame.render_widget(Paragraph::new(Span::styled(shown, fg(p.text))), inner);
-    if inner.width > 0 && inner.height > 0 {
-        frame.set_cursor_position((inner.x + cursor_x, inner.y));
+    if let Some(caret) = search_caret(state, inner) {
+        frame.set_cursor_position(caret);
     }
+}
+
+/// Where the caret goes in the search box: only while typing goes there
+/// (the list has the keys) and there is room to draw it.
+fn search_caret(state: &HomeState, inner: Rect) -> Option<(u16, u16)> {
+    if state.focus() != Focus::List || inner.width == 0 || inner.height == 0 {
+        return None;
+    }
+    let (_, x) = visible_query(state.query(), state.cursor(), usize::from(inner.width));
+    Some((inner.x + x, inner.y))
 }
 
 /// The part of the query that fits, scrolled so the cursor stays in view,
@@ -879,6 +886,13 @@ fn keys_lines(width: usize, p: &Palette) -> Vec<Line<'static>> {
     doc.text(
         "Typing searches Suvadu's features, not your history. Nothing you find here runs in \
          your shell: pickers show the command you chose, to copy.",
+        fg(p.text),
+    );
+    doc.blank();
+    doc.text(
+        "The status line shows what your settings say. Capture is not checked: Home never \
+         probes your shell, so open Recording status (type status) to see whether commands \
+         are really being recorded.",
         fg(p.text),
     );
     doc.blank();
@@ -1693,6 +1707,28 @@ mod tests {
         let mut state = HomeState::new();
         let screen = text(&render(&mut state, 120, 40));
         assert!(screen.contains("Ctrl+R  Search history"), "{screen}");
+    }
+
+    /// The search caret shows only while the list has the keys: with the
+    /// details focused, typing does not go to the search.
+    #[test]
+    fn the_search_caret_shows_only_while_typing_goes_there() {
+        let mut state = HomeState::new();
+        state.set_viewport(120, 40);
+        let inner = Rect::new(1, 2, 60, 1);
+        assert!(search_caret(&state, inner).is_some());
+        key(&mut state, KeyCode::Tab);
+        assert_eq!(state.focus(), Focus::Detail);
+        assert!(search_caret(&state, inner).is_none());
+    }
+
+    #[test]
+    fn the_keys_page_explains_the_status_line() {
+        let mut state = HomeState::new();
+        key(&mut state, KeyCode::F(1));
+        let screen = text(&render(&mut state, 120, 40));
+        assert!(screen.contains("not checked"), "{screen}");
+        assert!(screen.contains("(type status)"), "{screen}");
     }
 
     #[test]

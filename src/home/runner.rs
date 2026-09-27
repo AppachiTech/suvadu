@@ -23,6 +23,11 @@ use super::model::Outcome;
 /// can never block on a full pipe, and the result says it was cut.
 pub const CAPTURE_LIMIT: usize = 1024 * 1024;
 
+/// Set for every feature Home opens, so a picker can explain itself
+/// through its exit status (see `EXIT_NO_HISTORY`) instead of text Home's
+/// screen would cover. The shell's own widgets never set it.
+pub const LAUNCHED_BY_HOME: &str = "SUVADU_LAUNCHED_BY_HOME";
+
 /// How long a report may take before it is stopped.
 pub const REPORT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -60,7 +65,8 @@ pub fn run_with(
     // print the notice over its own screen nor start a check.
     command
         .args(&request.args)
-        .env(crate::update_check::OPT_OUT_ENV, "1");
+        .env(crate::update_check::OPT_OUT_ENV, "1")
+        .env(LAUNCHED_BY_HOME, "1");
     match request.mode {
         LaunchMode::Interactive => {
             let status = command.status()?;
@@ -203,6 +209,12 @@ pub fn outcome(request: &LaunchRequest, result: &LaunchResult) -> Option<Outcome
         }),
         LaunchMode::Selection => match result.code {
             Some(0) => selection(command, result),
+            Some(crate::commands::search::EXIT_NO_HISTORY) => failed(
+                "No commands are recorded yet, so there is nothing to search. Set up Shell \
+                 integration (under Connect tools), open a new terminal and run a few commands."
+                    .to_string(),
+                false,
+            ),
             Some(10) => failed(
                 "Search is unavailable because recording is off or paused in this shell. \
                  suv enable turns recording on; a pause lasts until SUVADU_PAUSED is unset \
@@ -499,6 +511,29 @@ mod tests {
             LaunchMode::Report,
         );
         assert_eq!(result.stdout, b"1");
+    }
+
+    #[test]
+    fn features_know_home_launched_them() {
+        let (result, _dir) = run(
+            &format!(r#"printf '%s' "${LAUNCHED_BY_HOME}""#),
+            &[],
+            LaunchMode::Report,
+        );
+        assert_eq!(result.stdout, b"1");
+    }
+
+    #[test]
+    fn a_search_with_no_history_says_so_instead_of_selecting_nothing() {
+        let Some(Outcome::Failed { message, retry }) = selection("exit 11") else {
+            panic!()
+        };
+        assert!(
+            message.contains("No commands are recorded yet"),
+            "{message}"
+        );
+        assert!(message.contains("Shell integration"), "{message}");
+        assert!(!retry);
     }
 
     #[test]

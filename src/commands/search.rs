@@ -10,6 +10,11 @@ use crate::search::{MatchMode, RecallScope};
 /// fall back to native search (e.g. Ctrl-R).
 const EXIT_CODE_SHELL_FALLBACK: i32 = 10;
 
+/// Exit status when there is no history at all, used only when Home opened
+/// search (so the shell widget's contract is unchanged): Home explains it,
+/// since the message search prints would be hidden behind Home's screen.
+pub const EXIT_NO_HISTORY: i32 = 11;
+
 #[allow(clippy::struct_excessive_bools)]
 pub struct SearchParams<'a> {
     pub query: Option<&'a String>,

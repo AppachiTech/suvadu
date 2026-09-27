@@ -819,6 +819,11 @@ pub fn run_search(
         && repo.count_filtered(&QueryFilter::default()).unwrap_or(0) == 0
     {
         eprintln!("No history recorded yet.");
+        // Opened from Home, the reason travels as the exit status instead:
+        // nothing has touched the terminal yet, so exiting here is clean.
+        if std::env::var_os(crate::home::runner::LAUNCHED_BY_HOME).is_some() {
+            std::process::exit(crate::commands::search::EXIT_NO_HISTORY);
+        }
         return Ok(None);
     }
 

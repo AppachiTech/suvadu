@@ -220,12 +220,19 @@ fn show_result(
     }
 }
 
-/// Whether a child's last words need a moment on screen: it failed, or it
-/// closed too soon to have been used — most likely printing why — and
-/// returned nothing Home will show instead.
+/// Whether a child's last words need a moment on screen before Home
+/// redraws over them. A picker explains itself through its exit status
+/// (a pick, a cancel, recording off, no history), so it pauses only when
+/// something unexpected went wrong. A screen pauses when it failed or
+/// closed too soon to have been used — most likely after printing why.
 fn needs_a_pause(request: &LaunchRequest, result: &runner::LaunchResult) -> bool {
-    let answered = request.mode == LaunchMode::Selection && !result.stdout.is_empty();
-    result.code != Some(0) || (result.elapsed < QUICK_EXIT && !answered)
+    match request.mode {
+        LaunchMode::Selection => !matches!(
+            result.code,
+            Some(0 | 10 | crate::commands::search::EXIT_NO_HISTORY)
+        ),
+        _ => result.code != Some(0) || result.elapsed < QUICK_EXIT,
+    }
 }
 
 /// On the normal screen, under whatever the child printed: wait for a key.
@@ -396,6 +403,53 @@ mod tests {
             }
             SetupFallback::Overview(_) => panic!("suv home should report the failure"),
         }
+    }
+
+    fn finished(mode: LaunchMode, code: Option<i32>, millis: u64, stdout: &[u8]) -> bool {
+        let request = LaunchRequest {
+            feature: catalog::FeatureId("search"),
+            args: Vec::new(),
+            mode,
+        };
+        let result = runner::LaunchResult {
+            code,
+            stdout: stdout.to_vec(),
+            elapsed: Duration::from_millis(millis),
+            ..runner::LaunchResult::default()
+        };
+        needs_a_pause(&request, &result)
+    }
+
+    /// A picker explains itself through its exit status, so it never needs
+    /// a pause: a quick Esc goes straight back. Screens that can print a
+    /// message and leave still get one, as does any failure.
+    #[test]
+    fn only_screens_and_failures_pause_on_the_way_back() {
+        use LaunchMode::{Interactive, Selection};
+        assert!(!finished(Selection, Some(0), 50, b""), "a quick cancel");
+        assert!(!finished(Selection, Some(0), 50, b"ls\n"), "a quick pick");
+        assert!(
+            !finished(Selection, Some(10), 50, b""),
+            "recording off: explained"
+        );
+        assert!(
+            !finished(Selection, Some(11), 50, b""),
+            "no history: explained"
+        );
+        assert!(finished(Selection, Some(2), 5_000, b""), "a failure");
+        assert!(finished(Selection, None, 5_000, b""), "a signal");
+        assert!(
+            finished(Interactive, Some(0), 50, b""),
+            "a screen that closed at once"
+        );
+        assert!(
+            !finished(Interactive, Some(0), 5_000, b""),
+            "a screen that was used"
+        );
+        assert!(
+            finished(Interactive, Some(1), 5_000, b""),
+            "a failed screen"
+        );
     }
 
     #[test]

@@ -512,7 +512,17 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.child.kill();
-        let _ = self.child.wait();
+        // Keep reading while the child exits: on macOS a session leader
+        // closing its terminal waits for queued output to be read, so a
+        // blocking wait here, with nobody reading, would never return.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            self.pump();
+            if self.status.is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
@@ -550,9 +560,9 @@ fn quit(session: &mut Session) -> ExitStatus {
 #[test]
 fn home_opens_and_esc_leaves_the_terminal_as_found() {
     let (_dir, mut session) = home();
-    let screen = session.screen.text();
-    assert!(screen.contains("Review AI activity"), "{screen}");
-    assert!(screen.contains("Command reference"), "{screen}");
+    // A frame reaches the terminal in pieces: wait for each part.
+    session.wait_text("Review AI activity");
+    session.wait_text("Command reference");
     let status = quit(&mut session);
     assert!(status.success(), "{status:?}");
     session.left_the_terminal_as_found();
@@ -630,23 +640,41 @@ fn settings_opens_and_esc_returns_to_the_same_selection() {
     );
 }
 
+/// Cancelling a picker is ordinary: even straight away, Home is back at
+/// once with a note — no pause, no page, no second keypress.
 #[test]
-fn a_cancelled_search_selects_nothing_and_returns() {
+fn a_cancelled_search_goes_straight_back_to_home() {
     let dir = tempfile::tempdir().unwrap();
     plant(dir.path(), "echo planted-for-home");
     let mut session = Session::start(dir.path(), &["home"]);
     session.wait_text("SUVADU HOME");
     for round in 0..2 {
+        let before = session.output.len();
         session.send(b"\x12"); // Ctrl+R
         session.wait_text("planted-for-home");
-        std::thread::sleep(Duration::from_millis(1200));
-        session.send(ESC);
-        session.wait_text("Nothing was selected.");
-        session.send(ENTER); // Back to Home
+        session.send(ESC); // at once
         session.wait_for(&format!("Home after round {round}"), |s| {
-            s.contains("Explore") && !s.contains("Nothing was selected.")
+            s.contains("Explore") && s.contains("Nothing was selected.")
         });
+        let since = String::from_utf8_lossy(&session.output[before..]).into_owned();
+        assert!(!since.contains("Press any key"), "round {round} paused");
     }
+    assert!(quit(&mut session).success());
+    session.left_the_terminal_as_found();
+}
+
+/// With nothing recorded yet, search cannot open; Home says why on its own
+/// page instead of flashing search's message and redrawing over it.
+#[test]
+fn a_search_with_no_history_explains_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::start(dir.path(), &["home"]);
+    session.wait_text("SUVADU HOME");
+    let before = session.output.len();
+    session.send(b"\x12"); // Ctrl+R
+    session.wait_text("No commands are recorded yet");
+    let since = String::from_utf8_lossy(&session.output[before..]).into_owned();
+    assert!(!since.contains("Press any key"), "paused");
     assert!(quit(&mut session).success());
     session.left_the_terminal_as_found();
 }
@@ -665,10 +693,9 @@ fn a_picked_command_is_shown_exactly_and_never_run() {
     session.wait_text("sentinel");
     session.send(ENTER);
     session.wait_text("Selected command");
-    let screen = session.screen.text();
-    assert!(screen.contains("This has not been run."), "{screen}");
-    assert!(screen.contains("Copy command"), "{screen}");
-    assert!(screen.contains(&planted), "{screen}");
+    session.wait_text("This has not been run.");
+    session.wait_text("Copy command");
+    session.wait_text(&planted);
     session.send(b"\x1b[C"); // Right: Back to Home
     session.send(ENTER);
     session.wait_for("Home", |s| {
@@ -1022,12 +1049,9 @@ fn browsing_home_writes_nothing_whatever_state_it_finds() {
         setup(dir.path());
         let before = snapshot(dir.path());
         let mut session = Session::start_with(dir.path(), dir.path(), &["home"], env);
-        session.wait_text("SUVADU HOME");
-        let screen = session.screen.text();
-        assert!(
-            screen.contains(status),
-            "{name}: wanted {status:?}\n{screen}"
-        );
+        session.wait_for(&format!("{name}: {status}"), |screen| {
+            screen.contains(status)
+        });
         browse(&mut session);
         assert!(quit(&mut session).success(), "{name}");
         session.left_the_terminal_as_found();

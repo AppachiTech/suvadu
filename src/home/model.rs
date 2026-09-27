@@ -341,6 +341,11 @@ impl HomeState {
 
     /// Show what a launched feature returned.
     pub fn show_outcome(&mut self, feature: FeatureId, outcome: Outcome) {
+        // A cancel is ordinary: no page to dismiss, just a note.
+        if outcome == Outcome::NothingSelected {
+            self.notice = Some(("Nothing was selected.".to_string(), false));
+            return;
+        }
         self.views.push(View::Result {
             feature,
             outcome,
@@ -417,6 +422,10 @@ impl HomeState {
         }
         self.notice = None;
         if ctrl && matches!(key.code, KeyCode::Char('r' | 'R')) {
+            // A new search replaces the result of the last one.
+            while matches!(self.views.last(), Some(View::Result { .. })) {
+                self.views.pop();
+            }
             return catalog::launch_request(FeatureId("search"))
                 .map_or(HomeAction::None, HomeAction::Launch);
         }
@@ -1235,10 +1244,24 @@ mod tests {
     }
 
     #[test]
-    fn nothing_selected_offers_only_back() {
+    /// Cancelling a picker is ordinary: Home is simply back, with a
+    /// one-line note, and no page to dismiss.
+    fn nothing_selected_returns_straight_to_home() {
         let mut state = wide();
         state.show_outcome(FeatureId("bookmarks"), Outcome::NothingSelected);
-        assert_eq!(state.buttons(), [Button::Back]);
+        assert!(state.view().is_none());
+        assert_eq!(state.notice(), Some("Nothing was selected."));
+        assert!(!state.notice_is_error());
+    }
+
+    /// Ctrl+R from a result replaces it rather than stacking another on top,
+    /// so one Esc always gets back to where you were.
+    #[test]
+    fn ctrl_r_from_a_result_replaces_it() {
+        let mut state = wide();
+        state.show_outcome(FeatureId("search"), Outcome::Selected("ls".into()));
+        assert!(matches!(state.on_event(ctrl('r')), HomeAction::Launch(_)));
+        assert!(state.view().is_none(), "the old result was closed");
     }
 
     #[test]

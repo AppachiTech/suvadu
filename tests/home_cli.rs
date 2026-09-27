@@ -236,3 +236,23 @@ fn a_dumb_terminal_never_opens_home() {
     assert!(!output.stderr.contains(&0x1b));
     assert!(text(&output.stderr).contains("needs an interactive terminal"));
 }
+
+/// With nothing recorded, `suv search` still answers the shell's Ctrl+R
+/// widget exactly as before (exit 0, nothing on stdout); only when Home
+/// opened it does it report the reason as its exit status.
+#[test]
+fn search_with_no_history_answers_the_shell_as_before() {
+    let sandbox = Sandbox::new();
+    let plain = sandbox.run(&["search"]);
+    assert_eq!(plain.status.code(), Some(0));
+    assert!(plain.stdout.is_empty());
+    assert!(text(&plain.stderr).contains("No history recorded yet."));
+
+    let from_home = sandbox
+        .command(&["search"])
+        .env("SUVADU_LAUNCHED_BY_HOME", "1")
+        .output()
+        .unwrap();
+    assert_eq!(from_home.status.code(), Some(11));
+    assert!(from_home.stdout.is_empty());
+}
