@@ -26,6 +26,22 @@ use super::reference;
 use crate::config::HomeIcons;
 use crate::search::highlight::{raw_view, wants_raw, RawStyle};
 
+/// Widest the list screen, pages and results get, centred on the terminal.
+const MAX_WIDTH: u16 = 140;
+
+/// Tallest the list and detail panes get.
+const PANE_ROWS: u16 = 24;
+
+/// `area`, no wider than [`MAX_WIDTH`], centred.
+fn column(area: Rect) -> Rect {
+    let width = area.width.min(MAX_WIDTH);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        width,
+        ..area
+    }
+}
+
 /// Width of the label column in a feature's details.
 const LABEL: usize = 11;
 
@@ -112,7 +128,10 @@ impl Palette {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(fg(if focused { self.focus } else { self.border }))
-            .title(title)
+            .title(Span::styled(
+                title,
+                bold(if focused { self.focus } else { self.secondary }),
+            ))
     }
 }
 
@@ -131,6 +150,14 @@ pub fn draw(frame: &mut Frame<'_>, state: &HomeState) {
         Constraint::Length(1),
     ])
     .areas(area);
+    // On a very large terminal everything but the reference keeps to a
+    // readable column, so a few rows of content are not stretched across
+    // the whole window.
+    let (body, status, footer) = if matches!(state.view(), Some(View::Reference { .. })) {
+        (body, status, footer)
+    } else {
+        (column(body), column(status), column(footer))
+    };
     frame.render_widget(
         Paragraph::new(Span::styled("SUVADU HOME", bold(p.primary))).alignment(Alignment::Center),
         title,
@@ -176,6 +203,11 @@ fn draw_main(
         Constraint::Min(0),
     ])
     .areas(area);
+    // The list and details need no more than this; the rest stays empty.
+    let content = Rect {
+        height: content.height.min(PANE_ROWS),
+        ..content
+    };
     draw_search(frame, search, state, p);
     draw_crumb(frame, crumb, state, p);
     match class {
@@ -213,7 +245,7 @@ fn draw_search(frame: &mut Frame<'_>, area: Rect, state: &HomeState, p: &Palette
         } else {
             "Type to find a feature"
         };
-        frame.render_widget(Paragraph::new(Span::styled(hint, fg(p.muted))), inner);
+        frame.render_widget(Paragraph::new(Span::styled(hint, fg(p.secondary))), inner);
         if inner.width > 0 && inner.height > 0 {
             frame.set_cursor_position((inner.x, inner.y));
         }
@@ -274,11 +306,13 @@ fn draw_crumb(frame: &mut Frame<'_>, area: Rect, state: &HomeState, p: &Palette)
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn marker(category: catalog::CategoryId, icons: HomeIcons) -> &'static str {
-    catalog::category(category).map_or("?", |c| match icons {
-        HomeIcons::Ascii => c.ascii,
-        HomeIcons::Unicode => c.unicode,
-    })
+/// The symbol before a category, with Unicode icons; ASCII shows only the
+/// words, so nothing looks like a shortcut key.
+fn marker(category: catalog::CategoryId, icons: HomeIcons) -> Option<&'static str> {
+    match icons {
+        HomeIcons::Ascii => None,
+        HomeIcons::Unicode => catalog::category(category).map(|c| c.unicode),
+    }
 }
 
 const fn kind(feature: &Feature) -> &'static str {
@@ -297,20 +331,24 @@ fn list_item(row: Row, state: &HomeState, width: usize, p: &Palette) -> ListItem
     match row {
         Row::Category(id) => {
             let title = catalog::category(id).map_or("", |c| c.title);
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{} ", marker(id, state.icons)), bold(p.secondary)),
-                Span::styled(title, fg(p.text)),
-            ]))
+            let mut spans = Vec::new();
+            if let Some(symbol) = marker(id, state.icons) {
+                spans.push(Span::styled(format!("{symbol} "), bold(p.secondary)));
+            }
+            spans.push(Span::styled(title, fg(p.text)));
+            ListItem::new(Line::from(spans))
         }
         Row::Feature(id) => {
             let Some(feature) = catalog::feature(id) else {
                 return ListItem::new("");
             };
             if id == REFERENCE && !state.searching() {
-                return ListItem::new(Line::from(vec![
-                    Span::styled("? ", bold(p.secondary)),
-                    Span::styled(feature.title, fg(p.text)),
-                ]));
+                let mut spans = Vec::new();
+                if state.icons == HomeIcons::Unicode {
+                    spans.push(Span::styled("? ", bold(p.secondary)));
+                }
+                spans.push(Span::styled(feature.title, fg(p.text)));
+                return ListItem::new(Line::from(spans));
             }
             let tag = format!("  {}", kind(feature));
             let mut spans = vec![Span::styled(feature.title, fg(p.text))];
@@ -499,12 +537,32 @@ fn category_lines(doc: &mut Doc<'_>, id: catalog::CategoryId) {
     doc.text(category.title, bold(p.primary));
     doc.text(category.description, fg(p.text));
     doc.blank();
-    for (n, feature) in catalog::category_features(id).into_iter().enumerate() {
-        doc.field(
-            if n == 0 { "Contains" } else { "" },
-            feature.title,
-            fg(p.text),
-        );
+    // Each feature beside what it is for, in two columns when they fit.
+    let features = catalog::category_features(id);
+    let column = features
+        .iter()
+        .map(|f| f.title.width())
+        .max()
+        .unwrap_or(0)
+        .min(28);
+    for feature in features {
+        if doc.width >= column + 2 + 16 {
+            let summaries = wrap(feature.summary, doc.width - column - 2);
+            for (n, part) in summaries.into_iter().enumerate() {
+                let head = if n == 0 {
+                    format!("{:<column$}  ", feature.title)
+                } else {
+                    " ".repeat(column + 2)
+                };
+                doc.lines.push(Line::from(vec![
+                    Span::styled(head, fg(p.text)),
+                    Span::styled(part, fg(p.secondary)),
+                ]));
+            }
+        } else {
+            doc.text(feature.title, fg(p.text));
+            doc.text(&format!("  {}", feature.summary), fg(p.secondary));
+        }
     }
     doc.blank();
     if id == catalog::categories()[0].id {
@@ -958,7 +1016,7 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, state: &HomeState, p: &Palette
             }
             Span::styled(
                 fit_segments(&segments, usize::from(area.width)),
-                fg(p.muted),
+                fg(p.secondary),
             )
         }
     };
@@ -1000,7 +1058,7 @@ fn draw_footer(
             badge("F1", "Keys");
             badge("Tab", tab);
             badge("F2", "Reference");
-            badge("^R", "History");
+            badge("Ctrl+R", "Search history");
         }
         Some(View::Reference { reading, .. }) => {
             badge("Esc", "Back");
@@ -1500,7 +1558,9 @@ mod tests {
     fn both_icon_sets_keep_the_labels() {
         let mut state = HomeState::new();
         let ascii = text(&render(&mut state, 120, 40));
-        assert!(ascii.contains("/ Find a command"), "{ascii}");
+        // Plain words: no symbol that could be mistaken for a shortcut.
+        assert!(ascii.contains(" > Find a command"), "{ascii}");
+        assert!(ascii.contains("   Review a session"), "{ascii}");
         state.icons = crate::config::HomeIcons::Unicode;
         let unicode = text(&render(&mut state, 120, 40));
         assert!(unicode.contains("⌕ Find a command"), "{unicode}");
@@ -1566,6 +1626,73 @@ mod tests {
             "{status}"
         );
         assert!(status.contains("Recording: enabled"), "{status}");
+    }
+
+    /// Instructions and status are read, not skimmed past: they use the
+    /// secondary text colour, never the faint one kept for metadata.
+    #[test]
+    fn the_search_hint_and_status_line_are_readable() {
+        let mut state = HomeState::new();
+        state.status.recording = Some(true);
+        let buffer = render(&mut state, 120, 40);
+        let t = crate::theme::theme();
+        let find = |needle: &str| -> (u16, u16) {
+            let Some((x, y)) =
+                (0..buffer.area.height).find_map(|y| row(&buffer, y).find(needle).map(|x| (x, y)))
+            else {
+                panic!("no {needle}")
+            };
+            let column = row(&buffer, y)[..x].chars().count();
+            (u16::try_from(column).unwrap(), y)
+        };
+        assert_eq!(buffer[find("Try:")].fg, t.text_secondary);
+        assert_eq!(buffer[find("Recording:")].fg, t.text_secondary);
+    }
+
+    /// On a very large terminal the list screen keeps to a readable block —
+    /// at most 140 columns and 24 rows of panes — instead of stretching a
+    /// few rows of content across the whole window. The footer stays.
+    #[test]
+    fn a_very_large_terminal_gets_a_bounded_home() {
+        let mut state = HomeState::new();
+        let buffer = render(&mut state, 200, 60);
+        let search_top = row(&buffer, 1);
+        let left = search_top.chars().position(|c| c == '╭').unwrap();
+        let right = search_top.chars().position(|c| c == '╮').unwrap();
+        assert_eq!(left, 30, "{search_top}");
+        assert_eq!(right - left + 1, 140);
+        let pane_bottom = (0..60)
+            .filter(|y| row(&buffer, *y).contains('╰'))
+            .max()
+            .unwrap();
+        assert!(pane_bottom <= 29, "panes end at row {pane_bottom}");
+        let screen = text(&buffer);
+        assert!(
+            screen.lines().last().unwrap().contains("Esc"),
+            "footer kept"
+        );
+    }
+
+    #[test]
+    fn a_category_preview_says_what_each_feature_is_for() {
+        let mut state = HomeState::new();
+        let screen = text(&render(&mut state, 120, 40));
+        for feature in
+            super::super::catalog::category_features(super::super::catalog::CategoryId("find"))
+        {
+            assert!(
+                screen.contains(feature.summary),
+                "{}: {screen}",
+                feature.summary
+            );
+        }
+    }
+
+    #[test]
+    fn the_footer_names_what_ctrl_r_opens() {
+        let mut state = HomeState::new();
+        let screen = text(&render(&mut state, 120, 40));
+        assert!(screen.contains("Ctrl+R  Search history"), "{screen}");
     }
 
     #[test]

@@ -1122,7 +1122,7 @@ const fn get_setting_description(tab: usize, item: usize) -> &'static str {
         (1, 1) => "Show risk assessment badges in the search detail pane for agent commands",
         (1, 2) => "Color theme: dark (RGB for dark terminals), light (RGB for light terminals), terminal (ANSI 16 — adapts to your scheme). Changes apply immediately.",
         (1, 3) => "What a bare suv opens at a terminal: home (the Home screen, to find any feature) or help (the command overview). suv home always opens Home, and scripts and pipes always get the overview. Applies from the next suv",
-        (1, 4) => "Category markers in Home: ascii (works in every terminal and font) or unicode (a few monochrome symbols). The labels are the same either way",
+        (1, 4) => "Category markers in Home: ascii (plain words, for every terminal and font) or unicode (a few monochrome symbols before each category). The labels are the same either way",
         (1, 5) => "Look for a newer release once a day, in the background, and mention it before a command you run at a terminal. The request only reads the latest version number; nothing about you or your history is sent. SUVADU_NO_UPDATE_CHECK=1 also turns it off",
         (4, _) => "Custom agent detection rules. When an env var is set, suvadu tags commands with that agent name and type. Custom agents are checked before built-in agents. Restart your shell (source ~/.zshrc) after adding or removing agents.",
         (5, 0) => "Default time window in days for MCP tools (1-365). Agents use this when they don't specify a date range.",

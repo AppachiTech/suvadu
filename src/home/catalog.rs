@@ -72,7 +72,8 @@ pub struct Category {
     pub id: CategoryId,
     pub title: &'static str,
     pub description: &'static str,
-    pub ascii: &'static str,
+    /// A monochrome symbol shown before the title with Unicode icons;
+    /// ASCII icons show the words alone.
     pub unicode: &'static str,
 }
 
@@ -81,6 +82,8 @@ pub struct Feature {
     pub id: FeatureId,
     pub category: CategoryId,
     pub title: &'static str,
+    /// A few words on what it is for, for category previews.
+    pub summary: &'static str,
     /// One sentence: what it does for you.
     pub description: &'static str,
     /// What opens or happens, including whether it can change data.
@@ -128,49 +131,42 @@ static CATEGORIES: [Category; 7] = [
         id: FIND,
         title: "Find a command",
         description: "Search past commands and narrow where to look",
-        ascii: "/",
         unicode: "⌕",
     },
     Category {
         id: SESSION,
         title: "Review a session",
         description: "Follow what happened in a shell or AI session",
-        ascii: "~",
         unicode: "◷",
     },
     Category {
         id: ORGANIZE,
         title: "Organize commands",
         description: "Save, annotate, and shorten commands you reuse",
-        ascii: "*",
         unicode: "★",
     },
     Category {
         id: UNDERSTAND,
         title: "Understand my activity",
         description: "Explore command usage and trends",
-        ascii: "#",
         unicode: "▤",
     },
     Category {
         id: AI,
         title: "Review AI activity",
         description: "Inspect agent commands, prompts, and reports",
-        ascii: "@",
         unicode: "◆",
     },
     Category {
         id: CONNECT,
         title: "Connect tools",
         description: "Set up your shell, AI integrations, and shared skills",
-        ascii: "&",
         unicode: "⇄",
     },
     Category {
         id: MANAGE,
         title: "Manage Suvadu",
         description: "Configure, diagnose, protect, and maintain your data",
-        ascii: "=",
         unicode: "≡",
     },
 ];
@@ -180,6 +176,7 @@ const BASE: Feature = Feature {
     id: FeatureId(""),
     category: FIND,
     title: "",
+    summary: "",
     description: "",
     opens: "",
     command: "",
@@ -203,6 +200,7 @@ static FEATURES: &[Feature] = &[
     Feature {
         id: FeatureId("search"),
         title: "Search history",
+        summary: "Find and copy a past command",
         description: "Search everything you have run, and pick a command to reuse.",
         opens: "Opens the search screen with your saved search settings. The command you \
                 pick is shown here to copy; nothing is run. The search screen can also \
@@ -239,6 +237,7 @@ static FEATURES: &[Feature] = &[
     Feature {
         id: FeatureId("search-directory"),
         title: "Commands in this directory",
+        summary: "Only what ran in this folder",
         description: "Search only what you ran in the directory Home was opened from.",
         opens: "Opens search limited to exactly this directory, not its subdirectories. \
                 The command you pick is shown here to copy; nothing is run. The search \
@@ -263,6 +262,7 @@ static FEATURES: &[Feature] = &[
     Feature {
         id: FeatureId("search-workspace"),
         title: "Commands in this workspace",
+        summary: "Search across the current project",
         description: "Search what you ran anywhere in the current Git repository or worktree.",
         opens: "Opens search limited to the enclosing Git repository. Outside one, search \
                 says so and shows everything instead. The command you pick is shown here to \
@@ -286,6 +286,7 @@ static FEATURES: &[Feature] = &[
     Feature {
         id: FeatureId("search-failed"),
         title: "Failed commands",
+        summary: "Find commands that failed",
         description: "Find commands that ended with an error, to fix and try again.",
         opens: "Opens search showing only commands with a non-zero exit status — any \
                 failure, not just exit code 1. The command you pick is shown here to copy; \
@@ -311,6 +312,7 @@ static FEATURES: &[Feature] = &[
     Feature {
         id: FeatureId("history"),
         title: "Print history",
+        summary: "A plain list to read or pipe",
         description: "Print recent commands as plain text to read, filter or pipe.",
         opens: "Shows your last 25 commands here. From your shell, suv history also filters \
                 by date, directory, exit code or executor, and prints JSON lines.",
@@ -345,6 +347,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("sessions"),
         category: SESSION,
         title: "Browse sessions",
+        summary: "A shell or AI session as a timeline",
         description:
             "See a shell or AI session as a timeline of what ran, where, and how it ended.",
         opens: "Opens the session picker, then the timeline of the session you choose. \
@@ -378,6 +381,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("replay"),
         category: SESSION,
         title: "Replay a time range",
+        summary: "Print commands in the order they ran",
         description: "Print the commands of a session or a time range in the order they ran.",
         command: "suv replay",
         synonyms: &[
@@ -412,6 +416,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("bookmarks"),
         category: ORGANIZE,
         title: "Bookmarks",
+        summary: "Commands you saved to reuse",
         description: "Keep commands you reuse in one list, with an optional label.",
         opens: "Opens your bookmarks, where you can also add, edit and delete them \
                 (deleting asks first). The command you pick is shown here to copy; nothing \
@@ -450,6 +455,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("tags"),
         category: ORGANIZE,
         title: "Tags",
+        summary: "Group sessions under a name",
         description: "Name a group of sessions, then filter search, history and stats by it.",
         opens: "Lists your tags here. Creating, renaming and attaching tags is done from \
                 your shell.",
@@ -482,6 +488,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("notes"),
         category: ORGANIZE,
         title: "Notes on commands",
+        summary: "Note why a command mattered",
         description: "Attach a note to one recorded command, such as why it worked.",
         command: "suv note <ENTRY_ID>",
         synonyms: &[
@@ -512,6 +519,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("aliases"),
         category: ORGANIZE,
         title: "Alias manager",
+        summary: "Short names for long commands",
         description: "Give short names to commands you type often.",
         opens: "Opens the alias manager, which can add, change and delete your saved \
                 aliases. Esc returns here.",
@@ -553,6 +561,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("alias-suggestions"),
         category: ORGANIZE,
         title: "Alias suggestions",
+        summary: "Aliases worth adding, from your habits",
         description: "See long commands you type often, each with a suggested alias.",
         opens: "Opens the suggestions screen. Esc returns here.",
         command: "suv aliases suggest",
@@ -581,6 +590,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("alias-apply"),
         category: ORGANIZE,
         title: "Load aliases in your shell",
+        summary: "Use saved aliases in your shell",
         description: "Write your aliases to the file your shell loads, and use them right away.",
         command: "suv aliases apply",
         synonyms: &["apply", "source", "load aliases", "aliases file", "reload"],
@@ -609,6 +619,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("stats"),
         category: UNDERSTAND,
         title: "Usage statistics",
+        summary: "Your most used commands, and when",
         description: "See which commands and directories you use most, and when, over any period.",
         opens: "Opens the statistics screen. Esc returns here.",
         command: "suv stats",
@@ -640,6 +651,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("agent-dashboard"),
         category: AI,
         title: "Agent dashboard",
+        summary: "What AI agents ran, with risk",
         description: "Review what AI agents ran today, with a risk level for each command.",
         opens: "Opens the agent dashboard for today; the period can be changed there. Esc \
                 returns here.",
@@ -671,6 +683,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("agent-prompts"),
         category: AI,
         title: "Prompt explorer",
+        summary: "Prompts and the commands they led to",
         description: "Browse the prompts you gave AI agents and the commands each one led to.",
         opens: "Opens the prompt explorer for the last 7 days. Esc returns here.",
         command: "suv agent prompts",
@@ -698,6 +711,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("agent-stats"),
         category: AI,
         title: "Agent statistics",
+        summary: "Usage per AI agent",
         description: "See usage analytics for each AI agent over the last 30 days.",
         opens: "Opens agent statistics. Esc returns here.",
         command: "suv agent stats",
@@ -712,6 +726,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("agent-report"),
         category: AI,
         title: "Agent activity report",
+        summary: "A shareable report of agent activity",
         description: "Summarize today's AI agent commands and their risk, as text to share.",
         opens: "Shows today's report here. From your shell it also takes dates, one agent, \
                 markdown or JSON, and --fail-on for hooks and CI.",
@@ -738,6 +753,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("agent-sessions"),
         category: AI,
         title: "Captured AI sessions",
+        summary: "Captured AI sessions as JSON",
         description:
             "Read captured AI sessions — events, commands, tokens and summaries — as JSON.",
         command: "suv agent sessions",
@@ -764,6 +780,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("agent-import"),
         category: AI,
         title: "Import an AI transcript",
+        summary: "Add a missed Codex or Claude session",
         description: "Add a Codex or Claude Code session that was not captured as it happened.",
         command: "suv agent import-session <PATH>",
         synonyms: &[
@@ -790,6 +807,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("agent-delete"),
         category: AI,
         title: "Delete a captured AI session",
+        summary: "Remove a captured AI session",
         description: "Remove one captured AI session and everything recorded with it.",
         command: "suv agent delete-session <SESSION_ID>",
         synonyms: &[
@@ -817,6 +835,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("guard"),
         category: AI,
         title: "Assess a command's risk",
+        summary: "Check a command's risk before it runs",
         description: "Check a command line against Suvadu's risk rules before it runs.",
         command: "suv guard \"<COMMAND>\"",
         synonyms: &[
@@ -854,6 +873,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("shell-setup"),
         category: CONNECT,
         title: "Shell integration",
+        summary: "Record commands in Zsh or Bash",
         description: "Record every command in Zsh or Bash, with Ctrl+R and Up/Down recall.",
         command: "suv init zsh",
         synonyms: &[
@@ -890,6 +910,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("ai-integrations"),
         category: CONNECT,
         title: "AI tool integrations",
+        summary: "Record what AI tools run",
         description:
             "Record commands from Claude Code, Codex, Cursor, Antigravity, OpenCode and pi.",
         command: "suv init claude-code",
@@ -928,6 +949,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("skills"),
         category: CONNECT,
         title: "Shared skills",
+        summary: "Instructions every agent can read",
         description:
             "Keep instructions for AI agents in one library every connected agent can read.",
         opens: "Opens the skills library, which can add, edit, delete and sync skills. Esc \
@@ -951,6 +973,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("skills-cli"),
         category: CONNECT,
         title: "Skill commands",
+        summary: "Manage skills from the command line",
         description: "Add, edit, sync and clean up skills from the command line.",
         command: "suv skills list",
         synonyms: &[
@@ -998,6 +1021,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("wrap"),
         category: CONNECT,
         title: "Record a wrapped command",
+        summary: "Record commands from scripts and CI",
         description:
             "Run a command through Suvadu so it is recorded where no shell hook is loaded.",
         command: "suv wrap -- <COMMAND>",
@@ -1030,6 +1054,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("completions"),
         category: CONNECT,
         title: "Shell completions",
+        summary: "Tab completion for suv",
         description: "Let Tab complete suv commands and options.",
         command: "suv completions zsh",
         synonyms: &["completion", "completions", "tab", "autocomplete", "fish"],
@@ -1056,6 +1081,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("settings"),
         category: MANAGE,
         title: "Settings",
+        summary: "Search, recording, theme and more",
         description: "Change search defaults, recording, privacy, theme and the startup screen.",
         opens: "Opens settings. Changes are saved only when you save there (Ctrl+S); Esc \
                 returns here.",
@@ -1081,6 +1107,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("status"),
         category: MANAGE,
         title: "Recording status",
+        summary: "Is this shell recording?",
         description: "Check whether recording is on, and what shows it is working.",
         opens: "Shows the status report here: the configuration, this shell's pause, and \
                 evidence of recent capture.",
@@ -1102,6 +1129,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("doctor"),
         category: MANAGE,
         title: "Diagnose setup",
+        summary: "Find and fix setup problems",
         description: "Find what is wrong with an installation, and the fix for each problem.",
         opens: "Shows the diagnosis here. It reports and suggests fixes; it does not repair \
                 anything.",
@@ -1125,6 +1153,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("recording"),
         category: MANAGE,
         title: "Turn recording on or off",
+        summary: "Stop or resume recording everywhere",
         description: "Stop or resume recording in every shell, until you change it back.",
         command: "suv disable",
         synonyms: &[
@@ -1154,6 +1183,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("pause"),
         category: MANAGE,
         title: "Pause this shell",
+        summary: "Stop recording in one shell",
         description: "Stop recording in one shell only, while it stays paused.",
         command: "eval \"$(suv pause)\"",
         synonyms: &[
@@ -1181,6 +1211,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("backup"),
         category: MANAGE,
         title: "Back up history",
+        summary: "A safe copy of your history",
         description: "Save a consistent copy of your history database.",
         command: "suv backup",
         synonyms: &[
@@ -1210,6 +1241,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("export"),
         category: MANAGE,
         title: "Export history",
+        summary: "Save history as JSON or CSV",
         description: "Write all your history to a JSON, JSON Lines or CSV file.",
         command: "suv export",
         synonyms: &["export", "json", "csv", "jsonl", "spreadsheet", "archive"],
@@ -1232,6 +1264,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("import"),
         category: MANAGE,
         title: "Import history",
+        summary: "Bring history from Zsh, Bash or Atuin",
         description: "Bring in history from Zsh, Bash, an Atuin database or a Suvadu export.",
         command: "suv import <FILE>",
         synonyms: &[
@@ -1272,6 +1305,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("delete"),
         category: MANAGE,
         title: "Delete history",
+        summary: "Remove commands for good",
         description: "Remove commands that contain some text, or match a pattern, for good.",
         command: "suv delete \"<TEXT>\" --dry-run",
         synonyms: &[
@@ -1301,6 +1335,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("gc"),
         category: MANAGE,
         title: "Clean up the database",
+        summary: "Clean up and shrink the database",
         description: "Remove leftover data no command refers to, and optionally shrink the file.",
         command: "suv gc",
         synonyms: &[
@@ -1328,6 +1363,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("version"),
         category: MANAGE,
         title: "Version",
+        summary: "Which build is installed",
         description: "Show the version and build of this suv.",
         opens: "Shows the version and build here.",
         command: "suv version",
@@ -1341,6 +1377,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("update"),
         category: MANAGE,
         title: "Update Suvadu",
+        summary: "Get the latest release",
         description: "Install the latest release.",
         command: "suv update",
         synonyms: &[
@@ -1372,6 +1409,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("uninstall"),
         category: MANAGE,
         title: "Uninstall Suvadu",
+        summary: "Remove Suvadu",
         description: "Remove Suvadu from this computer.",
         command: "suv uninstall",
         synonyms: &["uninstall", "remove suvadu"],
@@ -1387,6 +1425,7 @@ static FEATURES: &[Feature] = &[
         id: FeatureId("home-startup"),
         category: MANAGE,
         title: "Home and the startup screen",
+        summary: "What a bare suv opens",
         description:
             "Choose whether a bare suv opens this Home screen or prints the command overview.",
         command: "suv home",
@@ -1418,6 +1457,7 @@ static FEATURES: &[Feature] = &[
         id: REFERENCE,
         category: REFERENCE_CATEGORY,
         title: "Command reference",
+        summary: "Every command and option",
         description: "Every command and option, as suv --help and suv <command> --help print them.",
         opens: "Opens the reference: the command overview, then each command's own help.",
         command: "suv --help",
@@ -2095,6 +2135,18 @@ mod tests {
         assert!(guide.contains("once a day"), "{guide}");
         assert!(guide.contains("Check for Updates"), "{guide}");
         assert!(guide.contains("SUVADU_NO_UPDATE_CHECK"), "{guide}");
+    }
+
+    /// Each feature has a short summary for category previews: what it is
+    /// for, in a few words.
+    #[test]
+    fn every_feature_has_a_short_summary() {
+        for feature in features() {
+            let summary = feature.summary;
+            assert!(!summary.is_empty(), "{}", feature.id.0);
+            assert!(summary.chars().count() <= 44, "{}: {summary}", feature.id.0);
+            assert!(!summary.ends_with('.'), "{}: {summary}", feature.id.0);
+        }
     }
 
     #[test]
