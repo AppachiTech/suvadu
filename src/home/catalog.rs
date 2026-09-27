@@ -205,7 +205,9 @@ static FEATURES: &[Feature] = &[
         title: "Search history",
         description: "Search everything you have run, and pick a command to reuse.",
         opens: "Opens the search screen with your saved search settings. The command you \
-                pick is shown here to copy; nothing is run.",
+                pick is shown here to copy; nothing is run. The search screen can also \
+                delete an entry (after asking), bookmark a command, add a note or tag a \
+                session.",
         command: "suv search",
         shortcut: Some(
             "Ctrl+R in your shell opens the same search and puts the pick on your prompt",
@@ -239,7 +241,9 @@ static FEATURES: &[Feature] = &[
         title: "Commands in this directory",
         description: "Search only what you ran in the directory Home was opened from.",
         opens: "Opens search limited to exactly this directory, not its subdirectories. \
-                The command you pick is shown here to copy; nothing is run.",
+                The command you pick is shown here to copy; nothing is run. The search \
+                screen can also delete an entry (after asking), bookmark a command, add a \
+                note or tag a session.",
         command: "suv search --scope directory",
         shortcut: Some("Ctrl+P in search changes the scope"),
         synonyms: &[
@@ -262,7 +266,8 @@ static FEATURES: &[Feature] = &[
         description: "Search what you ran anywhere in the current Git repository or worktree.",
         opens: "Opens search limited to the enclosing Git repository. Outside one, search \
                 says so and shows everything instead. The command you pick is shown here to \
-                copy; nothing is run.",
+                copy; nothing is run. The search screen can also delete an entry (after \
+                asking), bookmark a command, add a note or tag a session.",
         command: "suv search --scope workspace",
         shortcut: Some("Ctrl+P in search changes the scope"),
         synonyms: &[
@@ -284,7 +289,8 @@ static FEATURES: &[Feature] = &[
         description: "Find commands that ended with an error, to fix and try again.",
         opens: "Opens search showing only commands with a non-zero exit status — any \
                 failure, not just exit code 1. The command you pick is shown here to copy; \
-                nothing is run.",
+                nothing is run. The search screen can also delete an entry (after asking), \
+                bookmark a command, add a note or tag a session.",
         command: "suv search --failed",
         shortcut: Some("Ctrl+E in search shows failures only"),
         synonyms: &[
@@ -407,8 +413,9 @@ static FEATURES: &[Feature] = &[
         category: ORGANIZE,
         title: "Bookmarks",
         description: "Keep commands you reuse in one list, with an optional label.",
-        opens: "Opens your bookmarks. The command you pick is shown here to copy; nothing \
-                is run. Adding and removing bookmarks is done from your shell.",
+        opens: "Opens your bookmarks, where you can also add, edit and delete them \
+                (deleting asks first). The command you pick is shown here to copy; nothing \
+                is run.",
         command: "suv bookmarks",
         synonyms: &[
             "bookmark",
@@ -1187,8 +1194,11 @@ static FEATURES: &[Feature] = &[
         guide: &[
             "suv backup writes a snapshot of the database — to a timestamped file in \
              Suvadu's backups directory, or wherever --out says.",
-            "There is no restore command: to go back to a backup, put the file in place of \
-             history.db while nothing is recording.",
+            "There is no restore command. To go back to a backup, first close everything \
+             that uses Suvadu — other suv commands, and any AI tool running its MCP server — \
+             then copy the backup over history.db and delete history.db-wal and \
+             history.db-shm beside it, so no leftover journal is applied to the restored \
+             file.",
         ],
         examples: &[
             ex("suv backup", "Timestamped file in the backups directory"),
@@ -2027,6 +2037,43 @@ mod tests {
                 "{id} should point to {others:?}: {text}"
             );
         }
+    }
+
+    /// A screen that can change data says so before it is opened.
+    #[test]
+    fn screens_that_can_change_data_say_so() {
+        let cases: &[(&str, &[&str])] = &[
+            ("bookmarks", &["add", "edit", "delete"]),
+            ("search", &["delete", "bookmark", "note", "tag"]),
+            ("search-directory", &["delete", "bookmark", "note", "tag"]),
+            ("search-workspace", &["delete", "bookmark", "note", "tag"]),
+            ("search-failed", &["delete", "bookmark", "note", "tag"]),
+            ("aliases", &["add", "change", "delete"]),
+            ("skills", &["add", "edit", "delete"]),
+            ("settings", &["saved"]),
+        ];
+        for (id, words) in cases {
+            let opens = feature(FeatureId(id)).unwrap().opens.to_lowercase();
+            for word in *words {
+                assert!(
+                    opens.contains(word),
+                    "{id} should mention {word:?}: {opens}"
+                );
+            }
+            assert!(!opens.contains("from your shell"), "{id}: {opens}");
+        }
+    }
+
+    /// Restoring a backup under a live or crashed database would mix it with
+    /// the old write-ahead log; the guide says how to avoid that.
+    #[test]
+    fn the_backup_guide_restores_safely() {
+        let guide = feature(FeatureId("backup")).unwrap().guide.join(" ");
+        assert!(
+            guide.contains("history.db-wal") && guide.contains("history.db-shm"),
+            "{guide}"
+        );
+        assert!(guide.contains("MCP"), "{guide}");
     }
 
     #[test]
