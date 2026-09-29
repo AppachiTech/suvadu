@@ -217,6 +217,24 @@ pub struct SearchApp {
     /// The command to select again once the reload in flight lands — set by
     /// the toggles that only change how the same matches are shown.
     reselect: Option<String>,
+    detail_scroll: DetailScroll,
+    /// What closing search does, for the cancel hint: "Home" when Suvadu
+    /// Home opened it (and comes back when it closes), otherwise "Quit".
+    /// Set by the caller, so a test never depends on the environment.
+    leave_label: &'static str,
+}
+
+/// The detail pane's focus and scroll. Shift+Tab focuses it; while focused
+/// the scroll keys move `offset` instead of the selection.
+#[derive(Default)]
+struct DetailScroll {
+    focused: bool,
+    offset: u16,
+    /// Text rows the pane showed when last drawn (0 = not drawn): one
+    /// PgUp/PgDn, and whether there is a pane to focus at all.
+    page: u16,
+    /// The last drawn details did not fit, so the footer offers scrolling.
+    overflow: bool,
 }
 
 impl SearchApp {
@@ -295,6 +313,8 @@ impl SearchApp {
             status_message: None,
             searching: false,
             reselect: None,
+            detail_scroll: DetailScroll::default(),
+            leave_label: "Quit",
         };
         // Derive the directory filter from the scope, unless the caller
         // supplied an explicit one (`--cwd`), which always wins.
@@ -447,6 +467,13 @@ impl SearchApp {
     /// acts on the results and waits for the current ones.
     pub(super) fn can_run_ahead(&self, event: &Event) -> bool {
         use crossterm::event::{KeyCode, KeyModifiers};
+        // Ctrl+C cancels search from anywhere, dialogs included, and needs
+        // no results to do it.
+        if let Event::Key(key) = event {
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                return true;
+            }
+        }
         if !matches!(self.dialog, DialogState::None) {
             return false;
         }
@@ -811,6 +838,11 @@ pub fn run_search(
     });
 
     let mut app = build_search_app(repo, args, &config)?;
+    // Opened by Suvadu Home, closing search returns there.
+    let launched_by_home = std::env::var_os(crate::home::runner::LAUNCHED_BY_HOME).is_some();
+    if launched_by_home {
+        app.leave_label = "Home";
+    }
 
     // An empty *scope* is a normal state the TUI explains in place; only a
     // genuinely empty database is worth refusing to open for.
@@ -821,7 +853,7 @@ pub fn run_search(
         eprintln!("No history recorded yet.");
         // Opened from Home, the reason travels as the exit status instead:
         // nothing has touched the terminal yet, so exiting here is clean.
-        if std::env::var_os(crate::home::runner::LAUNCHED_BY_HOME).is_some() {
+        if launched_by_home {
             std::process::exit(crate::commands::search::EXIT_NO_HISTORY);
         }
         return Ok(None);

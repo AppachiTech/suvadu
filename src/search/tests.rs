@@ -3642,6 +3642,8 @@ static THEME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Every key badge the search footer is allowed to render.
 const FOOTER_KEY_TOKENS: &[&str] = &[
     "Esc",
+    "\u{21e7}Tab",
+    "PgUp/PgDn",
     "\u{21b5}",
     "\u{2191}\u{2193}",
     "^F",
@@ -3677,6 +3679,10 @@ const FOOTER_LABEL_TOKENS: &[&str] = &[
     // PROD-09: "Mode" (^X) and "Scope" (^P) choose what matches; "Rank" (^S,
     // renamed from "Match") and the rest only reorder it.
     "Mode", "Reset", "Here", "Rank",
+    // The detail pane: "Pane" moves into it, "List"/"Back" move out.
+    "Pane", "List", "Back", "Page",
+    // Leaving a search that Suvadu Home opened returns there.
+    "Home",
 ];
 
 fn render_lines(app: &mut SearchApp, width: u16, height: u16) -> Vec<String> {
@@ -4916,4 +4922,164 @@ fn recall_opens_in_the_commands_view_unless_the_user_chose_executions() {
     assert_eq!(app.pagination.total_items, 3, "three runs");
     // ...and --unique still asks for grouping explicitly.
     assert!(open(&config, true).view.unique_mode);
+}
+
+#[test]
+fn shift_tab_focuses_the_detail_pane_to_scroll_it() {
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let entries = (0..2)
+        .map(|_| create_test_entry(&"x".repeat(2000)))
+        .collect();
+    let mut app = SearchApp::new(test_search_config(entries, 2));
+    let lines = render_lines(&mut app, 120, 30);
+    let footer = footer_text(&lines);
+    assert!(footer.contains("\u{21e7}Tab  Pane"), "footer: {footer}");
+    assert_no_partial_hint(&footer, "detail overflow 120x30");
+    // Overflow shows a scrollbar outside the pane's border, clear of the
+    // text, as beside the results table.
+    assert!(
+        lines.iter().any(|l| l.ends_with("\u{256e}\u{25b2}")),
+        "{}",
+        lines.join("\n")
+    );
+
+    // Focused, the arrows scroll the pane and leave the selection alone,
+    // and the footer names the pane's keys.
+    app.handle_input(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    app.handle_input(key(KeyCode::Down));
+    app.handle_input(key(KeyCode::Down));
+    app.handle_input(key(KeyCode::Up));
+    assert_eq!(app.detail_scroll.offset, 3);
+    assert_eq!(app.table_state.selected(), Some(0));
+    let footer = footer_text(&render_lines(&mut app, 120, 30));
+    for hint in [
+        "Esc  Back",
+        "Scroll",
+        "PgUp/PgDn  Page",
+        "\u{21e7}Tab  List",
+    ] {
+        assert!(footer.contains(hint), "{hint:?} missing: {footer}");
+    }
+    assert_no_partial_hint(&footer, "detail focused 120x30");
+
+    // End stops at the last row, exactly.
+    app.handle_input(key(KeyCode::End));
+    let screen = render_lines(&mut app, 120, 30).join("\n");
+    let title = screen.lines().find(|l| l.contains(" Detail ")).unwrap();
+    let (range, total) = title.rsplit_once('/').unwrap();
+    let last = range.rsplit('\u{2013}').next().unwrap();
+    assert!(total.starts_with(&format!("{last} ")), "{title}");
+    assert!(app.detail_scroll.offset > 0 && app.detail_scroll.offset < u16::MAX);
+
+    // Any other key returns focus to the list, scrolled back to the top,
+    // and still does its job there.
+    app.handle_input(key(KeyCode::Char('x')));
+    assert!(!app.detail_scroll.focused);
+    assert_eq!(app.detail_scroll.offset, 0);
+    assert_eq!(app.query, "x");
+
+    // Esc only leaves the pane; it does not close search.
+    app.handle_input(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert!(matches!(
+        app.handle_input(key(KeyCode::Esc)),
+        SearchAction::Continue
+    ));
+    assert!(!app.detail_scroll.focused);
+
+    // Details that fit need no scrolling, so the footer does not offer it.
+    app.entries[0].command = "ls".into();
+    let footer = footer_text(&render_lines(&mut app, 120, 30));
+    assert!(!footer.contains("Pane"), "footer: {footer}");
+
+    // With no pane on screen there is nothing to focus.
+    app.view.detail_pane_open = false;
+    render_lines(&mut app, 120, 30);
+    app.handle_input(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert!(!app.detail_scroll.focused);
+}
+
+#[test]
+fn ctrl_c_cancels_search_from_any_state() {
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    assert!(matches!(app.handle_input(ctrl_c), SearchAction::Exit));
+    // Not only at the top: in a dialog, and with the detail pane focused.
+    app.dialog = DialogState::Filter;
+    assert!(matches!(app.handle_input(ctrl_c), SearchAction::Exit));
+    app.dialog = DialogState::None;
+    app.detail_scroll.focused = true;
+    assert!(matches!(app.handle_input(ctrl_c), SearchAction::Exit));
+}
+
+#[test]
+fn opened_from_home_the_cancel_hint_says_it_returns_there() {
+    let mut app = render_app();
+    assert!(footer_text(&render_lines(&mut app, 100, 30)).contains("Esc  Quit"));
+    app.leave_label = "Home";
+    let footer = footer_text(&render_lines(&mut app, 100, 30));
+    assert!(footer.contains("Esc  Home"), "{footer}");
+    assert_no_partial_hint(&footer, "from home 100x30");
+}
+
+#[test]
+fn ctrl_c_runs_ahead_of_a_slow_query_but_ctrl_shift_c_is_left_to_the_terminal() {
+    use crossterm::event::Event;
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    // Leaving needs no results, so it never waits on the query in flight,
+    // not even from a dialog.
+    app.dialog = DialogState::Filter;
+    assert!(app.can_run_ahead(&Event::Key(ctrl_c)));
+    app.dialog = DialogState::None;
+    // Ctrl+Shift+C is copy in many terminals: it must not close search.
+    let copy = KeyEvent::new(
+        KeyCode::Char('C'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    );
+    assert!(matches!(app.handle_input(copy), SearchAction::Continue));
+}
+
+#[test]
+fn shift_tab_offers_the_pane_only_when_it_has_more_to_show() {
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    render_lines(&mut app, 120, 30);
+    app.handle_input(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert!(
+        !app.detail_scroll.focused,
+        "nothing to scroll, nothing to focus"
+    );
+}
+
+#[test]
+fn a_paste_hands_focus_back_to_the_list_it_changes() {
+    let entries = vec![create_test_entry(&"x".repeat(2000))];
+    let mut app = SearchApp::new(test_search_config(entries, 1));
+    render_lines(&mut app, 120, 30);
+    app.handle_input(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert!(app.detail_scroll.focused);
+    assert!(app.handle_paste("git"));
+    assert!(!app.detail_scroll.focused);
+    assert_eq!(app.query, "git");
+}
+
+#[test]
+fn vim_normal_motion_keys_scroll_the_focused_pane() {
+    let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+    let entries = (0..2)
+        .map(|_| create_test_entry(&"x".repeat(2000)))
+        .collect();
+    let mut app = SearchApp::new(test_search_config(entries, 2));
+    app.vim_enabled = true;
+    app.vim_mode = VimMode::Normal;
+    render_lines(&mut app, 120, 30);
+    app.handle_input(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    app.handle_input(key('j'));
+    assert_eq!(app.detail_scroll.offset, 3);
+    assert!(
+        app.detail_scroll.focused,
+        "j scrolls, it does not leave the pane"
+    );
+    assert_eq!(app.table_state.selected(), Some(0));
+    app.handle_input(key('g'));
+    assert_eq!(app.detail_scroll.offset, 0);
 }
