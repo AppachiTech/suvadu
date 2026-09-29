@@ -152,7 +152,12 @@ impl SearchApp {
                 self.render_results_table(f, chunks[0]);
                 self.render_detail_pane(f, chunks[1]);
             }
-            DetailPlacement::Hidden => self.render_results_table(f, area),
+            DetailPlacement::Hidden => {
+                self.detail_scroll.page = 0;
+                self.detail_scroll.overflow = false;
+                self.set_detail_focus(false);
+                self.render_results_table(f, area);
+            }
         }
     }
 
@@ -410,16 +415,20 @@ impl SearchApp {
         ))
     }
 
-    /// The cancel hint: quit, or leave vim insert mode.
+    /// The cancel hint: quit, or leave vim insert mode. Opened from Suvadu
+    /// Home, leaving returns there, so it says so.
     const fn quit_hint(&self) -> Hint {
-        if self.vim_enabled {
+        let leave = self.leave_label;
+        if self.detail_scroll.focused {
+            Hint::new("Esc", "Back")
+        } else if self.vim_enabled {
             if matches!(self.vim_mode, super::VimMode::Normal) {
-                Hint::new("q", "Quit")
+                Hint::new("q", leave)
             } else {
                 Hint::new("Esc", "Normal")
             }
         } else {
-            Hint::new("Esc", "Quit")
+            Hint::new("Esc", leave)
         }
     }
 
@@ -434,7 +443,14 @@ impl SearchApp {
     /// Enter is "Use", not "Run": from Ctrl+R the command lands on the
     /// prompt to edit or run, and `suv search` prints it. Nothing executes.
     fn footer_hints(&self) -> Vec<Hint> {
-        if self.vim_enabled && self.vim_mode == super::VimMode::Normal {
+        if self.detail_scroll.focused {
+            return vec![
+                Hint::new("\u{2191}\u{2193}", "Scroll"),
+                Hint::new("PgUp/PgDn", "Page"),
+                Hint::new("\u{21e7}Tab", "List"),
+            ];
+        }
+        let mut hints = if self.vim_enabled && self.vim_mode == super::VimMode::Normal {
             vec![
                 Hint::new("j/k", "Nav"),
                 Hint::new("\u{21b5}", "Use"),
@@ -456,7 +472,14 @@ impl SearchApp {
                 Hint::new("^X", "Mode"),
                 Hint::new("^P", "Scope"),
             ]
+        };
+        // Moving into the pane is offered only while it has more to show,
+        // and last, so it never costs ^X/^P their place at narrow widths;
+        // the pane's scrollbar already shows there is more.
+        if self.detail_scroll.overflow {
+            hints.push(Hint::new("\u{21e7}Tab", "Pane"));
         }
+        hints
     }
 
     /// `"2/7 (28%)"` — current page position.
@@ -777,23 +800,77 @@ impl SearchApp {
 
     // --- render_detail_pane (decomposed) ---
 
-    pub(super) fn render_detail_pane(&self, f: &mut ratatui::Frame, area: Rect) {
+    pub(super) fn render_detail_pane(&mut self, f: &mut ratatui::Frame, area: Rect) {
         let t = theme();
 
-        let entry = self.get_selected_entry();
-
+        // Focused the way a `suv stats` panel is: highlighted border and title.
+        let focused = self.detail_scroll.focused;
         let block = Block::default()
-            .title(" Detail ")
+            .title(Span::styled(
+                " Detail ",
+                if focused {
+                    Style::default().fg(t.primary)
+                } else {
+                    Style::default()
+                },
+            ))
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(t.border));
+            .border_style(Style::default().fg(if focused { t.border_focus } else { t.border }));
+        let inner = block.inner(area);
+        self.detail_scroll.page = inner.height.max(1);
+        self.detail_scroll.overflow = false;
 
-        if let Some(entry) = entry {
-            let lines = self.build_detail_lines(entry);
-            let paragraph = Paragraph::new(lines)
-                .block(block)
-                .wrap(ratatui::widgets::Wrap { trim: false });
-            f.render_widget(paragraph, area);
+        if let Some(entry) = self.get_selected_entry() {
+            // Details that do not fit give up the pane's last column to a
+            // scrollbar outside its border, as the results table does, and
+            // wrap again to the narrower inside. Narrower only adds rows, so
+            // they still overflow.
+            let detail = self.build_detail_lines(entry);
+            let wrap = |width: u16| -> Vec<Line<'static>> {
+                detail
+                    .iter()
+                    .flat_map(|line| crate::util::wrap_line(line, width.into(), true))
+                    .collect()
+            };
+            let mut lines = wrap(inner.width);
+            let overflow = lines.len() > inner.height as usize;
+            let pane = if overflow {
+                lines = wrap(inner.width.saturating_sub(1));
+                Rect {
+                    width: area.width.saturating_sub(1),
+                    ..area
+                }
+            } else {
+                area
+            };
+            let total = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+            let max_offset = total.saturating_sub(inner.height);
+            let offset = self.detail_scroll.offset.min(max_offset);
+            self.detail_scroll.offset = offset;
+            self.detail_scroll.overflow = overflow;
+
+            // Where the view is, only when there is more than fits.
+            let block = if overflow {
+                let last = (offset + inner.height).min(total);
+                block.title(
+                    Line::from(format!(" {}\u{2013}{last}/{total} ", offset + 1))
+                        .right_aligned()
+                        .style(Style::default().fg(t.text_muted)),
+                )
+            } else {
+                block
+            };
+            f.render_widget(Paragraph::new(lines).block(block).scroll((offset, 0)), pane);
+            if overflow {
+                let mut state = ScrollbarState::new(usize::from(max_offset) + 1)
+                    .viewport_content_length(usize::from(inner.height))
+                    .position(usize::from(offset));
+                let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .thumb_style(Style::default().fg(t.primary_dim))
+                    .track_style(Style::default().fg(t.border));
+                f.render_stateful_widget(scrollbar, area, &mut state);
+            }
         } else {
             let empty = Paragraph::new("No entry selected")
                 .block(block)
@@ -1602,7 +1679,7 @@ fn build_help_columns(
         help_section("\u{2500}\u{2500} Display \u{2500}\u{2500}", t),
         help_row("  ^U        ", "Group by command", t),
         help_row("  ^S        ", "Rank smart/recent", t),
-        help_row("  Tab       ", "Detail pane", t),
+        help_row("  Tab       ", "Detail (\u{21e7}Tab: scroll)", t),
     ]);
     if vim_enabled {
         right.extend([

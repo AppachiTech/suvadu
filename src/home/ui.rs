@@ -1213,23 +1213,10 @@ fn wrap_help_line(line: &str, width: usize) -> Vec<String> {
 /// Break lines only where they are wider than `width`, between graphemes,
 /// keeping every character (spaces included) and every line break.
 fn hard_wrap(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
-    let mut out = Vec::new();
-    for source in text.split('\n') {
-        let mut line = String::new();
-        let mut used = 0;
-        for g in source.graphemes(true) {
-            let w = g.width();
-            if used > 0 && used + w > width {
-                out.push(std::mem::take(&mut line));
-                used = 0;
-            }
-            line.push_str(g);
-            used += w;
-        }
-        out.push(line);
-    }
-    out
+    text.split('\n')
+        .flat_map(|source| crate::util::wrap_line(&Line::raw(source), width, false))
+        .map(|row| row.to_string())
+        .collect()
 }
 
 /// Text from another program, made safe to draw: terminal escape

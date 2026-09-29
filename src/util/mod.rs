@@ -6,6 +6,7 @@ mod highlight;
 mod reconcile_key;
 mod terminal;
 mod timestamp;
+mod wrap;
 
 pub use cleanup::*;
 pub use exclusion::*;
@@ -15,6 +16,7 @@ pub use highlight::*;
 pub use reconcile_key::*;
 pub use terminal::*;
 pub use timestamp::*;
+pub use wrap::*;
 
 use std::sync::LazyLock;
 

@@ -8,6 +8,9 @@ const MAX_INPUT_LEN: usize = 2000;
 
 /// Rows to move per `PageUp`/`PageDown` press.
 const PAGE_SCROLL_LINES: usize = 10;
+/// Rows one ↑/↓ scrolls the focused detail pane: a mouse-wheel step, since
+/// one row per key press crawls through a long command.
+const DETAIL_SCROLL_LINES: u16 = 3;
 
 /// Flatten pasted text into a single searchable line.
 ///
@@ -109,6 +112,9 @@ impl SearchApp {
             | DialogState::TagAssociation
             | DialogState::RawView { .. } => false,
             DialogState::None => {
+                // A paste types into the query, so, like typing, it hands
+                // focus back from the detail pane to the list it changes.
+                self.set_detail_focus(false);
                 // In vim Normal mode, auto-switch to Insert mode on paste
                 if self.vim_enabled && self.vim_mode == VimMode::Normal {
                     self.vim_mode = VimMode::Insert;
@@ -135,6 +141,13 @@ impl SearchApp {
     }
 
     pub(super) fn handle_input(&mut self, key: KeyEvent) -> SearchAction {
+        // Raw mode delivers Ctrl+C as a key, not SIGINT. It cancels from
+        // anywhere — a dialog, the detail pane, vim Normal — exactly as Esc
+        // does at the top: nothing is accepted and the shell keeps its buffer.
+        // Lowercase only: Ctrl+Shift+C is copy in many terminals.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            return SearchAction::Exit;
+        }
         match self.dialog {
             DialogState::Delete { .. } => return self.handle_delete_dialog_input(key),
             DialogState::GoToPage { .. } => return self.handle_goto_dialog_input(key),
@@ -152,6 +165,49 @@ impl SearchApp {
     }
 
     fn handle_normal_input(&mut self, key: KeyEvent) -> SearchAction {
+        // Shift+Tab moves focus into the detail pane when it has more than
+        // fits (as between panels in `suv stats`), and back out.
+        if key.code == KeyCode::BackTab
+            && (self.detail_scroll.focused || self.detail_scroll.overflow)
+        {
+            self.set_detail_focus(!self.detail_scroll.focused);
+            return SearchAction::Continue;
+        }
+        if self.detail_scroll.focused {
+            let page = self.detail_scroll.page;
+            let offset = &mut self.detail_scroll.offset;
+            // Vim Normal mode scrolls with its own motion keys too.
+            let vim = self.vim_enabled
+                && self.vim_mode == VimMode::Normal
+                && !key.modifiers.contains(KeyModifiers::CONTROL);
+            let code = match key.code {
+                KeyCode::Char('j') if vim => KeyCode::Down,
+                KeyCode::Char('k') if vim => KeyCode::Up,
+                KeyCode::Char('g') if vim => KeyCode::Home,
+                KeyCode::Char('G') if vim => KeyCode::End,
+                code => code,
+            };
+            match code {
+                KeyCode::Up => *offset = offset.saturating_sub(DETAIL_SCROLL_LINES),
+                KeyCode::Down => *offset = offset.saturating_add(DETAIL_SCROLL_LINES),
+                KeyCode::PageUp => *offset = offset.saturating_sub(page),
+                KeyCode::PageDown => *offset = offset.saturating_add(page),
+                KeyCode::Home => *offset = 0,
+                KeyCode::End => *offset = u16::MAX,
+                KeyCode::Esc => self.set_detail_focus(false),
+                // Anything else hands focus back to the list and does its
+                // usual job there, so the pane never traps a keystroke.
+                _ => {
+                    self.set_detail_focus(false);
+                    return self.handle_list_input(key);
+                }
+            }
+            return SearchAction::Continue;
+        }
+        self.handle_list_input(key)
+    }
+
+    fn handle_list_input(&mut self, key: KeyEvent) -> SearchAction {
         // Handle Ctrl+key shortcuts first; ignore unrecognized Ctrl combos
         // to prevent them from falling through to the character input handler.
         if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -325,6 +381,15 @@ impl SearchApp {
         let current = self.table_state.selected().unwrap_or(0);
         let max = self.entries.len() - 1;
         self.table_state.select(Some((current + n).min(max)));
+    }
+
+    /// Focus the detail pane, or give focus back to the list. The pane
+    /// always leaves focus scrolled to the top, so the next row starts there.
+    pub(super) const fn set_detail_focus(&mut self, focused: bool) {
+        self.detail_scroll.focused = focused;
+        if !focused {
+            self.detail_scroll.offset = 0;
+        }
     }
 
     /// Half the visible page size, minimum 1.
