@@ -6,12 +6,17 @@ use serde_json::{json, Map, Value};
 pub const ADAPTER_VERSION: u32 = 1;
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CodexState {
     pub native_id: Option<String>,
     pub cwd: String,
     pub model: Option<String>,
     pub turn_id: Option<String>,
     pub parent_id: Option<String>,
+    /// When this source's own session was created, in Unix seconds.
+    pub created_at: Option<i64>,
+    /// Inside history Codex copied from the parent into a forked rollout.
+    pub replaying_parent: bool,
 }
 
 /// Parse complete records, leaving an unfinished tail for the next import.
@@ -97,11 +102,14 @@ fn parse_record(
     let at = chrono::DateTime::parse_from_rfc3339(timestamp)
         .map_err(|_| "invalid timestamp")?
         .timestamp_millis();
+    if skip_replayed_parent(record_type, payload, state)? {
+        return Ok(None);
+    }
     if record_type != "session_meta" && state.native_id.is_none() {
         return Err("session metadata must precede events".into());
     }
     let (kind, data) = match record_type {
-        "session_meta" => ("session_started", session_metadata(payload, state)?),
+        "session_meta" => ("session_started", session_metadata(payload, at, state)?),
         "turn_context" => {
             update_context(payload, state)?;
             return Ok(None);
@@ -129,6 +137,59 @@ fn parse_record(
         cwd: state.cwd.clone(),
         data,
     }))
+}
+
+/// A forked or subagent rollout starts with the child's own `session_meta`,
+/// then replays the parent's rollout -- its `session_meta` first -- before
+/// the child's first turn. The replayed records are the parent's activity,
+/// already captured from the parent's own rollout, so none of them are
+/// credited to the child. They carry fork-time record timestamps; the
+/// replay ends at the first `task_started` that did not begin before the
+/// child existed (its `started_at` keeps the turn's real start), or that
+/// gives no start time to prove otherwise.
+fn skip_replayed_parent(
+    record_type: &str,
+    payload: &Value,
+    state: &mut CodexState,
+) -> Result<bool, String> {
+    if record_type == "session_meta" {
+        let Some(current) = state.native_id.as_deref() else {
+            return Ok(false);
+        };
+        let id = native_session_id(payload)?;
+        if id == current {
+            return Ok(state.replaying_parent);
+        }
+        if state.replaying_parent || state.parent_id.as_deref() == Some(id) {
+            state.replaying_parent = true;
+            return Ok(true);
+        }
+        return Err("native session ID changed within source".into());
+    }
+    if !state.replaying_parent {
+        return Ok(false);
+    }
+    if record_type == "event_msg" && payload["type"].as_str() == Some("task_started") {
+        let began_before_child = match (payload["started_at"].as_i64(), state.created_at) {
+            (Some(started), Some(created)) => started < created,
+            _ => false,
+        };
+        if !began_before_child {
+            state.replaying_parent = false;
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn native_session_id(payload: &Value) -> Result<&str, String> {
+    let id = payload
+        .get("id")
+        .or_else(|| payload.get("session_id"))
+        .and_then(Value::as_str)
+        .ok_or("missing native session ID")?;
+    validate_id(id)?;
+    Ok(id)
 }
 
 fn event_message(
@@ -216,24 +277,21 @@ fn has_user_text_metadata(payload: &Value) -> bool {
         .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("user.text")))
 }
 
-fn session_metadata(payload: &Value, state: &mut CodexState) -> Result<Value, String> {
-    let id = payload
-        .get("id")
-        .or_else(|| payload.get("session_id"))
-        .and_then(Value::as_str)
-        .ok_or("missing native session ID")?;
-    validate_id(id)?;
-    if state
-        .native_id
-        .as_deref()
-        .is_some_and(|current| current != id)
-    {
-        return Err("native session ID changed within source".into());
+fn session_metadata(payload: &Value, at: i64, state: &mut CodexState) -> Result<Value, String> {
+    // A different ID never reaches here: `skip_replayed_parent` treats it
+    // as the parent's replayed history or rejects it.
+    let id = native_session_id(payload)?;
+    if state.native_id.is_none() {
+        let created = optional_string(payload, "timestamp")?
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(&value).ok())
+            .map_or_else(|| at.div_euclid(1000), |value| value.timestamp());
+        state.created_at = Some(created);
     }
     state.native_id = Some(id.to_owned());
     update_context(payload, state)?;
-    if let Some(parent) =
-        optional_string(payload, "parent_id")?.or(optional_string(payload, "forked_from_id")?)
+    if let Some(parent) = optional_string(payload, "parent_id")?
+        .or(optional_string(payload, "forked_from_id")?)
+        .or(optional_string(payload, "parent_thread_id")?)
     {
         validate_id(&parent)?;
         state.parent_id = Some(parent);
@@ -631,5 +689,143 @@ mod tests {
                 assert!(parse_chunk(input.as_bytes(), 0, &mut initialized()).is_err());
             }
         }
+    }
+
+    /// A forked or subagent rollout as Codex writes it: the child's own
+    /// metadata, then the parent's metadata and history replayed verbatim,
+    /// then the child's first turn. Every replayed record carries the
+    /// fork-time timestamp; only `task_started.started_at` keeps the time
+    /// the parent's turn really began.
+    fn forked_rollout() -> (String, String) {
+        let replay = record(
+            "session_meta",
+            json!({"id":"parent-1","timestamp":"2026-09-10T08:00:00.000Z","cwd":"/parent","source":"vscode"}),
+        ) + &record(
+            "event_msg",
+            json!({"type":"task_started","turn_id":"parent-turn-1","started_at":1_789_100_000}),
+        ) + &record(
+            "turn_context",
+            json!({"turn_id":"parent-turn-1","cwd":"/parent","model":"parent-model"}),
+        ) + &record(
+            "response_item",
+            json!({
+                "type":"message","role":"user",
+                "content":[{"type":"input_text","text":"parent prompt"}],
+                "internal_chat_message_metadata_passthrough":{"content_item_kinds":["user.text"]}
+            }),
+        ) + &record(
+            "event_msg",
+            json!({"type":"user_message","message":"parent legacy prompt"}),
+        ) + &record(
+            "event_msg",
+            json!({"type":"agent_message","message":"parent answer","phase":"final_answer"}),
+        ) + &record(
+            "event_msg",
+            json!({"type":"token_count","info":{"total_token_usage":{"total_tokens":88_000_000}}}),
+        ) + &record(
+            "event_msg",
+            json!({"type":"task_complete","turn_id":"parent-turn-1","started_at":1_789_100_000}),
+        ) + &record(
+            "event_msg",
+            json!({"type":"task_started","turn_id":"parent-turn-2","started_at":1_789_200_000}),
+        ) + &record(
+            "turn_context",
+            json!({"turn_id":"parent-turn-2","cwd":"/parent","model":"parent-model"}),
+        ) + &record(
+            "event_msg",
+            json!({"type":"thread_settings_applied","thread_id":"child-1"}),
+        );
+        let child = record(
+            "event_msg",
+            json!({"type":"task_started","turn_id":"child-turn-1","started_at":1_789_207_200}),
+        ) + &record(
+            "turn_context",
+            json!({"turn_id":"child-turn-1","cwd":"/work","model":"child-model"}),
+        ) + &record(
+            "event_msg",
+            json!({"type":"agent_message","message":"child answer","phase":"final_answer"}),
+        ) + &record(
+            "event_msg",
+            json!({"type":"token_count","info":{"total_token_usage":{"total_tokens":50}}}),
+        ) + &record(
+            "event_msg",
+            json!({"type":"task_complete","turn_id":"child-turn-1"}),
+        );
+        let head = record(
+            "session_meta",
+            json!({
+                "id":"child-1","session_id":"parent-1","forked_from_id":"parent-1",
+                "parent_thread_id":"parent-1","timestamp":"2026-09-12T10:00:00.100Z",
+                "cwd":"/work","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-1","depth":1}}},
+                "thread_source":"subagent"
+            }),
+        );
+        (head + &replay, child)
+    }
+
+    #[test]
+    fn forked_rollout_imports_as_the_child_without_the_parents_replayed_history() {
+        let (head, child) = forked_rollout();
+        let input = head + &child;
+        let mut state = CodexState::default();
+        let (events, consumed) = parse_chunk(input.as_bytes(), 0, &mut state).unwrap();
+
+        assert_eq!(consumed, input.len());
+        assert_eq!(state.native_id.as_deref(), Some("child-1"));
+        assert_eq!(state.parent_id.as_deref(), Some("parent-1"));
+        assert_eq!(
+            events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
+            [
+                "session_started",
+                "turn_started",
+                "response",
+                "usage",
+                "turn_completed"
+            ]
+        );
+        assert_eq!(events[0].data["native_id"], "child-1");
+        assert!(!events.iter().any(|e| e.data.to_string().contains("parent")));
+        assert!(events.iter().all(|e| e.cwd == "/work"));
+        assert_eq!(events[1].turn_id.as_deref(), Some("child-turn-1"));
+        assert_eq!(events[2].model.as_deref(), Some("child-model"));
+        assert_eq!(events[3].data["total"]["total_tokens"], 50);
+    }
+
+    #[test]
+    fn a_fork_split_inside_the_replayed_history_resumes_without_crediting_it() {
+        let (head, child) = forked_rollout();
+        let mut state = CodexState::default();
+        let (first, consumed) = parse_chunk(head.as_bytes(), 0, &mut state).unwrap();
+        assert_eq!(consumed, head.len());
+        assert_eq!(
+            first.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
+            ["session_started"]
+        );
+        // The checkpoint survives a round trip through its stored form.
+        let mut state: CodexState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        let (events, _) = parse_chunk(child.as_bytes(), head.len() as u64, &mut state).unwrap();
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[1].data, json!({"text":"child answer"}));
+    }
+
+    #[test]
+    fn subagent_metadata_links_its_parent_thread() {
+        let input = record(
+            "session_meta",
+            json!({"id":"child-2","cwd":"/work","parent_thread_id":"parent-1","thread_source":"subagent"}),
+        );
+        let mut state = CodexState::default();
+        parse_chunk(input.as_bytes(), 0, &mut state).unwrap();
+        assert_eq!(state.parent_id.as_deref(), Some("parent-1"));
+    }
+
+    #[test]
+    fn checkpoints_written_before_fork_support_still_load() {
+        let state: CodexState = serde_json::from_str(
+            r#"{"native_id":"native-123","cwd":"/work","model":null,"turn_id":null,"parent_id":null}"#,
+        )
+        .unwrap();
+        assert_eq!(state.native_id.as_deref(), Some("native-123"));
     }
 }

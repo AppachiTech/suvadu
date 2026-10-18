@@ -1748,6 +1748,32 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::format_collect)] // Small readable JSONL test fixture.
+    fn forked_rollout_imports_as_a_linked_child_with_only_its_own_usage() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("fork.jsonl");
+        let lines: String = [
+            json!({"type":"session_meta","payload":{"id":"child","forked_from_id":"parent","timestamp":"2026-09-12T12:00:00Z","cwd":"/work/project"}}),
+            json!({"type":"session_meta","payload":{"id":"parent","timestamp":"2026-09-10T08:00:00Z","cwd":"/work/project"}}),
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"p1","started_at":1_789_000_000}}),
+            json!({"type":"event_msg","payload":{"type":"user_message","message":"Parent request"}}),
+            json!({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":9_000_000}}}}),
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"c1","started_at":1_789_214_400}}),
+            json!({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":42}}}}),
+            json!({"type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"Child result"}}),
+        ].into_iter().map(|mut v| {v["timestamp"]=json!("2026-09-12T12:00:00Z"); format!("{v}\n")}).collect();
+        std::fs::write(&path, lines).unwrap();
+
+        let result = import(&repo, &path);
+        assert_eq!(result["session_id"], "codex-child");
+        let session = repo.get_ai_session("codex-child", 100, 0, &[]).unwrap();
+        assert_eq!(session["session"]["parent_id"], "parent");
+        assert_eq!(session["session"]["usage"]["total_tokens"], 42);
+        assert!(!session.to_string().contains("Parent request"));
+        assert!(repo.get_ai_session("codex-parent", 100, 0, &[]).is_err());
+    }
+
+    #[test]
     fn oversized_record_fails_instead_of_returning_a_non_advancing_page() {
         let (dir, repo) = crate::test_utils::test_repo();
         let path = dir.path().join("oversized.jsonl");
