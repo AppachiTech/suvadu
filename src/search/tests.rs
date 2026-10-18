@@ -2453,6 +2453,45 @@ fn test_paste_respects_remaining_capacity() {
     assert!(app.query.ends_with("abcde"));
 }
 
+/// The cap is in bytes everywhere: a multi-byte paste never takes the query
+/// past it, and stops at a whole character.
+#[test]
+fn a_multi_byte_paste_stops_at_the_byte_cap_on_a_character_boundary() {
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    // 3 bytes each: 700 characters, 2100 bytes.
+    let pasted = "€".repeat(700);
+    assert!(app.handle_paste(&pasted));
+    assert!(app.query.len() <= 2000, "{} bytes", app.query.len());
+    assert_eq!(app.query, "€".repeat(666));
+
+    // Typing respects the same cap: 1998 bytes, so a 3-byte char is refused
+    // and a 2-byte one fits.
+    app.handle_input(KeyEvent::new(KeyCode::Char('€'), KeyModifiers::NONE));
+    assert_eq!(app.query.len(), 1998);
+    app.handle_input(KeyEvent::new(KeyCode::Char('é'), KeyModifiers::NONE));
+    assert_eq!(app.query.len(), 2000);
+}
+
+#[test]
+fn a_multi_byte_paste_into_a_note_or_filter_field_keeps_to_the_byte_cap() {
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    app.dialog = DialogState::Note {
+        entry_id: 1,
+        input: String::new(),
+    };
+    app.handle_paste(&"日本".repeat(500)); // 3000 bytes
+    let DialogState::Note { input, .. } = &app.dialog else {
+        panic!("the note dialog closed");
+    };
+    assert_eq!(input.len(), 1998);
+    assert!(input.chars().all(|c| c == '日' || c == '本'));
+
+    app.dialog = DialogState::Filter;
+    app.filters.focus_index = 2;
+    app.handle_paste(&"ü".repeat(1500)); // 3000 bytes
+    assert_eq!(app.filters.tag_filter_input, "ü".repeat(1000));
+}
+
 #[test]
 fn test_paste_empty_string() {
     let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));

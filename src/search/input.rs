@@ -3,8 +3,25 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::{DialogState, RecallScope, SearchAction, SearchApp, VimMode};
 use crate::util;
 
-/// Maximum length for any text input field (query, filters, notes, etc.).
+/// Maximum length, in bytes, of any text input field (query, filters,
+/// notes, etc.).
 const MAX_INPUT_LEN: usize = 2000;
+
+/// Whether `c` still fits in `input` under [`MAX_INPUT_LEN`], in bytes.
+const fn fits(input: &str, c: char) -> bool {
+    input.len() + c.len_utf8() <= MAX_INPUT_LEN
+}
+
+/// Append as much of `text` as fits under [`MAX_INPUT_LEN`] bytes, stopping
+/// at the last whole character that fits — the same cap typing applies.
+fn push_capped(input: &mut String, text: &str) {
+    for c in text.chars() {
+        if !fits(input, c) {
+            break;
+        }
+        input.push(c);
+    }
+}
 
 /// Rows to move per `PageUp`/`PageDown` press.
 const PAGE_SCROLL_LINES: usize = 10;
@@ -92,15 +109,13 @@ impl SearchApp {
 
         match self.dialog {
             DialogState::Note { ref mut input, .. } => {
-                let remaining = MAX_INPUT_LEN.saturating_sub(input.len());
-                input.extend(sanitized.chars().take(remaining));
+                push_capped(input, &sanitized);
                 false
             }
             DialogState::GoToPage { ref mut input } => {
                 // Only accept digits
                 let digits: String = sanitized.chars().filter(char::is_ascii_digit).collect();
-                let remaining = MAX_INPUT_LEN.saturating_sub(input.len());
-                input.extend(digits.chars().take(remaining));
+                push_capped(input, &digits);
                 false
             }
             DialogState::Filter => {
@@ -119,8 +134,7 @@ impl SearchApp {
                 if self.vim_enabled && self.vim_mode == VimMode::Normal {
                     self.vim_mode = VimMode::Insert;
                 }
-                let remaining = MAX_INPUT_LEN.saturating_sub(self.query.len());
-                self.query.extend(sanitized.chars().take(remaining));
+                push_capped(&mut self.query, &sanitized);
                 self.reselect = None;
                 true
             }
@@ -136,8 +150,7 @@ impl SearchApp {
             3 => &mut self.filters.exit_code_input,
             _ => return, // field 4 is a selector, no text paste
         };
-        let remaining = MAX_INPUT_LEN.saturating_sub(target.len());
-        target.extend(text.chars().take(remaining));
+        push_capped(target, text);
     }
 
     pub(super) fn handle_input(&mut self, key: KeyEvent) -> SearchAction {
@@ -256,7 +269,7 @@ impl SearchApp {
                 self.dialog = DialogState::Help;
                 return SearchAction::Continue;
             }
-            KeyCode::Char(c) if self.query.len() + c.len_utf8() <= MAX_INPUT_LEN => {
+            KeyCode::Char(c) if fits(&self.query, c) => {
                 self.query.push(c);
                 self.reselect = None;
                 return SearchAction::Reload;
@@ -589,7 +602,7 @@ impl SearchApp {
             }
             KeyCode::Char(c) => {
                 if let DialogState::Note { ref mut input, .. } = self.dialog {
-                    if input.len() + c.len_utf8() <= MAX_INPUT_LEN {
+                    if fits(input, c) {
                         input.push(c);
                     }
                 }
@@ -668,7 +681,7 @@ impl SearchApp {
             }
             KeyCode::Char(c) if c.is_ascii_digit() => {
                 if let DialogState::GoToPage { ref mut input } = self.dialog {
-                    if input.len() + c.len_utf8() <= MAX_INPUT_LEN {
+                    if fits(input, c) {
                         input.push(c);
                     }
                 }
@@ -726,16 +739,16 @@ impl SearchApp {
                 _ => {}
             },
             KeyCode::Char(c) => match self.filters.focus_index {
-                0 if self.filters.start_date_input.len() + c.len_utf8() <= MAX_INPUT_LEN => {
+                0 if fits(&self.filters.start_date_input, c) => {
                     self.filters.start_date_input.push(c);
                 }
-                1 if self.filters.end_date_input.len() + c.len_utf8() <= MAX_INPUT_LEN => {
+                1 if fits(&self.filters.end_date_input, c) => {
                     self.filters.end_date_input.push(c);
                 }
-                2 if self.filters.tag_filter_input.len() + c.len_utf8() <= MAX_INPUT_LEN => {
+                2 if fits(&self.filters.tag_filter_input, c) => {
                     self.filters.tag_filter_input.push(c);
                 }
-                3 if self.filters.exit_code_input.len() + c.len_utf8() <= MAX_INPUT_LEN => {
+                3 if fits(&self.filters.exit_code_input, c) => {
                     self.filters.exit_code_input.push(c);
                 }
                 // field 4 is a selector, no text input
