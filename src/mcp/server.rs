@@ -31,103 +31,94 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Apply user risk-ignore suppressions so the assess_risk tool honors them.
     crate::risk::set_ignore_patterns(&config.agent.risk_ignore_patterns);
     crate::risk::set_extra_patterns(&config.agent.risk_extra_patterns);
-    let mcp = &config.mcp;
+    let server = Server {
+        repo: repo.as_ref(),
+        db_error: db_error.as_deref(),
+        mcp: &config.mcp,
+    };
     let stdin = io::stdin();
     let stdout = io::stdout();
-    let mut stdout = stdout.lock();
+    serve(&mut stdin.lock(), &mut stdout.lock(), &server)
+}
 
-    for line in stdin.lock().lines() {
+/// Everything one server session needs to answer a message.
+struct Server<'a> {
+    repo: Option<&'a Repository>,
+    db_error: Option<&'a str>,
+    mcp: &'a crate::config::McpConfig,
+}
+
+/// Answer line-delimited JSON-RPC from `input` on `output` until `input`
+/// ends. Only protocol messages are ever written to `output`.
+fn serve(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    server: &Server<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for line in input.lines() {
         let line = line?;
-        if line.trim().is_empty() {
-            continue;
+        if let Some(resp) = server.handle_line(&line) {
+            writeln!(output, "{}", serde_json::to_string(&resp)?)?;
+            output.flush()?;
         }
+    }
+    Ok(())
+}
 
-        let request: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
+impl Server<'_> {
+    /// The response to one input line, or `None` when it needs none.
+    fn handle_line(&self, line: &str) -> Option<serde_json::Value> {
+        if line.trim().is_empty() {
+            return None;
+        }
+        match serde_json::from_str(line) {
+            Ok(request) => self.handle_message(&request),
             Err(e) => {
                 eprintln!("[suvadu-mcp] parse error: {e}");
-                let resp =
-                    protocol::error_response(&serde_json::Value::Null, -32700, "Parse error");
-                writeln!(stdout, "{}", serde_json::to_string(&resp)?)?;
-                stdout.flush()?;
-                continue;
+                Some(protocol::error_response(
+                    &serde_json::Value::Null,
+                    -32700,
+                    "Parse error",
+                ))
             }
-        };
+        }
+    }
 
+    fn handle_message(&self, request: &serde_json::Value) -> Option<serde_json::Value> {
         let method = request["method"].as_str().unwrap_or("");
         let id = request.get("id").cloned();
 
         // Notifications (no id) don't get a response
         let is_notification = id.is_none();
+        let rid = id.as_ref().unwrap_or(&serde_json::Value::Null);
 
-        let response = match method {
-            "initialize" => {
-                let rid = id.as_ref().unwrap_or(&serde_json::Value::Null);
-                Some(protocol::handle_initialize(rid))
-            }
+        match method {
+            "initialize" => Some(protocol::handle_initialize(rid)),
             "notifications/initialized" => None,
-            "tools/list" => {
-                let rid = id.as_ref().unwrap_or(&serde_json::Value::Null);
-                Some(tools::list_tools(rid, mcp))
-            }
-            "tools/call" => {
-                let rid = id.as_ref().unwrap_or(&serde_json::Value::Null);
-                Some(repo.as_ref().map_or_else(
-                    || protocol::tool_error(rid, &db_unavailable_message(db_error.as_deref())),
-                    |repo| handle_tool_call(repo, rid, &request, mcp),
-                ))
-            }
-            "resources/list" => {
-                let rid = id.as_ref().unwrap_or(&serde_json::Value::Null);
-                Some(resources::list_resources(rid, mcp))
-            }
-            "resources/templates/list" => {
-                let rid = id.as_ref().unwrap_or(&serde_json::Value::Null);
-                Some(resources::list_resource_templates(rid))
-            }
-            "resources/read" => {
-                let rid = id.as_ref().unwrap_or(&serde_json::Value::Null);
-                Some(repo.as_ref().map_or_else(
-                    || {
-                        protocol::error_response(
-                            rid,
-                            -32000,
-                            &db_unavailable_message(db_error.as_deref()),
-                        )
-                    },
-                    |repo| handle_resource_read(repo, rid, &request, mcp),
-                ))
-            }
-            "prompts/list" => {
-                let rid = id.as_ref().unwrap_or(&serde_json::Value::Null);
-                Some(prompts::list_prompts(rid))
-            }
-            "prompts/get" => {
-                let rid = id.as_ref().unwrap_or(&serde_json::Value::Null);
-                Some(prompts::get_prompt(rid, &request))
-            }
-            "ping" => {
-                let rid = id.as_ref().unwrap_or(&serde_json::Value::Null);
-                Some(protocol::handle_ping(rid))
-            }
+            "tools/list" => Some(tools::list_tools(rid, self.mcp)),
+            "tools/call" => Some(self.repo.map_or_else(
+                || protocol::tool_error(rid, &db_unavailable_message(self.db_error)),
+                |repo| handle_tool_call(repo, rid, request, self.mcp),
+            )),
+            "resources/list" => Some(resources::list_resources(rid, self.mcp)),
+            "resources/templates/list" => Some(resources::list_resource_templates(rid)),
+            "resources/read" => Some(self.repo.map_or_else(
+                || protocol::error_response(rid, -32000, &db_unavailable_message(self.db_error)),
+                |repo| handle_resource_read(repo, rid, request, self.mcp),
+            )),
+            "prompts/list" => Some(prompts::list_prompts(rid)),
+            "prompts/get" => Some(prompts::get_prompt(rid, request)),
+            "ping" => Some(protocol::handle_ping(rid)),
             _ => {
                 if is_notification {
                     // Unknown notifications are silently ignored per spec
                     None
                 } else {
-                    let rid = id.as_ref().unwrap_or(&serde_json::Value::Null);
                     Some(protocol::error_response(rid, -32601, "Method not found"))
                 }
             }
-        };
-
-        if let Some(resp) = response {
-            writeln!(stdout, "{}", serde_json::to_string(&resp)?)?;
-            stdout.flush()?;
         }
     }
-
-    Ok(())
 }
 
 /// Migrate and open the read-only repository used by the long-lived MCP
@@ -247,18 +238,50 @@ mod tests {
             .contains("shown: 0 of 0"));
     }
 
-    #[test]
-    fn test_malformed_json_returns_parse_error() {
-        // Simulate what the server does when it receives malformed JSON:
-        // serde_json::from_str fails and we produce an error_response.
-        let bad_input = "{ not valid json }}}";
-        let parse_result: Result<serde_json::Value, _> = serde_json::from_str(bad_input);
-        assert!(parse_result.is_err());
+    /// Feed `input` to a server session over `repo` and return every line it
+    /// wrote, each parsed as JSON — so a stray non-protocol line fails here.
+    fn exchange(repo: Option<&Repository>, input: &[u8]) -> Vec<serde_json::Value> {
+        let mcp = crate::config::McpConfig::default();
+        let server = Server {
+            repo,
+            db_error: None,
+            mcp: &mcp,
+        };
+        let mut output = Vec::new();
+        serve(&mut &input[..], &mut output, &server).unwrap();
+        String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
 
-        let resp = protocol::error_response(&serde_json::Value::Null, -32700, "Parse error");
-        assert_eq!(resp["error"]["code"], -32700);
-        assert_eq!(resp["error"]["message"], "Parse error");
-        assert!(resp["id"].is_null());
+    #[test]
+    fn serve_answers_requests_in_order_and_skips_blank_lines() {
+        let responses = exchange(
+            None,
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n\
+              \n\
+              {\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n\
+              {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n",
+        );
+        assert_eq!(responses.len(), 2, "{responses:?}");
+        assert_eq!(responses[0]["id"], 1);
+        assert_eq!(responses[0]["result"]["serverInfo"]["name"], "suvadu-mcp");
+        assert_eq!(responses[1]["id"], 2);
+    }
+
+    #[test]
+    fn malformed_json_gets_a_parse_error_and_the_server_keeps_serving() {
+        let responses = exchange(
+            None,
+            b"{ not valid json }}}\n{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}\n",
+        );
+        assert_eq!(responses.len(), 2, "{responses:?}");
+        assert_eq!(responses[0]["error"]["code"], -32700);
+        assert_eq!(responses[0]["error"]["message"], "Parse error");
+        assert!(responses[0]["id"].is_null());
+        assert_eq!(responses[1]["id"], 7);
     }
     #[test]
     fn session_json_keeps_pagination_after_large_payload() {
