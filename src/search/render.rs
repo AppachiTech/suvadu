@@ -19,7 +19,8 @@ use super::format::{
     NoResults, StatusSegment, DETAIL_BOTTOM_HEIGHT, SELECTION_SYMBOL,
 };
 use super::highlight::{
-    command_text, match_mask, raw_view, relative_age, wants_raw, CommandStyle, Fit, RawStyle,
+    command_text, loose_match_mask, match_mask, raw_view, relative_age, wants_raw, CommandStyle,
+    Fit, RawStyle,
 };
 use super::{centered_rect, DialogState, RecallScope, SearchApp};
 
@@ -694,10 +695,14 @@ impl SearchApp {
         };
         // Show why the row matched — only when the query searched the
         // command text, not a directory, session or executor.
-        let mask = if self.view.search_field == crate::models::SearchField::Command {
-            match_mask(&entry.command, &self.query, self.recall.match_mode)
-        } else {
+        let mask = if self.view.search_field != crate::models::SearchField::Command {
             Vec::new()
+        } else if self.loosened {
+            // Found with separators ignored: the strict marks would show
+            // nothing, so mark what that rule matched instead.
+            loose_match_mask(&entry.command, &self.query)
+        } else {
+            match_mask(&entry.command, &self.query, self.recall.match_mode)
         };
         // The selected row wraps so every character of it can be read;
         // the others stay one line and say so when they are cut short.

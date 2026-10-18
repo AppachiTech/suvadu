@@ -5366,3 +5366,30 @@ fn the_ranker_keeps_every_loose_match_and_ranks_strict_ones_first() {
     assert_eq!(commands[0], "hiveagent", "a strict hit outranks loose ones");
     assert!(!commands.contains(&"ls"));
 }
+
+#[test]
+fn a_loose_result_marks_the_separator_it_spanned_on_screen() {
+    let (_d, repo) = repo_with(&["ssh hive-agent"]);
+    let mut app = app_for(&repo, "hiveagent");
+    assert!(app.loosened);
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal.draw(|f| app.draw(f)).unwrap();
+    let buf = terminal.backend().buffer();
+    let lines = buffer_lines(buf);
+    let (y, line) = lines
+        .iter()
+        .enumerate()
+        .find(|(_, l)| l.contains("ssh hive-agent"))
+        .expect("the row is drawn");
+    let x = line[..line.find("hive-agent").unwrap()].chars().count();
+    let underlined = |x: usize| {
+        buf.cell((u16::try_from(x).unwrap(), u16::try_from(y).unwrap()))
+            .unwrap()
+            .modifier
+            .contains(ratatui::style::Modifier::UNDERLINED)
+    };
+    for (i, c) in "hive-agent".chars().enumerate() {
+        assert!(underlined(x + i), "{c:?} of hive-agent is not marked");
+    }
+    assert!(!underlined(x - 2), "`ssh` did not match");
+}

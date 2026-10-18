@@ -6,7 +6,9 @@
 //!   and the emphasis wins over syntax colour, so a path-heavy command that
 //!   matched `suv u` shows where. `terms` marks every occurrence of each
 //!   word, `literal` the whole query, `prefix` the start, and `fuzzy` the
-//!   characters its subsequence rule actually walked.
+//!   characters its subsequence rule actually walked. Results `terms` found
+//!   with separators ignored mark each match from its first character to
+//!   its last, separators inside it included.
 //! * **What is really stored.** Grouping is by exact command text, so
 //!   `suv status` and `suv status  ` are two commands. Leading and trailing
 //!   whitespace is drawn as visible markers and runs of spaces are kept, so
@@ -73,6 +75,68 @@ pub(super) fn match_mask(command: &str, query: &str, mode: MatchMode) -> Vec<boo
                 }
             }
         }
+    }
+    mask
+}
+
+/// For each character of `command`, whether `terms`' separator-insensitive
+/// fallback matched it (see [`MatchMode::loose_plan`]).
+///
+/// Each term is found in the command with its separators removed, by the
+/// rule the database used — ASCII case for an ASCII term, full Unicode
+/// lowercase for any other — and the match is marked on the original
+/// characters from the first one it used to the last, so the `-` inside a
+/// `hive-agent` found by `hiveagent` is marked with the rest.
+pub(super) fn loose_match_mask(command: &str, query: &str) -> Vec<bool> {
+    let chars: Vec<char> = command.chars().collect();
+    let mut mask = vec![false; chars.len()];
+    let Some(plan) = MatchMode::Terms.loose_plan(query) else {
+        return mask;
+    };
+    // The command without its separators, and where each character was.
+    let (kept, at): (Vec<char>, Vec<usize>) = chars
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| !crate::util::SEPARATORS.contains(c))
+        .map(|(i, &c)| (c, i))
+        .unzip();
+    let mut spans = Vec::new();
+    for term in &plan.loose_tokens {
+        if term.is_ascii() {
+            let needle: Vec<char> = term.chars().collect();
+            if needle.len() > kept.len() {
+                continue;
+            }
+            for start in 0..=kept.len() - needle.len() {
+                if kept[start..start + needle.len()]
+                    .iter()
+                    .zip(&needle)
+                    .all(|(a, b)| a.eq_ignore_ascii_case(b))
+                {
+                    spans.push((start, start + needle.len() - 1));
+                }
+            }
+        } else {
+            let kept_text: String = kept.iter().collect();
+            let mut in_kept = vec![false; kept.len()];
+            mark_unicode_folded(&kept_text, term, &mut in_kept);
+            // Each run of marked characters is one match (or overlapping
+            // ones), and spans the separators between its characters.
+            let mut run_start = None;
+            for (k, &marked) in in_kept.iter().chain([&false]).enumerate() {
+                match (marked, run_start) {
+                    (true, None) => run_start = Some(k),
+                    (false, Some(first)) => {
+                        spans.push((first, k - 1));
+                        run_start = None;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    for (first, last) in spans {
+        mask[at[first]..=at[last]].fill(true);
     }
     mask
 }
@@ -705,6 +769,58 @@ mod tests {
         // fuzzy walks the whole-string Unicode lowercase, like
         // `is_subsequence_ci`.
         assert_eq!(marked("ÉCHO", "éh", MatchMode::Fuzzy), "É.H.");
+    }
+
+    /// As `marked`, for the separator-insensitive fallback; `~` is a
+    /// character that was not marked, so a `.` in the command stays visible.
+    fn marked_loose(command: &str, query: &str) -> String {
+        command
+            .chars()
+            .zip(loose_match_mask(command, query))
+            .map(|(c, m)| if m { c.to_ascii_uppercase() } else { '~' })
+            .collect()
+    }
+
+    #[test]
+    fn a_loose_match_marks_the_separators_inside_it() {
+        assert_eq!(
+            marked_loose("ssh hive-agent", "hiveagent"),
+            "~~~~HIVE-AGENT"
+        );
+        assert_eq!(
+            marked_loose("hive_agent && hive.agent", "hiveagent"),
+            "HIVE_AGENT~~~~HIVE.AGENT"
+        );
+        assert_eq!(marked_loose("cd hive/agent", "hive:agent"), "~~~HIVE/AGENT");
+        assert_eq!(marked_loose("HiveAgent", "hive-agent"), "HIVEAGENT");
+        // Separators around a match are not part of it.
+        assert_eq!(
+            marked_loose("-hive--agent- x", "hiveagent"),
+            "~HIVE--AGENT~~~"
+        );
+        // Every term is marked wherever it occurs.
+        assert_eq!(
+            marked_loose("hive-agent re-start", "hiveagent restart"),
+            "HIVE-AGENT~RE-START"
+        );
+    }
+
+    #[test]
+    fn a_loose_match_follows_the_terms_case_rules() {
+        // A non-ASCII term folds Unicode case, an ASCII one ASCII only.
+        assert_eq!(marked_loose("echo É-cho", "écho"), "~~~~~É-CHO");
+        assert_eq!(marked_loose("\u{212a}-x", "kx"), "~~~");
+        assert_eq!(marked_loose("echo İ-x", "i\u{307}x"), "~~~~~İ-X");
+    }
+
+    #[test]
+    fn a_loose_query_of_nothing_but_separators_marks_nothing() {
+        for query in ["", "  ", "--", "._/:"] {
+            assert!(
+                loose_match_mask("hive-agent", query).iter().all(|m| !m),
+                "{query:?}"
+            );
+        }
     }
 
     #[test]
