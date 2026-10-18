@@ -51,7 +51,10 @@ pub struct AddParams {
 
 /// Maximum lengths for input fields (defense against malicious/buggy hooks).
 const MAX_SESSION_ID_LEN: usize = 256;
-const MAX_COMMAND_LEN: usize = 65536; // 64 KB — long pipe chains, heredocs
+/// Longest command text stored, in bytes (64 KB — long pipe chains,
+/// heredocs). A longer command is stored cut to this length, see
+/// [`truncate_command`].
+const MAX_COMMAND_LEN: usize = 65536;
 const MAX_CWD_LEN: usize = 4096; // PATH_MAX on most systems
 
 // ── Exclusion pattern cache ─────────────────────────────────
@@ -113,15 +116,13 @@ pub fn handle_add_with_context(params: AddParams) -> Result<(), Box<dyn std::err
 }
 
 /// Pre-check: returns `true` if the input should be silently dropped
-/// (space-prefixed, oversized, or invalid session ID).
+/// (space-prefixed, an oversized session ID or directory, or an invalid
+/// session ID). An oversized command is kept, cut to length later.
 fn should_drop_early(params: &AddParams) -> bool {
     if params.command.starts_with(' ') {
         return true;
     }
-    if params.session_id.len() > MAX_SESSION_ID_LEN
-        || params.command.len() > MAX_COMMAND_LEN
-        || params.cwd.len() > MAX_CWD_LEN
-    {
+    if params.session_id.len() > MAX_SESSION_ID_LEN || params.cwd.len() > MAX_CWD_LEN {
         return true;
     }
     if !util::is_valid_session_id(&params.session_id) {
@@ -195,12 +196,15 @@ fn handle_add_inner(
     };
     let ended_at = if ended_at == 0 { started_at } else { ended_at };
 
-    // Redact secrets before storage (unless disabled in config)
+    // Redact secrets before storage (unless disabled in config). The whole
+    // text is redacted before it is cut, so a secret that crosses the cut
+    // is already replaced and cannot leave a recognisable fragment behind.
     let command = if config.redaction.enabled {
         crate::redact::redact_secrets_with_extra(&command, &config.redaction.extra_patterns)
     } else {
         command
     };
+    let command = truncate_command(command);
 
     // Create entry
     let mut entry = Entry::new(
@@ -264,6 +268,27 @@ fn handle_add_inner(
     repo.insert_entry(&entry)?;
 
     Ok(()) // Silent success
+}
+
+/// Cut a command longer than [`MAX_COMMAND_LEN`] bytes on a character
+/// boundary and mark the cut, keeping the result within the limit:
+/// `<start> …[truncated N bytes]`, where N is the number of bytes dropped.
+fn truncate_command(command: String) -> String {
+    if command.len() <= MAX_COMMAND_LEN {
+        return command;
+    }
+    // Room for the marker at its longest, when N has as many digits as the
+    // whole command's length; a shorter N only leaves the result shorter.
+    let marker_room = format!(" …[truncated {} bytes]", command.len()).len();
+    let mut keep = MAX_COMMAND_LEN - marker_room;
+    while !command.is_char_boundary(keep) {
+        keep -= 1;
+    }
+    format!(
+        "{} …[truncated {} bytes]",
+        &command[..keep],
+        command.len() - keep
+    )
 }
 
 /// The git branch to store with a command recorded in `cwd`, read from the
@@ -1351,10 +1376,10 @@ mod tests {
     }
 
     #[test]
-    fn test_drop_early_oversized_command() {
+    fn test_drop_early_keeps_an_oversized_command() {
         let mut params = make_params("ls");
         params.command = "x".repeat(MAX_COMMAND_LEN + 1);
-        assert!(should_drop_early(&params));
+        assert!(!should_drop_early(&params));
     }
 
     #[test]
@@ -1410,6 +1435,52 @@ mod tests {
             .as_ref()
             .and_then(|ctx| ctx.get("git_branch"))
             .map(String::as_str)
+    }
+
+    #[test]
+    fn an_oversized_command_is_stored_cut_on_a_char_boundary_with_a_marker() {
+        let (_dir, repo) = test_repo();
+        // Two-byte characters, so a cut at the byte limit would split one.
+        let command = format!("echo {}", "é".repeat(40_000));
+        handle_add_inner(make_params(&command), &default_config(), &repo).unwrap();
+        let stored = only_entry(&repo).command;
+        assert!(stored.len() <= MAX_COMMAND_LEN, "{}", stored.len());
+        let (kept, marker) = stored.rsplit_once(" …[truncated ").unwrap();
+        assert!(command.starts_with(kept));
+        assert!(kept.len() > MAX_COMMAND_LEN - 64);
+        assert_eq!(marker, format!("{} bytes]", command.len() - kept.len()));
+    }
+
+    #[test]
+    fn a_secret_across_the_cut_is_redacted_before_the_command_is_cut() {
+        let (_dir, repo) = test_repo();
+        // An AWS key id is only recognised whole: cut first, its first
+        // twelve characters would be stored as they are.
+        let key = "AKIAABCDEFGHIJKLMNOP";
+        let command = format!(
+            "{} {key} {}",
+            "x".repeat(MAX_COMMAND_LEN - 38),
+            "y".repeat(1000)
+        );
+        let keep = MAX_COMMAND_LEN - " …[truncated 994 bytes]".len();
+        assert!((MAX_COMMAND_LEN - 37..MAX_COMMAND_LEN - 17).contains(&keep));
+        handle_add_inner(make_params(&command), &default_config(), &repo).unwrap();
+        let stored = only_entry(&repo).command;
+        assert!(stored.contains("…[truncated "));
+        assert!(!stored.contains("AKIA"), "{}", &stored[stored.len() - 80..]);
+    }
+
+    #[test]
+    fn an_exclusion_matching_past_the_cut_still_excludes_the_command() {
+        let (_dir, repo) = test_repo();
+        let mut config = default_config();
+        config.exclusions = vec!["do-not-record".into()];
+        let command = format!("{} do-not-record", "x".repeat(MAX_COMMAND_LEN));
+        handle_add_inner(make_params(&command), &config, &repo).unwrap();
+        assert!(repo
+            .get_entries_filtered(10, 0, &crate::repository::QueryFilter::default())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

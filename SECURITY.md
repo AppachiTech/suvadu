@@ -407,8 +407,10 @@ behind either.
 
 **Nothing is recorded at all when** the command starts with a space, matches
 one of your exclusion patterns, `SUVADU_PAUSED` is set in that shell,
-recording is disabled in the config, or the command exceeds 64 KB (or its
-directory 4096 characters). Bash additionally ignores `PROMPT_COMMAND`
+recording is disabled in the config, or its directory exceeds 4096
+characters. A command longer than 64 KB is redacted in full, then stored cut
+to 64 KB and ending in `…[truncated N bytes]`; exclusion patterns are matched
+against the whole command before it is cut. Bash additionally ignores `PROMPT_COMMAND`
 itself, tab completion, and lines sourced before the first interactive
 prompt.
 
