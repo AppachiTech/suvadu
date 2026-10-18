@@ -28,7 +28,7 @@
 ## Install
 
 ```bash
-# Homebrew (macOS)
+# Homebrew (macOS & Linux)
 brew tap AppachiTech/suvadu && brew install suvadu
 
 # Install script (macOS & Linux)
@@ -37,7 +37,7 @@ curl -fsSL https://downloads.appachi.tech/suvadu/install.sh | bash
 # Install script, into ~/.local/bin without sudo
 curl -fsSL https://downloads.appachi.tech/suvadu/install.sh | bash -s -- --user
 
-# Cargo
+# Cargo (Rust 1.95 or newer)
 cargo install suvadu
 ```
 

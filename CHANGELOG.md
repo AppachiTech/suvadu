@@ -2,6 +2,50 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Scroll recall's detail pane** — `Shift+Tab` moves focus into the detail pane when its contents don't fit, and `↑↓`, `PgUp`/`PgDn`, `Home`/`End` (or `j`/`k`/`g`/`G` in vim Normal mode) scroll it. A scrollbar sits outside the pane's border and the title shows the rows in view (`12–32/67`). `Esc`, `Shift+Tab` or any other key returns to the list.
+
+### Changed
+- **Substring search uses the trigram index as intended** — every `terms` and `literal` query used to scan the whole history, because SQLite does not hand a `LIKE … ESCAPE` to the full-text index. At 100,000 entries typical queries now return in well under a millisecond instead of 10–40 ms, with the same results. `fuzzy` no longer runs one scan per letter of the query and is about twice as fast.
+- **The risk rules check every command of a line** — `suv guard` and the `assess_risk` MCP tool split chained, piped and wrapped commands (`&&`, `;`, `|`, `sudo`, `env`, `bash -c`, `ssh host`, `$(…)`, `find -exec`) and rate each one. They now catch every spelling of recursive `rm` (`-fr`, `-Rf`, `-r`) and force push (`-f`, `+branch`, `--force-with-lease`), and have rules for `kubectl delete`, `terraform destroy`, `find -delete`, `shred`, `truncate`, `docker system prune`, `git checkout .`/`git restore .`, SQL `TRUNCATE`/`DELETE` without `WHERE`, `crontab -r` and `diskutil erase*`. They no longer block `chmod 755`, `pip install -r requirements.txt` or `./build.sh`.
+- **A project `.suvadu.toml` can only tighten privacy** — it can no longer turn redaction off or recording back on, and its `exclusions` and `redaction.extra_patterns` add to your global lists instead of replacing them.
+- **`suv update` only installs a strictly newer release**, and refuses a download whose signed version does not match the release it advertises.
+- **Suvadu now declares Rust 1.95 as its minimum** (`rust-version`), which its SQLite dependency already required; CI checks it. `cargo install` on an older toolchain now says so up front instead of failing inside a dependency's build script.
+
+### Fixed
+- **`suv stats` no longer passes recorded command text to a shell** — resolving aliases ran `type <first word>` unquoted through an interactive shell, so a history entry such as `ls;touch${IFS}/tmp/x` was executed. Only plain program names are probed now, each quoted.
+- **Bash records the whole line you typed** — the hook stored only the last simple command, so `cd /tmp && ls` was recorded as `ls` and a pipeline as its last stage, with the last stage's duration. An empty Enter no longer re-records a prompt command, and lines typed with a leading space are skipped under `ignorespace`/`ignoreboth`. Loading the hook no longer breaks an existing multi-line `DEBUG` trap.
+- **Zsh keeps recording under unusual options** — `OCTAL_ZEROES`, `SH_WORD_SPLIT`, `NO_UNSET`, or a `suv` path containing a space no longer break the hook, and managed aliases load when the data directory's path contains quotes, `$` or backticks.
+- **A config file that doesn't load no longer silently stops recording** — recording falls back to the global config, or to the defaults with redaction on, and `suv doctor` names the broken file.
+- **Several shells starting together after an upgrade no longer lose commands** — the schema upgrade now runs one process at a time, so they no longer fail with "database is locked" or index history twice.
+- **Parallel first commands of one agent session are no longer lost** to `UNIQUE constraint failed: sessions.id`.
+- **Commands that start with `-` are recorded**, and Up-arrow and `Ctrl+R` work when the line starts with `-`.
+- **Redaction catches more secrets** — OpenAI `sk-proj-`/`sk-svcacct-` keys, `curl --header`/`--user`, httpie auth headers, credentials in any `scheme://user:pass@host` URL, temporary `ASIA…` AWS keys, `aws configure set` secrets, Slack `xoxe-`/`xapp-` and GitHub `ghu_` tokens, `sshpass -p`, `docker login -p`, quoted passwords containing spaces, and whole PEM private-key blocks.
+- **Redaction no longer rewrites harmless commands** such as `mysql -P3306`, `… | perl -pe`, `--sort-key=…`, `--grep=token:…` or `my-disk-<id>`, and no longer swallows the closing quote after `password=…`.
+- **Search lists every entry its total counts** — an entry whose session record was missing was counted but could never be shown.
+- **Attaching agent context to a command no longer rewrites the search index** (schema v10).
+- **`suv import --from zsh-history`** decodes non-ASCII text correctly, adds nothing on a re-import (plain-format files included), keeps both runs of a command run twice in one second, and no longer duplicates commands already captured live. Plain-format rows get the 1970-01-01 placeholder time, as bash imports do.
+- **Ctrl+C closes every interactive screen in one press** — stats, settings (leaving without saving), sessions and timelines, the agent dashboard, Prompts and agent stats, alias suggestions, skills, bookmarks and aliases. It used to be ignored, or typed a `c` into the field being edited. Screens opened from Suvadu Home say `Esc Home` instead of `Esc Quit`.
+- **Saving in `suv settings` keeps comments and unknown keys**, and auto-tags and custom agents deleted there stay deleted.
+- **`suv settings`** refuses a blank exclusion pattern (one would stop every command containing a space from being recorded), always adds a directory on `Ctrl+A` in the MCP tab, and accepts a search page limit up to 10,000, as the config file does.
+- **`suv skills sync` never replaces an AGENTS.md, SKILL.md or `.mdc` it cannot read** (for example one that is not UTF-8); it reports a conflict and leaves the file alone, even with `--force`. Files written through a symlink now update the linked file and keep the link and its permissions.
+- **The agent dashboard, Prompts and agent stats show the newest 10,000 agent commands**, not the oldest, and no longer load all human history to find them.
+- **`suv aliases add-suggested` asks before writing** and refuses names that are already aliases instead of overwriting them. `suv aliases remove` now takes effect in new shells, including after removing the last alias.
+- **`suv tag associate` as the first command of a new shell keeps the tag.**
+- **In an AI session timeline, Enter with a panel open** no longer opens the prompt behind it. `suv skills` accepts pasted text, and `$EDITOR` no longer receives bracketed-paste markers.
+- **The terminal is restored if a screen fails to start**, and a crash no longer leaves bracketed paste on.
+- **The Claude Code hook no longer crashes** on error text containing characters such as `İ`.
+- **MCP server** —
+  - A far-off date (`200000000000 days ago`) or a huge `days`/`hours` no longer crashes the server, and a failure inside one tool call is returned as an error instead of ending the session.
+  - Dates it cannot read are an error naming the accepted formats instead of being ignored; `after`/`before` also accept ISO 8601 date-times and `N minutes/hours/weeks ago`, and days that start or end in a clock change are handled.
+  - `recent_commands` with a `directory` returns only that directory's commands.
+  - Large pages stop at a whole row with a working `next_offset` instead of being cut off with the cursor lost.
+  - `initialize` answers in the protocol version the client asked for when supported (2024-11-05 through 2025-11-25).
+  - Batches, non-object messages and requests without a method get a `-32600` error instead of silence; notifications are never answered or run; invalid UTF-8 no longer stops the server.
+  - `search_commands` rejects an `exit_code` it cannot filter on, and `find_agent_session` finds sessions older than the newest 5,000 commands.
+
 ## [0.5.0] - 2026-09-27
 
 ### Added
