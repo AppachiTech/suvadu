@@ -1021,6 +1021,9 @@ struct AiSessionApp {
     status_message: Option<(String, std::time::Instant)>,
     summary_panel: Option<SummaryPanelState>,
     text_panel: Option<TextPanel>,
+    /// The command whose prompt detail Enter asked for, opened by the run
+    /// loop (which owns the terminal) and then cleared.
+    prompt_request: Option<Entry>,
 }
 
 impl AiSessionApp {
@@ -1039,7 +1042,13 @@ impl AiSessionApp {
             status_message: None,
             summary_panel: None,
             text_panel: None,
+            prompt_request: None,
         }
+    }
+
+    /// The command Enter asked to open in prompt detail, if any.
+    const fn take_prompt_request(&mut self) -> Option<Entry> {
+        self.prompt_request.take()
     }
 
     fn total_pages(&self) -> usize {
@@ -1215,6 +1224,9 @@ impl AiSessionApp {
         }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => return false,
+            // Only reached with no panel open: a panel takes every key
+            // first, so Enter there never opens the row hidden behind it.
+            KeyCode::Enter => self.prompt_request = self.selected_linked_command().cloned(),
             KeyCode::Tab => self.detail_open = !self.detail_open,
             KeyCode::Char('s') => self.open_summary_panel(),
             KeyCode::Char('h') => self.open_handoff_panel(),
@@ -1893,18 +1905,15 @@ where
             if key.kind != KeyEventKind::Press {
                 continue;
             }
-            if key.code == KeyCode::Enter {
-                if let Some(selected) = app.selected_linked_command().cloned() {
-                    let entries = app.command_entries();
-                    let exit = crate::agent_ui::run_prompt_detail(terminal, &entries, &selected)?;
-                    if exit == ScreenExit::Interrupted {
-                        return Ok(exit);
-                    }
-                }
-                continue;
-            }
             if !app.handle_input(key) {
                 return Ok(ScreenExit::by(&key));
+            }
+            if let Some(selected) = app.take_prompt_request() {
+                let entries = app.command_entries();
+                let exit = crate::agent_ui::run_prompt_detail(terminal, &entries, &selected)?;
+                if exit == ScreenExit::Interrupted {
+                    return Ok(exit);
+                }
             }
         }
     }
@@ -2321,6 +2330,53 @@ mod tests {
 
     fn ctrl_c() -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    /// AI session data whose first row is a command linked to a prompt, so
+    /// Enter on it opens that prompt's detail.
+    fn ai_data_with_a_linked_command() -> crate::session_ui::AiSessionData {
+        let mut data = make_ai_data();
+        let mut entry = make_entry(1_000, 2_000);
+        entry.context = Some(HashMap::from([(
+            "agent_prompt".to_string(),
+            "run the tests".to_string(),
+        )]));
+        data.items.insert(
+            0,
+            AiTimelineItem::Command {
+                entry,
+                source_id: "cmd-1".to_string(),
+            },
+        );
+        data
+    }
+
+    #[test]
+    fn enter_opens_the_prompt_behind_the_selected_command() {
+        let mut app = AiSessionApp::new(ai_data_with_a_linked_command());
+        assert!(app.handle_input(crossterm::event::KeyEvent::from(KeyCode::Enter)));
+        let opened = app.take_prompt_request().expect("a prompt detail to open");
+        assert_eq!(opened.started_at, 1_000);
+        assert!(app.take_prompt_request().is_none(), "asked for once");
+    }
+
+    #[test]
+    fn enter_with_a_panel_open_never_opens_the_row_hidden_behind_it() {
+        let mut app = AiSessionApp::new(ai_data_with_a_linked_command());
+        app.handle_input(crossterm::event::KeyEvent::from(KeyCode::Char('h')));
+        assert!(app.text_panel.is_some());
+        assert!(app.handle_input(crossterm::event::KeyEvent::from(KeyCode::Enter)));
+        assert!(app.take_prompt_request().is_none());
+        assert!(app.text_panel.is_some(), "the panel stays open");
+
+        let mut data = ai_data_with_a_linked_command();
+        data.summaries = vec![summary_record("s1", "Saved", true)];
+        let mut app = AiSessionApp::new(data);
+        app.handle_input(crossterm::event::KeyEvent::from(KeyCode::Char('s')));
+        assert!(app.summary_panel.is_some());
+        assert!(app.handle_input(crossterm::event::KeyEvent::from(KeyCode::Enter)));
+        assert!(app.take_prompt_request().is_none());
+        assert!(app.summary_panel.is_some());
     }
 
     #[test]
