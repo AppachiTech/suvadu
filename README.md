@@ -398,9 +398,12 @@ commands, native sessions and MCP registration have been seen.
   AGENTS/environment context and developer instructions are excluded too.
 - **Non-shell tool calls and file edits**, and child sessions started from a
   session — stated on every session header as `capture.unverifiable`.
-- **Size limits:** hook input is capped (1 MiB, 16 MiB for OpenCode) and a
-  single native transcript record at 16 MiB; an oversize record is rejected
-  with a named error rather than silently truncated. Prompt text is capped at
+- **Size limits:** hook input is read up to 16 MiB, keeping only the fields
+  Suvadu records, so a large tool output never costs the command; past
+  16 MiB the command is still recorded when it arrived before the cut, and
+  the hook fails with a named error otherwise. A single native transcript
+  record is capped at 16 MiB; an oversize record is rejected with a named
+  error rather than silently truncated. Prompt text is capped at
   `agent.prompt_capture_max_chars` (default 4000).
 - **Timing and exit codes are not equally trustworthy per agent.** Codex and
   Claude Code hook timestamps are *receipt* time, not execution time (Codex

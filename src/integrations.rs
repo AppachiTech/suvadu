@@ -5,6 +5,7 @@
 
 pub mod agent_hook;
 pub mod codex;
+pub mod hook_input;
 pub mod registry;
 
 use std::collections::HashMap;
@@ -12,19 +13,62 @@ use std::path::{Path, PathBuf};
 
 use crate::util::atomic_write;
 
-/// Maximum bytes to read from stdin for hook input (1 MB).
+/// Maximum bytes of raw prompt text read from stdin (1 MB). JSON hook
+/// payloads are read through [`hook_input`] with a larger cap instead.
 const MAX_HOOK_INPUT_BYTES: u64 = 1_048_576;
+
+use hook_input::{only, whole, Field};
+
+/// What the Claude Code `PostToolUse`/`PostToolUseFailure` hooks use.
+const CLAUDE_TOOL_FIELDS: &[Field] = &[
+    whole("tool_name"),
+    only("tool_input", &[whole("command")]),
+    whole("cwd"),
+    only(
+        "tool_response",
+        &[whole("exit_code"), whole("exitCode"), whole("status_code")],
+    ),
+    whole("error"),
+    whole("session_id"),
+    whole("prompt_id"),
+];
+const CLAUDE_PROMPT_FIELDS: &[Field] = &[whole("session_id"), whole("prompt"), whole("prompt_id")];
+const SESSION_END_FIELDS: &[Field] = &[
+    whole("hook_event_name"),
+    whole("session_id"),
+    whole("transcript_path"),
+];
+const CURSOR_SHELL_FIELDS: &[Field] = &[
+    whole("command"),
+    whole("cwd"),
+    whole("exit_code"),
+    whole("duration"),
+    whole("conversation_id"),
+];
+const CURSOR_PROMPT_FIELDS: &[Field] = &[whole("conversation_id"), whole("prompt")];
+
+/// Read a JSON hook payload from stdin, keeping only `fields`; `None` for
+/// empty input.
+fn read_hook_payload(
+    fields: &'static [Field],
+) -> Result<Option<hook_input::HookPayload>, Box<dyn std::error::Error>> {
+    Ok(hook_input::read(std::io::stdin().lock(), fields)?)
+}
+
+/// The non-empty Bash command of a Claude Code tool payload.
+fn claude_bash_command(event: &serde_json::Value) -> Option<&str> {
+    event["tool_input"]["command"]
+        .as_str()
+        .filter(|command| !command.is_empty())
+}
 
 /// Handle `PostToolUse` hook from Claude Code — reads JSON event from stdin and records the command.
 pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Read;
-
-    let mut input = String::new();
-    std::io::stdin()
-        .take(MAX_HOOK_INPUT_BYTES)
-        .read_to_string(&mut input)?;
-
-    let event: serde_json::Value = serde_json::from_str(&input)?;
+    let Some(payload) = read_hook_payload(CLAUDE_TOOL_FIELDS)? else {
+        return Ok(());
+    };
+    payload.require(claude_bash_command(&payload.event).is_some())?;
+    let event = payload.event;
 
     // Only process Bash tool calls
     let tool_name = event
@@ -96,14 +140,11 @@ pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Handle `UserPromptSubmit` hook from Claude Code — caches the prompt text
 pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Read;
-
-    let mut input = String::new();
-    std::io::stdin()
-        .take(MAX_HOOK_INPUT_BYTES)
-        .read_to_string(&mut input)?;
-
-    let event: serde_json::Value = serde_json::from_str(&input)?;
+    let Some(payload) = read_hook_payload(CLAUDE_PROMPT_FIELDS)? else {
+        return Ok(());
+    };
+    payload.require(payload.event["prompt"].is_string())?;
+    let event = payload.event;
 
     let session_id = event
         .get("session_id")
@@ -245,14 +286,11 @@ pub fn handle_hook_opencode_prompt(
 /// The payload has an `error` string (no `tool_response`) from which we
 /// parse the exit code.
 pub fn handle_hook_claude_code_failure() -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Read;
-
-    let mut input = String::new();
-    std::io::stdin()
-        .take(MAX_HOOK_INPUT_BYTES)
-        .read_to_string(&mut input)?;
-
-    let event: serde_json::Value = serde_json::from_str(&input)?;
+    let Some(payload) = read_hook_payload(CLAUDE_TOOL_FIELDS)? else {
+        return Ok(());
+    };
+    payload.require(claude_bash_command(&payload.event).is_some())?;
+    let event = payload.event;
 
     // Only process Bash tool calls
     let tool_name = event
@@ -314,19 +352,11 @@ pub fn handle_hook_claude_code_failure() -> Result<(), Box<dyn std::error::Error
 
 /// Reconcile Claude Code's native transcript at the end of each turn/session.
 pub fn handle_hook_claude_session() -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Read;
-
-    let mut input = String::new();
-    std::io::stdin()
-        .take(MAX_HOOK_INPUT_BYTES + 1)
-        .read_to_string(&mut input)?;
-    if input.is_empty() {
+    let Some(payload) = read_hook_payload(SESSION_END_FIELDS)? else {
         return Ok(());
-    }
-    if input.len() as u64 > MAX_HOOK_INPUT_BYTES {
-        return Err("Claude hook input exceeds 1 MB".into());
-    }
-    let event: serde_json::Value = serde_json::from_str(&input)?;
+    };
+    payload.require(payload.event["transcript_path"].is_string())?;
+    let event = payload.event;
     if !matches!(
         event["hook_event_name"].as_str(),
         Some("Stop" | "SessionEnd")
@@ -394,14 +424,15 @@ pub fn handle_hook_opencode_session(
 /// Cursor's payload: `{ "command": "...", "output": "...", "exit_code": 0, "cwd": "...",
 ///   "duration": 123, "conversation_id": "...", "generation_id": "..." }`
 pub fn handle_hook_cursor() -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Read;
-
-    let mut input = String::new();
-    std::io::stdin()
-        .take(MAX_HOOK_INPUT_BYTES)
-        .read_to_string(&mut input)?;
-
-    let event: serde_json::Value = serde_json::from_str(&input)?;
+    let Some(payload) = read_hook_payload(CURSOR_SHELL_FIELDS)? else {
+        return Ok(());
+    };
+    payload.require(
+        payload.event["command"]
+            .as_str()
+            .is_some_and(|c| !c.is_empty()),
+    )?;
+    let event = payload.event;
 
     let command = event
         .get("command")
@@ -466,14 +497,8 @@ pub fn handle_hook_cursor() -> Result<(), Box<dyn std::error::Error>> {
 /// Payload: `{ "prompt": "...", "conversation_id": "...", ... }`
 /// Must return `{"continue": true}` on stdout to let Cursor proceed.
 pub fn handle_hook_cursor_prompt() -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Read;
-
-    let mut input = String::new();
-    std::io::stdin()
-        .take(MAX_HOOK_INPUT_BYTES)
-        .read_to_string(&mut input)?;
-
-    let event: serde_json::Value = serde_json::from_str(&input)?;
+    let event =
+        read_hook_payload(CURSOR_PROMPT_FIELDS)?.map_or(serde_json::Value::Null, |p| p.event);
 
     let conversation_id = event
         .get("conversation_id")

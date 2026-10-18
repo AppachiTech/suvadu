@@ -752,3 +752,129 @@ fn doctor_does_not_create_a_database_on_a_clean_machine() {
         "doctor must not create a database:\n{out}"
     );
 }
+
+/// A Bash call whose output is several megabytes, as a build log or a
+/// `cat` of a large file produces.
+fn large_output() -> String {
+    "build output line\n".repeat(5 * 1024 * 1024 / 18)
+}
+
+fn assert_recorded(s: &Sandbox, command: &str, output: &Output) {
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        s.history().iter().any(|entry| entry["command"] == command),
+        "{command} was not recorded"
+    );
+}
+
+#[test]
+fn claude_records_a_command_whose_tool_response_is_megabytes() {
+    let s = Sandbox::new();
+    let output = run_hook(
+        &s,
+        "hook-claude-code",
+        &serde_json::json!({
+            "hook_event_name":"PostToolUse", "session_id":"session-123",
+            "cwd":s.home.path(), "tool_name":"Bash",
+            "tool_input":{"command":"make build"},
+            "tool_response":{"stdout":large_output(),"stderr":"","exit_code":0}
+        }),
+    );
+    assert_recorded(&s, "make build", &output);
+}
+
+#[test]
+fn claude_failure_hook_records_a_command_with_a_megabyte_error() {
+    let s = Sandbox::new();
+    let output = run_hook(
+        &s,
+        "hook-claude-code-failure",
+        &serde_json::json!({
+            "hook_event_name":"PostToolUseFailure", "session_id":"session-123",
+            "cwd":s.home.path(), "tool_name":"Bash",
+            "tool_input":{"command":"make test"},
+            "error":format!("Command exited with non-zero status code 2\n{}", large_output())
+        }),
+    );
+    assert_recorded(&s, "make test", &output);
+    let entry = s
+        .history()
+        .into_iter()
+        .find(|entry| entry["command"] == "make test")
+        .unwrap();
+    assert_eq!(entry["exit_code"], 2);
+}
+
+#[test]
+fn cursor_records_a_command_whose_output_is_megabytes() {
+    let s = Sandbox::new();
+    let output = run_hook(
+        &s,
+        "hook-cursor",
+        &serde_json::json!({
+            "command":"cargo build", "cwd":s.home.path(), "exit_code":0,
+            "conversation_id":"conversation-1", "output":large_output()
+        }),
+    );
+    assert_recorded(&s, "cargo build", &output);
+}
+
+#[test]
+fn codex_records_a_command_whose_tool_response_is_megabytes() {
+    let s = Sandbox::new();
+    let output = run_hook(
+        &s,
+        "hook-codex",
+        &tool(
+            "turn-one",
+            "cargo test",
+            &serde_json::json!({"exit_code":1,"output":large_output()}),
+        ),
+    );
+    assert_recorded(&s, "cargo test", &output);
+    let entry = s
+        .history()
+        .into_iter()
+        .find(|entry| entry["command"] == "cargo test")
+        .unwrap();
+    assert_eq!(entry["exit_code"], 1);
+}
+
+#[test]
+fn a_payload_beyond_the_hard_cap_still_records_a_command_that_precedes_the_output() {
+    let s = Sandbox::new();
+    // serde_json writes object keys in sorted order, so `tool_input` comes
+    // before `tool_response`, as in the agents' own payloads.
+    let output = run_hook(
+        &s,
+        "hook-claude-code",
+        &serde_json::json!({
+            "hook_event_name":"PostToolUse", "session_id":"session-123",
+            "cwd":s.home.path(), "tool_name":"Bash",
+            "tool_input":{"command":"cat huge.log"},
+            "tool_response":{"stdout":large_output().repeat(4)}
+        }),
+    );
+    assert_recorded(&s, "cat huge.log", &output);
+
+    let output = run_hook(
+        &s,
+        "hook-claude-code",
+        &serde_json::json!({
+            "hook_event_name":"PostToolUse", "session_id":"session-123",
+            "a_huge_field":large_output().repeat(4),
+            "cwd":s.home.path(), "tool_name":"Bash",
+            "tool_input":{"command":"never seen"}
+        }),
+    );
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("16 MB"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

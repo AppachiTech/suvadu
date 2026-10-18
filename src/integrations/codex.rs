@@ -1,7 +1,8 @@
 //! Codex hooks use Claude-compatible event names but have distinct identity and semantics.
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
+
+use super::hook_input::{only, whole, Field};
 
 use crate::{config, util};
 use serde_json::{json, Value};
@@ -9,18 +10,33 @@ use util::atomic_write;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+/// What the Codex hooks use; a large `tool_response` is skipped unread.
+const HOOK_FIELDS: &[Field] = &[
+    whole("hook_event_name"),
+    whole("session_id"),
+    whole("transcript_path"),
+    whole("turn_id"),
+    whole("prompt"),
+    whole("tool_name"),
+    whole("tool_use_id"),
+    whole("cwd"),
+    only(
+        "tool_input",
+        &[whole("command"), whole("cwd"), whole("workdir")],
+    ),
+    only("tool_response", &[whole("exit_code")]),
+];
+
 pub fn handle_hook() -> Result<()> {
-    let mut input = String::new();
-    std::io::stdin()
-        .take(super::MAX_HOOK_INPUT_BYTES + 1)
-        .read_to_string(&mut input)?;
-    if input.is_empty() {
+    let Some(payload) = super::hook_input::read(std::io::stdin().lock(), HOOK_FIELDS)? else {
         return Ok(());
-    }
-    if input.len() as u64 > super::MAX_HOOK_INPUT_BYTES {
-        return Err("Codex hook input exceeds 1 MB".into());
-    }
-    let event: Value = serde_json::from_str(&input)?;
+    };
+    payload.require(
+        payload.event["tool_input"]["command"].is_string()
+            || payload.event["prompt"].is_string()
+            || payload.event["transcript_path"].is_string(),
+    )?;
+    let event = payload.event;
     if terminal_hook(
         &event,
         |path, id| crate::commands::agent_session::import_native(path, Some(id)),
