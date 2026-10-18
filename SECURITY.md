@@ -234,17 +234,22 @@ a command**. That is all they do.
 
 Known limits of matching text, all verified by tests:
 
-- A rule anchored to the start of a command does not see the second command
-  of a chain: `git commit -m x && git push --force` is not flagged as a force
-  push.
+- A line is split into its commands first — on `;`, `&&`, `||`, `|`, `&`
+  and newlines outside quotes — and each is checked on its own, after wrappers
+  such as `sudo`, `env`, `VAR=x`, `nohup` or `xargs`. The text handed to
+  `bash -c`, `ssh host`, `eval`, `su -c`, `find -exec`, a shell's here-doc and
+  a `$(…)` substitution is checked as a command line too. What the splitter
+  cannot see stays unseen: an alias or function defined earlier, a command
+  held in a variable, the contents of a script file.
 - A command built at runtime (`eval "$CMD"`, a decoded payload, a
   substitution) can only be reported as indirection, never as what it will
   become.
-- Quoted text handed to a program that merely searches, prints or records
-  strings (`grep`, `rg`, `git commit -m`, `git log`, `man`, `history`) is
-  treated as a mention, not an action — but only when the command line chains
-  nothing. `bash -c "rm -rf /"`, `ssh host 'rm -rf /srv'` and
-  `psql -c "drop table users"` are still flagged.
+- The arguments of a program that merely searches, prints or records strings
+  (`grep`, `rg`, `echo`, `printf`, `alias`, `git commit -m`, `git log`,
+  `man`, `history`) are treated as a mention, not an action. Each command of
+  a chain is judged on its own, so in `grep -r "rm -rf" . && rm -rf build`
+  the second command is still flagged, as are `bash -c "rm -rf /"`,
+  `ssh host 'rm -rf /srv'` and `psql -c "drop table users"`.
 
 #### Custom rules and overrides
 

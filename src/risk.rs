@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+use std::ops::Range;
 use std::sync::{LazyLock, OnceLock};
 
 use regex::Regex;
@@ -162,12 +164,27 @@ impl std::fmt::Display for RiskLevel {
     }
 }
 
+/// Where in a command line a rule may match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    /// At the start of a simple command: the first word of every command in
+    /// the line, after wrappers such as `sudo`, `env`, `VAR=x` or `xargs`.
+    Command,
+    /// Anywhere in a command's text, unless the command only searches,
+    /// prints or records its arguments (`grep "drop table"` is a mention).
+    Anywhere,
+    /// Like `Command`, but only inside a `$(…)` or backtick substitution,
+    /// which runs before the command that receives its output.
+    Substitution,
+}
+
 /// A single risk pattern definition
 struct RiskPattern {
     regex: Regex,
     level: RiskLevel,
     category: &'static str,
     description: &'static str,
+    scope: Scope,
 }
 
 /// How much the matched text actually settles.
@@ -267,20 +284,26 @@ pub struct FailedCommand {
 
 /// Build the default risk pattern set (compiled once, reused)
 fn build_patterns() -> Vec<RiskPattern> {
-    let mut defs = Vec::with_capacity(40);
-    defs.extend(critical_pattern_defs());
-    defs.extend(high_pattern_defs());
-    defs.extend(obfuscation_pattern_defs());
-    defs.extend(medium_pattern_defs());
-    defs.extend(low_pattern_defs());
+    let scoped = [
+        (Scope::Command, critical_pattern_defs()),
+        (Scope::Anywhere, anywhere_pattern_defs()),
+        (Scope::Command, high_pattern_defs()),
+        (Scope::Command, obfuscation_pattern_defs()),
+        (Scope::Substitution, substitution_pattern_defs()),
+        (Scope::Command, medium_pattern_defs()),
+        (Scope::Command, low_pattern_defs()),
+    ];
 
-    defs.into_iter()
-        .filter_map(|(pat, level, cat, desc)| match Regex::new(pat) {
+    scoped
+        .into_iter()
+        .flat_map(|(scope, defs)| defs.into_iter().map(move |def| (scope, def)))
+        .filter_map(|(scope, (pat, level, cat, desc))| match Regex::new(pat) {
             Ok(regex) => Some(RiskPattern {
                 regex,
                 level,
                 category: cat,
                 description: desc,
+                scope,
             }),
             Err(e) => {
                 eprintln!("suvadu: risk pattern failed to compile: {pat}: {e}");
@@ -292,14 +315,13 @@ fn build_patterns() -> Vec<RiskPattern> {
 
 type PatternDef = (&'static str, RiskLevel, &'static str, &'static str);
 
+/// Command rules are matched against the text from the start of a command
+/// to the end of that command, so `^` means "this program runs" and a
+/// pattern cannot reach into the next command of the line.
 fn critical_pattern_defs() -> Vec<PatternDef> {
     vec![
         (
-            // A quote counts as a boundary: `bash -c "rm -rf /"` and
-            // `ssh host 'rm -rf /srv'` really do delete, and a quote is the
-            // usual way to wrap them. Quoted *mentions* (`grep "rm -rf"`)
-            // are suppressed separately, by `is_quoted_mention`.
-            r#"(^|\s|["'`(])rm\s+.*(-rf|--recursive|-r\s+-f|-f\s+-r)"#,
+            r"^rm\s+.*(-rf|--recursive|-r\s+-f|-f\s+-r)",
             RiskLevel::Critical,
             "destructive",
             "Recursive delete",
@@ -317,18 +339,6 @@ fn critical_pattern_defs() -> Vec<PatternDef> {
             "Hard reset (discards changes)",
         ),
         (
-            r"(?i)drop\s+(table|database|schema)",
-            RiskLevel::Critical,
-            "destructive",
-            "SQL drop statement",
-        ),
-        (
-            r">\s*/dev/sd",
-            RiskLevel::Critical,
-            "destructive",
-            "Write to block device",
-        ),
-        (
             r"^mkfs\.",
             RiskLevel::Critical,
             "destructive",
@@ -341,6 +351,17 @@ fn critical_pattern_defs() -> Vec<PatternDef> {
             "Raw disk write",
         ),
     ]
+}
+
+/// Text that does harm wherever it sits in a command — typically SQL handed
+/// to a database client, as in `psql -c "drop table users"`.
+fn anywhere_pattern_defs() -> Vec<PatternDef> {
+    vec![(
+        r"(?i)drop\s+(table|database|schema)",
+        RiskLevel::Critical,
+        "destructive",
+        "SQL drop statement",
+    )]
 }
 
 fn high_pattern_defs() -> Vec<PatternDef> {
@@ -394,19 +415,15 @@ fn high_pattern_defs() -> Vec<PatternDef> {
             "Make executable",
         ),
         (
-            r"curl\s+.*\|\s*(sh|bash|zsh)",
+            // `bash <(curl …)`, `sh -c "$(curl …)"`, `source <(wget …)`:
+            // the fetched text is run without ever touching a pipe.
+            r#"^(?:sh|bash|zsh|dash|ksh|fish|source|\.|python[\d.]*|perl|ruby|node)\s+(?:.*\s)?["']?(?:<\(|\$\(|`)\s*(?:curl|wget)\b"#,
             RiskLevel::High,
             "script-exec",
-            "Pipe curl to shell",
+            "Run a fetched script",
         ),
         (
-            r"wget\s+.*\|\s*(sh|bash|zsh)",
-            RiskLevel::High,
-            "script-exec",
-            "Pipe wget to shell",
-        ),
-        (
-            r"\./[^\s]+\.sh\b",
+            r"^\./[^\s]+\.sh\b",
             RiskLevel::High,
             "script-exec",
             "Execute shell script",
@@ -449,39 +466,36 @@ fn high_pattern_defs() -> Vec<PatternDef> {
 
 /// Obfuscation/indirection: regexes match literal command text, so anything
 /// that constructs or hides the real command at runtime defeats every
-/// pattern above it. These don't close that gap (no AST here), but they
-/// flag the indirection itself as worth a second look — the same principle
-/// as flagging `curl | sh` without needing to know what the downloaded
-/// script does.
+/// pattern above it. These don't close that gap, but they flag the
+/// indirection itself as worth a second look — the same principle as
+/// flagging `curl | sh` without needing to know what the downloaded script
+/// does. Decoding into a shell (`base64 -d | sh`) is caught where pipelines
+/// are checked, in `Finder::check_pipe_into_shell`.
 fn obfuscation_pattern_defs() -> Vec<PatternDef> {
-    vec![
-        (
-            r"(?i)base64\s+(-d|--decode|-D)\b.*\|\s*(sh|bash|zsh)\b",
-            RiskLevel::High,
-            "obfuscation",
-            "Decode base64 and pipe to a shell",
-        ),
-        (
-            r"(^|\s)eval\s+\S",
-            RiskLevel::High,
-            "obfuscation",
-            "eval executes a dynamically-built command — its real contents \
-             can't be checked from the command text alone",
-        ),
-        (
-            r"\$\([^)]*\b(rm\s+-rf|curl|wget|dd\s|mkfs|base64|eval)\b[^)]*\)",
-            RiskLevel::High,
-            "obfuscation",
-            "Command substitution invokes a network/destructive command — \
-             it runs before the outer command does",
-        ),
-    ]
+    vec![(
+        r"^eval\s+\S",
+        RiskLevel::High,
+        "obfuscation",
+        "eval executes a dynamically-built command — its real contents \
+         can't be checked from the command text alone",
+    )]
+}
+
+/// Matched only against commands that run inside `$(…)` or backticks.
+fn substitution_pattern_defs() -> Vec<PatternDef> {
+    vec![(
+        r"^(?:rm\s+-rf|curl|wget|dd|mkfs|base64|eval)\b",
+        RiskLevel::High,
+        "obfuscation",
+        "Command substitution invokes a network/destructive command — \
+         it runs before the outer command does",
+    )]
 }
 
 fn medium_pattern_defs() -> Vec<PatternDef> {
     vec![
         (
-            r"^sudo\s+",
+            r"^(sudo|doas)\s+",
             RiskLevel::Medium,
             "privilege",
             "Privilege escalation",
@@ -537,9 +551,16 @@ fn low_pattern_defs() -> Vec<PatternDef> {
     ]
 }
 
+/// Device nodes whose contents are a whole disk or partition.
+static BLOCK_DEVICE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^/dev/(?:sd[a-z]|hd[a-z]|vd[a-z]|xvd[a-z]|nvme\d|mmcblk\d|r?disk\d|disk/|md\d|dm-\d|mapper/|loop\d)",
+    )
+    .expect("block device pattern compiles")
+});
+
 /// Assess the risk level of a single command
 pub fn assess_risk(command: &str) -> Option<RiskAssessment> {
-    let patterns = &*RISK_PATTERNS;
     let cmd = command.trim();
 
     // Skip commands that don't actually execute the matched operation
@@ -552,136 +573,1144 @@ pub fn assess_risk(command: &str) -> Option<RiskAssessment> {
         return None;
     }
 
-    // Find the highest-risk matching pattern across both the built-in set
-    // and any user-configured `risk_extra_patterns` — a user pattern can
-    // win (or lose to) a built-in one purely on severity, same as two
-    // built-ins competing today.
-    let mut best: Option<RiskAssessment> = None;
+    // Find the highest-risk match across every command of the line, for the
+    // built-in set and any user-configured `risk_extra_patterns` alike — a
+    // user pattern can win (or lose to) a built-in one purely on severity.
+    let mut finder = Finder::new(
+        RISK_EXTRA_PATTERNS
+            .get()
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+    );
+    finder.check_source(cmd, 0, false);
+    finder.check_extra_patterns_on_line(cmd);
+    finder.verdict()
+}
 
-    for p in patterns {
-        let Some(m) = p.regex.find(cmd) else { continue };
-        if is_quoted_mention(cmd, m.range()) {
-            continue;
+// ── Checking a command line ─────────────────────────────────────────
+
+/// How many levels of `bash -c '…'`, `ssh host '…'`, `$(…)` and the like
+/// are unpacked. Real commands rarely nest more than two deep.
+const MAX_DEPTH: u8 = 6;
+
+/// Shells: given `-c`, they run their next argument as a command line, and
+/// given no script they run whatever arrives on stdin.
+const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish"];
+
+/// Walks a command line and keeps the most severe match.
+struct Finder<'p> {
+    extra: &'p [ExtraRiskPattern],
+    builtin: Option<RiskAssessment>,
+    custom: Option<RiskAssessment>,
+    /// Byte ranges of the top-level line that a program only reads as text:
+    /// the arguments of `grep`, `echo`, `git commit -m` and so on.
+    mentions: Vec<Range<usize>>,
+}
+
+impl<'p> Finder<'p> {
+    const fn new(extra: &'p [ExtraRiskPattern]) -> Self {
+        Self {
+            extra,
+            builtin: None,
+            custom: None,
+            mentions: Vec::new(),
         }
-        if best.as_ref().is_none_or(|current| p.level > current.level) {
-            best = Some(RiskAssessment {
-                level: p.level,
-                category: std::borrow::Cow::Borrowed(p.category),
-                description: std::borrow::Cow::Borrowed(p.description),
-                evidence: evidence_from(cmd, m.range()),
-                certainty: certainty_for(p.category),
+    }
+
+    /// The most severe match; on a tie the built-in rule is the one reported.
+    fn verdict(self) -> Option<RiskAssessment> {
+        match (self.builtin, self.custom) {
+            (Some(builtin), Some(custom)) if custom.level > builtin.level => Some(custom),
+            (Some(builtin), _) => Some(builtin),
+            (None, custom) => custom,
+        }
+    }
+
+    fn offer(&mut self, rule: Rule, src: &str, span: Range<usize>) {
+        let (level, category, description) = rule;
+        if self
+            .builtin
+            .as_ref()
+            .is_none_or(|current| level > current.level)
+        {
+            self.builtin = Some(RiskAssessment {
+                level,
+                category: Cow::Borrowed(category),
+                description: Cow::Borrowed(description),
+                evidence: evidence_from(src, span),
+                certainty: certainty_for(category),
             });
         }
     }
 
-    if let Some(extra) = RISK_EXTRA_PATTERNS.get() {
-        for p in extra {
-            let Some(m) = p.regex.find(cmd) else { continue };
-            if is_quoted_mention(cmd, m.range()) {
+    fn offer_custom(&mut self, pattern: &ExtraRiskPattern, src: &str, span: Range<usize>) {
+        if self
+            .custom
+            .as_ref()
+            .is_none_or(|current| pattern.level > current.level)
+        {
+            self.custom = Some(RiskAssessment {
+                level: pattern.level,
+                category: Cow::Borrowed("custom"),
+                description: Cow::Owned(pattern.description.clone()),
+                evidence: evidence_from(src, span),
+                // A user-supplied regex says what its author meant it to
+                // say; suvadu cannot vouch for what the match implies.
+                certainty: Certainty::Unresolved,
+            });
+        }
+    }
+
+    /// User patterns are documented as matching the raw command line, so
+    /// they also see the whole line — except text that is only mentioned.
+    fn check_extra_patterns_on_line(&mut self, cmd: &str) {
+        let extra = self.extra;
+        for pattern in extra {
+            let Some(m) = pattern.regex.find(cmd) else {
+                continue;
+            };
+            let mentioned = self
+                .mentions
+                .iter()
+                .any(|r| r.start <= m.start() && m.end() <= r.end);
+            if !mentioned {
+                self.offer_custom(pattern, cmd, m.range());
+            }
+        }
+    }
+
+    /// Check every command in `src`. `depth` counts how many levels of
+    /// unpacking `src` came from; `substituted` marks the body of `$(…)`.
+    fn check_source(&mut self, src: &str, depth: u8, substituted: bool) {
+        let line = split_commands(src);
+        let commands: Vec<SimpleCommand<'_>> = line
+            .segments
+            .iter()
+            .map(|segment| SimpleCommand::new(src, segment))
+            .collect();
+        for (i, command) in commands.iter().enumerate() {
+            self.check_command(src, command, depth, substituted);
+            self.check_pipe_into_shell(src, &commands, i);
+        }
+        if depth < MAX_DEPTH {
+            for range in line.substitutions {
+                if let Some(body) = src.get(range) {
+                    self.check_source(body, depth + 1, true);
+                }
+            }
+        }
+    }
+
+    fn check_command(
+        &mut self,
+        src: &str,
+        command: &SimpleCommand<'_>,
+        depth: u8,
+        substituted: bool,
+    ) {
+        let segment = command.segment;
+        let text_only = command.only_reads_text();
+        if text_only && depth == 0 {
+            self.mentions
+                .extend(command.argument_words().iter().map(|w| w.start..w.end));
+        }
+
+        let mut anchors = command.anchors.clone();
+        if !text_only {
+            anchors.extend(command.embedded_destructive_anchors(src));
+        }
+        let extra = self.extra;
+        for &anchor in &anchors {
+            let Some(tail) = src.get(anchor..segment.end) else {
+                continue;
+            };
+            for p in RISK_PATTERNS.iter() {
+                let in_scope =
+                    p.scope == Scope::Command || (substituted && p.scope == Scope::Substitution);
+                if !in_scope {
+                    continue;
+                }
+                if let Some(m) = p.regex.find(tail) {
+                    let span = anchor + m.start()..anchor + m.end();
+                    self.offer((p.level, p.category, p.description), src, span);
+                }
+            }
+            for pattern in extra {
+                if let Some(m) = pattern.regex.find(tail) {
+                    self.offer_custom(pattern, src, anchor + m.start()..anchor + m.end());
+                }
+            }
+        }
+
+        if !text_only {
+            // A here-doc is the program's input: SQL fed to `psql` counts,
+            // a file written by `cat` does not, and a shell's is checked
+            // as a command line of its own (see `payloads`).
+            let heredocs: &[Range<usize>] =
+                if command.is_shell() || matches!(command.name(), "cat" | "tee") {
+                    &[]
+                } else {
+                    &segment.heredocs
+                };
+            let bodies =
+                std::iter::once(segment.start..segment.end).chain(heredocs.iter().cloned());
+            for body in bodies {
+                let Some(text) = src.get(body.clone()) else {
+                    continue;
+                };
+                for p in RISK_PATTERNS.iter().filter(|p| p.scope == Scope::Anywhere) {
+                    if let Some(m) = p.regex.find(text) {
+                        let span = body.start + m.start()..body.start + m.end();
+                        self.offer((p.level, p.category, p.description), src, span);
+                    }
+                }
+            }
+        }
+
+        self.check_redirects(src, command);
+
+        if depth < MAX_DEPTH && !text_only {
+            for payload in command.payloads(src) {
+                self.check_source(&payload, depth + 1, false);
+            }
+        }
+    }
+
+    fn check_redirects(&mut self, src: &str, command: &SimpleCommand<'_>) {
+        for redirect in &command.segment.redirects {
+            let target = unquote(
+                src.get(redirect.target.start..redirect.target.end)
+                    .unwrap_or_default(),
+            );
+            let writes = match redirect.kind {
+                RedirectKind::Write | RedirectKind::Append => true,
+                // `>&2` duplicates a descriptor; `>&file` writes to a file.
+                RedirectKind::Dup => {
+                    !target.is_empty()
+                        && target != "-"
+                        && !target.bytes().all(|b| b.is_ascii_digit())
+                }
+                RedirectKind::Input | RedirectKind::HereDoc | RedirectKind::HereString => false,
+            };
+            if writes && BLOCK_DEVICE.is_match(&target) {
+                self.offer(
+                    (RiskLevel::Critical, "destructive", "Write to block device"),
+                    src,
+                    redirect.start..redirect.target.end,
+                );
+            }
+        }
+    }
+
+    /// `… | sh`: whatever reaches the shell's stdin is run. How bad that is
+    /// depends on where it came from, anywhere upstream in the pipeline.
+    fn check_pipe_into_shell(&mut self, src: &str, commands: &[SimpleCommand<'_>], i: usize) {
+        let sink = &commands[i];
+        if i == 0 || !sink.segment.piped || !sink.reads_script_from_stdin() {
+            return;
+        }
+        let mut first = i;
+        while first > 0 && commands[first].segment.piped {
+            first -= 1;
+        }
+        let fallback = (
+            (RiskLevel::Medium, "script-exec", "Pipe into a shell"),
+            commands[i - 1].segment.start,
+        );
+        let (rule, from) = commands[first..i]
+            .iter()
+            .filter_map(|upstream| {
+                upstream
+                    .feeds_shell_rule()
+                    .map(|r| (r, upstream.segment.start))
+            })
+            .fold(fallback, |best, candidate| {
+                if candidate.0 .0 > best.0 .0 {
+                    candidate
+                } else {
+                    best
+                }
+            });
+        self.offer(rule, src, from..sink.segment.end);
+    }
+}
+
+/// Severity, category and description of a finding.
+type Rule = (RiskLevel, &'static str, &'static str);
+
+/// One simple command of a line, with its words as the program receives them.
+struct SimpleCommand<'s> {
+    segment: &'s Segment,
+    /// Each word with quotes removed and escapes resolved.
+    words: Vec<String>,
+    /// Byte offsets where a command starts: the program itself and every
+    /// wrapper in front of it (`sudo`, `env`, `nohup` …).
+    anchors: Vec<usize>,
+    /// Index into `words` of the program, once wrappers are skipped.
+    program: Option<usize>,
+}
+
+impl<'s> SimpleCommand<'s> {
+    fn new(src: &str, segment: &'s Segment) -> Self {
+        let words: Vec<String> = segment
+            .words
+            .iter()
+            .map(|w| unquote(src.get(w.start..w.end).unwrap_or_default()))
+            .collect();
+        let (anchors, program) = find_program(src, &segment.words, &words);
+        Self {
+            segment,
+            words,
+            anchors,
+            program,
+        }
+    }
+
+    fn name(&self) -> &str {
+        self.program.map_or("", |i| command_name(&self.words[i]))
+    }
+
+    fn args(&self) -> &[String] {
+        self.program.map_or(&[][..], |i| &self.words[i + 1..])
+    }
+
+    fn argument_words(&self) -> &[Word] {
+        self.program
+            .map_or(&[][..], |i| &self.segment.words[i + 1..])
+    }
+
+    fn is_shell(&self) -> bool {
+        SHELLS.contains(&self.name())
+    }
+
+    /// Programs whose arguments are text to search for, print or record —
+    /// not text to run. `git commit -m "drop table users"` writes a message;
+    /// it does not drop a table.
+    fn only_reads_text(&self) -> bool {
+        const PROGRAMS: &[&str] = &[
+            "grep", "egrep", "fgrep", "rg", "ag", "ack", "man", "history", "echo", "printf",
+            "alias", ":",
+        ];
+        let name = self.name();
+        PROGRAMS.contains(&name)
+            || (name == "git"
+                && matches!(git_subcommand(self.args()), Some("grep" | "commit" | "log")))
+    }
+
+    /// `rm`, `dd` and other destructive programs passed on as arguments to
+    /// a program this file doesn't know as a wrapper (`chroot /mnt rm -rf /`,
+    /// `kubectl exec pod -- rm -rf /data`). `git rm` is left alone: it
+    /// removes tracked files git can restore.
+    fn embedded_destructive_anchors(&self, src: &str) -> Vec<usize> {
+        const PROGRAMS: &[&str] = &["rm", "dd", "shred", "wipefs", "mke2fs"];
+        let mut anchors = Vec::new();
+        let Some(program) = self.program else {
+            return anchors;
+        };
+        if self.name() == "git" {
+            return anchors;
+        }
+        for (word, text) in self.segment.words.iter().zip(&self.words).skip(program + 1) {
+            let name = command_name(text);
+            if PROGRAMS.contains(&name) || name.starts_with("mkfs") {
+                push_anchor(&mut anchors, src, *word);
+            }
+        }
+        anchors
+    }
+
+    /// Whether this command, as the end of a pipe, runs its stdin as code.
+    fn reads_script_from_stdin(&self) -> bool {
+        let name = self.name();
+        let shell = self.is_shell();
+        let interpreter = name.starts_with("python") || matches!(name, "perl" | "ruby" | "node");
+        if !shell && !interpreter {
+            return false;
+        }
+        let args = self.args();
+        let mut i = 0;
+        while let Some(arg) = args.get(i) {
+            i += 1;
+            if arg == "-" || arg == "-s" {
+                return true;
+            }
+            if shell && (arg == "-o" || arg == "+o") {
+                i += 1;
                 continue;
             }
-            if best.as_ref().is_none_or(|current| p.level > current.level) {
-                best = Some(RiskAssessment {
-                    level: p.level,
-                    category: std::borrow::Cow::Borrowed("custom"),
-                    description: std::borrow::Cow::Owned(p.description.clone()),
-                    evidence: evidence_from(cmd, m.range()),
-                    // A user-supplied regex says what its author meant it to
-                    // say; suvadu cannot vouch for what the match implies.
-                    certainty: Certainty::Unresolved,
-                });
+            if let Some(flags) = arg.strip_prefix('-') {
+                // `-c CMD`, `python -m mod`, `perl -e CODE`: stdin is data.
+                let runs_argument = if shell {
+                    !flags.starts_with('-') && flags.contains('c')
+                } else {
+                    flags.contains(['c', 'm', 'e', 'p'])
+                };
+                if runs_argument {
+                    return false;
+                }
+                continue;
             }
+            if shell && arg.starts_with('+') {
+                continue;
+            }
+            // A script file: stdin is that script's input, not code.
+            return false;
+        }
+        true
+    }
+
+    /// What this command contributes when it feeds a shell through a pipe.
+    fn feeds_shell_rule(&self) -> Option<Rule> {
+        match self.name() {
+            "curl" => Some((RiskLevel::High, "script-exec", "Pipe curl to shell")),
+            "wget" => Some((RiskLevel::High, "script-exec", "Pipe wget to shell")),
+            "base64" if self.args().iter().any(|a| is_decode_flag(a)) => Some((
+                RiskLevel::High,
+                "obfuscation",
+                "Decode base64 and pipe to a shell",
+            )),
+            _ => None,
         }
     }
 
-    best
-}
-
-/// Programs whose arguments are text to search for, print or record — not
-/// text to run. `git commit -m "drop table users"` writes a message; it does
-/// not drop a table.
-fn is_text_only_program(cmd: &str) -> bool {
-    const PROGRAMS: &[&str] = &[
-        "grep ",
-        "egrep ",
-        "fgrep ",
-        "rg ",
-        "ag ",
-        "ack ",
-        "git grep ",
-        "git commit ",
-        "git log ",
-        "man ",
-        "history ",
-    ];
-    PROGRAMS.iter().any(|p| cmd.starts_with(p))
-}
-
-/// Byte ranges of `cmd` that sit inside single or double quotes.
-fn quoted_spans(cmd: &str) -> Vec<std::ops::Range<usize>> {
-    let bytes = cmd.as_bytes();
-    let mut spans = Vec::new();
-    let mut open: Option<(u8, usize)> = None;
-    for (i, &b) in bytes.iter().enumerate() {
-        match open {
-            Some((quote, start)) => {
-                if b == quote {
-                    spans.push(start..i);
-                    open = None;
-                }
-            }
-            None => {
-                if b == b'\'' || b == b'"' {
-                    open = Some((b, i + 1));
+    /// Command lines this command hands to a shell of its own: `bash -c`,
+    /// `ssh host …`, `eval …`, `su -c`, `find -exec`, and the here-doc or
+    /// here-string a shell reads.
+    fn payloads(&self, src: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let Some(program) = self.program else {
+            return out;
+        };
+        let words = &self.words;
+        // The program itself or any shell later in the line
+        // (`docker exec box sh -c …`, `xargs bash -c …`).
+        for k in program..words.len() {
+            if SHELLS.contains(&command_name(&words[k])) {
+                if let Some(payload) = shell_payload(words, k) {
+                    out.push(payload.clone());
                 }
             }
         }
+        let args = &words[program + 1..];
+        match self.name() {
+            "eval" if !args.is_empty() => out.push(args.join(" ")),
+            "su" => out.extend(su_payload(args)),
+            "ssh" => out.extend(ssh_payload(args)),
+            "find" => out.extend(find_exec_payloads(args)),
+            _ => {}
+        }
+        if self.is_shell() {
+            for redirect in &self.segment.redirects {
+                if redirect.kind == RedirectKind::HereString {
+                    out.push(unquote(
+                        src.get(redirect.target.start..redirect.target.end)
+                            .unwrap_or_default(),
+                    ));
+                }
+            }
+            for body in &self.segment.heredocs {
+                out.push(src.get(body.clone()).unwrap_or_default().to_string());
+            }
+        }
+        out
     }
-    spans
 }
 
-/// Whether a matched span is only a *mention* of a dangerous command: quoted
-/// text handed to a program that reads or records strings, in a command line
-/// that chains nothing.
-///
-/// Deliberately narrow. `bash -c "rm -rf /"`, `psql -c "drop table users"`
-/// and `grep foo . ; rm -rf /tmp` all execute their quoted text, so none of
-/// them qualify: the program must be one that cannot run its argument, and a
-/// single `&&`, `|`, `;` or `$(…)` anywhere disqualifies the whole line.
-fn is_quoted_mention(cmd: &str, span: std::ops::Range<usize>) -> bool {
-    if !is_text_only_program(cmd) || has_shell_chaining(cmd) {
+fn is_decode_flag(arg: &str) -> bool {
+    arg == "--decode"
+        || arg == "-D"
+        || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('d'))
+}
+
+/// The command line after a shell's `-c` (`bash -lc 'cmd'`), if any.
+fn shell_payload(words: &[String], shell: usize) -> Option<&String> {
+    let mut j = shell + 1;
+    while let Some(arg) = words.get(j) {
+        if arg == "-o" || arg == "+o" {
+            j += 2;
+            continue;
+        }
+        if let Some(flags) = arg.strip_prefix('-') {
+            if !flags.starts_with('-') && flags.contains('c') {
+                return words.get(j + 1);
+            }
+            j += 1;
+            continue;
+        }
+        return None;
+    }
+    None
+}
+
+fn su_payload(args: &[String]) -> Option<String> {
+    for (i, arg) in args.iter().enumerate() {
+        if arg == "-c" || arg == "--command" {
+            return args.get(i + 1).cloned();
+        }
+        if let Some(payload) = arg.strip_prefix("--command=") {
+            return Some(payload.to_string());
+        }
+    }
+    None
+}
+
+/// The remote command of `ssh [options] host command…`, which the remote
+/// shell receives as its arguments joined by spaces.
+fn ssh_payload(args: &[String]) -> Option<String> {
+    const TAKES_VALUE: &[u8] = b"BbcDEeFIiJLlmOoPpQRSWw";
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        if !arg.starts_with('-') {
+            break;
+        }
+        i += 1;
+        if arg == "--" {
+            break;
+        }
+        if arg.len() == 2 && TAKES_VALUE.contains(&arg.as_bytes()[1]) {
+            i += 1;
+        }
+    }
+    let remote = args.get(i + 1..)?;
+    (!remote.is_empty()).then(|| remote.join(" "))
+}
+
+/// The commands `find` runs for each match: `-exec rm {} \;` and friends.
+fn find_exec_payloads(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if matches!(args[i].as_str(), "-exec" | "-execdir" | "-ok" | "-okdir") {
+            let end = (i + 1..args.len())
+                .find(|&e| args[e] == ";" || args[e] == "+")
+                .unwrap_or(args.len());
+            if end > i + 1 {
+                out.push(args[i + 1..end].join(" "));
+            }
+            i = end;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The first non-option argument of `git`: its subcommand.
+fn git_subcommand(args: &[String]) -> Option<&str> {
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        match arg.as_str() {
+            "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" => i += 2,
+            a if a.starts_with('-') => i += 1,
+            a => return Some(a),
+        }
+    }
+    None
+}
+
+/// A program's name as written, minus a leading backslash (which only
+/// bypasses aliases) and any directory (`/bin/rm` is `rm`).
+fn command_name(word: &str) -> &str {
+    let word = word.strip_prefix('\\').unwrap_or(word);
+    if word.starts_with('/') {
+        word.rsplit('/').next().unwrap_or(word)
+    } else {
+        word
+    }
+}
+
+/// `NAME=value` (or `NAME+=value`) in command position: an assignment.
+fn is_assignment(word: &str) -> bool {
+    let Some(eq) = word.find('=') else {
         return false;
-    }
-    // A pattern may consume its left boundary (the quote or the space before
-    // the command word), which would place the span just outside the quoted
-    // range it actually sits in.
-    let matched = cmd.get(span.clone()).unwrap_or_default();
-    let trimmed = matched.trim_start_matches(['"', '\'', '`', '(', ' ', '\t']);
-    let start = span.start + (matched.len() - trimmed.len());
-    quoted_spans(cmd)
-        .into_iter()
-        .any(|quoted| quoted.start <= start && span.end <= quoted.end)
+    };
+    let name = word[..eq].strip_suffix('+').unwrap_or(&word[..eq]);
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Returns true if the command doesn't actually execute the matched operation.
-/// Catches false positives like comments, echo output, and alias definitions.
+/// Record where the command in `word` starts, and where its bare name
+/// starts if it is written as `\rm` or `/bin/rm`.
+fn push_anchor(anchors: &mut Vec<usize>, src: &str, word: Word) {
+    anchors.push(word.start);
+    let raw = src.get(word.start..word.end).unwrap_or_default();
+    if raw.starts_with('\\') {
+        anchors.push(word.start + 1);
+    } else if raw.starts_with('/') {
+        if let Some(slash) = raw.rfind('/') {
+            anchors.push(word.start + slash + 1);
+        }
+    }
+}
+
+/// Skip a wrapper's options starting at `i`. `with_value` lists the short
+/// options that take a value (`-u root`), `long_with_value` the long ones.
+fn skip_options(
+    words: &[String],
+    mut i: usize,
+    with_value: &[u8],
+    long_with_value: &[&str],
+) -> usize {
+    while let Some(arg) = words.get(i) {
+        if arg == "--" {
+            return i + 1;
+        }
+        if arg.starts_with("--") {
+            let takes_value = !arg.contains('=') && long_with_value.contains(&arg.as_str());
+            i += if takes_value { 2 } else { 1 };
+            continue;
+        }
+        if arg.len() > 1 && arg.starts_with('-') {
+            let flags = &arg.as_bytes()[1..];
+            // `-u root` takes the next word; `-uroot` carries its value.
+            let last_takes_value = flags
+                .iter()
+                .position(|f| with_value.contains(f))
+                .is_some_and(|p| p + 1 == flags.len());
+            i += if last_takes_value { 2 } else { 1 };
+            continue;
+        }
+        break;
+    }
+    i
+}
+
+/// Find the program a simple command runs, looking through assignments,
+/// shell keywords and wrappers that run the rest of the line as a command.
+/// Returns every command start seen on the way and the program's index.
+fn find_program(src: &str, raw: &[Word], words: &[String]) -> (Vec<usize>, Option<usize>) {
+    const KEYWORDS: &[&str] = &[
+        "if", "then", "else", "elif", "do", "while", "until", "!", "{",
+    ];
+    let mut anchors = Vec::new();
+    let mut i = 0;
+    loop {
+        while words
+            .get(i)
+            .is_some_and(|w| is_assignment(w) || KEYWORDS.contains(&w.as_str()))
+        {
+            i += 1;
+        }
+        let Some(word) = words.get(i) else {
+            return (anchors, None);
+        };
+        push_anchor(&mut anchors, src, raw[i]);
+        i = match command_name(word) {
+            "sudo" => skip_options(
+                words,
+                i + 1,
+                b"ugpChDrtUTR",
+                &[
+                    "--user",
+                    "--group",
+                    "--prompt",
+                    "--close-from",
+                    "--host",
+                    "--chdir",
+                    "--role",
+                    "--type",
+                    "--other-user",
+                    "--command-timeout",
+                    "--chroot",
+                ],
+            ),
+            "doas" => skip_options(words, i + 1, b"uC", &[]),
+            "env" => skip_options(
+                words,
+                i + 1,
+                b"uCSP",
+                &["--unset", "--chdir", "--split-string"],
+            ),
+            "command" => {
+                // `command -v rm` looks a program up; it runs nothing.
+                if words.get(i + 1).is_some_and(|a| a == "-v" || a == "-V") {
+                    return (anchors, None);
+                }
+                skip_options(words, i + 1, b"", &[])
+            }
+            "builtin" | "nohup" | "busybox" => i + 1,
+            "exec" => skip_options(words, i + 1, b"a", &[]),
+            "time" => skip_options(words, i + 1, b"fo", &["--format", "--output"]),
+            "nice" => skip_options(words, i + 1, b"n", &["--adjustment"]),
+            // `timeout [options] DURATION command…`
+            "timeout" => skip_options(words, i + 1, b"sk", &["--signal", "--kill-after"]) + 1,
+            "xargs" => skip_options(
+                words,
+                i + 1,
+                b"adEILnPs",
+                &[
+                    "--arg-file",
+                    "--delimiter",
+                    "--max-args",
+                    "--max-procs",
+                    "--max-chars",
+                    "--max-lines",
+                ],
+            ),
+            "stdbuf" => skip_options(words, i + 1, b"ioe", &[]),
+            _ => return (anchors, Some(i)),
+        };
+    }
+}
+
+// ── Splitting a command line into simple commands ──────────────────
+
+/// A word of a command, as a byte range of the text it came from.
+#[derive(Debug, Clone, Copy)]
+struct Word {
+    start: usize,
+    end: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedirectKind {
+    /// `>`, `>|`, `&>`
+    Write,
+    /// `>>`, `&>>`
+    Append,
+    /// `<`, `<>`, `<&`
+    Input,
+    /// `>&` — a descriptor (`2>&1`) or, followed by a name, a file.
+    Dup,
+    /// `<<`, `<<-`
+    HereDoc,
+    /// `<<<`
+    HereString,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Redirect {
+    /// Where the operator (or its descriptor number) starts.
+    start: usize,
+    kind: RedirectKind,
+    target: Word,
+}
+
+/// One simple command: the text between two control operators.
+#[derive(Debug, Default)]
+struct Segment {
+    start: usize,
+    end: usize,
+    words: Vec<Word>,
+    redirects: Vec<Redirect>,
+    /// Here-document bodies this command reads.
+    heredocs: Vec<Range<usize>>,
+    /// Joined to the previous command by `|` or `|&`.
+    piped: bool,
+}
+
+#[derive(Debug, Default)]
+struct SplitLine {
+    segments: Vec<Segment>,
+    /// Bodies of `$(…)`, backticks, `<(…)` and `>(…)` at this level.
+    substitutions: Vec<Range<usize>>,
+}
+
+/// Redirection operators, longest first.
+const REDIRECT_OPERATORS: &[(&[u8], RedirectKind)] = &[
+    (b"<<<", RedirectKind::HereString),
+    (b"<<-", RedirectKind::HereDoc),
+    (b"&>>", RedirectKind::Append),
+    (b"<<", RedirectKind::HereDoc),
+    (b"&>", RedirectKind::Write),
+    (b">>", RedirectKind::Append),
+    (b">|", RedirectKind::Write),
+    (b">&", RedirectKind::Dup),
+    (b"<&", RedirectKind::Input),
+    (b"<>", RedirectKind::Input),
+    (b">", RedirectKind::Write),
+    (b"<", RedirectKind::Input),
+];
+
+/// Split `src` on the control operators a shell would split it on —
+/// `;`, `&&`, `||`, `|`, `|&`, `&`, newlines and parentheses — outside
+/// quotes, escapes, comments, substitutions and here-documents.
+fn split_commands(src: &str) -> SplitLine {
+    let mut splitter = Splitter {
+        src,
+        out: SplitLine::default(),
+        current: Segment::default(),
+        started: false,
+        word_start: None,
+        redirect: None,
+        heredocs: Vec::new(),
+        next_piped: false,
+    };
+    let bytes = src.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        i = splitter.step(bytes, i);
+    }
+    splitter.end_word(bytes.len());
+    splitter.end_segment(false);
+    splitter.out
+}
+
+struct PendingHeredoc {
+    delimiter: String,
+    strip_tabs: bool,
+    /// An unquoted delimiter means `$(…)` in the body still runs.
+    expands: bool,
+    segment: usize,
+}
+
+struct Splitter<'a> {
+    src: &'a str,
+    out: SplitLine,
+    current: Segment,
+    started: bool,
+    word_start: Option<usize>,
+    /// An operator still waiting for its target word.
+    redirect: Option<(usize, RedirectKind)>,
+    /// Here-docs whose bodies start after the next newline.
+    heredocs: Vec<PendingHeredoc>,
+    next_piped: bool,
+}
+
+impl Splitter<'_> {
+    /// Consume the token at `i`; returns where the next one starts.
+    fn step(&mut self, b: &[u8], i: usize) -> usize {
+        let next = b.get(i + 1).copied();
+        match b[i] {
+            b' ' | b'\t' | b'\r' => {
+                self.end_word(i);
+                i + 1
+            }
+            b'\n' => {
+                self.end_word(i);
+                self.end_segment(false);
+                self.read_heredocs(i + 1)
+            }
+            b'#' if self.word_start.is_none() => b[i..]
+                .iter()
+                .position(|&c| c == b'\n')
+                .map_or(b.len(), |p| i + p),
+            b';' | b'(' | b')' => {
+                self.end_word(i);
+                self.end_segment(false);
+                i + 1
+            }
+            b'&' if next == Some(b'>') => self.redirect(b, i),
+            b'<' | b'>' => self.redirect(b, i),
+            b'&' | b'|' => self.control(b, i),
+            b'\'' => {
+                self.begin_word(i);
+                skip_single_quoted(b, i + 1)
+            }
+            b'"' => {
+                self.begin_word(i);
+                skip_double_quoted(b, i + 1, &mut self.out.substitutions)
+            }
+            b'`' => {
+                self.begin_word(i);
+                skip_backticks(b, i + 1, &mut self.out.substitutions)
+            }
+            b'\\' if next == Some(b'\n') => {
+                self.end_word(i);
+                i + 2
+            }
+            b'\\' => {
+                self.begin_word(i);
+                (i + 2).min(b.len())
+            }
+            b'$' if next == Some(b'(') => {
+                self.begin_word(i);
+                skip_substitution(b, i + 2, &mut self.out.substitutions)
+            }
+            b'$' if next == Some(b'\'') => {
+                self.begin_word(i);
+                skip_ansi_c_quoted(b, i + 2)
+            }
+            _ => {
+                self.begin_word(i);
+                i + 1
+            }
+        }
+    }
+
+    /// `&&`, `||`, `|`, `|&` or a backgrounding `&`.
+    fn control(&mut self, b: &[u8], i: usize) -> usize {
+        self.end_word(i);
+        match (b[i], b.get(i + 1).copied()) {
+            (b'|', Some(b'|')) | (b'&', Some(b'&')) => {
+                self.end_segment(false);
+                i + 2
+            }
+            (b'|', Some(b'&')) => {
+                self.end_segment(true);
+                i + 2
+            }
+            (b'|', _) => {
+                self.end_segment(true);
+                i + 1
+            }
+            _ => {
+                self.end_segment(false);
+                i + 1
+            }
+        }
+    }
+
+    fn redirect(&mut self, b: &[u8], i: usize) -> usize {
+        if b[i] != b'&' && b.get(i + 1) == Some(&b'(') {
+            // `<(…)` / `>(…)`: process substitution, part of a word.
+            self.begin_word(i);
+            return skip_substitution(b, i + 2, &mut self.out.substitutions);
+        }
+        // Bare digits right before the operator name a descriptor (`2>`).
+        let descriptor = self.word_start.filter(|&start| {
+            self.src
+                .get(start..i)
+                .is_some_and(|w| w.bytes().all(|c| c.is_ascii_digit()))
+        });
+        let start = if let Some(start) = descriptor {
+            self.word_start = None;
+            start
+        } else {
+            self.end_word(i);
+            i
+        };
+        let rest = &b[i..];
+        let (kind, len) = REDIRECT_OPERATORS
+            .iter()
+            .find(|(op, _)| rest.starts_with(op))
+            .map_or((RedirectKind::Write, 1), |&(op, kind)| (kind, op.len()));
+        self.redirect = Some((start, kind));
+        self.touch(start, i + len);
+        i + len
+    }
+
+    const fn touch(&mut self, start: usize, end: usize) {
+        if !self.started {
+            self.current.start = start;
+            self.started = true;
+        }
+        self.current.end = end;
+    }
+
+    const fn begin_word(&mut self, i: usize) {
+        if self.word_start.is_none() {
+            self.word_start = Some(i);
+        }
+    }
+
+    fn end_word(&mut self, i: usize) {
+        let Some(start) = self.word_start.take() else {
+            return;
+        };
+        let word = Word { start, end: i };
+        self.touch(start, i);
+        let Some((op, kind)) = self.redirect.take() else {
+            self.current.words.push(word);
+            return;
+        };
+        if kind == RedirectKind::HereDoc {
+            let raw = self.src.get(start..i).unwrap_or_default();
+            self.heredocs.push(PendingHeredoc {
+                delimiter: unquote(raw),
+                strip_tabs: self.src.get(op..).is_some_and(|s| s.starts_with("<<-")),
+                expands: !raw.contains(['\'', '"', '\\']),
+                segment: self.out.segments.len(),
+            });
+        }
+        self.current.redirects.push(Redirect {
+            start: op,
+            kind,
+            target: word,
+        });
+    }
+
+    /// Close the current command; `piped_next` says whether the next one
+    /// reads this one's output.
+    fn end_segment(&mut self, piped_next: bool) {
+        self.redirect = None;
+        self.started = false;
+        if self.current.words.is_empty() && self.current.redirects.is_empty() {
+            // `(curl x) | sh`, `a |\n b`: an empty command between two
+            // operators doesn't break the pipeline.
+            self.current = Segment::default();
+            self.next_piped |= piped_next;
+            return;
+        }
+        let mut segment = std::mem::take(&mut self.current);
+        segment.piped = self.next_piped;
+        self.out.segments.push(segment);
+        self.next_piped = piped_next;
+    }
+
+    /// Read the bodies of pending here-docs, which start at `i` (just after
+    /// a newline). Returns where the line after the last delimiter starts.
+    fn read_heredocs(&mut self, mut i: usize) -> usize {
+        let src = self.src;
+        for doc in std::mem::take(&mut self.heredocs) {
+            let body_start = i;
+            let mut body_end = src.len();
+            while i < src.len() {
+                let line_end = src[i..].find('\n').map_or(src.len(), |p| i + p);
+                let line = &src[i..line_end];
+                let line = if doc.strip_tabs {
+                    line.trim_start_matches('\t')
+                } else {
+                    line
+                };
+                let line_start = i;
+                i = (line_end + 1).min(src.len());
+                if line == doc.delimiter {
+                    body_end = line_start;
+                    break;
+                }
+            }
+            if doc.expands {
+                record_substitutions(
+                    src.as_bytes(),
+                    body_start..body_end,
+                    &mut self.out.substitutions,
+                );
+            }
+            if let Some(segment) = self.out.segments.get_mut(doc.segment) {
+                segment.heredocs.push(body_start..body_end);
+            }
+        }
+        i
+    }
+}
+
+/// Push the bodies of the `$(…)` and backtick substitutions in `range` —
+/// the text of an unquoted here-doc, where quotes are literal.
+fn record_substitutions(b: &[u8], range: Range<usize>, subs: &mut Vec<Range<usize>>) {
+    let mut i = range.start;
+    while i < range.end {
+        match b[i] {
+            b'\\' => i += 2,
+            b'`' => i = skip_backticks(b, i + 1, subs),
+            b'$' if b.get(i + 1) == Some(&b'(') => i = skip_substitution(b, i + 2, subs),
+            _ => i += 1,
+        }
+    }
+}
+
+/// Index just past the `'` that closes a single-quoted string whose
+/// contents start at `i`.
+fn skip_single_quoted(b: &[u8], i: usize) -> usize {
+    b.get(i..)
+        .and_then(|rest| rest.iter().position(|&c| c == b'\''))
+        .map_or(b.len(), |p| i + p + 1)
+}
+
+/// Index just past the `'` that closes a `$'…'` string.
+fn skip_ansi_c_quoted(b: &[u8], mut i: usize) -> usize {
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 2,
+            b'\'' => return i + 1,
+            _ => i += 1,
+        }
+    }
+    b.len()
+}
+
+/// Index just past the closing `"`. Substitutions inside still run, so
+/// their bodies are pushed to `subs`.
+fn skip_double_quoted(b: &[u8], mut i: usize, subs: &mut Vec<Range<usize>>) -> usize {
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 2,
+            b'"' => return i + 1,
+            b'`' => i = skip_backticks(b, i + 1, subs),
+            b'$' if b.get(i + 1) == Some(&b'(') => i = skip_substitution(b, i + 2, subs),
+            _ => i += 1,
+        }
+    }
+    b.len()
+}
+
+/// Index just past the `)` closing a `$(` whose body starts at `i`; the
+/// body is pushed to `subs`.
+fn skip_substitution(b: &[u8], i: usize, subs: &mut Vec<Range<usize>>) -> usize {
+    let close = matching_paren(b, i);
+    subs.push(i..close);
+    (close + 1).min(b.len())
+}
+
+/// Index just past the closing backtick; the body is pushed to `subs`.
+fn skip_backticks(b: &[u8], i: usize, subs: &mut Vec<Range<usize>>) -> usize {
+    let mut j = i;
+    while j < b.len() && b[j] != b'`' {
+        j += if b[j] == b'\\' { 2 } else { 1 };
+    }
+    let close = j.min(b.len());
+    subs.push(i..close);
+    (close + 1).min(b.len())
+}
+
+/// Index of the `)` that closes a parenthesis whose contents start at `i`,
+/// or the end of input if it is never closed.
+fn matching_paren(b: &[u8], mut i: usize) -> usize {
+    let mut depth = 1usize;
+    let mut nested = Vec::new();
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 2,
+            b'\'' => i = skip_single_quoted(b, i + 1),
+            b'"' => i = skip_double_quoted(b, i + 1, &mut nested),
+            b'`' => i = skip_backticks(b, i + 1, &mut nested),
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i;
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    b.len()
+}
+
+/// A word as the shell hands it to the program: quotes removed and
+/// backslash escapes resolved. `$VAR` and `$(…)` are left as written.
+fn unquote(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    let (mut single, mut double) = (false, false);
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            // `$'…'` quoting: drop the `$`, the quote is handled next.
+            '$' if !single && !double && chars.peek() == Some(&'\'') => {}
+            '\\' if !single => {
+                if let Some(escaped) = chars.next() {
+                    if double && !matches!(escaped, '"' | '\\' | '$' | '`' | '\n') {
+                        out.push('\\');
+                    }
+                    out.push(escaped);
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Returns true if the command doesn't actually execute anything risky.
+/// A fast path for comments, echo output and alias definitions; anything
+/// that chains, substitutes or redirects goes through the full check.
 fn is_non_executing(cmd: &str) -> bool {
-    // Shell comments
+    // A shell comment, as long as it is the only line.
     if cmd.starts_with('#') {
-        return true;
+        return !cmd.contains('\n');
     }
 
-    // echo/printf — output only, unless chained to another command
-    if (cmd.starts_with("echo ") || cmd.starts_with("printf ")) && !has_shell_chaining(cmd) {
-        return true;
-    }
-
-    // alias definitions — setting up an alias, not executing the aliased command
-    if cmd.starts_with("alias ") {
-        return true;
-    }
-
-    false
+    let prints =
+        cmd.starts_with("echo ") || cmd.starts_with("printf ") || cmd.starts_with("alias ");
+    prints && !has_shell_chaining(cmd) && !cmd.contains(['<', '>'])
 }
 
 /// Check if the command contains shell operators that chain execution.
@@ -726,37 +1755,11 @@ const fn has_shell_chaining(cmd: &str) -> bool {
             return true;
         }
 
-        // Only detect operators when outside all quotes
-        if !in_single && !in_double {
-            // Semicolon (no surrounding spaces required)
-            if b == b';' {
-                return true;
-            }
-
-            if b == b' ' {
-                // " | " — pipe (3 chars)
-                if i + 2 < len && bytes[i + 1] == b'|' && bytes[i + 2] == b' ' {
-                    return true;
-                }
-
-                // " && " — logical and (4 chars)
-                if i + 3 < len
-                    && bytes[i + 1] == b'&'
-                    && bytes[i + 2] == b'&'
-                    && bytes[i + 3] == b' '
-                {
-                    return true;
-                }
-
-                // " || " — logical or (4 chars)
-                if i + 3 < len
-                    && bytes[i + 1] == b'|'
-                    && bytes[i + 2] == b'|'
-                    && bytes[i + 3] == b' '
-                {
-                    return true;
-                }
-            }
+        // Control operators outside quotes, with or without spaces around
+        // them: `a && b` and `a&&b` chain alike, as do `|`, `&`, `;`, a
+        // newline and a subshell or process substitution's `(`.
+        if !in_single && !in_double && matches!(b, b';' | b'\n' | b'|' | b'&' | b'(') {
+            return true;
         }
 
         i += 1;
@@ -1473,21 +2476,27 @@ mod tests {
     }
 
     /// The limits of matching command text, pinned so the documentation in
-    /// SECURITY.md and the behaviour here cannot drift apart. These are
-    /// known gaps, not accidents: closing them needs parsing, not a regex.
+    /// SECURITY.md and the behaviour here cannot drift apart.
     #[test]
     fn known_limits_of_text_matching_are_pinned() {
-        // A rule anchored to the start of the line does not see the second
-        // command of a chain.
+        // Every command of a chain is checked on its own, so the second
+        // command is seen even though the line starts with another one.
         assert_eq!(
             risk_level("git commit -m msg && git push --force"),
-            RiskLevel::None
+            RiskLevel::Critical
+        );
+        // A mention in one command does not excuse the next one.
+        assert_eq!(
+            risk_level(r#"grep -r "rm -rf" . && rm -rf build"#),
+            RiskLevel::Critical
         );
         // A command assembled at runtime can only be reported as
         // indirection, never as the thing it will turn into.
         let built = assess_risk("eval $DEPLOY_CMD").unwrap();
         assert_eq!(built.level, RiskLevel::High);
         assert_eq!(built.certainty, Certainty::Unresolved);
+        // A command held in a variable is not seen at all.
+        assert_eq!(risk_level("$CLEANUP"), RiskLevel::None);
     }
 
     /// The risky patterns the suppression above must not weaken.
@@ -1508,5 +2517,243 @@ mod tests {
         ] {
             assert_eq!(risk_level(command), level, "coverage lost for: {command}");
         }
+    }
+
+    // ── Command lines are split before rules are matched ────────────
+
+    fn assert_levels(cases: &[(&str, RiskLevel)]) {
+        let wrong: Vec<String> = cases
+            .iter()
+            .filter(|(command, level)| risk_level(command) != *level)
+            .map(|(command, level)| {
+                format!("{command:?}: expected {level}, got {}", risk_level(command))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A rule anchored to the start of a command fires on every command of
+    /// the line, however the commands are joined.
+    #[test]
+    fn every_command_of_a_line_is_checked() {
+        assert_levels(&[
+            ("git add -A && git push --force", RiskLevel::Critical),
+            ("cd x && git reset --hard", RiskLevel::Critical),
+            ("cd x; git reset --hard", RiskLevel::Critical),
+            ("make || git reset --hard", RiskLevel::Critical),
+            ("sleep 1 & rm -rf /tmp/x", RiskLevel::Critical),
+            ("ls\nrm -rf /tmp/x", RiskLevel::Critical),
+            ("(cd x && rm -rf build)", RiskLevel::Critical),
+            ("if true; then git reset --hard; fi", RiskLevel::Critical),
+            ("for f in a b; do rm -rf $f; done", RiskLevel::Critical),
+        ]);
+    }
+
+    /// Lines that start with a harmless printing command used to skip
+    /// assessment altogether.
+    #[test]
+    fn a_harmless_first_command_does_not_hide_the_rest() {
+        assert_levels(&[
+            ("echo ok&&rm -rf ~", RiskLevel::Critical),
+            ("echo ok;rm -rf ~", RiskLevel::Critical),
+            ("echo ok||rm -rf ~", RiskLevel::Critical),
+            ("echo ok&rm -rf ~", RiskLevel::Critical),
+            ("echo cm0gLXJmIC90bXA= |base64 -d|sh", RiskLevel::High),
+            ("echo x > /dev/sda", RiskLevel::Critical),
+            ("echo x >/dev/disk2", RiskLevel::Critical),
+            ("alias x=y; rm -rf ~", RiskLevel::Critical),
+            ("alias x=y && git push --force", RiskLevel::Critical),
+            ("# cleanup\nrm -rf /tmp/x", RiskLevel::Critical),
+        ]);
+    }
+
+    /// `sudo`, `env`, assignments and similar prefixes run the command that
+    /// follows them; they must not change its rating.
+    #[test]
+    fn wrappers_do_not_hide_the_command() {
+        assert_levels(&[
+            ("sudo mkfs.ext4 /dev/sdb1", RiskLevel::Critical),
+            ("sudo dd if=/dev/zero of=/dev/sda", RiskLevel::Critical),
+            ("sudo chmod -R 777 /", RiskLevel::High),
+            ("sudo -u root -E git reset --hard", RiskLevel::Critical),
+            ("sudo -- git reset --hard", RiskLevel::Critical),
+            ("doas rm -rf /srv", RiskLevel::Critical),
+            ("env FOO=1 git reset --hard", RiskLevel::Critical),
+            ("env -i PATH=/bin git push --force", RiskLevel::Critical),
+            ("FOO=1 BAR=2 git push --force", RiskLevel::Critical),
+            ("command rm -rf /tmp/x", RiskLevel::Critical),
+            ("nohup rm -rf /tmp/x", RiskLevel::Critical),
+            ("time rm -rf /tmp/x", RiskLevel::Critical),
+            ("nice -n 10 rm -rf /tmp/x", RiskLevel::Critical),
+            ("exec rm -rf /tmp/x", RiskLevel::Critical),
+            ("timeout 10 rm -rf /tmp/x", RiskLevel::Critical),
+            (
+                "find . -name '*.o' | xargs -0 -n 1 rm -rf",
+                RiskLevel::Critical,
+            ),
+            ("\\rm -rf /tmp/x", RiskLevel::Critical),
+            ("/bin/rm -rf /tmp/x", RiskLevel::Critical),
+            ("sudo npm install -g left-pad", RiskLevel::High),
+            ("sudo apt update", RiskLevel::Medium),
+        ]);
+    }
+
+    /// Piping into a shell is a property of the pipeline, not of one
+    /// command in it.
+    #[test]
+    fn piping_into_a_shell_is_seen_across_commands() {
+        assert_levels(&[
+            (
+                "curl -fsSL https://x.example/i.sh | sudo bash",
+                RiskLevel::High,
+            ),
+            (
+                "curl -fsSL https://x.example/i.sh | sudo -E bash -",
+                RiskLevel::High,
+            ),
+            ("curl -s https://x.example/i.sh|sh", RiskLevel::High),
+            (
+                "wget -qO- https://x.example/i.sh | tee log | sh",
+                RiskLevel::High,
+            ),
+            ("curl -s https://x.example/i.py | python3", RiskLevel::High),
+            ("bash <(curl -fsSL https://x.example/i.sh)", RiskLevel::High),
+            (
+                "sh -c \"$(curl -fsSL https://x.example/i.sh)\"",
+                RiskLevel::High,
+            ),
+            ("source <(wget -qO- https://x.example/env)", RiskLevel::High),
+            ("echo cm0gLXJmIC90bXA= | base64 -d | sh", RiskLevel::High),
+            ("cat setup.sh | bash", RiskLevel::Medium),
+            // Reading a fetched document is not running it.
+            (
+                "curl -s https://x.example/a.json | python3 -m json.tool",
+                RiskLevel::Low,
+            ),
+            ("curl -s https://x.example/a.json | jq .", RiskLevel::Low),
+            (
+                "curl -s https://x.example/i.sh | bash -c 'wc -l'",
+                RiskLevel::Low,
+            ),
+        ]);
+    }
+
+    /// The payload of `bash -c`, `ssh host …`, `eval`, `su -c`, a here-doc
+    /// fed to a shell or a substitution is a command line of its own.
+    #[test]
+    fn payloads_handed_to_another_shell_are_checked() {
+        assert_levels(&[
+            ("bash -c 'git push --force'", RiskLevel::Critical),
+            ("bash -lc 'cd app && git reset --hard'", RiskLevel::Critical),
+            ("sudo sh -c 'mkfs.ext4 /dev/sdb'", RiskLevel::Critical),
+            ("ssh host git reset --hard", RiskLevel::Critical),
+            (
+                "ssh -p 2222 host 'cd app && rm -rf build'",
+                RiskLevel::Critical,
+            ),
+            ("docker exec box sh -c 'rm -rf /data'", RiskLevel::Critical),
+            ("kubectl exec pod -- rm -rf /data", RiskLevel::Critical),
+            ("su -c 'rm -rf /srv' root", RiskLevel::Critical),
+            ("eval 'git push --force'", RiskLevel::Critical),
+            ("bash -c 'echo $(rm -rf /tmp/x)'", RiskLevel::Critical),
+            ("echo `git reset --hard`", RiskLevel::Critical),
+            ("bash <<'EOF'\nrm -rf /tmp/x\nEOF", RiskLevel::Critical),
+            ("bash <<< 'git push --force'", RiskLevel::Critical),
+            ("psql <<EOF\nDROP TABLE users;\nEOF", RiskLevel::Critical),
+            (
+                "cat <<EOF > notes.md\n$(rm -rf ~)\nEOF",
+                RiskLevel::Critical,
+            ),
+        ]);
+    }
+
+    /// Splitting must not turn quoted mentions, here-doc text or ordinary
+    /// redirections into findings.
+    #[test]
+    fn mentions_stay_mentions_inside_a_chain() {
+        for command in [
+            r#"grep -rn "rm -rf" scripts/ | wc -l"#,
+            r#"history | grep "git push --force""#,
+            r#"echo "git push --force" && git status"#,
+            r#"git log --grep "drop table" && git status"#,
+            r#"git commit -m "fix: rm -rf; git push --force" && git status"#,
+            "echo 'a && rm -rf ~'",
+            "cat <<'EOF' > notes.md\nrm -rf / is a bad idea\nEOF",
+            "cat <<'EOF' > notes.md\n$(rm -rf ~)\nEOF",
+            "echo hello > out.txt",
+            "ls 2>&1 | tee log.txt",
+            "make >/dev/null 2>&1 &",
+            "cargo build 2> errors.txt",
+            "echo $HOME; ls",
+        ] {
+            assert_eq!(
+                risk_level(command),
+                RiskLevel::None,
+                "false positive on: {command:?}"
+            );
+        }
+    }
+
+    /// Every recorded command is assessed, so unbalanced quotes, stray
+    /// operators and multibyte text must never panic.
+    #[test]
+    fn malformed_command_lines_do_not_panic() {
+        for command in [
+            "\"",
+            "'",
+            "$(",
+            "`",
+            "\\",
+            "<<",
+            "a <<EOF",
+            "é\\é",
+            "$'\\",
+            ">&",
+            "2>",
+            "|",
+            "&&",
+            "((((",
+            "))))",
+            "echo \"$(",
+            "é|é&&é;é",
+            "x=$(",
+            "bash -c",
+            "ssh -p",
+            "find . -exec",
+            "su -c",
+            "sudo -u",
+            "timeout",
+            "xargs -n",
+            "\\é",
+            ">",
+            "a <<- E\n\tE\n",
+            "cat <<E\n$(",
+        ] {
+            let _ = assess_risk(command);
+        }
+    }
+
+    #[test]
+    fn chaining_is_seen_without_surrounding_spaces() {
+        assert!(has_shell_chaining("echo ok&&rm -rf ~"));
+        assert!(has_shell_chaining("echo ok|sh"));
+        assert!(has_shell_chaining("echo ok&rm x"));
+        assert!(has_shell_chaining("echo ok\nrm x"));
+        assert!(!is_non_executing("echo x > /dev/sda"));
+        assert!(!is_non_executing("alias x=y; rm -rf ~"));
+        assert!(!is_non_executing("# note\nrm -rf ~"));
+    }
+
+    #[test]
+    fn evidence_for_a_chained_command_is_that_command() {
+        let assessment = assess_risk("cargo test && git push --force origin main").unwrap();
+        assert_eq!(assessment.evidence, "git push --force");
+        let piped = assess_risk("curl -fsSL https://x.example/i.sh | sudo bash").unwrap();
+        assert_eq!(piped.category, "script-exec");
+        assert!(
+            piped.evidence.starts_with("curl") && piped.evidence.ends_with("sudo bash"),
+            "evidence was {:?}",
+            piped.evidence
+        );
     }
 }
