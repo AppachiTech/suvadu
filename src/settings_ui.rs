@@ -136,6 +136,9 @@ struct AppState {
     selected_item: usize,
     input_mode: InputMode,
     input_buffer: String,
+    /// The MCP tab's input popup is adding an excluded directory (Ctrl+A),
+    /// not editing the number on the selected row.
+    adding_mcp_dir: bool,
     // Auto-tag multi-field form
     auto_tag_path_input: String,
     auto_tag_name_input: String,
@@ -163,6 +166,7 @@ impl AppState {
             selected_item: 0,
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
+            adding_mcp_dir: false,
             auto_tag_path_input: String::new(),
             auto_tag_name_input: String::new(),
             auto_tag_focus: 0,
@@ -456,12 +460,10 @@ impl AppState {
                 if key.modifiers.contains(KeyModifiers::CONTROL)
                     && self.current_tab == SettingsTab::Mcp =>
             {
-                // Add only works for exclude_dirs
-                let dirs_start = MCP_DIRS_START;
-                if self.selected_item >= dirs_start || self.config.mcp.exclude_dirs.is_empty() {
-                    self.input_mode = InputMode::Editing;
-                    self.input_buffer.clear();
-                }
+                // Add only works for exclude_dirs, from any row.
+                self.input_mode = InputMode::Editing;
+                self.input_buffer.clear();
+                self.adding_mcp_dir = true;
             }
             KeyCode::Char('d')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
@@ -728,6 +730,17 @@ impl AppState {
                             self.save_status = Some("Both Path and Tag are required".to_string());
                         }
                     }
+                } else if self.current_tab == SettingsTab::Mcp && self.adding_mcp_dir {
+                    let val = self.input_buffer.trim().to_string();
+                    if !val.is_empty() {
+                        self.config.mcp.exclude_dirs.push(val.clone());
+                        self.mark_mcp_dirty();
+                        self.save_status = Some(format!("Excluded dir: {val}"));
+                        self.selected_item =
+                            MCP_DIRS_START + self.config.mcp.exclude_dirs.len() - 1;
+                    }
+                    self.adding_mcp_dir = false;
+                    self.input_mode = InputMode::Normal;
                 } else if self.current_tab == SettingsTab::Mcp && self.selected_item == 0 {
                     if let Ok(n) = self.input_buffer.parse::<u32>() {
                         self.config.mcp.default_days = n.clamp(1, 365);
@@ -751,12 +764,6 @@ impl AppState {
                     } else {
                         self.save_status = Some("Invalid number".to_string());
                     }
-                    self.input_mode = InputMode::Normal;
-                } else if self.current_tab == SettingsTab::Mcp && !self.input_buffer.is_empty() {
-                    let val = self.input_buffer.trim().to_string();
-                    self.config.mcp.exclude_dirs.push(val.clone());
-                    self.mark_mcp_dirty();
-                    self.save_status = Some(format!("Excluded dir: {val}"));
                     self.input_mode = InputMode::Normal;
                 } else if self.current_tab == SettingsTab::Agents {
                     // Agent triple-field form
@@ -804,6 +811,7 @@ impl AppState {
             }
             KeyCode::Esc => {
                 self.input_mode = InputMode::Normal;
+                self.adding_mcp_dir = false;
             }
             KeyCode::Tab if self.current_tab == SettingsTab::AutoTags => {
                 // Toggle focus between path and tag
@@ -3523,6 +3531,60 @@ mod tests {
             mapped, expected,
             "every selectable MCP item must have exactly one row, and no row may point past the end"
         );
+    }
+
+    fn type_line(app: &mut AppState, text: &str) {
+        for c in text.chars() {
+            app.handle_input(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+    }
+
+    /// Ctrl+A on the MCP tab adds an excluded directory, whichever row is
+    /// selected — on the two number rows it must not edit their value.
+    #[test]
+    fn mcp_ctrl_a_always_adds_a_directory() {
+        for row in [0, 1, MCP_OPT_INS_START, MCP_TOOLS_START] {
+            let mut app = AppState::new(Config::default());
+            app.current_tab = SettingsTab::Mcp;
+            app.selected_item = row;
+
+            app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+            assert_eq!(app.input_mode, InputMode::Editing, "row {row}");
+            type_line(&mut app, "42");
+
+            assert_eq!(
+                app.config.mcp.exclude_dirs,
+                vec!["42".to_string()],
+                "row {row}"
+            );
+            assert_eq!(app.config.mcp.default_days, 7, "row {row}");
+            assert_eq!(app.config.mcp.default_limit, 20, "row {row}");
+            assert_eq!(app.input_mode, InputMode::Normal, "row {row}");
+
+            // With a directory already listed, Ctrl+A still adds one.
+            app.selected_item = row;
+            app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+            type_line(&mut app, "/tmp/second");
+            assert_eq!(app.config.mcp.exclude_dirs.len(), 2, "row {row}");
+            assert_eq!(app.config.mcp.default_days, 7, "row {row}");
+        }
+    }
+
+    /// Enter on the number rows still edits them after an add was cancelled.
+    #[test]
+    fn mcp_number_rows_still_edit_after_a_cancelled_add() {
+        let mut app = AppState::new(Config::default());
+        app.current_tab = SettingsTab::Mcp;
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        app.handle_input(KeyEvent::from(KeyCode::Esc));
+
+        app.selected_item = 0;
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        app.input_buffer.clear();
+        type_line(&mut app, "42");
+        assert_eq!(app.config.mcp.default_days, 42);
+        assert!(app.config.mcp.exclude_dirs.is_empty());
     }
 
     #[test]
