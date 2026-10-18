@@ -216,19 +216,40 @@ fn handle_tool_call(
     let empty = serde_json::Value::Object(serde_json::Map::new());
     let args = request["params"].get("arguments").unwrap_or(&empty);
 
-    let result = if name == "save_session_summary" {
-        // Validate authorization and input before opening any writable connection.
-        super::ai_sessions::summary_input(args, mcp).and_then(|_| {
-            let writer = Repository::init().map_err(|e| e.to_string())?;
-            tools::call_tool(&writer, name, args, mcp)
-        })
-    } else {
-        tools::call_tool(repo, name, args, mcp)
-    };
+    let result = guard_tool_panics(|| {
+        if name == "save_session_summary" {
+            // Validate authorization and input before opening any writable connection.
+            super::ai_sessions::summary_input(args, mcp).and_then(|_| {
+                let writer = Repository::init().map_err(|e| e.to_string())?;
+                tools::call_tool(&writer, name, args, mcp)
+            })
+        } else {
+            tools::call_tool(repo, name, args, mcp)
+        }
+    });
     match result {
         Ok(text) => tool_response(id, name, &text),
         Err(msg) => protocol::tool_error(id, &msg),
     }
+}
+
+/// Run one tool call, turning a panic inside it into an error result, so a
+/// bug reachable from one call's arguments costs that call rather than the
+/// whole session. The panic message still goes to stderr via the panic hook.
+///
+/// `AssertUnwindSafe` holds because nothing a tool touches outlives the call
+/// in a half-updated state: the shared connection is read-only, its
+/// statements are finalized as the unwind drops them, and the writer that
+/// `save_session_summary` opens is dropped (rolling back) with the closure.
+fn guard_tool_panics(call: impl FnOnce() -> Result<String, String>) -> Result<String, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)).unwrap_or_else(|payload| {
+        let detail = payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown cause".to_string());
+        Err(format!("internal error while running this tool: {detail}"))
+    })
 }
 
 /// Session tools already paginate records. Byte truncation would corrupt JSON
@@ -431,6 +452,15 @@ mod tests {
             );
         }
         assert_eq!(responses[calls.len()]["id"], "last");
+    }
+
+    #[test]
+    fn a_panic_inside_a_tool_becomes_an_error_result() {
+        let result = guard_tool_panics(|| panic!("boom"));
+        let message = result.unwrap_err();
+        assert!(message.contains("internal error"), "{message}");
+        assert!(message.contains("boom"), "{message}");
+        assert_eq!(guard_tool_panics(|| Ok("fine".into())), Ok("fine".into()));
     }
 
     #[test]
