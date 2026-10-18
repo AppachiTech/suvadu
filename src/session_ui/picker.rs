@@ -58,6 +58,11 @@ struct PickerFilter {
     end_date_input: String,
     focus_index: usize, // 0=tag, 1=start date, 2=end date
     popup_open: bool,
+    /// The three inputs as they were when the popup opened, so Esc can put
+    /// back exactly what was there.
+    inputs_on_open: [String; NUM_FILTER_FIELDS],
+    /// Why Enter applied nothing: a date that could not be read.
+    error: Option<String>,
 
     // Applied filter values
     tag_query: String,
@@ -738,11 +743,19 @@ impl PickerApp {
             f.render_widget(input, chunks[i + 1]);
         }
 
-        // Help
-        let help_text = Paragraph::new("Tab/S-Tab: switch fields  |  Enter: apply  |  Esc: cancel")
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(t.text_muted));
-        f.render_widget(help_text, chunks[4]);
+        // Why the last Enter applied nothing, then the help.
+        let mut lines = Vec::new();
+        if let Some(error) = &self.filter.error {
+            lines.push(Line::styled(error.as_str(), Style::default().fg(t.error)));
+        }
+        lines.push(Line::styled(
+            "Tab/S-Tab: switch fields  |  Enter: apply  |  Esc: cancel",
+            Style::default().fg(t.text_muted),
+        ));
+        f.render_widget(
+            Paragraph::new(lines).alignment(Alignment::Center),
+            chunks[4],
+        );
     }
 
     fn render_filter_progress(&self, f: &mut ratatui::Frame, area: Rect) {
@@ -791,20 +804,63 @@ impl PickerApp {
         }
     }
 
+    fn open_filter_popup(&mut self) {
+        self.filter.popup_open = true;
+        self.filter.focus_index = 0;
+        self.filter.error = None;
+        self.filter.inputs_on_open = [
+            self.filter.tag_input.clone(),
+            self.filter.start_date_input.clone(),
+            self.filter.end_date_input.clone(),
+        ];
+    }
+
+    /// Apply the popup's inputs, all or nothing: a date that cannot be read
+    /// keeps every applied filter as it was and leaves the popup open on
+    /// that field with the reason.
+    fn apply_filter_popup(&mut self) {
+        let parse = |input: &str, end_of_day: bool| {
+            if input.trim().is_empty() {
+                Ok(None)
+            } else {
+                util::parse_date_input(input, end_of_day)
+                    .map(Some)
+                    .ok_or(())
+            }
+        };
+        let Ok(after_ms) = parse(&self.filter.start_date_input, false) else {
+            self.reject_date(1, "start");
+            return;
+        };
+        let Ok(before_ms) = parse(&self.filter.end_date_input, true) else {
+            self.reject_date(2, "end");
+            return;
+        };
+        self.filter.tag_query = self.filter.tag_input.trim().to_lowercase();
+        self.filter.after_ms = after_ms;
+        self.filter.before_ms = before_ms;
+        self.filter.error = None;
+        self.filter.popup_open = false;
+        self.rebuild_visible();
+    }
+
+    fn reject_date(&mut self, field: usize, which: &str) {
+        self.filter.focus_index = field;
+        self.filter.error = Some(format!(
+            "Can't read the {which} date. Try today, 3 days ago, 2024-01-15"
+        ));
+    }
+
     fn handle_filter_popup_key(&mut self, key: crossterm::event::KeyEvent) {
         match key.code {
             KeyCode::Esc => {
+                // Discard every edit since the popup opened.
+                let [tag, start, end] = std::mem::take(&mut self.filter.inputs_on_open);
+                self.filter.tag_input = tag;
+                self.filter.start_date_input = start;
+                self.filter.end_date_input = end;
+                self.filter.error = None;
                 self.filter.popup_open = false;
-                // Discard pending edits -- restore from applied values
-                self.filter.tag_input = self.filter.tag_query.clone();
-                self.filter.start_date_input = self
-                    .filter
-                    .after_ms
-                    .map_or_else(String::new, |_| self.filter.start_date_input.clone());
-                self.filter.end_date_input = self
-                    .filter
-                    .before_ms
-                    .map_or_else(String::new, |_| self.filter.end_date_input.clone());
             }
             KeyCode::Tab => {
                 self.filter.focus_index = (self.filter.focus_index + 1) % NUM_FILTER_FIELDS;
@@ -816,40 +872,31 @@ impl PickerApp {
                     self.filter.focus_index - 1
                 };
             }
-            KeyCode::Enter => {
-                // Apply filters
-                self.filter.tag_query = self.filter.tag_input.trim().to_lowercase();
-                self.filter.after_ms = if self.filter.start_date_input.is_empty() {
-                    None
-                } else {
-                    util::parse_date_input(&self.filter.start_date_input, false)
-                };
-                self.filter.before_ms = if self.filter.end_date_input.is_empty() {
-                    None
-                } else {
-                    util::parse_date_input(&self.filter.end_date_input, true)
-                };
-                self.filter.popup_open = false;
-                self.rebuild_visible();
+            KeyCode::Enter => self.apply_filter_popup(),
+            KeyCode::Backspace => {
+                self.filter.error = None;
+                match self.filter.focus_index {
+                    0 => {
+                        self.filter.tag_input.pop();
+                    }
+                    1 => {
+                        self.filter.start_date_input.pop();
+                    }
+                    2 => {
+                        self.filter.end_date_input.pop();
+                    }
+                    _ => {}
+                }
             }
-            KeyCode::Backspace => match self.filter.focus_index {
-                0 => {
-                    self.filter.tag_input.pop();
+            KeyCode::Char(c) => {
+                self.filter.error = None;
+                match self.filter.focus_index {
+                    0 => self.filter.tag_input.push(c),
+                    1 => self.filter.start_date_input.push(c),
+                    2 => self.filter.end_date_input.push(c),
+                    _ => {}
                 }
-                1 => {
-                    self.filter.start_date_input.pop();
-                }
-                2 => {
-                    self.filter.end_date_input.pop();
-                }
-                _ => {}
-            },
-            KeyCode::Char(c) => match self.filter.focus_index {
-                0 => self.filter.tag_input.push(c),
-                1 => self.filter.start_date_input.push(c),
-                2 => self.filter.end_date_input.push(c),
-                _ => {}
-            },
+            }
             _ => {}
         }
     }
@@ -861,10 +908,7 @@ impl PickerApp {
     fn handle_normal_key(&mut self, key: crossterm::event::KeyEvent) -> PickerAction {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
-                KeyCode::Char('f') => {
-                    self.filter.popup_open = true;
-                    self.filter.focus_index = 0;
-                }
+                KeyCode::Char('f') => self.open_filter_popup(),
                 KeyCode::Char('x') => self.clear_filters(),
                 KeyCode::Char('t') => self.cycle_kind_filter(),
                 _ => {}
@@ -1065,6 +1109,114 @@ mod tests {
         assert_eq!(picker.app.filter.search, "work");
         assert_eq!(picker.app.filter.kind, KindFilter::Human);
         assert_eq!(picker.app.page, 2);
+    }
+
+    fn press(app: &mut PickerApp, code: KeyCode) {
+        app.handle_key(crossterm::event::KeyEvent::from(code));
+    }
+
+    fn type_text(app: &mut PickerApp, text: &str) {
+        for c in text.chars() {
+            press(app, KeyCode::Char(c));
+        }
+    }
+
+    fn open_filters(app: &mut PickerApp) {
+        app.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        ));
+        assert!(app.filter.popup_open);
+    }
+
+    /// Applies tag `work` and start date 2024-01-15 through the popup.
+    fn apply_tag_and_start_date(app: &mut PickerApp) -> i64 {
+        open_filters(app);
+        type_text(app, "work");
+        press(app, KeyCode::Tab);
+        type_text(app, "2024-01-15");
+        press(app, KeyCode::Enter);
+        assert!(!app.filter.popup_open);
+        app.filter.after_ms.expect("the start date applies")
+    }
+
+    #[test]
+    fn esc_discards_every_edit_made_since_the_popup_opened() {
+        let mut app = PickerApp::new(vec![make_summary("s1", 3)]);
+        let after = apply_tag_and_start_date(&mut app);
+
+        open_filters(&mut app);
+        type_text(&mut app, "x");
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Backspace);
+        press(&mut app, KeyCode::Backspace);
+        type_text(&mut app, "20");
+        press(&mut app, KeyCode::Tab);
+        type_text(&mut app, "today");
+        press(&mut app, KeyCode::Esc);
+
+        assert!(!app.filter.popup_open);
+        assert_eq!(app.filter.tag_input, "work");
+        assert_eq!(app.filter.start_date_input, "2024-01-15");
+        assert_eq!(app.filter.end_date_input, "");
+        assert_eq!(app.filter.after_ms, Some(after));
+        assert_eq!(app.filter.before_ms, None);
+
+        // Reopened, the popup shows what is applied, not the discarded edit.
+        open_filters(&mut app);
+        let screen = crate::test_utils::render_to_text(140, 30, |f| app.render_picker(f));
+        assert!(screen.contains("2024-01-15"), "{screen}");
+        assert!(!screen.contains("2024-01-20"), "{screen}");
+    }
+
+    #[test]
+    fn an_unreadable_date_keeps_the_applied_filters_and_says_so() {
+        let mut app = PickerApp::new(vec![make_summary("s1", 3)]);
+        let after = apply_tag_and_start_date(&mut app);
+
+        open_filters(&mut app);
+        press(&mut app, KeyCode::Tab);
+        for _ in 0.."2024-01-15".len() {
+            press(&mut app, KeyCode::Backspace);
+        }
+        type_text(&mut app, "last tuesday");
+        press(&mut app, KeyCode::Enter);
+
+        // Still open, nothing applied, and the reason is on screen.
+        assert!(app.filter.popup_open);
+        assert_eq!(app.filter.after_ms, Some(after));
+        assert_eq!(app.filter.tag_query, "work");
+        let screen = crate::test_utils::render_to_text(140, 30, |f| app.render_picker(f));
+        assert!(screen.contains("Can't read the start date"), "{screen}");
+
+        // Fixing the date clears the message and applies it.
+        for _ in 0.."last tuesday".len() {
+            press(&mut app, KeyCode::Backspace);
+        }
+        type_text(&mut app, "2024-02-01");
+        let screen = crate::test_utils::render_to_text(140, 30, |f| app.render_picker(f));
+        assert!(!screen.contains("Can't read"), "{screen}");
+        press(&mut app, KeyCode::Enter);
+        assert!(!app.filter.popup_open);
+        assert!(app.filter.after_ms.unwrap() > after);
+    }
+
+    #[test]
+    fn an_unreadable_end_date_is_named_and_focused() {
+        let mut app = PickerApp::new(vec![make_summary("s1", 3)]);
+        open_filters(&mut app);
+        press(&mut app, KeyCode::BackTab);
+        type_text(&mut app, "soon");
+        press(&mut app, KeyCode::BackTab);
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.filter.focus_index, 0);
+        press(&mut app, KeyCode::Enter);
+
+        assert!(app.filter.popup_open);
+        assert_eq!(app.filter.focus_index, 2);
+        assert_eq!(app.filter.before_ms, None);
+        let screen = crate::test_utils::render_to_text(140, 30, |f| app.render_picker(f));
+        assert!(screen.contains("Can't read the end date"), "{screen}");
     }
 
     fn make_summary_tagged(id: &str, tag: &str) -> SessionSummary {
