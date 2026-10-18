@@ -543,6 +543,51 @@ const DRIFT_DETAIL: &str = "this file was edited outside suvadu since the last s
 const FOREIGN_DETAIL: &str = "this file was not written by suvadu (no managed marker) — not written. Move it aside, or re-run with --force to replace it.";
 const APPENDED_DETAIL: &str = "this file has content below suvadu's managed marker — not written, because suvadu owns the whole file and rewriting it would delete that text (the diff below shows it as removed). Move it into the skill (`suv skills edit`), or re-run with --force to discard it.";
 
+/// What is at `path` now: `None` when nothing is. Anything else that
+/// stops the read — text that is not UTF-8, no permission, a symlink to a
+/// file that is gone — is an error, never an empty file: replacing it would
+/// destroy content that was simply not readable.
+fn read_existing(path: &Path) -> std::io::Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            match std::fs::symlink_metadata(path) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    let target = std::fs::read_link(path)?;
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!(
+                            "it is a symlink to {}, which does not exist",
+                            target.display()
+                        ),
+                    ))
+                }
+                _ => Ok(None),
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// The conflict reported for a file that exists but could not be read.
+fn unreadable_change(
+    target: SyncTarget,
+    path: &Path,
+    skills: Vec<String>,
+    error: &std::io::Error,
+) -> FileChange {
+    FileChange {
+        target,
+        path: path.to_path_buf(),
+        kind: ChangeKind::Conflict,
+        skills,
+        diff: Vec::new(),
+        detail: Some(format!(
+            "this file could not be read ({error}) — not written, not even with --force, so nothing in it is lost. Make it readable UTF-8 text, or move it aside, then sync again."
+        )),
+    }
+}
+
 fn sync_whole_file(
     target: SyncTarget,
     skill: &Skill,
@@ -551,7 +596,18 @@ fn sync_whole_file(
     options: SyncOptions,
     report: &mut SyncReport,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let existing = std::fs::read_to_string(path).ok();
+    let existing = match read_existing(path) {
+        Ok(existing) => existing,
+        Err(e) => {
+            report.push(unreadable_change(
+                target,
+                path,
+                vec![skill.name.clone()],
+                &e,
+            ));
+            return Ok(());
+        }
+    };
     let desired = managed_file_content(base, &skill.name);
     let ownership = classify_file(existing.as_deref(), base);
     let old_region = existing.as_deref().map(managed_region).unwrap_or_default();
@@ -774,7 +830,14 @@ fn sync_codex_file(
     options: SyncOptions,
     report: &mut SyncReport,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let existing = match read_existing(path) {
+        Ok(existing) => existing.unwrap_or_default(),
+        Err(e) => {
+            let names = skills.iter().map(|s| s.name.clone()).collect();
+            report.push(unreadable_change(SyncTarget::Codex, path, names, &e));
+            return Ok(());
+        }
+    };
     let found = find_codex_block(&existing);
     let desired_inner = codex_block_inner(skills);
     let old_inner = found
@@ -1594,6 +1657,119 @@ mod tests {
         let content2 = std::fs::read_to_string(codex_home.path().join("AGENTS.md")).unwrap();
         assert_eq!(content2.matches(CODEX_BLOCK_START_PREFIX).count(), 1);
         assert_eq!(content, content2);
+    }
+
+    const FORCE: SyncOptions = SyncOptions {
+        dry_run: false,
+        force: true,
+    };
+
+    /// Sync the global `ci-tips` skill into Codex's `AGENTS.md` under
+    /// `codex_home`.
+    fn sync_codex_global(
+        repo: &Repository,
+        cwd: &Path,
+        codex_home: &Path,
+        options: SyncOptions,
+    ) -> Result<SyncReport, Box<dyn std::error::Error>> {
+        sync_inner(
+            repo,
+            &[SyncTarget::Codex],
+            cwd,
+            None,
+            Some(codex_home),
+            options,
+        )
+    }
+
+    #[test]
+    fn an_agents_md_that_is_not_utf8_is_never_replaced() {
+        let (_dir, repo) = test_repo();
+        repo.create_skill(&skill("ci-tips", SKILL_SCOPE_GLOBAL))
+            .unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let codex_home = tempfile::tempdir().unwrap();
+        let path = codex_home.path().join("AGENTS.md");
+        let original = b"# Notes\n\xff\xfe latin-1 caf\xe9\n".to_vec();
+        std::fs::write(&path, &original).unwrap();
+
+        for options in [SyncOptions::apply(), FORCE] {
+            let report = sync_codex_global(&repo, cwd.path(), codex_home.path(), options).unwrap();
+            let change = change_for(&report, &path);
+            assert_eq!(change.kind, ChangeKind::Conflict);
+            let detail = change.detail.as_deref().unwrap_or_default();
+            assert!(detail.contains("could not be read"), "{detail}");
+            assert_eq!(std::fs::read(&path).unwrap(), original, "file kept as is");
+        }
+    }
+
+    #[test]
+    fn a_skill_md_that_is_not_utf8_is_never_replaced() {
+        let (_dir, repo) = test_repo();
+        repo.create_skill(&skill("deploy", SKILL_SCOPE_GLOBAL))
+            .unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let path = home.path().join(".claude/skills/deploy/SKILL.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = b"my own \xff notes\n".to_vec();
+        std::fs::write(&path, &original).unwrap();
+
+        for options in [SyncOptions::apply(), FORCE] {
+            let report = sync_inner(
+                &repo,
+                &[SyncTarget::ClaudeCode],
+                cwd.path(),
+                Some(home.path()),
+                None,
+                options,
+            )
+            .unwrap();
+            assert_eq!(change_for(&report, &path).kind, ChangeKind::Conflict);
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn an_unreadable_agents_md_is_reported_and_left_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, repo) = test_repo();
+        repo.create_skill(&skill("ci-tips", SKILL_SCOPE_GLOBAL))
+            .unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let codex_home = tempfile::tempdir().unwrap();
+        let path = codex_home.path().join("AGENTS.md");
+        std::fs::write(&path, "# Private\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() {
+            // Running as root: permissions do not stop the read.
+            return;
+        }
+
+        let report = sync_codex_global(&repo, cwd.path(), codex_home.path(), FORCE).unwrap();
+        assert_eq!(change_for(&report, &path).kind, ChangeKind::Conflict);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Private\n");
+    }
+
+    #[test]
+    fn a_dangling_agents_md_link_is_reported_not_replaced() {
+        let (_dir, repo) = test_repo();
+        repo.create_skill(&skill("ci-tips", SKILL_SCOPE_GLOBAL))
+            .unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let codex_home = tempfile::tempdir().unwrap();
+        let missing = codex_home.path().join("gone/AGENTS.md");
+        let link = codex_home.path().join("AGENTS.md");
+        std::os::unix::fs::symlink(&missing, &link).unwrap();
+
+        let report = sync_codex_global(&repo, cwd.path(), codex_home.path(), FORCE).unwrap();
+        assert_eq!(change_for(&report, &link).kind, ChangeKind::Conflict);
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!missing.exists());
     }
 
     #[test]
