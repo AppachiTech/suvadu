@@ -164,7 +164,7 @@ impl Server<'_> {
         request: &serde_json::Value,
     ) -> serde_json::Value {
         match method {
-            "initialize" => protocol::handle_initialize(rid),
+            "initialize" => protocol::handle_initialize(rid, &request["params"]),
             "tools/list" => tools::list_tools(rid, self.mcp),
             "tools/call" => self.repo.map_or_else(
                 || protocol::tool_error(rid, &db_unavailable_message(self.db_error)),
@@ -345,6 +345,45 @@ mod tests {
         assert_eq!(responses[0]["error"]["message"], "Parse error");
         assert!(responses[0]["id"].is_null());
         assert_eq!(responses[1]["id"], 7);
+    }
+
+    fn initialize_line(version: Option<&str>) -> Vec<u8> {
+        let params = version.map_or_else(
+            || json!({}),
+            |v| json!({"protocolVersion": v, "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}),
+        );
+        let mut line = serde_json::to_vec(
+            &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params}),
+        )
+        .unwrap();
+        line.push(b'\n');
+        line
+    }
+
+    #[test]
+    fn initialize_echoes_a_supported_protocol_version_the_client_asked_for() {
+        for version in ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"] {
+            let responses = exchange(None, &initialize_line(Some(version)));
+            assert_eq!(
+                responses[0]["result"]["protocolVersion"], version,
+                "{responses:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn initialize_answers_the_latest_version_when_the_request_is_unsupported_or_missing() {
+        for request in [
+            initialize_line(Some("1999-01-01")),
+            initialize_line(None),
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":5}}\n".to_vec(),
+        ] {
+            let responses = exchange(None, &request);
+            assert_eq!(
+                responses[0]["result"]["protocolVersion"], "2025-11-25",
+                "{responses:?}"
+            );
+        }
     }
 
     #[test]

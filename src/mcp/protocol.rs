@@ -1,18 +1,42 @@
 use serde_json::{json, Value};
 
-/// MCP protocol version we support.
+/// The newest MCP protocol version we speak, answered whenever the client
+/// asks for one we do not.
 pub const PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// Every MCP protocol version this server can answer in. Everything it
+/// sends — text tool results with `isError`, resources, resource
+/// templates, prompts, `instructions` — exists unchanged in all of them,
+/// and it sends nothing a later version added (`structuredContent`,
+/// `outputSchema`, titles, icons), so one set of responses serves each.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
+    &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// Maximum number of characters in a tool result before truncation.
 const MAX_OUTPUT_CHARS: usize = 50_000;
 
-/// Build the response for `initialize`.
-pub fn handle_initialize(id: &Value) -> Value {
+/// The protocol version to answer `initialize` with: the client's own when
+/// we support it, otherwise our latest, which the client may then reject.
+pub fn negotiate_version(params: &Value) -> &'static str {
+    params
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .and_then(|asked| {
+            SUPPORTED_PROTOCOL_VERSIONS
+                .iter()
+                .copied()
+                .find(|&v| v == asked)
+        })
+        .unwrap_or(PROTOCOL_VERSION)
+}
+
+/// Build the response for `initialize`, given the request's `params`.
+pub fn handle_initialize(id: &Value, params: &Value) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
         "result": {
-            "protocolVersion": PROTOCOL_VERSION,
+            "protocolVersion": negotiate_version(params),
             "capabilities": {
                 "tools": { "listChanged": false },
                 "resources": { "subscribe": false, "listChanged": false },
@@ -97,7 +121,7 @@ mod tests {
 
     #[test]
     fn test_initialize_response() {
-        let resp = handle_initialize(&json!(1));
+        let resp = handle_initialize(&json!(1), &json!({}));
         assert_eq!(resp["jsonrpc"], "2.0");
         assert_eq!(resp["id"], 1);
         assert_eq!(resp["result"]["serverInfo"]["name"], "suvadu-mcp");
@@ -110,7 +134,7 @@ mod tests {
         // Guards against the instructions field regressing into a generic
         // "here's what this server is" blurb — it should tell a connecting
         // client *when* to proactively call the highest-value tools.
-        let resp = handle_initialize(&json!(1));
+        let resp = handle_initialize(&json!(1), &json!({}));
         let instructions = resp["result"]["instructions"].as_str().unwrap();
         assert!(instructions.contains("project_context"));
         assert!(instructions.contains("learn_from_failures"));
