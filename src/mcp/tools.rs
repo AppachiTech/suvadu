@@ -448,6 +448,26 @@ fn date_arg(args: &Value, key: &str, end_of_day: bool) -> Result<Option<i64>, St
     })
 }
 
+/// The `exit_code` filter. Absent or null is no filter; anything that is not
+/// a whole number an exit code can hold is an error — never a stand-in
+/// value, which would quietly search for something else.
+fn exit_code_arg(args: &Value) -> Result<Option<i32>, String> {
+    match args.get("exit_code") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_i64()
+            .and_then(|code| i32::try_from(code).ok())
+            .map(Some)
+            .ok_or_else(|| {
+                format!(
+                    "exit_code must be a whole number from {} to {}, got {value}",
+                    i32::MIN,
+                    i32::MAX
+                )
+            }),
+    }
+}
+
 /// Schema description for a date argument, listing what it accepts.
 fn date_schema(what: &str) -> Value {
     json!({
@@ -593,10 +613,7 @@ fn handle_search_commands(
     let before = date_arg(args, "before", true)?;
     let executor = get_str(args, "executor");
     let directory = get_str(args, "directory");
-    let exit_code = args
-        .get("exit_code")
-        .and_then(Value::as_i64)
-        .map(|c| i32::try_from(c).unwrap_or(0));
+    let exit_code = exit_code_arg(args)?;
 
     let qf = QueryFilter {
         query_tokens: &[],
@@ -3985,5 +4002,43 @@ mod tests {
             assert_eq!(trailer["shown"], "1 of 1", "{args}: {text}");
             assert_eq!(trailer["next_offset"], "none", "{args}: {text}");
         }
+    }
+
+    #[test]
+    fn an_exit_code_that_cannot_be_one_is_an_error_not_a_search_for_successes() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_two_dirs(&repo);
+        for bad in [
+            json!(4_294_967_296_i64),
+            json!(-2_147_483_649_i64),
+            json!(1.5),
+            json!("1"),
+        ] {
+            let err = call_tool(
+                &repo,
+                "search_commands",
+                &json!({"query": "", "exit_code": bad}),
+                &default_mcp(),
+            )
+            .expect_err(&format!("exit_code {bad} should be rejected"));
+            assert!(err.contains("exit_code"), "{err}");
+        }
+        // In range still filters, and null means no filter.
+        let text = call_tool(
+            &repo,
+            "search_commands",
+            &json!({"query": "", "exit_code": 0}),
+            &default_mcp(),
+        )
+        .unwrap();
+        assert!(text.contains("shown: 2 of 2"), "{text}");
+        let text = call_tool(
+            &repo,
+            "search_commands",
+            &json!({"query": "", "exit_code": null}),
+            &default_mcp(),
+        )
+        .unwrap();
+        assert!(text.contains("shown: 2 of 2"), "{text}");
     }
 }
