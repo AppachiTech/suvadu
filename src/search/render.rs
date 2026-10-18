@@ -787,7 +787,7 @@ impl SearchApp {
         self.table_title(usize::MAX)
     }
 
-    /// [`Self::build_table_title`] fitted to `width` columns. Results found
+    /// The results title (see `build_table_title`), fitted to `width` columns. Results found
     /// with separators ignored say so beside the count — in full where it
     /// fits, shortened where it does not. Narrower still, the status row's
     /// `terms (loose)` and the marks in each row are what say it: the

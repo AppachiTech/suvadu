@@ -422,7 +422,7 @@ impl FilterBuilder {
     ///
     /// On `command` an ASCII term is looked up in the `entries_norm_fts`
     /// trigram index, by the same two-argument `LIKE` as
-    /// [`Self::push_command_contains`] and for the same reason. A normalized
+    /// `push_command_contains` and for the same reason. A normalized
     /// term holds no `_` (it is a separator) but can hold `%`, which the
     /// unescaped lookup reads as a wildcard, so such a term is checked again
     /// with an escaped `LIKE` on the normalized command. A non-ASCII term, or
