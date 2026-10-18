@@ -5393,3 +5393,55 @@ fn a_loose_result_marks_the_separator_it_spanned_on_screen() {
     }
     assert!(!underlined(x - 2), "`ssh` did not match");
 }
+
+#[test]
+fn loose_results_say_so_in_the_title_at_every_width() {
+    let (_d, repo) = repo_with(HIVE_SPELLINGS);
+    let mut app = app_for(&repo, "hiveagent");
+    assert!(app.loosened);
+    let screen = render_lines(&mut app, 120, 24).join("\n");
+    assert!(
+        screen.contains("Executions 1-5 of 5 \u{b7} ignoring punctuation (-_./:) \u{b7} ^U group"),
+        "{screen}"
+    );
+    let screen = render_lines(&mut app, 60, 24).join("\n");
+    assert!(screen.contains("-_./: ignored \u{b7} ^U group"), "{screen}");
+    // The status row says how these matched wherever it has room for the
+    // mode at all, and the grouping key keeps its place beside the count
+    // at every width.
+    for width in [60_u16, 80, 120] {
+        let screen = render_lines(&mut app, width, 24).join("\n");
+        assert!(screen.contains("terms (loose)"), "{width} cols:\n{screen}");
+    }
+    for width in [40_u16, 60, 80, 120] {
+        let screen = render_lines(&mut app, width, 24).join("\n");
+        assert!(screen.contains("^U group"), "{width} cols:\n{screen}");
+    }
+}
+
+#[test]
+fn strict_results_carry_no_loose_label() {
+    let (_d, repo) = repo_with(HIVE_SPELLINGS);
+    let mut app = app_for(&repo, "hive-agent");
+    assert!(!app.loosened);
+    let screen = render_lines(&mut app, 120, 24).join("\n");
+    assert!(!screen.contains("ignoring punctuation"), "{screen}");
+    assert!(!screen.contains("(loose)"), "{screen}");
+}
+
+#[test]
+fn no_results_says_the_separator_fallback_was_tried_too() {
+    let (_d, repo) = repo_with(HIVE_SPELLINGS);
+    let mut app = app_for(&repo, "hiveagentz");
+    let screen = render_lines(&mut app, 100, 30).join("\n");
+    assert!(screen.contains("No matches for \"hiveagentz\""), "{screen}");
+    assert!(
+        screen.contains("also tried ignoring punctuation (-_./:)"),
+        "{screen}"
+    );
+    // Literal has no fallback, so it claims none.
+    app.recall.match_mode = MatchMode::Literal;
+    app.reload_entries(&repo).unwrap();
+    let screen = render_lines(&mut app, 100, 30).join("\n");
+    assert!(!screen.contains("also tried"), "{screen}");
+}

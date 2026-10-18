@@ -22,6 +22,10 @@ How a query is read, in every mode:
   - There is no quoting syntax: \" and ' are ordinary characters to find.
     Use --match literal for a phrase with spaces or punctuation.
   - Punctuation is never stripped. git-push is one word and matches only git-push.
+  - The one exception: when a terms query matches nothing at all, it is
+    retried with separators (whitespace and - _ . / :) ignored, so hiveagent
+    finds hive-agent and hive_agent. Those results are labelled \"ignoring
+    punctuation\" and never mixed with exact matches.
   - Every mode narrows in the database, so how old a match is never decides
     whether it is found.
 

@@ -245,7 +245,16 @@ impl SearchApp {
             // reorders what the others chose, so it is dropped first when
             // the terminal is narrow.
             StatusSegment::new("Scope", self.recall.scope.status_value()),
-            StatusSegment::new("Match", self.recall.match_mode.label()),
+            StatusSegment::new(
+                "Match",
+                // These results came from `terms`' fallback that ignores
+                // separators; the results title spells it out.
+                if self.loosened {
+                    "terms (loose)"
+                } else {
+                    self.recall.match_mode.label()
+                },
+            ),
             StatusSegment::new(
                 "Agents",
                 if self.filters.show_agents {
@@ -538,7 +547,8 @@ impl SearchApp {
 
         let widths = layout.constraints();
         let header_row = layout.header_row();
-        let title = self.build_table_title();
+        // The block's border takes a column on either side of the title.
+        let title = self.table_title(usize::from(table_area.width.saturating_sub(2)));
 
         if self.entries.is_empty() {
             if self.searching {
@@ -615,6 +625,9 @@ impl SearchApp {
             failed_only: self.filters.failed_only,
             bookmarks_only: self.filters.bookmarks_only,
             other_filters: self.dialog_filter_count(),
+            // Nothing on screen with a fallback available means it ran and
+            // found nothing either.
+            tried_loose: self.recall.match_mode.loose_plan(&self.query).is_some(),
         };
 
         let lines: Vec<Line<'static>> = no_results_lines(&state)
@@ -769,7 +782,17 @@ impl SearchApp {
     /// `"Commands 1-50 of 139 · ^U every run"` when rows are grouped by
     /// command — the count says what it counts, and the key that switches
     /// it sits beside it.
+    #[cfg(test)]
     fn build_table_title(&self) -> String {
+        self.table_title(usize::MAX)
+    }
+
+    /// [`Self::build_table_title`] fitted to `width` columns. Results found
+    /// with separators ignored say so beside the count — in full where it
+    /// fits, shortened where it does not. Narrower still, the status row's
+    /// `terms (loose)` and the marks in each row are what say it: the
+    /// grouping key is never the one that goes.
+    fn table_title(&self, width: usize) -> String {
         let noun = if self.view.unique_mode {
             "Commands"
         } else {
@@ -800,6 +823,17 @@ impl SearchApp {
         } else {
             " \u{b7} ^U group"
         };
+        if self.loosened {
+            for label in [
+                " \u{b7} ignoring punctuation (-_./:)",
+                " \u{b7} -_./: ignored",
+            ] {
+                let title = format!("{counts}{searching}{label}{switch}");
+                if display_width(&title) <= width {
+                    return title;
+                }
+            }
+        }
         format!("{counts}{searching}{switch}")
     }
 

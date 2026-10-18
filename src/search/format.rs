@@ -309,6 +309,7 @@ impl StatusSegment {
 // ── No-results state (PROD-09) ─────────────────────────────────
 
 /// Everything the empty state needs to describe itself.
+#[allow(clippy::struct_excessive_bools)]
 pub(super) struct NoResults<'a> {
     pub query: &'a str,
     pub mode: crate::search::MatchMode,
@@ -320,6 +321,8 @@ pub(super) struct NoResults<'a> {
     pub bookmarks_only: bool,
     /// Filter-dialog narrowings (date, tag, exit code, executor).
     pub other_filters: usize,
+    /// `terms`' separator-insensitive retry ran as well, and found nothing.
+    pub tried_loose: bool,
 }
 
 /// The lines shown when a search matches nothing.
@@ -343,6 +346,9 @@ pub(super) fn no_results_lines(state: &NoResults) -> Vec<String> {
         state.mode.label(),
         state.mode.describe()
     ));
+    if state.tried_loose {
+        lines.push("        also tried ignoring punctuation (-_./:)".to_string());
+    }
     lines.push(state.scope_detail.map_or_else(
         || format!("Scope   {}", state.scope.status_value()),
         |detail| format!("Scope   {} ({detail})", state.scope.status_value()),
@@ -430,7 +436,23 @@ mod prod09_no_results_tests {
             failed_only: false,
             bookmarks_only: false,
             other_filters: 0,
+            tried_loose: false,
         }
+    }
+
+    #[test]
+    fn it_says_when_the_separator_fallback_found_nothing_either() {
+        let text = no_results_lines(&base()).join("\n");
+        assert!(!text.contains("also tried"), "{text}");
+        let state = NoResults {
+            tried_loose: true,
+            ..base()
+        };
+        let text = no_results_lines(&state).join("\n");
+        assert!(
+            text.contains("also tried ignoring punctuation (-_./:)"),
+            "{text}"
+        );
     }
 
     #[test]

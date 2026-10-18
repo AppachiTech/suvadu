@@ -66,9 +66,8 @@
 #[clap(rename_all = "kebab-case")]
 pub enum MatchMode {
     /// Every whitespace-separated term must appear as a substring, in any
-    /// order. When nothing matches, the query is retried ignoring
-    /// separators (-_./: and whitespace), and those results are labelled.
-    /// This is the historical default and stays the default.
+    /// order; if nothing does, retried ignoring separators (-_./:). The
+    /// historical default, and still the default.
     #[default]
     Terms,
     /// The whole query must appear as one contiguous substring.

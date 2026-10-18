@@ -164,7 +164,7 @@ controls, and changing one never changes what another does.
 
 | Mode | Rule |
 |---|---|
-| `terms` (default) | every whitespace-separated word must appear as a substring, in any order |
+| `terms` (default) | every whitespace-separated word must appear as a substring, in any order — and if nothing does, the same words with separators ignored (below) |
 | `literal` | the whole query must appear exactly as typed, spaces and punctuation included |
 | `prefix` | the command must start with the query |
 | `fuzzy` | the query's letters must appear in order, gaps allowed (`gco` finds `git checkout`) |
@@ -174,6 +174,17 @@ never stripped, so `git-push` is one word. Matching is case-insensitive;
 `terms` and `fuzzy` fold non-ASCII case too, while `literal` and `prefix` are
 answered by SQLite's `LIKE`, which folds ASCII only. **Every mode narrows in
 the database, so how old a match is never decides whether it is found.**
+
+**Separators — the one fallback.** When a `terms` query matches *nothing* in
+the current scope and filters, it is asked again with separators ignored —
+whitespace, `-`, `_`, `.`, `/` and `:` are dropped from both your words and
+the commands. `hiveagent` then finds `hive-agent`, `hive_agent`, `hive.agent`,
+`hive/agent` and `hive:agent`, and `hive-agent` finds `hiveagent`. Every word
+must still appear. The results title says `ignoring punctuation (-_./:)`, the
+status row says `Match terms (loose)`, and the matched text — separators
+inside it included — is marked as usual. It never mixes with exact matches:
+if anything matches as typed, only that is shown, so the count and every page
+come from one rule. `literal`, `prefix` and `fuzzy` have no fallback.
 
 **Scope** — `--scope`, `^P` to cycle, `^R` to reset:
 

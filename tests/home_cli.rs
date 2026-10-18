@@ -151,6 +151,7 @@ fn subcommand_help_is_plain_and_successful() {
     assert!(output.status.success());
     assert!(!output.stdout.contains(&0x1b));
     assert!(text(&output.stdout).contains("Matching modes"));
+    assert!(text(&output.stdout).contains("so hiveagent\n    finds hive-agent"));
 }
 
 /// Help is how someone recovers from a broken setup, so it must not depend
