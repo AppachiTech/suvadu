@@ -315,31 +315,51 @@ fn build_patterns() -> Vec<RiskPattern> {
 
 type PatternDef = (&'static str, RiskLevel, &'static str, &'static str);
 
+/// A pattern for `git <subcommand…>` that also allows git's global options
+/// before the subcommand: `git -C repo push`, `git --no-pager reset`.
+macro_rules! git {
+    ($subcommand:literal) => {
+        concat!(
+            r"^git\s+(?:(?:-C|-c|--git-dir|--work-tree|--namespace)\s+\S+\s+|--?[a-zA-Z][\w-]*(?:=\S+)?\s+)*",
+            $subcommand
+        )
+    };
+}
+
 /// Command rules are matched against the text from the start of a command
 /// to the end of that command, so `^` means "this program runs" and a
 /// pattern cannot reach into the next command of the line.
 fn critical_pattern_defs() -> Vec<PatternDef> {
     vec![
         (
-            r"^rm\s+.*(-rf|--recursive|-r\s+-f|-f\s+-r)",
+            // Any flag cluster with r or R (`-rf`, `-fr`, `-Rf`, `-r`,
+            // `-rfv`), or `--recursive`, anywhere among the arguments.
+            r"^rm\s+(?:.*\s)?(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?:\s|$)",
             RiskLevel::Critical,
             "destructive",
             "Recursive delete",
         ),
         (
-            r"^git\s+push\s+.*--force(\s|$)",
+            git!(r"push\b(?:.*\s)?(?:--force|-[a-zA-Z]*f[a-zA-Z]*)(?:\s|$)"),
             RiskLevel::Critical,
             "destructive",
             "Force push",
         ),
         (
-            r"^git\s+reset\s+--hard",
+            // `git push origin +main`: a leading `+` forces that refspec.
+            git!(r"push\b(?:.*\s)?\+[^\s+]"),
+            RiskLevel::Critical,
+            "destructive",
+            "Force push (+refspec)",
+        ),
+        (
+            git!(r"reset\b(?:.*\s)?--hard\b"),
             RiskLevel::Critical,
             "destructive",
             "Hard reset (discards changes)",
         ),
         (
-            r"^mkfs\.",
+            r"^(?:mkfs(?:\.\w+)?|mke2fs|mkswap|wipefs|newfs(?:_\w+)?)(?:\s|$)",
             RiskLevel::Critical,
             "destructive",
             "Format filesystem",
@@ -366,6 +386,14 @@ fn anywhere_pattern_defs() -> Vec<PatternDef> {
 
 fn high_pattern_defs() -> Vec<PatternDef> {
     vec![
+        (
+            // The lease variants refuse to overwrite commits the local repo
+            // hasn't seen, so they rate below a bare force push.
+            git!(r"push\b(?:.*\s)?--force-(?:with-lease|if-includes)\b"),
+            RiskLevel::High,
+            "destructive",
+            "Force push with lease",
+        ),
         (
             r"^(npm|yarn|pnpm)\s+(install|add|i)\b",
             RiskLevel::High,
@@ -443,7 +471,7 @@ fn high_pattern_defs() -> Vec<PatternDef> {
         // Irreversible operations an agent might run that previously slipped
         // through as "safe".
         (
-            r"^git\s+clean\s+(-[a-zA-Z]*f|--force)",
+            git!(r"clean\s+(-[a-zA-Z]*f|--force)"),
             RiskLevel::High,
             "git",
             "Delete untracked files (git clean)",
@@ -518,21 +546,21 @@ fn medium_pattern_defs() -> Vec<PatternDef> {
             "process",
             "Process termination (by name)",
         ),
-        (r"^git\s+reset\s+", RiskLevel::Medium, "git", "Git reset"),
+        (git!(r"reset\s"), RiskLevel::Medium, "git", "Git reset"),
         (
-            r"^git\s+checkout\s+--\s+\.",
+            git!(r"checkout\s+--\s+\."),
             RiskLevel::Medium,
             "git",
             "Discard file changes",
         ),
         (
-            r"^git\s+stash\s+drop",
+            git!(r"stash\s+(?:drop|clear)\b"),
             RiskLevel::Medium,
             "git",
             "Drop stashed changes",
         ),
         (
-            r"^git\s+branch\s+-[dD]",
+            git!(r"branch\s+(?:.*\s)?(?:-[dD]|--delete)(?:\s|$)"),
             RiskLevel::Medium,
             "git",
             "Delete git branch",
@@ -547,7 +575,7 @@ fn low_pattern_defs() -> Vec<PatternDef> {
         (r"^ssh\s+", RiskLevel::Low, "network", "SSH connection"),
         (r"^scp\s+", RiskLevel::Low, "network", "Remote file copy"),
         (r"^rsync\s+", RiskLevel::Low, "network", "File sync"),
-        (r"^git\s+push\s+", RiskLevel::Low, "git", "Push to remote"),
+        (git!(r"push\b"), RiskLevel::Low, "git", "Push to remote"),
     ]
 }
 
@@ -902,7 +930,7 @@ impl<'s> SimpleCommand<'s> {
     /// `kubectl exec pod -- rm -rf /data`). `git rm` is left alone: it
     /// removes tracked files git can restore.
     fn embedded_destructive_anchors(&self, src: &str) -> Vec<usize> {
-        const PROGRAMS: &[&str] = &["rm", "dd", "shred", "wipefs", "mke2fs"];
+        const PROGRAMS: &[&str] = &["rm", "dd", "shred", "wipefs", "mke2fs", "mkswap"];
         let mut anchors = Vec::new();
         let Some(program) = self.program else {
             return anchors;
@@ -912,7 +940,7 @@ impl<'s> SimpleCommand<'s> {
         }
         for (word, text) in self.segment.words.iter().zip(&self.words).skip(program + 1) {
             let name = command_name(text);
-            if PROGRAMS.contains(&name) || name.starts_with("mkfs") {
+            if PROGRAMS.contains(&name) || name.starts_with("mkfs") || name.starts_with("newfs") {
                 push_anchor(&mut anchors, src, *word);
             }
         }
@@ -2755,5 +2783,89 @@ mod tests {
             "evidence was {:?}",
             piped.evidence
         );
+    }
+
+    // ── Spellings of the same destructive operation ─────────────────
+
+    /// Any recursive `rm` is a recursive delete, however its flags are
+    /// spelled and whatever it targets.
+    #[test]
+    fn every_spelling_of_recursive_rm_is_critical() {
+        assert_levels(&[
+            ("rm -fr ~", RiskLevel::Critical),
+            ("rm -Rf /", RiskLevel::Critical),
+            ("rm -R dir", RiskLevel::Critical),
+            ("rm -r ~/projects", RiskLevel::Critical),
+            ("rm -r -- dir", RiskLevel::Critical),
+            ("rm -rfv build", RiskLevel::Critical),
+            ("rm -v -r -f build", RiskLevel::Critical),
+            ("rm --recursive dir", RiskLevel::Critical),
+            ("rm --recursive --force /", RiskLevel::Critical),
+            ("rm --force --recursive /", RiskLevel::Critical),
+            ("rm -r $HOME", RiskLevel::Critical),
+            ("rm -rf *", RiskLevel::Critical),
+            ("rm -rf ..", RiskLevel::Critical),
+            // Not recursive: a named file, not a tree.
+            ("rm notes.txt", RiskLevel::None),
+            ("rm -f notes.txt", RiskLevel::None),
+            ("rm -i notes.txt", RiskLevel::None),
+        ]);
+    }
+
+    /// Every way of overwriting the remote branch is a force push. The
+    /// lease variants refuse to clobber work they haven't seen, so they
+    /// rate high rather than critical — still enough for `suv guard`.
+    #[test]
+    fn every_spelling_of_force_push_is_caught() {
+        assert_levels(&[
+            ("git push -f", RiskLevel::Critical),
+            ("git push -f origin main", RiskLevel::Critical),
+            ("git push -uf origin main", RiskLevel::Critical),
+            ("git push --force", RiskLevel::Critical),
+            ("git push origin +main", RiskLevel::Critical),
+            ("git push origin +HEAD:main", RiskLevel::Critical),
+            ("git push origin main +feature", RiskLevel::Critical),
+            ("git -C repo push --force", RiskLevel::Critical),
+            ("git --no-pager push -f", RiskLevel::Critical),
+            ("git push --force-with-lease", RiskLevel::High),
+            (
+                "git push --force-with-lease=main:abc123 origin main",
+                RiskLevel::High,
+            ),
+            (
+                "git push --force-if-includes --force-with-lease",
+                RiskLevel::High,
+            ),
+            ("git push origin main", RiskLevel::Low),
+            ("git push -u origin feature", RiskLevel::Low),
+            ("git push --tags", RiskLevel::Low),
+        ]);
+    }
+
+    /// git's global options come before the subcommand and must not hide it.
+    #[test]
+    fn git_rules_see_past_global_options() {
+        assert_levels(&[
+            ("git -C repo reset --hard", RiskLevel::Critical),
+            ("git -c core.pager=cat reset --hard", RiskLevel::Critical),
+            ("git reset HEAD~1 --hard", RiskLevel::Critical),
+            ("git -C repo branch -D old", RiskLevel::Medium),
+            ("git branch --delete old", RiskLevel::Medium),
+            ("git stash clear", RiskLevel::Medium),
+            ("git -C repo status", RiskLevel::None),
+        ]);
+    }
+
+    #[test]
+    fn every_spelling_of_formatting_a_disk_is_critical() {
+        assert_levels(&[
+            ("mkfs -t ext4 /dev/sdb1", RiskLevel::Critical),
+            ("mkfs /dev/sdb1", RiskLevel::Critical),
+            ("mkfs.ext4 /dev/sdb1", RiskLevel::Critical),
+            ("mke2fs -t ext4 /dev/sdb1", RiskLevel::Critical),
+            ("mkswap /dev/sdb2", RiskLevel::Critical),
+            ("wipefs -a /dev/sdb", RiskLevel::Critical),
+            ("newfs_apfs /dev/disk3s1", RiskLevel::Critical),
+        ]);
     }
 }
