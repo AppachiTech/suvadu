@@ -34,9 +34,11 @@ pub fn parse_date_input(input: &str, is_end_of_day: bool) -> Option<i64> {
     } else if input == "yesterday" {
         Local::now().date_naive().pred_opt()?
     } else if let Some(days) = parse_relative_days(&input) {
+        // `try_days`, not `days`: an absurd count must be an unparseable
+        // date, not a panic in whoever is parsing it.
         Local::now()
             .date_naive()
-            .checked_sub_signed(chrono::Duration::days(days))?
+            .checked_sub_signed(chrono::TimeDelta::try_days(days)?)?
     } else {
         NaiveDate::parse_from_str(&input, "%Y-%m-%d").ok()?
     };
@@ -95,6 +97,13 @@ mod tests {
         let seven = parse_date_input("7 days ago", false).unwrap();
         let yesterday = parse_date_input("yesterday", false).unwrap();
         assert!(seven < yesterday);
+    }
+
+    #[test]
+    fn a_relative_date_too_far_back_is_rejected_instead_of_panicking() {
+        assert!(parse_date_input("200000000000 days ago", false).is_none());
+        assert!(parse_date_input("9223372036854775807 days ago", true).is_none());
+        assert!(parse_date_input("100000000 days ago", false).is_none());
     }
 
     #[test]

@@ -386,6 +386,53 @@ mod tests {
         }
     }
 
+    fn tool_call_line(id: usize, name: &str, arguments: &serde_json::Value) -> Vec<u8> {
+        let mut line = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": name, "arguments": arguments}
+        }))
+        .unwrap();
+        line.push(b'\n');
+        line
+    }
+
+    #[test]
+    fn huge_dates_and_time_windows_do_not_take_the_server_down() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let far = "200000000000 days ago";
+        let calls = [
+            ("search_commands", json!({"query": "x", "after": far})),
+            ("search_commands", json!({"query": "x", "before": far})),
+            ("recent_commands", json!({"after": far})),
+            ("get_prompts", json!({"after": far})),
+            ("find_agent_session", json!({"after": far, "before": far})),
+            ("get_stats", json!({"days": i64::MAX})),
+            ("get_stats", json!({"days": i64::MIN})),
+            ("what_changed", json!({"hours": i64::MAX})),
+            ("what_changed", json!({"hours": i64::MIN})),
+            ("what_failed", json!({"hours": i64::MAX})),
+            ("learn_from_failures", json!({"days": i64::MAX})),
+            ("project_context", json!({"days": i64::MAX})),
+        ];
+        let mut input = Vec::new();
+        for (i, (name, args)) in calls.iter().enumerate() {
+            input.extend(tool_call_line(i, name, args));
+        }
+        input.extend(b"{\"jsonrpc\":\"2.0\",\"id\":\"last\",\"method\":\"ping\"}\n");
+
+        let responses = exchange(Some(&repo), &input);
+
+        assert_eq!(responses.len(), calls.len() + 1, "{responses:?}");
+        for (i, response) in responses.iter().take(calls.len()).enumerate() {
+            assert_eq!(response["id"], i, "{response}");
+            assert!(
+                response["result"]["content"][0]["text"].is_string(),
+                "{response}"
+            );
+        }
+        assert_eq!(responses[calls.len()]["id"], "last");
+    }
+
     #[test]
     fn a_batch_gets_one_invalid_request_error_instead_of_silence() {
         let responses = exchange(

@@ -416,6 +416,21 @@ fn get_int(args: &Value, key: &str, default: i64) -> i64 {
     args.get(key).and_then(Value::as_i64).unwrap_or(default)
 }
 
+/// The longest look-back a `days` or `hours` argument may ask for: about a
+/// century. Clamping keeps the millisecond arithmetic that turns the window
+/// into a start time far from overflow, whatever number a caller sends.
+const MAX_WINDOW_DAYS: i64 = 36_500;
+
+/// A `days` window argument, clamped to `1..=MAX_WINDOW_DAYS`.
+fn days_arg(args: &Value, default: i64) -> i64 {
+    get_int(args, "days", default).clamp(1, MAX_WINDOW_DAYS)
+}
+
+/// An `hours` window argument, clamped to at most [`MAX_WINDOW_DAYS`].
+fn hours_arg(args: &Value, default: i64) -> i64 {
+    get_int(args, "hours", default).clamp(1, MAX_WINDOW_DAYS * 24)
+}
+
 fn get_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
@@ -875,7 +890,7 @@ fn handle_get_stats(
     args: &Value,
     mcp: &crate::config::McpConfig,
 ) -> Result<String, String> {
-    let days = get_int(args, "days", i64::from(mcp.default_days));
+    let days = days_arg(args, i64::from(mcp.default_days));
     let directory = get_str(args, "directory");
 
     let now = chrono::Utc::now().timestamp_millis();
@@ -1104,7 +1119,7 @@ fn handle_what_changed(
     args: &Value,
     mcp: &crate::config::McpConfig,
 ) -> Result<String, String> {
-    let hours = get_int(args, "hours", 4);
+    let hours = hours_arg(args, 4);
     let directory = get_str(args, "directory");
     let executor = get_str(args, "executor");
 
@@ -1241,7 +1256,7 @@ fn handle_what_failed(
     args: &Value,
     mcp: &crate::config::McpConfig,
 ) -> Result<String, String> {
-    let hours = get_int(args, "hours", 24);
+    let hours = hours_arg(args, 24);
     let (limit, offset) = paging(args, i64::from(mcp.default_limit));
     let directory = get_str(args, "directory");
 
@@ -1905,7 +1920,7 @@ fn handle_learn_from_failures(
     args: &Value,
     mcp: &crate::config::McpConfig,
 ) -> Result<String, String> {
-    let days = get_int(args, "days", i64::from(mcp.default_days));
+    let days = days_arg(args, i64::from(mcp.default_days));
     let directory = get_str(args, "directory");
 
     let now = chrono::Utc::now().timestamp_millis();
@@ -2052,7 +2067,7 @@ fn handle_project_context(
     args: &Value,
     mcp: &crate::config::McpConfig,
 ) -> Result<String, String> {
-    let days = get_int(args, "days", i64::from(mcp.default_days));
+    let days = days_arg(args, i64::from(mcp.default_days));
     let directory = get_str(args, "directory");
     let detail = detail(args);
 
