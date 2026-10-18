@@ -74,16 +74,22 @@ fn add_alias_to(
 
 fn handle_remove(name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let repo = Repository::init()?;
-    remove_alias_from(&repo, name)
+    if remove_alias_from(&repo, name)? {
+        // Regenerate the managed alias file so new shells no longer define it.
+        write_aliases_file(&repo)?;
+    }
+    Ok(())
 }
 
-fn remove_alias_from(repo: &Repository, name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    if repo.remove_alias(name)? {
+/// Returns whether an alias was removed.
+fn remove_alias_from(repo: &Repository, name: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    let removed = repo.remove_alias(name)?;
+    if removed {
         println!("✓ Removed alias '{name}'");
     } else {
         println!("No alias named '{name}' found.");
     }
-    Ok(())
+    Ok(removed)
 }
 
 fn handle_list(json: bool) -> Result<(), Box<dyn std::error::Error>> {
@@ -159,14 +165,21 @@ fn build_apply_output(repo: &Repository) -> Result<Option<String>, Box<dyn std::
 /// Write `aliases.sh` with no stdout/println output — safe to call from the
 /// interactive manager (`alias_picker::sync_status`), which owns the
 /// terminal via raw mode; any print here would corrupt its display. Returns
-/// `None` (nothing written) when there are no aliases.
+/// `None` when there are no aliases; any existing file is then deleted, so
+/// new shells stop defining the aliases it held (the shell hook only
+/// sources it if it exists).
 pub fn write_aliases_file(
     repo: &Repository,
 ) -> Result<Option<std::path::PathBuf>, Box<dyn std::error::Error>> {
+    let dirs = crate::util::project_dirs().ok_or("Could not determine data directory")?;
     let Some(lines) = build_apply_output(repo)? else {
+        match std::fs::remove_file(dirs.data_dir().join("aliases.sh")) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
         return Ok(None);
     };
-    let dirs = crate::util::project_dirs().ok_or("Could not determine data directory")?;
     let data_dir = dirs.data_dir();
     if !data_dir.exists() {
         std::fs::create_dir_all(data_dir)?;
@@ -382,7 +395,7 @@ mod tests {
     fn test_alias_remove_nonexistent() {
         let (_dir, repo) = test_repo();
         // remove_alias_from succeeds even when nothing exists (prints message)
-        remove_alias_from(&repo, "nope").unwrap();
+        assert!(!remove_alias_from(&repo, "nope").unwrap());
         // The underlying repo call returns false
         assert!(!repo.remove_alias("nope").unwrap());
     }

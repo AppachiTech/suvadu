@@ -665,3 +665,79 @@ fn bash_loads_aliases_from_a_path_that_needs_quoting() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// Which of `names` a new shell has as aliases.
+fn aliases_defined_in_new_shell(s: &Sandbox, shell: ShellKind, bin: &Path) -> Vec<String> {
+    let probe =
+        "for n in keep gone; do alias \"$n\" >/dev/null 2>&1 && echo \"defined:$n\"; done\n";
+    let out = s.run_interactive(shell, bin, "", "", probe);
+    assert_clean(&out);
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.strip_prefix("defined:").map(str::to_string))
+        .collect()
+}
+
+#[test]
+fn removed_aliases_are_gone_from_new_shells() {
+    let shells: Vec<(ShellKind, PathBuf)> = [
+        modern_bash().map(|b| (ShellKind::Bash, b)),
+        zsh_bin().map(|z| (ShellKind::Zsh, z)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    for (kind, bin) in shells {
+        let s = Sandbox::new();
+        for (name, command) in [("keep", "echo kept"), ("gone", "echo gone")] {
+            let out = s
+                .suv()
+                .args(["aliases", "add", name, command])
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        assert_eq!(
+            aliases_defined_in_new_shell(&s, kind, &bin),
+            ["keep", "gone"]
+        );
+
+        let out = s
+            .suv()
+            .args(["aliases", "remove", "gone"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            aliases_defined_in_new_shell(&s, kind, &bin),
+            ["keep"],
+            "{} after removing one alias",
+            kind.name()
+        );
+
+        // Removing the last alias must not leave the old file behind.
+        let out = s
+            .suv()
+            .args(["aliases", "remove", "keep"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            aliases_defined_in_new_shell(&s, kind, &bin).is_empty(),
+            "{} after removing every alias",
+            kind.name()
+        );
+    }
+}
