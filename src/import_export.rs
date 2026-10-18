@@ -149,8 +149,8 @@ pub fn handle_export(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = Repository::init()?;
 
-    let after_ms = after.and_then(|d| util::parse_date_input(d, false));
-    let before_ms = before.and_then(|d| util::parse_date_input(d, true));
+    let after_ms = util::parse_date_flag("--after", after, false)?;
+    let before_ms = util::parse_date_flag("--before", before, true)?;
 
     match format {
         "json" => {

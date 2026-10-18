@@ -36,8 +36,8 @@ fn handle_replay_with_repo(
     };
 
     // Parse date filters
-    let after_ms = p.after.and_then(|d| util::parse_date_input(d, false));
-    let before_ms = p.before.and_then(|d| util::parse_date_input(d, true));
+    let after_ms = util::parse_date_flag("--after", p.after, false)?;
+    let before_ms = util::parse_date_flag("--before", p.before, true)?;
 
     let scope = ReplayScope {
         session: p.session,

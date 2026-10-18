@@ -121,7 +121,7 @@ fn handle_session_with_repo(
         .transpose()?
         .flatten();
 
-    let after_ms = after.and_then(|d| util::parse_date_input(d, false));
+    let after_ms = util::parse_date_flag("--after", after, false)?;
 
     // If a session ID was given directly, resolve by prefix
     if let Some(prefix) = session_id {

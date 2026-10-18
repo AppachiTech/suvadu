@@ -27,8 +27,8 @@ pub fn handle_history(
         cwd.map(String::from)
     };
 
-    let after_ms = after.and_then(|d| util::parse_date_input(d, false));
-    let before_ms = before.and_then(|d| util::parse_date_input(d, true));
+    let after_ms = util::parse_date_flag("--after", after, false)?;
+    let before_ms = util::parse_date_flag("--before", before, true)?;
 
     let entries = repo.get_entries_filtered(
         limit,

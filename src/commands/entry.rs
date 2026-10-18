@@ -343,13 +343,7 @@ fn handle_delete_with_repo(
         );
     }
 
-    let before_timestamp: Option<i64> = if let Some(date_str) = before {
-        Some(util::parse_date_input(date_str, false).ok_or_else(|| {
-            format!("Invalid date format: {date_str}. Use YYYY-MM-DD or keywords.")
-        })?)
-    } else {
-        None
-    };
+    let before_timestamp = util::parse_date_flag("--before", before, false)?;
 
     let count = repo.count_entries_by_pattern(pattern, is_regex, before_timestamp)?;
 

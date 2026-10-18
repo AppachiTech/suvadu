@@ -778,8 +778,8 @@ fn build_search_app(
 
     let tag_id = resolve_tag_id(repo, args.tag);
 
-    let filter_after = args.after.and_then(|s| util::parse_date_input(s, false));
-    let filter_before = args.before.and_then(|s| util::parse_date_input(s, true));
+    let filter_after = util::parse_date_flag("--after", args.after, false)?;
+    let filter_before = util::parse_date_flag("--before", args.before, true)?;
 
     let (recall, cwd_filter) = resolve_recall(args.scope, args.match_mode, args.cwd);
 

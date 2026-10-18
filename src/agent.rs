@@ -61,8 +61,8 @@ fn handle_agent_report(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = repository::Repository::init()?;
 
-    let after_ms = util::parse_date_input(after, false);
-    let before_ms = before.and_then(|d| util::parse_date_input(d, true));
+    let after_ms = util::parse_date_flag("--after", Some(after), false)?;
+    let before_ms = util::parse_date_flag("--before", before, true)?;
 
     let cwd_filter = if here {
         Some(std::env::current_dir()?.to_string_lossy().to_string())
@@ -476,7 +476,7 @@ fn handle_agent_dashboard(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = repository::Repository::init()?;
 
-    let after_ms = util::parse_date_input(after, false);
+    let after_ms = util::parse_date_flag("--after", Some(after), false)?;
     let cwd_filter = if here {
         Some(std::env::current_dir()?.to_string_lossy().to_string())
     } else {
@@ -502,7 +502,7 @@ fn handle_agent_prompts(
     here: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = repository::Repository::init()?;
-    let after_ms = util::parse_date_input(after, false);
+    let after_ms = util::parse_date_flag("--after", Some(after), false)?;
     let cwd_filter = if here {
         Some(std::env::current_dir()?.to_string_lossy().to_string())
     } else {

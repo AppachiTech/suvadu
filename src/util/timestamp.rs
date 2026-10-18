@@ -80,6 +80,26 @@ pub fn parse_date_input(input: &str, is_end_of_day: bool) -> Option<i64> {
     Some(dt_local.timestamp_millis())
 }
 
+/// A date given on the command line as `flag` (`--after`, `--before`), read
+/// as [`parse_date_input`] reads it. Absent is `Ok(None)`; present but
+/// unreadable is an error naming the accepted formats, never a filter
+/// silently dropped, which would return more than was asked for.
+pub fn parse_date_flag(
+    flag: &str,
+    input: Option<&str>,
+    is_end_of_day: bool,
+) -> Result<Option<i64>, String> {
+    input.map_or(Ok(None), |text| {
+        parse_date_input(text, is_end_of_day)
+            .map(Some)
+            .ok_or_else(|| {
+                format!(
+                    "could not read {flag} \"{text}\" as a date. Accepted: {DATE_INPUT_FORMATS}"
+                )
+            })
+    })
+}
+
 /// An ISO 8601 date-time, with or without an offset, as epoch milliseconds.
 /// Expects lowercased input, which chrono's RFC 3339 parser accepts.
 fn parse_date_time(input: &str) -> Option<i64> {
@@ -173,6 +193,20 @@ fn parse_relative(input: &str) -> Option<(i64, RelativeUnit)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_date_flag_is_read_or_refused_with_the_accepted_formats() {
+        assert_eq!(parse_date_flag("--after", None, false), Ok(None));
+        assert_eq!(
+            parse_date_flag("--after", Some("2024-01-15"), false),
+            Ok(parse_date_input("2024-01-15", false))
+        );
+        let error = parse_date_flag("--before", Some("last tuesday"), true).unwrap_err();
+        assert_eq!(
+            error,
+            format!("could not read --before \"last tuesday\" as a date. Accepted: {DATE_INPUT_FORMATS}")
+        );
+    }
 
     #[test]
     fn test_parse_date_iso() {
