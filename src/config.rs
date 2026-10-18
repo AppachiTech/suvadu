@@ -545,9 +545,11 @@ pub fn find_project_overlay(start_dir: &std::path::Path) -> Option<PathBuf> {
 /// Merge `overlay` onto `base` in place. A table merges key-by-key,
 /// recursing into nested tables; anything else (a scalar or an array) is
 /// replaced wholesale by the overlay's value when the overlay sets it.
-/// Arrays are not concatenated — a project's `exclusions = [...]` fully
-/// replaces the global list, matching how every other overridden field
-/// behaves (least surprise: one value per key, the more specific one wins).
+/// Arrays are not concatenated here: one value per key, the more specific
+/// one wins.
+///
+/// This is the generic rule only. [`overlay_config_for_dir`] then puts back
+/// the privacy settings a project overlay is not allowed to weaken.
 fn merge_toml_value(base: &mut toml::Value, overlay: toml::Value) {
     match overlay {
         toml::Value::Table(overlay_table) => {
@@ -571,7 +573,19 @@ fn merge_toml_value(base: &mut toml::Value, overlay: toml::Value) {
 /// Load the effective config for `dir`: the global config, with any
 /// `.suvadu.toml` found by walking up from `dir` merged on top. A field
 /// left out of the overlay keeps the global config's value; a table in the
-/// overlay only needs to name the fields it's actually changing.
+/// overlay only needs to name the fields it's actually changing, and the
+/// overlay's value wins for the fields it sets.
+///
+/// Privacy is the exception, because a `.suvadu.toml` arrives with any
+/// repository you clone: an overlay can only tighten it.
+/// - `redaction.enabled = false` is ignored when the global config has
+///   redaction on; an overlay can still turn it on.
+/// - `enabled = true` is ignored when the global config has recording off;
+///   an overlay can still turn recording off for its project.
+/// - `exclusions` and `redaction.extra_patterns` are the union of the
+///   global entries and the overlay's, never a replacement.
+///
+/// `home` and `update` are ignored in an overlay altogether.
 ///
 /// Returns the global config unchanged if `dir` has no project overlay.
 pub fn load_config_for_dir(dir: &std::path::Path) -> ConfigResult<Config> {
@@ -599,9 +613,33 @@ pub fn overlay_config_for_dir(base: &Config, dir: &std::path::Path) -> ConfigRes
     }
     let mut merged_value = toml::Value::try_from(base.clone())?;
     merge_toml_value(&mut merged_value, overlay_value);
-    let merged: Config = merged_value.try_into()?;
+    let mut merged: Config = merged_value.try_into()?;
+    keep_global_privacy(base, &mut merged);
     validate_config(&merged)?;
     Ok(merged)
+}
+
+/// Undo anything a project overlay did to weaken `base`'s privacy settings
+/// (see [`load_config_for_dir`]).
+fn keep_global_privacy(base: &Config, merged: &mut Config) {
+    merged.enabled &= base.enabled;
+    merged.redaction.enabled |= base.redaction.enabled;
+    merged.exclusions = union_keeping_order(&base.exclusions, &merged.exclusions);
+    merged.redaction.extra_patterns = union_keeping_order(
+        &base.redaction.extra_patterns,
+        &merged.redaction.extra_patterns,
+    );
+}
+
+/// `first` followed by each entry of `second` not already present.
+fn union_keeping_order(first: &[String], second: &[String]) -> Vec<String> {
+    let mut out = first.to_vec();
+    for item in second {
+        if !out.contains(item) {
+            out.push(item.clone());
+        }
+    }
+    out
 }
 
 /// `load_config_for_dir` for the current working directory. Falls back to
@@ -1137,6 +1175,99 @@ unknown_mcp_key = 7
         let merged = overlay_config_for_dir(&Config::default(), dir.path()).unwrap();
         assert!(merged.update.check);
         assert_eq!(merged.search.page_limit, 9);
+    }
+
+    /// A `.suvadu.toml` arrives with any repository you clone, so it may
+    /// only add privacy protection, never remove the person's own.
+    #[test]
+    fn a_project_overlay_cannot_turn_redaction_off() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join(".suvadu.toml"),
+            "[redaction]\nenabled = false\n[search]\npage_limit = 9\n",
+        )
+        .unwrap();
+        let merged = overlay_config_for_dir(&Config::default(), dir.path()).unwrap();
+        assert!(merged.redaction.enabled);
+        assert_eq!(merged.search.page_limit, 9, "other keys still apply");
+
+        // Turning it on where the global config has it off is tightening.
+        std::fs::write(
+            dir.path().join(".suvadu.toml"),
+            "[redaction]\nenabled = true\n",
+        )
+        .unwrap();
+        let mut base = Config::default();
+        base.redaction.enabled = false;
+        assert!(
+            overlay_config_for_dir(&base, dir.path())
+                .unwrap()
+                .redaction
+                .enabled
+        );
+    }
+
+    #[test]
+    fn a_project_overlay_cannot_turn_recording_back_on() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".suvadu.toml"), "enabled = true\n").unwrap();
+        let base = Config {
+            enabled: false,
+            ..Config::default()
+        };
+        assert!(!overlay_config_for_dir(&base, dir.path()).unwrap().enabled);
+
+        std::fs::write(dir.path().join(".suvadu.toml"), "enabled = false\n").unwrap();
+        assert!(
+            !overlay_config_for_dir(&Config::default(), dir.path())
+                .unwrap()
+                .enabled,
+            "a project may still opt out of recording"
+        );
+    }
+
+    #[test]
+    fn a_project_overlay_adds_to_privacy_lists_instead_of_replacing_them() {
+        let dir = TempDir::new().unwrap();
+        let mut base = Config {
+            exclusions: vec!["secret-tool".into(), "shared".into()],
+            ..Config::default()
+        };
+        base.redaction.extra_patterns = vec!["CORP-[0-9]{6}".into()];
+
+        for overlay in [
+            "exclusions = []\n[redaction]\nextra_patterns = []\n",
+            "exclusions = [\"project-tool\", \"shared\"]\n\
+             [redaction]\nextra_patterns = [\"PRJ-[a-z]{8}\"]\n",
+        ] {
+            std::fs::write(dir.path().join(".suvadu.toml"), overlay).unwrap();
+            let merged = overlay_config_for_dir(&base, dir.path()).unwrap();
+            for kept in &base.exclusions {
+                assert!(merged.exclusions.contains(kept), "{overlay}: lost {kept}");
+            }
+            assert!(
+                merged
+                    .redaction
+                    .extra_patterns
+                    .contains(&"CORP-[0-9]{6}".to_string()),
+                "{overlay}"
+            );
+        }
+
+        // Entries the overlay adds are applied, once each.
+        let merged = overlay_config_for_dir(&base, dir.path()).unwrap();
+        assert_eq!(
+            merged.exclusions,
+            vec![
+                "secret-tool".to_string(),
+                "shared".to_string(),
+                "project-tool".to_string()
+            ]
+        );
+        assert_eq!(
+            merged.redaction.extra_patterns,
+            vec!["CORP-[0-9]{6}".to_string(), "PRJ-[a-z]{8}".to_string()]
+        );
     }
 
     #[test]

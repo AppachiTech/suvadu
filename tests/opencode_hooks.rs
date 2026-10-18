@@ -348,21 +348,23 @@ fn opencode_prompt_cache_respects_a_project_suvadu_toml_overlay() {
     let s = Sandbox::new();
     let project = s.home.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    // A project overlay that diverges from the global defaults (redaction
-    // on, 4000-char cap): shrinks the cap (well past where the secret sits)
-    // and turns redaction off. Before routing the prompt cache through
+    // A project overlay that diverges from the global defaults (4000-char
+    // cap, no extra patterns): shrinks the cap and adds a redaction pattern
+    // of its own. It also tries to turn redaction off, which a project
+    // overlay may not do. Before routing the prompt cache through
     // load_config_for_dir(directory), the cache always used the global
     // config, so this project's own policy would have been ignored for the
     // cached copy.
     std::fs::write(
         project.join(".suvadu.toml"),
-        "[agent]\nprompt_capture_max_chars = 200\n[redaction]\nenabled = false\n",
+        "[agent]\nprompt_capture_max_chars = 200\n\
+         [redaction]\nenabled = false\nextra_patterns = [\"PRJMARK-[0-9]+\"]\n",
     )
     .unwrap();
     let project_dir = project.to_string_lossy().to_string();
 
-    let secret = "overlay_secret_should_survive_here";
-    let prompt = format!("token={secret} {}", "padding ".repeat(40));
+    let marker = "PRJMARK-424242";
+    let prompt = format!("ticket {marker} {}", "padding ".repeat(40));
     assert!(prompt.len() > 300, "prompt must exceed the overlay's cap");
 
     s.cache_prompt("ses1", &project_dir, &prompt);
@@ -370,14 +372,13 @@ fn opencode_prompt_cache_respects_a_project_suvadu_toml_overlay() {
 
     let entries = s.history();
     let stored = entries[0]["context"]["agent_prompt"].as_str().unwrap();
-    // The overlay turns redaction off for this project, unlike the global
-    // default, so the secret (well within the 200-char cap) is expected to
-    // survive here...
+    // The overlay's own extra pattern applies to the cached copy (so
+    // redaction is still on, despite the overlay asking for it off)...
     assert!(
-        stored.contains(secret),
-        "project overlay disabling redaction was not applied to the cache: {stored}"
+        !stored.contains(marker),
+        "project overlay's redaction pattern was not applied to the cache: {stored}"
     );
-    // ...but its much shorter max_chars must still apply, not the 4000-char
+    // ...and its much shorter max_chars applies too, not the 4000-char
     // global default (which would keep the whole prompt).
     assert!(
         stored.len() < prompt.len() && stored.len() < 300,
