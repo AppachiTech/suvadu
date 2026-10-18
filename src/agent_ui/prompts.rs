@@ -51,7 +51,6 @@ fn short_session_id(id: &str) -> String {
 // ── Data ────────────────────────────────────────────────────
 
 /// A unique prompt group: one session + one prompt text, with aggregated stats.
-#[allow(dead_code)]
 struct PromptGroup {
     session_id: String,
     turn_id: Option<String>,
