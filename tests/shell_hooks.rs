@@ -1,8 +1,8 @@
 //! The generated shell hooks, running inside real interactive shells.
 //!
-//! Each test writes the hook that `suv init <shell>` prints into a private
-//! HOME, starts an interactive shell whose rc file sources it, and types
-//! lines into the shell's stdin. Whatever the hook records goes into that
+//! Each test starts an interactive shell with a private HOME whose rc file
+//! loads the hook with `eval "$(suv init <shell>)"`, and types lines into
+//! the shell's stdin. Whatever the hook records goes into that
 //! HOME's database, which is read back with `suv history --json` — the
 //! user's own shell config and history are never touched.
 #![cfg(unix)]
@@ -24,18 +24,26 @@ struct Recorded {
 }
 
 struct Sandbox {
-    home: tempfile::TempDir,
+    _root: tempfile::TempDir,
+    home: PathBuf,
 }
 
 impl Sandbox {
     fn new() -> Self {
-        Self {
-            home: tempfile::tempdir().unwrap(),
-        }
+        Self::with_home_named("home")
+    }
+
+    /// A sandbox whose HOME directory has the given name, for paths that
+    /// need quoting.
+    fn with_home_named(name: &str) -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join(name);
+        std::fs::create_dir_all(&home).unwrap();
+        Self { _root: root, home }
     }
 
     fn path(&self, name: &str) -> PathBuf {
-        self.home.path().join(name)
+        self.home.join(name)
     }
 
     fn suv(&self) -> Command {
@@ -48,7 +56,7 @@ impl Sandbox {
     fn isolate(&self, cmd: &mut Command) {
         let bin_dir = Path::new(env!("CARGO_BIN_EXE_suv")).parent().unwrap();
         cmd.env_clear()
-            .env("HOME", self.home.path())
+            .env("HOME", &self.home)
             .env("XDG_DATA_HOME", self.path("data"))
             .env("XDG_CONFIG_HOME", self.path("config"))
             .env(
@@ -93,8 +101,18 @@ impl Sandbox {
                     .arg("-i")
                     .env("HISTFILE", self.path(".bash_history"));
             }
+            ShellKind::Zsh => {
+                let zdot = self.path("zdot");
+                std::fs::create_dir_all(&zdot).unwrap();
+                std::fs::write(zdot.join(".zshrc"), format!("PS1='$ '\n{rc}")).unwrap();
+                // -d: skip /etc/zsh* so only the sandbox rc file runs.
+                cmd.arg("-d")
+                    .arg("-i")
+                    .env("ZDOTDIR", &zdot)
+                    .env("HISTFILE", self.path(".zsh_history"));
+            }
         }
-        cmd.current_dir(self.home.path())
+        cmd.current_dir(&self.home)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -121,6 +139,10 @@ impl Sandbox {
 
     fn bash(&self, bash: &Path, rc_before: &str, rc_after: &str, lines: &str) -> Output {
         self.run_interactive(ShellKind::Bash, bash, rc_before, rc_after, lines)
+    }
+
+    fn zsh(&self, zsh: &Path, rc_before: &str, rc_after: &str, lines: &str) -> Output {
+        self.run_interactive(ShellKind::Zsh, zsh, rc_before, rc_after, lines)
     }
 
     /// Everything recorded so far, oldest first.
@@ -171,12 +193,14 @@ impl Sandbox {
 #[derive(Clone, Copy)]
 enum ShellKind {
     Bash,
+    Zsh,
 }
 
 impl ShellKind {
     const fn name(self) -> &'static str {
         match self {
             Self::Bash => "bash",
+            Self::Zsh => "zsh",
         }
     }
 }
@@ -226,6 +250,22 @@ fn legacy_bash() -> Option<PathBuf> {
     bash_candidates()
         .into_iter()
         .find(|p| bash_version(p).is_some_and(|v| v < (4, 0)))
+}
+
+fn zsh_bin() -> Option<PathBuf> {
+    let found = [
+        "/bin/zsh",
+        "/usr/bin/zsh",
+        "/opt/homebrew/bin/zsh",
+        "/usr/local/bin/zsh",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .find(|p| p.exists());
+    if found.is_none() {
+        eprintln!("skipping: zsh not found");
+    }
+    found
 }
 
 fn assert_clean(out: &Output) {
@@ -516,4 +556,112 @@ fn bash_loading_the_hook_twice_installs_it_once() {
     let trap = std::fs::read_to_string(s.path("trap.txt")).unwrap();
     assert_eq!(trap.matches("__suvadu_preexec").count(), 1, "{trap}");
     assert_eq!(trap.matches(": mine").count(), 1, "{trap}");
+}
+
+// ── zsh: the hook under the user's own options ─────────────
+
+/// Put a working `suv` at a path with a space in it.
+fn suv_at_spaced_path(s: &Sandbox) -> PathBuf {
+    let dir = s.path("my tools");
+    std::fs::create_dir_all(&dir).unwrap();
+    let link = dir.join("suv");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_suv"), &link).unwrap();
+    link
+}
+
+#[test]
+fn zsh_records_under_options_that_change_word_splitting_and_math() {
+    let Some(zsh) = zsh_bin() else { return };
+    for (when, options) in [
+        ("before", "setopt OCTAL_ZEROES SH_WORD_SPLIT NO_UNSET"),
+        ("after", ""),
+    ] {
+        let s = Sandbox::new();
+        let bin = suv_at_spaced_path(&s);
+        // A clock reading whose milliseconds start with 0, which
+        // OCTAL_ZEROES would read as a (bad) octal number.
+        let rc_after = format!(
+            "_SUVADU_BIN='{}'\n\
+             zmodload -u zsh/datetime\n\
+             typeset -g EPOCHREALTIME=1700000000.089123\n\
+             {}",
+            bin.display(),
+            if when == "after" {
+                "setopt OCTAL_ZEROES SH_WORD_SPLIT NO_UNSET"
+            } else {
+                ""
+            }
+        );
+        let out = s.zsh(&zsh, options, &rc_after, "echo hi\nfalse\n");
+        assert_clean(&out);
+        let rows = s.recorded();
+        let commands: Vec<&str> = rows.iter().map(|r| r.command.as_str()).collect();
+        assert_eq!(
+            commands,
+            ["echo hi", "false"],
+            "options set {when} the hook"
+        );
+        assert_eq!(rows[1].exit_code, Some(1), "options set {when} the hook");
+        let out = s
+            .suv()
+            .args(["history", "--json", "-n", "1"])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains("1700000000089"),
+            "start time misread with options set {when} the hook: {text}"
+        );
+    }
+}
+
+// ── both shells: the managed aliases file ──────────────────
+
+/// A HOME whose path needs quoting in every way a shell can get wrong.
+const AWKWARD_HOME: &str = "it's \"q\" $HOME `echo x` dir";
+
+#[test]
+fn zsh_loads_aliases_from_a_path_that_needs_quoting() {
+    let Some(zsh) = zsh_bin() else { return };
+    let s = Sandbox::with_home_named(AWKWARD_HOME);
+    let out = s
+        .suv()
+        .args(["aliases", "add", "hello", "echo hi-from-alias"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = s.zsh(&zsh, "", "", "hello\n");
+    assert_clean(&out);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("hi-from-alias"),
+        "alias not loaded:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn bash_loads_aliases_from_a_path_that_needs_quoting() {
+    let Some(bash) = modern_bash() else { return };
+    let s = Sandbox::with_home_named(AWKWARD_HOME);
+    let out = s
+        .suv()
+        .args(["aliases", "add", "hello", "echo hi-from-alias"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = s.bash(&bash, "", "", "hello\n");
+    assert_clean(&out);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("hi-from-alias"),
+        "alias not loaded:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

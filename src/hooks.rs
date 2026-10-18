@@ -149,6 +149,7 @@ alias suvadu="suv"
 
 export SUVADU_SESSION_ID="${{SUVADU_SESSION_ID:-$(uuidgen)}}"
 _SUVADU_START_TIME=0
+_SUVADU_CMD=""
 _SUVADU_OFFSET=-1
 _SUVADU_BIN={escaped}
 
@@ -196,20 +197,27 @@ suv() {{
 const fn zsh_hook_functions() -> &'static str {
     r#"# Capture command start time (registered via add-zsh-hook)
 _suvadu_preexec() {
+    # Run with zsh's default options whatever the user has set: e.g.
+    # SH_WORD_SPLIT would split the binary path, and OCTAL_ZEROES would read
+    # milliseconds such as "089" as a (bad) octal number.
+    emulate -L zsh
     # LC_ALL=C keeps the EPOCHREALTIME decimal point a literal '.' — under
     # comma-decimal locales (e.g. pl_PL) it comes back as "1784724300,751987",
     # silently corrupting the arithmetic below. `local` scopes it to this call.
     local LC_ALL=C
     _SUVADU_CMD="$1"
-    _SUVADU_START_TIME=$(( ${EPOCHREALTIME%.*} * 1000 + ${${EPOCHREALTIME#*.}:0:3} ))
+    # 10# reads the milliseconds as decimal even if they start with 0
+    _SUVADU_START_TIME=$(( ${EPOCHREALTIME%.*} * 1000 + 10#${${EPOCHREALTIME#*.}:0:3} ))
 }
 
 # Capture command completion and save to DB (registered via add-zsh-hook)
 _suvadu_precmd() {
+    # Before anything else, which would overwrite $?
     local exit_code=$?
-    # See _suvadu_preexec: force the '.' decimal point regardless of locale.
+    # See _suvadu_preexec: default options, '.' decimal point, decimal ms.
+    emulate -L zsh
     local LC_ALL=C
-    local end_time=$(( ${EPOCHREALTIME%.*} * 1000 + ${${EPOCHREALTIME#*.}:0:3} ))
+    local end_time=$(( ${EPOCHREALTIME%.*} * 1000 + 10#${${EPOCHREALTIME#*.}:0:3} ))
 
     # Reset history offset for new prompt
     _SUVADU_OFFSET=-1
@@ -229,7 +237,7 @@ _suvadu_precmd() {
     local executor="${executor_info##*:}"
 
     # Synchronous add to avoid race conditions with immediate Up arrow
-    $_SUVADU_BIN add \
+    "$_SUVADU_BIN" add \
         --session-id "$SUVADU_SESSION_ID" \
         --command "$_SUVADU_CMD" \
         --cwd "$PWD" \
@@ -294,7 +302,7 @@ _suvadu_search_widget() {
     fi
 
     # If suvadu is disabled (exit code 10), fallback to default search
-    selected="$($_SUVADU_BIN search --query "$BUFFER" < "$tty_dev")"
+    selected="$("$_SUVADU_BIN" search --query "$BUFFER" < "$tty_dev")"
     local ret=$?
 
     # Restore terminal state
@@ -345,7 +353,7 @@ _suvadu_up_arrow_widget() {
     # Up-arrow shows only commands you typed by default; Alt+A reveals AI-agent
     # commands by setting _SUVADU_SHOW_AGENTS for this shell.
     [[ -n "$_SUVADU_SHOW_AGENTS" ]] && _suvadu_agents_flag="--include-agents"
-    result="$($_SUVADU_BIN get --query "$_SUVADU_QUERY" --offset $_SUVADU_OFFSET --prefix --cwd "$PWD" $_suvadu_agents_flag 2>/dev/null)"
+    result="$("$_SUVADU_BIN" get --query "$_SUVADU_QUERY" --offset $_SUVADU_OFFSET --prefix --cwd "$PWD" $_suvadu_agents_flag 2>/dev/null)"
 
     if [[ -n "$result" ]]; then
         LBUFFER="$result"
@@ -371,7 +379,7 @@ _suvadu_down_arrow_widget() {
         ((_SUVADU_OFFSET--))
         local result _suvadu_agents_flag=""
         [[ -n "$_SUVADU_SHOW_AGENTS" ]] && _suvadu_agents_flag="--include-agents"
-        result="$($_SUVADU_BIN get --query "$_SUVADU_QUERY" --offset $_SUVADU_OFFSET --prefix --cwd "$PWD" $_suvadu_agents_flag 2>/dev/null)"
+        result="$("$_SUVADU_BIN" get --query "$_SUVADU_QUERY" --offset $_SUVADU_OFFSET --prefix --cwd "$PWD" $_suvadu_agents_flag 2>/dev/null)"
         if [[ -n "$result" ]]; then
             LBUFFER="$result"
             RBUFFER=""
@@ -753,10 +761,11 @@ bind -x '"\C-r": __suvadu_search_widget'
 fn aliases_source_script() -> Option<String> {
     let dirs = crate::util::project_dirs()?;
     let aliases_path = dirs.data_dir().join("aliases.sh");
+    // Single-quoted so a data path containing `"`, `$` or backticks is
+    // taken literally.
+    let quoted = shell_quote_single(&aliases_path.to_string_lossy());
     Some(format!(
-        "\n# Suvadu managed aliases\n[ -f \"{}\" ] && source \"{}\"\n",
-        aliases_path.display(),
-        aliases_path.display()
+        "\n# Suvadu managed aliases\n[ -f {quoted} ] && source {quoted}\n"
     ))
 }
 
@@ -867,8 +876,9 @@ mod tests {
             "search widget missing emulate -L zsh"
         );
         assert!(
-            hook.matches("emulate -L zsh").count() == 4,
-            "expected emulate -L zsh in all 4 widgets (search, up, down, toggle-agents)"
+            hook.matches("emulate -L zsh").count() == 6,
+            "expected emulate -L zsh in all 4 widgets (search, up, down, toggle-agents) \
+             and both hooks (preexec, precmd)"
         );
         // Widgets must use LBUFFER/RBUFFER (not BUFFER/CURSOR) for buffer placement
         assert!(hook.contains("LBUFFER=\"$selected\""));
