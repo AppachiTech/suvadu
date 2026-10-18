@@ -194,6 +194,28 @@ impl<Q: EntryQuery> EntryQuery for Subsequence<'_, Q> {
     }
 }
 
+/// Any entry query plus separator-insensitive terms: each of `terms`, already
+/// normalized (`util::normalize_separators`), must appear in `field` once
+/// its separators are removed.
+///
+/// This is how recall retries a `terms` query that matched nothing, so that
+/// `hiveagent` finds `hive-agent`. Like [`Subsequence`], it is a wrapper so
+/// that only that caller ever sees the rule; empty `terms` behaves exactly
+/// like the inner query.
+pub struct SeparatorInsensitive<'a, Q: EntryQuery> {
+    pub inner: Q,
+    pub terms: &'a [String],
+    pub field: crate::models::SearchField,
+}
+
+impl<Q: EntryQuery> EntryQuery for SeparatorInsensitive<'_, Q> {
+    fn entry_filter_builder(&self) -> FilterBuilder {
+        self.inner
+            .entry_filter_builder()
+            .with_separator_insensitive_terms(self.terms, self.field)
+    }
+}
+
 use crate::models::SearchField;
 
 /// Filter parameters for replay queries.
@@ -392,6 +414,57 @@ impl FilterBuilder {
             self.params
                 .push(Box::new(format!("%{}%", escape_like(needle))));
         }
+    }
+
+    /// AND together one separator-insensitive clause per term: `field`, with
+    /// its separators removed and ASCII lower-cased (`db::normalized_sql`),
+    /// must contain the term, which the caller has normalized the same way.
+    ///
+    /// On `command` an ASCII term is looked up in the `entries_norm_fts`
+    /// trigram index, by the same two-argument `LIKE` as
+    /// [`Self::push_command_contains`] and for the same reason. A normalized
+    /// term holds no `_` (it is a separator) but can hold `%`, which the
+    /// unescaped lookup reads as a wildcard, so such a term is checked again
+    /// with an escaped `LIKE` on the normalized command. A non-ASCII term, or
+    /// any term on another field, has no index and is tested row by row:
+    /// `suvadu_contains_ci` for non-ASCII, so case folds as it does in
+    /// strict `terms`.
+    pub fn with_separator_insensitive_terms(
+        mut self,
+        terms: &[String],
+        field: SearchField,
+    ) -> Self {
+        let column = match field {
+            SearchField::Cwd => "e.cwd",
+            SearchField::Session => "e.session_id",
+            SearchField::Executor => "COALESCE(e.executor_type || ' ' || e.executor, '')",
+            SearchField::Command => "e.command",
+        };
+        let normalized = crate::db::normalized_sql(column);
+        for term in terms.iter().filter(|t| !t.is_empty()) {
+            if !term.is_ascii() {
+                self.clauses
+                    .push(format!("suvadu_contains_ci({normalized}, ?)"));
+                self.params.push(Box::new(term.clone()));
+            } else if field == SearchField::Command {
+                self.clauses.push(
+                    "e.id IN (SELECT rowid FROM entries_norm_fts WHERE command_norm LIKE ?)".into(),
+                );
+                self.params.push(Box::new(format!("%{term}%")));
+                if term.contains(['%', '_']) {
+                    self.clauses
+                        .push(format!("{normalized} LIKE ? ESCAPE '\\'"));
+                    self.params
+                        .push(Box::new(format!("%{}%", escape_like(term))));
+                }
+            } else {
+                self.clauses
+                    .push(format!("{normalized} LIKE ? ESCAPE '\\'"));
+                self.params
+                    .push(Box::new(format!("%{}%", escape_like(term))));
+            }
+        }
+        self
     }
 
     /// Require `field` to contain `needle` as a case-insensitive subsequence

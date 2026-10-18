@@ -66,6 +66,30 @@ pub fn is_subsequence_ci(haystack: &str, needle: &str) -> bool {
     needle.to_lowercase().chars().all(|c| chars.any(|h| h == c))
 }
 
+// ── Separator-insensitive matching ─────────────────────
+
+/// The characters separator-insensitive matching ignores: whitespace that
+/// separates words, and the punctuation that joins them in identifiers,
+/// paths and hostnames (`hive-agent`, `hive_agent`, `hive.agent`,
+/// `hive/agent`, `host:port`).
+pub const SEPARATORS: [char; 8] = [' ', '\t', '\n', '-', '_', '.', '/', ':'];
+
+/// `text` with every [`SEPARATORS`] character removed and ASCII letters
+/// lower-cased, so `Hive-Agent`, `hive_agent` and `hiveagent` all become
+/// `hiveagent`.
+///
+/// Only ASCII case is folded because this is, character for character, the
+/// SQL expression behind the `entries_norm_fts` index (see
+/// `db::normalized_sql`), and `SQLite`'s `lower()` folds ASCII only. Keeping
+/// the two identical is what lets the index, the in-memory ranker and the
+/// highlighter agree on what a separator-insensitive match is.
+pub fn normalize_separators(text: &str) -> String {
+    text.chars()
+        .filter(|c| !SEPARATORS.contains(c))
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
 // ── Session ID validation ──────────────────────────────
 
 /// Returns `true` if `id` contains only safe characters for use as a session
@@ -143,6 +167,35 @@ pub fn centered_rect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_separators_drops_each_separator_and_folds_ascii_case() {
+        for spelling in [
+            "hive-agent",
+            "hive_agent",
+            "hive.agent",
+            "hive/agent",
+            "hive:agent",
+            "hive agent",
+            "hive\tagent",
+            "hive\nagent",
+            "Hive-Agent",
+            "HIVEAGENT",
+            "-hive--agent_",
+        ] {
+            assert_eq!(normalize_separators(spelling), "hiveagent", "{spelling:?}");
+        }
+        // Everything else is kept as it is.
+        assert_eq!(normalize_separators("a%b\\c\"d'e"), "a%b\\c\"d'e");
+        assert_eq!(normalize_separators("--._/: \t\n"), "");
+    }
+
+    #[test]
+    fn normalize_separators_folds_ascii_case_only() {
+        // SQLite's lower() leaves non-ASCII letters alone, so this must too.
+        assert_eq!(normalize_separators("ÉCHO-Émile"), "ÉchoÉmile");
+        assert_eq!(normalize_separators("\u{212a}elvin"), "\u{212a}elvin");
+    }
 
     #[test]
     fn test_resolve_auto_tag() {

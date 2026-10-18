@@ -179,6 +179,7 @@ pub struct SearchConfig {
     pub recall: RecallState,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct SearchApp {
     query: String,
     entries: Vec<Entry>,
@@ -208,6 +209,11 @@ pub struct SearchApp {
     // never rank. Pages past its end are read from the database instead —
     // see `SearchApp::RANK_WINDOW`.
     ranked_window: Vec<Entry>,
+    /// The results on screen came from the `terms` fallback that ignores
+    /// separators, because the query as typed matched nothing. Later pages
+    /// ask the same question as the reload that produced them, and the UI
+    /// labels them.
+    loosened: bool,
 
     // UI Feedback
     status_message: Option<(String, std::time::Instant)>,
@@ -309,6 +315,7 @@ impl SearchApp {
             bookmarked_commands: cfg.bookmarked_commands,
 
             ranked_window: Vec::new(),
+            loosened: false,
 
             status_message: None,
             searching: false,

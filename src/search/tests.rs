@@ -5120,3 +5120,249 @@ fn vim_normal_motion_keys_scroll_the_focused_pane() {
     app.handle_input(key('g'));
     assert_eq!(app.detail_scroll.offset, 0);
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// The `terms` fallback that ignores separators: `hiveagent` → `hive-agent`.
+// ───────────────────────────────────────────────────────────────────────────
+
+fn sorted(mut commands: Vec<String>) -> Vec<String> {
+    commands.sort();
+    commands
+}
+
+const HIVE_SPELLINGS: &[&str] = &[
+    "ssh hive-agent",
+    "hive_agent run",
+    "cat hive.agent",
+    "cd hive/agent",
+    "nc hive:agent 80",
+    "git status",
+];
+
+#[test]
+fn a_query_without_separators_finds_every_separated_spelling() {
+    let (_d, repo) = repo_with(HIVE_SPELLINGS);
+    let app = app_for(&repo, "hiveagent");
+    assert!(app.loosened, "the fallback must say it ran");
+    let found: Vec<String> = app.entries.iter().map(|e| e.command.clone()).collect();
+    assert_eq!(
+        sorted(found),
+        sorted(
+            HIVE_SPELLINGS[..5]
+                .iter()
+                .map(|c| (*c).to_string())
+                .collect()
+        )
+    );
+    assert_eq!(app.pagination.total_items, 5);
+}
+
+#[test]
+fn a_separated_query_finds_the_unseparated_and_differently_separated_spellings() {
+    let (_d, repo) = repo_with(&["hiveagent run", "hive_agent stop", "hive agentx", "ls"]);
+    let app = app_for(&repo, "hive-agent");
+    assert!(app.loosened);
+    let found: Vec<String> = app.entries.iter().map(|e| e.command.clone()).collect();
+    assert_eq!(
+        sorted(found),
+        vec![
+            "hive agentx".to_string(),
+            "hive_agent stop".to_string(),
+            "hiveagent run".to_string()
+        ]
+    );
+}
+
+#[test]
+fn an_exact_hit_suppresses_the_separator_fallback() {
+    let (_d, repo) = repo_with(&["hive-agent", "hive_agent"]);
+    let app = app_for(&repo, "hive-agent");
+    assert!(!app.loosened, "a strict match is never labelled loose");
+    let found: Vec<String> = app.entries.iter().map(|e| e.command.clone()).collect();
+    assert_eq!(found, vec!["hive-agent".to_string()]);
+    assert_eq!(app.pagination.total_items, 1);
+
+    // A query that does match strictly as two terms is not loosened either.
+    let app = app_for(&repo, "hive agent");
+    assert!(!app.loosened);
+    assert_eq!(app.pagination.total_items, 2);
+}
+
+#[test]
+fn the_fallback_is_only_for_terms_mode() {
+    let (_d, repo) = repo_with(HIVE_SPELLINGS);
+    for mode in [MatchMode::Literal, MatchMode::Prefix] {
+        assert!(
+            search_in_mode(&repo, mode, "hiveagent").is_empty(),
+            "{mode:?}"
+        );
+    }
+    // Fuzzy already reaches these by its own rule, unlabelled.
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+    app.recall.match_mode = MatchMode::Fuzzy;
+    app.query = "hiveagent".into();
+    app.reload_entries(&repo).unwrap();
+    assert!(!app.loosened);
+    assert_eq!(app.pagination.total_items, 5);
+}
+
+#[test]
+fn nothing_found_either_way_is_still_no_results() {
+    let (_d, repo) = repo_with(HIVE_SPELLINGS);
+    for query in ["hiveagentz", "--", "zz-top"] {
+        let app = app_for(&repo, query);
+        assert!(!app.loosened, "{query:?}");
+        assert!(app.entries.is_empty(), "{query:?}");
+        assert_eq!(app.pagination.total_items, 0, "{query:?}");
+    }
+}
+
+#[test]
+fn the_fallback_stays_inside_the_scope_and_filters() {
+    let (_d, repo) = repo_with(&["ssh hive-agent"]);
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+    app.filters.failed_only = true;
+    app.query = "hiveagent".into();
+    app.reload_entries(&repo).unwrap();
+    assert!(app.entries.is_empty(), "the only match succeeded");
+    assert_eq!(app.pagination.total_items, 0);
+}
+
+#[test]
+fn a_new_query_starts_strict_again() {
+    let (_d, repo) = repo_with(&["ssh hive-agent", "hive_agent"]);
+    let mut app = app_for(&repo, "hiveagent");
+    assert!(app.loosened);
+    app.query = "hive-agent".into();
+    app.reload_entries(&repo).unwrap();
+    assert!(!app.loosened);
+    assert_eq!(app.pagination.total_items, 1);
+}
+
+#[test]
+fn the_separator_fallback_counts_and_pages_like_any_query() {
+    // More loose matches than the ranking window, none of them strict, so
+    // the later pages come straight from the database and must ask the
+    // loose question too.
+    let (_d, repo) = repo_with_broad_matches("hive-agent", "echo hive_agent filler ", 5000);
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+    app.query = "hiveagent".into();
+    app.reload_entries(&repo).unwrap();
+    assert!(app.loosened);
+    assert_eq!(app.pagination.total_items, 5001);
+    assert_eq!(app.entries.len(), app.pagination.page_size);
+
+    app.set_page(&repo, 2).unwrap();
+    assert_eq!(
+        app.entries.len(),
+        app.pagination.page_size,
+        "page 2 stays loose"
+    );
+
+    let seen = walk_every_page(&mut app, &repo);
+    assert_eq!(seen.len(), 5001, "every counted match must be listed");
+    let unique: std::collections::HashSet<&String> = seen.iter().collect();
+    assert_eq!(unique.len(), 5001, "paging must not repeat an entry");
+    assert!(seen.contains(&"hive-agent".to_string()));
+    assert!(app.loosened, "paging never changes the rule");
+}
+
+#[test]
+fn the_separator_fallback_groups_by_command() {
+    let (_d, repo) = repo_with(&["ssh hive-agent", "hive_agent", "ssh hive-agent", "ls"]);
+    let mut config = test_search_config(vec![], 0);
+    config.view.unique_mode = true;
+    let mut app = SearchApp::new(config);
+    app.query = "hiveagent".into();
+    app.reload_entries(&repo).unwrap();
+    assert!(app.loosened);
+    assert_eq!(app.pagination.total_items, 2);
+    let rows: Vec<(String, i64)> = app
+        .entries
+        .iter()
+        .map(|e| (e.command.clone(), app.unique_count(e)))
+        .collect();
+    assert_eq!(
+        sorted(rows.iter().map(|(c, n)| format!("{c} x{n}")).collect()),
+        vec!["hive_agent x1".to_string(), "ssh hive-agent x2".to_string()]
+    );
+}
+
+#[test]
+fn the_separator_fallback_groups_and_pages_past_the_ranking_window() {
+    let (_d, repo) = repo_with_broad_matches("hive-agent", "echo hive_agent filler ", 5000);
+    let mut config = test_search_config(vec![], 0);
+    config.view.unique_mode = true;
+    let mut app = SearchApp::new(config);
+    app.query = "hiveagent".into();
+    app.reload_entries(&repo).unwrap();
+    assert!(app.loosened);
+    assert_eq!(app.pagination.total_items, 5001);
+    let seen = walk_every_page(&mut app, &repo);
+    let unique: std::collections::HashSet<&String> = seen.iter().collect();
+    assert_eq!(unique.len(), 5001);
+}
+
+#[test]
+fn a_kept_selection_is_found_again_among_loose_results() {
+    let commands: Vec<String> = (0..9).map(|i| format!("echo hive_agent{i}")).collect();
+    let refs: Vec<&str> = commands.iter().map(String::as_str).collect();
+    let (_d, repo) = repo_with(&refs);
+    let mut app = SearchApp::new(test_search_config(vec![], 0));
+    app.pagination.page_size = 3;
+    app.query = "hiveagent".into();
+    app.reload_entries(&repo).unwrap();
+    assert!(app.loosened);
+    app.set_page(&repo, 3).unwrap();
+    app.table_state.select(Some(1));
+    let target = selected(&app).unwrap();
+
+    app.handle_input(ctrl_key('u'));
+    app.reload_entries(&repo).unwrap();
+    assert!(app.loosened);
+    assert_eq!(selected(&app), Some(target));
+    assert_eq!(app.pagination.page, 3);
+}
+
+#[test]
+fn the_worker_falls_back_exactly_as_the_ui_thread_does() {
+    let (_d, repo) = repo_with(HIVE_SPELLINGS);
+    let worker = super::worker::QueryWorker::spawn(repo.search_reader().unwrap()).unwrap();
+    let mut app = app_for(&repo, "hiveagent");
+    let expected: Vec<String> = app.entries.iter().map(|e| e.command.clone()).collect();
+    app.loosened = false;
+    assert!(worker.submit(1, app.reload_request()));
+    let result = worker.wait(1).unwrap().unwrap();
+    assert_eq!(result.first_page_commands(), expected);
+    app.apply_reload(result);
+    assert!(app.loosened);
+}
+
+#[test]
+fn the_ranker_keeps_every_loose_match_and_ranks_strict_ones_first() {
+    let entries = vec![
+        create_test_entry("ssh hive-agent"),
+        create_test_entry("hive_agent run"),
+        create_test_entry("hiveagent"),
+        create_test_entry("ls"),
+    ];
+    let loose = MatchMode::Terms
+        .loose_plan("hiveagent")
+        .unwrap()
+        .loose_tokens;
+    let ranked = SearchApp::fuzzy_score_mode(
+        entries,
+        "hiveagent",
+        None,
+        SearchField::Command,
+        80,
+        0,
+        0,
+        false,
+        Some(&loose),
+    );
+    let commands: Vec<&str> = ranked.iter().map(|e| e.command.as_str()).collect();
+    assert_eq!(commands.len(), 3, "{commands:?}");
+    assert_eq!(commands[0], "hiveagent", "a strict hit outranks loose ones");
+    assert!(!commands.contains(&"ls"));
+}

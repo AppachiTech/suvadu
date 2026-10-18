@@ -10,7 +10,7 @@
 //!
 //! | Mode      | Rule                                                             |
 //! |-----------|------------------------------------------------------------------|
-//! | `terms`   | every whitespace-separated term must appear as a substring (AND) |
+//! | `terms`   | every whitespace-separated term must appear as a substring (AND); if none does, see *Separators* below |
 //! | `literal` | the whole query must appear as one contiguous substring          |
 //! | `prefix`  | the entry must *start with* the query                            |
 //! | `fuzzy`   | the query's characters must appear in order, gaps allowed        |
@@ -37,6 +37,16 @@
 //! * **Punctuation:** never stripped, never tokenised. `git-push` is one term
 //!   and only matches entries containing `git-push`. SQL wildcards (`%`, `_`)
 //!   are escaped, so they match themselves.
+//! * **Separators — the one fallback:** when a `terms` query matches
+//!   *nothing* in the current scope and filters, it is asked again with
+//!   separators ignored — spaces, tabs, newlines, `-`, `_`, `.`, `/` and `:`
+//!   ([`normalize_separators`]) — on both the terms and the commands, so
+//!   `hiveagent` finds `hive-agent` and `hive_agent`, and `hive-agent` finds
+//!   `hiveagent`. The results are labelled as such wherever they are shown.
+//!   It never mixes with strict results: one exact hit and only exact hits
+//!   are shown, so a count and its pages always come from one rule. Each
+//!   term still has to appear (AND); a term made only of separators is
+//!   dropped. `literal`, `prefix` and `fuzzy` have no fallback.
 //! * **Whitespace:** a query is trimmed; runs of internal whitespace separate
 //!   terms in `terms` mode and are matched literally in `literal` mode.
 
@@ -56,7 +66,9 @@
 #[clap(rename_all = "kebab-case")]
 pub enum MatchMode {
     /// Every whitespace-separated term must appear as a substring, in any
-    /// order. This is the historical default and stays the default.
+    /// order. When nothing matches, the query is retried ignoring
+    /// separators (-_./: and whitespace), and those results are labelled.
+    /// This is the historical default and stays the default.
     #[default]
     Terms,
     /// The whole query must appear as one contiguous substring.
@@ -159,6 +171,13 @@ pub struct QueryPlan {
     /// between it and the default. It selects the rule outright — it is not a
     /// fallback applied only when nothing matched literally.
     pub allow_subsequence: bool,
+    /// Separator-insensitive per-term clauses, combined with AND: each is a
+    /// query term passed through [`normalize_separators`], to be found in
+    /// the command with its separators removed (the `entries_norm_fts`
+    /// index). Only [`MatchMode::loose_plan`] fills this in, and a plan that
+    /// has them has nothing else narrowing it, so the whole result set comes
+    /// from this one rule.
+    pub loose_tokens: Vec<String>,
 }
 
 impl MatchMode {
@@ -195,6 +214,50 @@ impl MatchMode {
         }
     }
 }
+
+impl MatchMode {
+    /// The separator-insensitive retry of a query that matched nothing, or
+    /// `None` when this mode has no such retry or the query has nothing left
+    /// once its separators are gone.
+    ///
+    /// Only `terms` has one. Its terms are split on whitespace as usual and
+    /// each is normalized like the commands are (separators removed, ASCII
+    /// lower-cased); a term that was nothing but separators is dropped. Any
+    /// entry the strict plan accepts, this one accepts too, which is why it
+    /// is asked only when the strict plan found nothing.
+    pub fn loose_plan(self, query: &str) -> Option<QueryPlan> {
+        if self != Self::Terms {
+            return None;
+        }
+        let loose_tokens: Vec<String> = query_terms(query.trim())
+            .into_iter()
+            .map(normalize_separators)
+            .filter(|t| !t.is_empty())
+            .collect();
+        (!loose_tokens.is_empty()).then(|| QueryPlan {
+            loose_tokens,
+            rerank: true,
+            ..QueryPlan::default()
+        })
+    }
+}
+
+/// Whether every one of `loose_tokens` (already normalized, as
+/// [`MatchMode::loose_plan`] makes them) appears in `haystack` once its
+/// separators are removed — the separator-insensitive rule, as the in-memory
+/// ranker and the tests apply it.
+///
+/// Case is folded with Rust's Unicode lowercasing, so this accepts every
+/// entry the database does (`LIKE` for an ASCII term, `suvadu_contains_ci`
+/// for any other) and never drops one it has already counted.
+pub fn matches_loosely(haystack: &str, loose_tokens: &[String]) -> bool {
+    let hay = normalize_separators(haystack).to_lowercase();
+    loose_tokens.iter().all(|t| hay.contains(&t.to_lowercase()))
+}
+
+/// Separator-insensitive matching's normalization, shared with the
+/// `entries_norm_fts` index; see [`crate::util::normalize_separators`].
+pub use crate::util::normalize_separators;
 
 /// The one definition of `fuzzy` eligibility, shared with the SQL predicate
 /// `suvadu_subseq_ci` so the database and the in-memory pass can never
@@ -377,6 +440,73 @@ mod tests {
         assert_eq!(plan.query, None);
         assert!(!plan.prefix);
         assert!(!plan.allow_subsequence);
+    }
+
+    fn loose(query: &str) -> Option<Vec<String>> {
+        MatchMode::Terms.loose_plan(query).map(|p| p.loose_tokens)
+    }
+
+    #[test]
+    fn the_terms_fallback_normalizes_each_term_like_the_commands() {
+        assert_eq!(loose("hiveagent"), Some(vec!["hiveagent".to_string()]));
+        assert_eq!(loose(" Hive-Agent "), Some(vec!["hiveagent".to_string()]));
+        assert_eq!(
+            loose("git  push-force x_y.z/w:v"),
+            Some(vec![
+                "git".to_string(),
+                "pushforce".to_string(),
+                "xyzwv".to_string()
+            ])
+        );
+        // A term that was only separators narrows nothing and is dropped…
+        assert_eq!(loose("hive -- agent"), loose("hive agent"));
+        // …and a query of nothing else has no fallback at all.
+        assert_eq!(loose("-- . _"), None);
+        assert_eq!(loose("   "), None);
+    }
+
+    #[test]
+    fn the_terms_fallback_is_one_rule_and_still_ranked() {
+        let plan = MatchMode::Terms.loose_plan("hive-agent start").unwrap();
+        assert!(plan.tokens.is_empty(), "no strict clause rides along");
+        assert_eq!(plan.query, None);
+        assert!(!plan.prefix);
+        assert!(!plan.allow_subsequence);
+        assert!(plan.rerank);
+        // The strict plan never carries loose clauses.
+        assert!(MatchMode::Terms.plan("hive-agent").loose_tokens.is_empty());
+    }
+
+    #[test]
+    fn only_terms_has_a_separator_insensitive_fallback() {
+        for mode in [MatchMode::Literal, MatchMode::Prefix, MatchMode::Fuzzy] {
+            assert_eq!(mode.loose_plan("hiveagent"), None, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn a_loose_match_ignores_separators_in_the_command() {
+        let terms = loose("hiveagent").unwrap();
+        for command in [
+            "ssh hive-agent",
+            "hive_agent run",
+            "hive.agent",
+            "cd hive/agent",
+            "hive:agent",
+            "HIVE-AGENT",
+        ] {
+            assert!(matches_loosely(command, &terms), "{command:?}");
+        }
+        assert!(!matches_loosely(
+            "hive agentx",
+            &loose("hiveagentz").unwrap()
+        ));
+        // Every term must appear, as in strict `terms`.
+        let two = loose("hive-agent restart").unwrap();
+        assert!(matches_loosely("hive_agent --restart", &two));
+        assert!(!matches_loosely("hive_agent --stop", &two));
+        // The strict rule is unchanged: punctuation still is not stripped.
+        assert!(!MatchMode::Terms.matches("ssh hive-agent", "hiveagent"));
     }
 
     #[test]

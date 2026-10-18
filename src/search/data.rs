@@ -156,6 +156,7 @@ impl SearchApp {
             cwd_boost_percent: self.view.cwd_boost_percent,
             page_size: self.pagination.page_size.max(1),
             reselect: self.reselect.clone(),
+            loosened: self.loosened,
         }
     }
 
@@ -179,6 +180,7 @@ impl SearchApp {
             human_boost_percent,
             cwd_boost_percent,
             false,
+            None,
         )
     }
 
@@ -186,6 +188,12 @@ impl SearchApp {
     /// eligibility rule (`gco` → `git checkout`) instead of the default one.
     /// Only `MatchMode::Fuzzy` passes `true`; that single flag is the whole
     /// behavioural difference between the two modes.
+    ///
+    /// `loose` carries the separator-insensitive terms when the rows come
+    /// from `terms`' fallback ([`MatchMode::loose_plan`]). Those rows are
+    /// accepted by [`super::matching::matches_loosely`] — the rule the
+    /// database used to find them — and rank below every strict match, in
+    /// the same tiers computed on the text with its separators removed.
     ///
     /// Eligibility is decided *before* and independently of the ranking tier,
     /// and the relevance score never removes an entry — it only orders what
@@ -206,6 +214,7 @@ impl SearchApp {
         human_boost_percent: u32,
         cwd_boost_percent: u32,
         allow_subsequence: bool,
+        loose: Option<&[String]>,
     ) -> Vec<Entry> {
         use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
         use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
@@ -222,9 +231,18 @@ impl SearchApp {
         // sort key.
         let query_lc = query.trim().to_lowercase();
         let atoms: Vec<&str> = query_lc.split_whitespace().collect();
+        // The same signal for the separator-insensitive fallback, on the
+        // query and the command with their separators removed.
+        let loose_atoms: Vec<String> = loose
+            .unwrap_or_default()
+            .iter()
+            .map(|t| t.to_lowercase())
+            .collect();
+        let loose_atoms: Vec<&str> = loose_atoms.iter().map(String::as_str).collect();
+        let loose_query = loose_atoms.concat();
 
-        // (entry, match-quality tier, boosted fuzzy score)
-        let mut scored: Vec<(Entry, u8, u32)> = Vec::new();
+        // (entry, match-quality tier, loose tier, boosted fuzzy score)
+        let mut scored: Vec<(Entry, u8, u8, u32)> = Vec::new();
         let mut buf = Vec::new();
 
         for entry in entries {
@@ -244,11 +262,25 @@ impl SearchApp {
             // whole-query subsequence rule instead — *instead*, not as a
             // fallback for tier 0, or a query whose words each appear would
             // slip past the ordering the mode's own help promises.
+            //
+            // The separator-insensitive fallback accepts by its own rule as
+            // well: its rows are what the database found with separators
+            // ignored, and dropping them here would list fewer than it
+            // counted.
             let tier = match_tier(&field_value.to_lowercase(), &query_lc, &atoms);
+            let loose_tier = match loose {
+                Some(terms) if super::matching::matches_loosely(field_value, terms) => match_tier(
+                    &super::matching::normalize_separators(field_value).to_lowercase(),
+                    &loose_query,
+                    &loose_atoms,
+                )
+                .max(1),
+                _ => 0,
+            };
             let eligible = if allow_subsequence {
                 MatchMode::Fuzzy.matches(field_value, query)
             } else {
-                tier >= 1
+                tier >= 1 || loose_tier >= 1
             };
             if !eligible {
                 continue;
@@ -290,19 +322,22 @@ impl SearchApp {
             // Match-quality tier (see `match_tier`): textual match quality
             // dominates the cwd/recency boosts, which only break ties within
             // a tier.
-            scored.push((entry, tier, final_score));
+            scored.push((entry, tier, loose_tier, final_score));
         }
 
         scored.sort_by(|a, b| {
-            // Primary: match-quality tier (prefix > substring > scattered)
+            // Primary: match-quality tier (prefix > substring > scattered);
+            // a separator-insensitive match is tier 0 here, below them all.
             b.1.cmp(&a.1)
-                // Secondary: boosted fuzzy score (descending)
+                // Then, among those, the same tiers with separators ignored.
                 .then_with(|| b.2.cmp(&a.2))
+                // Secondary: boosted fuzzy score (descending)
+                .then_with(|| b.3.cmp(&a.3))
                 // Tiebreaker: interactively-typed entries (terminal/IDE) first,
                 // above agent/bot/ci/script commands.
                 .then_with(|| b.0.is_interactive().cmp(&a.0.is_interactive()))
         });
-        scored.into_iter().map(|(e, _, _)| e).collect()
+        scored.into_iter().map(|(e, _, _, _)| e).collect()
     }
 
     /// Stable re-sort: combined context + human-first ranking in a single pass.
@@ -369,6 +404,7 @@ impl SearchApp {
         self.pagination.total_items = result.total;
         self.pagination.page = 1;
         self.ranked_window = result.ranked_window;
+        self.loosened = result.loosened;
         self.unique_counts = result.unique_counts;
         self.entries = result.first_page;
         self.table_state.select(if self.entries.is_empty() {
@@ -488,6 +524,10 @@ pub(super) struct ReloadRequest {
     /// switches that show the same matches differently. Where it lands is
     /// worked out here, off the UI thread, since it can take a query.
     reselect: Option<String>,
+    /// Ask `terms`' separator-insensitive fallback rather than the query
+    /// as typed. A page read with [`Self::page`] follows the reload that
+    /// produced the results on screen; [`Self::run`] decides afresh.
+    loosened: bool,
 }
 
 /// What a reload found: the count, the ranked window later pages inside it
@@ -500,6 +540,8 @@ pub(super) struct ReloadResult {
     first_page: Vec<Entry>,
     /// Where the requested selection landed, if one was requested.
     reselected: Option<Reselected>,
+    /// These results come from `terms`' separator-insensitive fallback.
+    loosened: bool,
 }
 
 /// Where a command kept selected across a reload ended up.
@@ -571,9 +613,16 @@ impl ReloadRequest {
     fn matched_query<'a>(
         &'a self,
         plan: &'a super::matching::QueryPlan,
-    ) -> crate::repository::Subsequence<'a, SessionScoped<'a>> {
+    ) -> crate::repository::Subsequence<
+        'a,
+        crate::repository::SeparatorInsensitive<'a, SessionScoped<'a>>,
+    > {
         crate::repository::Subsequence {
-            inner: self.query_filter(plan.query.as_deref(), &plan.tokens, plan.prefix),
+            inner: crate::repository::SeparatorInsensitive {
+                inner: self.query_filter(plan.query.as_deref(), &plan.tokens, plan.prefix),
+                terms: &plan.loose_tokens,
+                field: self.search_field,
+            },
             // The trimmed query when the mode matches by subsequence.
             needle: plan
                 .allow_subsequence
@@ -583,6 +632,16 @@ impl ReloadRequest {
         }
     }
 
+    /// What this request asks the database: the mode's plan for the query
+    /// as typed, or — once a reload has fallen back — `terms`'
+    /// separator-insensitive plan.
+    fn plan(&self) -> super::matching::QueryPlan {
+        self.loosened
+            .then(|| self.match_mode.loose_plan(&self.query))
+            .flatten()
+            .unwrap_or_else(|| self.match_mode.plan(&self.query))
+    }
+
     /// The ranking window rounded up to whole pages, so no single page ever
     /// straddles the boundary between ranked results and the recency tail.
     const fn rank_window_size(&self) -> usize {
@@ -590,7 +649,13 @@ impl ReloadRequest {
     }
 
     /// Count every eligible match, rank the newest window of them, and fetch
-    /// page 1.
+    /// page 1 — and when a `terms` query matched nothing at all, do the same
+    /// again with separators ignored ([`MatchMode::loose_plan`]), and say so
+    /// in the result.
+    ///
+    /// The fallback only ever replaces an empty answer, never adds to a
+    /// non-empty one, so the count and every page always come from a single
+    /// rule. A query that matches as typed costs exactly what it did before.
     ///
     /// `cancelled` is asked between queries; once it says yes the remaining
     /// ones are skipped and the answer is `Ok(None)`. A statement already
@@ -601,10 +666,42 @@ impl ReloadRequest {
         repo: &Repository,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Option<ReloadResult>, crate::db::DbError> {
+        let strict = Self {
+            loosened: false,
+            ..self.clone()
+        };
+        let Some(result) = strict.run_plan(repo, cancelled)? else {
+            return Ok(None);
+        };
+        if result.total > 0 || self.match_mode.loose_plan(&self.query).is_none() {
+            return Ok(Some(result));
+        }
+        if cancelled() {
+            return Ok(None);
+        }
+        let loose = Self {
+            loosened: true,
+            ..strict
+        }
+        .run_plan(repo, cancelled)?;
+        // Nothing either way is the plain "no matches" of the query as
+        // typed, not an empty fallback.
+        Ok(match loose {
+            Some(loose) if loose.total == 0 => Some(result),
+            other => other,
+        })
+    }
+
+    /// [`Self::run`] for this request's own [`Self::plan`].
+    fn run_plan(
+        &self,
+        repo: &Repository,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<ReloadResult>, crate::db::DbError> {
         // The matching mode decides how the query becomes SQL; see
         // `MatchMode::plan`. Every mode narrows *and decides* in the database,
         // so how far back a match lives never decides whether it is found.
-        let plan = self.match_mode.plan(&self.query);
+        let plan = self.plan();
         let qf = self.matched_query(&plan);
         let count = || -> Result<usize, crate::db::DbError> {
             let n = if self.unique_mode {
@@ -649,6 +746,7 @@ impl ReloadRequest {
                 self.human_boost_percent,
                 self.cwd_boost_percent,
                 plan.allow_subsequence,
+                (!plan.loose_tokens.is_empty()).then_some(plan.loose_tokens.as_slice()),
             );
             (total, ranked, counts)
         } else {
@@ -680,6 +778,7 @@ impl ReloadRequest {
             unique_counts,
             first_page,
             reselected,
+            loosened: self.loosened,
         }))
     }
 
@@ -757,7 +856,9 @@ impl ReloadRequest {
         repo: &Repository,
         offset: usize,
     ) -> Result<(Vec<Entry>, std::collections::HashMap<i64, i64>), crate::db::DbError> {
-        let plan = self.match_mode.plan(&self.query);
+        // The same plan as the reload these pages belong to, loose or not,
+        // or page 2 would answer a different question from page 1.
+        let plan = self.plan();
         let qf = self.matched_query(&plan);
         if self.unique_mode {
             // `sort_alphabetically` must match the ordering the window was

@@ -700,12 +700,14 @@ fn migrate_v10(conn: &Connection) -> DbResult<()> {
 
 /// `expr` (an SQL text expression) in the separator-insensitive form the
 /// `entries_norm_fts` index holds: every space, tab, newline, `-`, `_`, `.`,
-/// `/` and `:` removed, then ASCII letters lower-cased.
+/// `/` and `:` ([`crate::util::SEPARATORS`]) removed, then ASCII letters
+/// lower-cased.
 ///
 /// Plain `replace()` and `lower()` rather than a registered function, so the
 /// view, its triggers and the index stay usable from the `sqlite3` shell or a
 /// restored backup, where no Suvadu function exists. `lower()` folds ASCII
-/// only.
+/// only; [`crate::util::normalize_separators`] does the same, and a test holds
+/// the two to one answer.
 ///
 /// This text is part of schema v11: the triggers and the view store it. A
 /// change to it, or to the separator list, needs a migration that recreates
@@ -1172,6 +1174,34 @@ mod tests {
                 .query_row(&sql, params![sample], |row| row.get(0))
                 .unwrap();
             assert_eq!(from_sql, expected, "{sample:?}");
+        }
+    }
+
+    #[test]
+    fn test_the_separator_index_expression_is_normalize_separators() {
+        // The index is built by SQL and queried with terms normalized in
+        // Rust; if the two ever disagreed, a match could be missed.
+        let conn = Connection::open_in_memory().unwrap();
+        let sql = format!("SELECT {}", normalized_sql("?1"));
+        for sample in [
+            "hive-agent",
+            "Hive_Agent.v2/run:now",
+            "kubectl  get\tpods\n-n kube-system",
+            "C:\\Temp\\x",
+            "50% done_",
+            "ÉCHO-Émile ΣΟΦΙΑ \u{212a}elvin İstanbul",
+            "line\r\nbreak\u{a0}nbsp\u{3000}ideographic",
+            "",
+            "--._/: \t\n",
+        ] {
+            let from_sql: String = conn
+                .query_row(&sql, params![sample], |row| row.get(0))
+                .unwrap();
+            assert_eq!(
+                from_sql,
+                crate::util::normalize_separators(sample),
+                "{sample:?}"
+            );
         }
     }
 

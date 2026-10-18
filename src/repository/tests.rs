@@ -3306,3 +3306,140 @@ fn an_entry_without_a_session_row_is_counted_and_listed_alike() {
     assert_eq!(orphan.session_id, "vanished-session");
     assert_eq!(orphan.tag_name.as_deref(), Some("work"));
 }
+
+// ── Separator-insensitive search and its index ─────────────────────────────
+
+/// What the separator-insensitive rule accepts: every term (already
+/// normalized) in the command with its separators removed, ASCII case folded.
+fn loose_matches(commands: &[&str], terms: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = commands
+        .iter()
+        .filter(|c| {
+            let hay = crate::util::normalize_separators(c);
+            terms.iter().all(|t| hay.contains(&t.to_ascii_lowercase()))
+        })
+        .map(|c| (*c).to_string())
+        .collect();
+    out.sort();
+    out
+}
+
+fn loose_search(repo: &Repository, terms: &[&str], field: SearchField) -> Vec<String> {
+    let terms: Vec<String> = terms.iter().map(|t| (*t).to_string()).collect();
+    let query = SeparatorInsensitive {
+        inner: QueryFilter {
+            field,
+            ..Default::default()
+        },
+        terms: &terms,
+        field,
+    };
+    let found = sorted_commands(repo.get_entries_filtered(100, 0, &query).unwrap());
+    assert_eq!(
+        repo.count_filtered(&query).unwrap(),
+        i64::try_from(found.len()).unwrap(),
+        "count {terms:?}"
+    );
+    found
+}
+
+const SEPARATOR_CORPUS: &[&str] = &[
+    "ssh hive-agent",
+    "hive_agent run",
+    "cat hive.agent",
+    "cd hive/agent",
+    "nc hive:agent 80",
+    "HiveAgent --help",
+    "hive agent",
+    "hive\tagent",
+    "hive\nagent",
+    "hivebagent",
+    "echo 50% done",
+    "echo 50x done",
+    r"dir C:\temp",
+    "echo écho-x",
+    "echo ÉCHO_x",
+];
+
+#[test]
+fn a_separator_insensitive_search_matches_exactly_its_rule() {
+    let (_d, repo) = repo_with_commands(SEPARATOR_CORPUS);
+    for terms in [
+        &["hiveagent"][..],
+        &["hive", "agent"],
+        &["agentrun"],
+        &["50%done"],
+        &["%"],
+        &[r"c\temp"],
+        &[r"\"],
+        &["help", "hiveagent"],
+        &["nomatch"],
+    ] {
+        assert_eq!(
+            loose_search(&repo, terms, SearchField::Command),
+            loose_matches(SEPARATOR_CORPUS, terms),
+            "{terms:?}"
+        );
+    }
+    assert_eq!(
+        loose_search(&repo, &["hiveagent"], SearchField::Command).len(),
+        9,
+        "every spelling of hive-agent, and only those"
+    );
+}
+
+#[test]
+fn a_separator_insensitive_non_ascii_term_folds_unicode_case() {
+    let (_d, repo) = repo_with_commands(SEPARATOR_CORPUS);
+    assert_eq!(
+        loose_search(&repo, &["échox"], SearchField::Command),
+        vec!["echo ÉCHO_x".to_string(), "echo écho-x".to_string()]
+    );
+}
+
+#[test]
+fn a_separator_insensitive_search_works_on_other_fields() {
+    let (_d, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 1000);
+    repo.insert_session(&session).unwrap();
+    for (cmd, cwd) in [("ls", "/srv/hive-agent"), ("pwd", "/srv/other")] {
+        repo.insert_entry(&crate::models::Entry::new(
+            session.id.clone(),
+            cmd.to_string(),
+            cwd.to_string(),
+            Some(0),
+            1000,
+            1000,
+        ))
+        .unwrap();
+    }
+    assert_eq!(
+        loose_search(&repo, &["srvhiveagent"], SearchField::Cwd),
+        vec!["ls".to_string()]
+    );
+}
+
+#[test]
+fn a_separator_insensitive_search_seeks_its_trigram_index() {
+    let (_d, repo) = setup_test_db();
+    for term in ["hiveagent", "50%done", r"c\temp"] {
+        let terms = vec![term.to_string()];
+        let fb =
+            FilterBuilder::new().with_separator_insensitive_terms(&terms, SearchField::Command);
+        let plan = query_plan(&repo, &fb);
+        assert!(
+            plan.iter()
+                .any(|d| d.contains("entries_norm_fts") && d.contains("INDEX 0:L0")),
+            "{term:?}: expected the separator index's LIKE lookup, got {plan:#?}"
+        );
+    }
+}
+
+#[test]
+fn no_separator_insensitive_terms_narrow_nothing() {
+    let fb = FilterBuilder::new().with_separator_insensitive_terms(&[], SearchField::Command);
+    assert_eq!(fb.build_where(), FilterBuilder::new().build_where());
+    let blank = vec![String::new()];
+    let fb = FilterBuilder::new().with_separator_insensitive_terms(&blank, SearchField::Command);
+    assert_eq!(fb.build_where(), FilterBuilder::new().build_where());
+}
