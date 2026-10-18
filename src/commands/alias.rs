@@ -207,6 +207,28 @@ pub fn apply_aliases_from(
     Ok(())
 }
 
+/// Add each suggestion as a new alias. A name that is already an alias is
+/// left as it is — never replaced — and returned among the refused names.
+fn add_new_aliases(
+    repo: &Repository,
+    suggestions: &[crate::models::AliasSuggestion],
+) -> Result<(usize, Vec<String>), Box<dyn std::error::Error>> {
+    let mut taken: std::collections::HashSet<String> =
+        repo.list_aliases()?.into_iter().map(|a| a.name).collect();
+    let mut added = 0;
+    let mut refused = Vec::new();
+    for s in suggestions {
+        if taken.contains(&s.name) {
+            refused.push(s.name.clone());
+            continue;
+        }
+        repo.add_alias(&s.name, &s.command)?;
+        taken.insert(s.name.clone());
+        added += 1;
+    }
+    Ok((added, refused))
+}
+
 fn handle_add_suggested(
     min_count: usize,
     min_length: usize,
@@ -218,15 +240,17 @@ fn handle_add_suggested(
     match selected {
         Some(suggestions) if !suggestions.is_empty() => {
             let repo = Repository::init()?;
-            let mut added = 0;
-            for s in &suggestions {
-                repo.add_alias(&s.name, &s.command)?;
-                added += 1;
-            }
+            let (added, refused) = add_new_aliases(&repo, &suggestions)?;
             println!(
                 "✓ Added {added} alias{}",
                 if added == 1 { "" } else { "es" }
             );
+            if !refused.is_empty() {
+                println!(
+                    "  Not added, the name is already an alias: {}",
+                    refused.join(", ")
+                );
+            }
             // Regenerate the managed alias file automatically.
             apply_aliases_from(&repo, false)?;
         }
@@ -252,6 +276,33 @@ mod tests {
         assert_eq!(aliases.len(), 2);
         assert_eq!(aliases[0].name, "gco"); // ordered by name
         assert_eq!(aliases[1].name, "gst");
+    }
+
+    #[test]
+    fn adding_suggestions_never_replaces_an_existing_alias() {
+        let (_dir, repo) = test_repo();
+        repo.add_alias("gst", "git status --short").unwrap();
+        let suggestion = |name: &str, command: &str| crate::models::AliasSuggestion {
+            name: name.to_string(),
+            command: command.to_string(),
+            count: 5,
+            dir_count: 1,
+            selected: true,
+        };
+        let (added, refused) = add_new_aliases(
+            &repo,
+            &[
+                suggestion("gst", "git stash"),
+                suggestion("gco", "git checkout"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(added, 1);
+        assert_eq!(refused, ["gst"]);
+        let aliases = repo.list_aliases().unwrap();
+        let gst = aliases.iter().find(|a| a.name == "gst").unwrap();
+        assert_eq!(gst.command, "git status --short", "kept as it was");
+        assert!(aliases.iter().any(|a| a.name == "gco"));
     }
 
     #[test]

@@ -141,22 +141,38 @@ pub fn shell_quote(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
-/// Build suggestions from history, filtering out already-aliased commands.
-/// When `human_only` is true, only commands executed by humans are considered.
+/// Alias suggestions built from history.
+pub struct SuggestionSet {
+    pub suggestions: Vec<AliasSuggestion>,
+    /// Frequent commands left out because an alias already runs them.
+    pub skipped: Vec<String>,
+    /// Alias names already defined, in the shell or managed by suvadu.
+    pub existing: std::collections::HashSet<String>,
+}
+
+/// Build suggestions from history, filtering out already-aliased commands —
+/// aliases in the shell and ones suvadu manages — and never proposing a
+/// name either already uses. When `human_only` is true, only commands
+/// executed by humans are considered.
 pub fn build_suggestions(
     min_count: usize,
     min_length: usize,
     days: Option<usize>,
     top: usize,
     human_only: bool,
-) -> Result<(Vec<AliasSuggestion>, Vec<String>), Box<dyn std::error::Error>> {
+) -> Result<SuggestionSet, Box<dyn std::error::Error>> {
     let repo = repository::Repository::init()?;
 
     let frequent =
         repo.get_frequent_commands_filtered(days, min_count, min_length, top * 3, human_only)?;
 
     let alias_output = get_shell_aliases();
-    let (alias_values, mut alias_names) = parse_alias_output(&alias_output);
+    let (mut alias_values, mut alias_names) = parse_alias_output(&alias_output);
+    for alias in repo.list_aliases()? {
+        alias_values.insert(alias.command);
+        alias_names.insert(alias.name);
+    }
+    let existing = alias_names.clone();
 
     let mut suggestions = Vec::new();
     let mut skipped = Vec::new();
@@ -190,7 +206,11 @@ pub fn build_suggestions(
         }
     }
 
-    Ok((suggestions, skipped))
+    Ok(SuggestionSet {
+        suggestions,
+        skipped,
+        existing,
+    })
 }
 
 pub fn handle_suggest_aliases_text(
@@ -201,7 +221,11 @@ pub fn handle_suggest_aliases_text(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Only suggest aliases for commands a human actually typed — aliasing an
     // agent's one-off commands is noise. Matches the add-suggested apply path.
-    let (suggestions, skipped) = build_suggestions(min_count, min_length, days, top, true)?;
+    let SuggestionSet {
+        suggestions,
+        skipped,
+        ..
+    } = build_suggestions(min_count, min_length, days, top, true)?;
 
     if suggestions.is_empty() {
         let period = days.map_or_else(|| "all time".to_string(), |d| format!("last {d} days"));
@@ -254,7 +278,11 @@ pub fn handle_suggest_aliases_tui(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Only suggest aliases for commands a human actually typed — aliasing an
     // agent's one-off commands is noise. Matches the add-suggested apply path.
-    let (suggestions, skipped) = build_suggestions(min_count, min_length, days, top, true)?;
+    let SuggestionSet {
+        suggestions,
+        skipped,
+        existing,
+    } = build_suggestions(min_count, min_length, days, top, true)?;
 
     if suggestions.is_empty() {
         let period = days.map_or_else(|| "all time".to_string(), |d| format!("last {d} days"));
@@ -264,7 +292,15 @@ pub fn handle_suggest_aliases_tui(
     }
 
     let mut guard = crate::util::TerminalGuard::new()?;
-    let res = suggest_ui::run_suggest_ui(guard.terminal(), suggestions, skipped);
+    let res = suggest_ui::run_suggest_ui(
+        guard.terminal(),
+        suggestions,
+        skipped,
+        suggest_ui::SuggestOptions {
+            existing,
+            confirm_add: false,
+        },
+    );
     drop(guard);
 
     match res {
@@ -294,7 +330,9 @@ pub fn handle_suggest_aliases_tui(
     Ok(())
 }
 
-/// Run the suggest TUI and return the user's selected suggestions (or None if quit).
+/// Run the suggest TUI to pick aliases to add, and return the ones the user
+/// confirmed adding (or None if quit). Enter asks before confirming, and no
+/// selected suggestion may reuse an existing alias name.
 /// When `human_only` is true, only human-executed commands are considered.
 pub fn run_suggest_and_select(
     min_count: usize,
@@ -303,7 +341,11 @@ pub fn run_suggest_and_select(
     top: usize,
     human_only: bool,
 ) -> Result<Option<Vec<AliasSuggestion>>, Box<dyn std::error::Error>> {
-    let (suggestions, skipped) = build_suggestions(min_count, min_length, days, top, human_only)?;
+    let SuggestionSet {
+        suggestions,
+        skipped,
+        existing,
+    } = build_suggestions(min_count, min_length, days, top, human_only)?;
 
     if suggestions.is_empty() {
         let period = days.map_or_else(|| "all time".to_string(), |d| format!("last {d} days"));
@@ -313,7 +355,15 @@ pub fn run_suggest_and_select(
     }
 
     let mut guard = crate::util::TerminalGuard::new()?;
-    let res = suggest_ui::run_suggest_ui(guard.terminal(), suggestions, skipped);
+    let res = suggest_ui::run_suggest_ui(
+        guard.terminal(),
+        suggestions,
+        skipped,
+        suggest_ui::SuggestOptions {
+            existing,
+            confirm_add: true,
+        },
+    );
     drop(guard);
 
     match res {

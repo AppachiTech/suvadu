@@ -9,12 +9,25 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Terminal,
 };
+use std::collections::HashSet;
 use std::io;
 
 #[derive(Debug, PartialEq)]
 enum InputMode {
     Normal,
     EditingName,
+    /// "Add N aliases? y/n" — shown before anything is written.
+    ConfirmAdd,
+}
+
+/// How the suggest screen is being used.
+pub struct SuggestOptions {
+    /// Alias names already defined — managed by suvadu or in the shell. A
+    /// selected suggestion may not take one.
+    pub existing: HashSet<String>,
+    /// Confirming writes the aliases (`suv aliases add-suggested`), so Enter
+    /// asks first.
+    pub confirm_add: bool,
 }
 
 struct AppState {
@@ -24,6 +37,10 @@ struct AppState {
     input_mode: InputMode,
     edit_buffer: String,
     skipped: Vec<String>,
+    existing: HashSet<String>,
+    confirm_add: bool,
+    /// Why the last Enter was refused.
+    status: Option<String>,
     /// The quit hint's label: "Home" when Suvadu Home opened this screen,
     /// since leaving returns there.
     leave_label: &'static str,
@@ -42,6 +59,9 @@ impl AppState {
             input_mode: InputMode::Normal,
             edit_buffer: String::new(),
             skipped,
+            existing: HashSet::new(),
+            confirm_add: false,
+            status: None,
             leave_label: "Quit",
         }
     }
@@ -84,12 +104,69 @@ impl AppState {
         }
     }
 
-    /// Returns Some(selected suggestions) on confirm, None on quit.
+    fn selected_count(&self) -> usize {
+        self.suggestions.iter().filter(|s| s.selected).count()
+    }
+
+    /// Why suggestion `idx` cannot be taken as it is named, if it cannot:
+    /// the name is already an alias, or another selected suggestion has it.
+    fn clash(&self, idx: usize) -> Option<&'static str> {
+        let s = self.suggestions.get(idx)?;
+        if self.existing.contains(&s.name) {
+            Some("exists")
+        } else if self
+            .suggestions
+            .iter()
+            .enumerate()
+            .any(|(j, other)| j != idx && other.selected && other.name == s.name)
+        {
+            Some("duplicate")
+        } else {
+            None
+        }
+    }
+
+    /// Names of selected suggestions that clash, each once.
+    fn selected_clashes(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for (i, s) in self.suggestions.iter().enumerate() {
+            if s.selected && self.clash(i).is_some() && !names.contains(&s.name) {
+                names.push(s.name.clone());
+            }
+        }
+        names
+    }
+
+    /// Enter on the list: refuse while a selected name clashes, ask first
+    /// when confirming writes, otherwise confirm.
+    fn confirm(&mut self) -> Option<bool> {
+        let clashes = self.selected_clashes();
+        if !clashes.is_empty() {
+            self.status = Some(format!(
+                "Already taken: {} — rename (^E) or deselect (Space)",
+                clashes.join(", ")
+            ));
+            return None;
+        }
+        if self.confirm_add && self.selected_count() > 0 {
+            self.input_mode = InputMode::ConfirmAdd;
+            return None;
+        }
+        Some(true)
+    }
+
+    /// Returns `Some(true)` on confirm, `Some(false)` on quit.
     fn handle_input(&mut self, key: event::KeyEvent) -> Option<bool> {
         if crate::util::is_interrupt(&key) {
             return Some(false);
         }
+        self.status = None;
         match self.input_mode {
+            InputMode::ConfirmAdd => match key.code {
+                KeyCode::Char('y' | 'Y') => return Some(true),
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => self.input_mode = InputMode::Normal,
+                _ => {}
+            },
             InputMode::Normal if key.modifiers.contains(KeyModifiers::CONTROL) => match key.code {
                 KeyCode::Char('a') => self.select_all(),
                 KeyCode::Char('n') => self.deselect_all(),
@@ -103,7 +180,7 @@ impl AppState {
             },
             InputMode::Normal => match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => return Some(false),
-                KeyCode::Enter => return Some(true),
+                KeyCode::Enter => return self.confirm(),
                 KeyCode::Down | KeyCode::Char('j') => self.next(),
                 KeyCode::Up | KeyCode::Char('k') => self.prev(),
                 KeyCode::Char(' ') => self.toggle_selected(),
@@ -140,11 +217,14 @@ pub fn run_suggest_ui<B: Backend>(
     terminal: &mut Terminal<B>,
     suggestions: Vec<AliasSuggestion>,
     skipped: Vec<String>,
+    options: SuggestOptions,
 ) -> io::Result<Option<Vec<AliasSuggestion>>>
 where
     io::Error: From<B::Error>,
 {
     let mut app = AppState::new(suggestions, skipped);
+    app.existing = options.existing;
+    app.confirm_add = options.confirm_add;
     app.leave_label = crate::home::runner::leave_label();
 
     loop {
@@ -244,6 +324,12 @@ fn render_suggestion_list(
             // Pad name to 8 chars for alignment
             let name_padded = format!("{name_text:<8}");
             let name_span = Span::styled(name_padded, name_style);
+            let clash = app.clash(i).map(|why| {
+                Span::styled(
+                    format!(" {why}"),
+                    Style::default().fg(t.error).add_modifier(Modifier::BOLD),
+                )
+            });
 
             // Command text — truncate and highlight like search
             let max_cmd_len = total_width.saturating_sub(40) as usize;
@@ -259,7 +345,9 @@ fn render_suggestion_list(
             let count_str = format!("  {} uses", s.count);
             let count_span = Span::styled(count_str, Style::default().fg(t.text_muted));
 
-            let mut spans = vec![Span::raw("  "), checkbox, name_span, Span::raw("  ")];
+            let mut spans = vec![Span::raw("  "), checkbox, name_span];
+            spans.extend(clash);
+            spans.push(Span::raw("  "));
             spans.extend(cmd_spans);
             spans.push(count_span);
 
@@ -335,15 +423,27 @@ fn render_suggest_footer(
     let badge_key = Style::default().bg(t.badge_bg).fg(t.text);
     let badge_label = Style::default().fg(t.text_secondary);
 
-    let footer_spans = if app.input_mode == InputMode::EditingName {
-        vec![
+    let mut footer_spans = match app.input_mode {
+        InputMode::EditingName => vec![
             Span::styled(" Enter ", badge_key),
             Span::styled(" Save  ", badge_label),
             Span::styled(" Esc ", badge_key),
             Span::styled(" Cancel  ", badge_label),
-        ]
-    } else {
-        vec![
+        ],
+        InputMode::ConfirmAdd => {
+            let n = app.selected_count();
+            vec![
+                Span::styled(
+                    format!(" Add {n} alias{}? ", if n == 1 { "" } else { "es" }),
+                    Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" y ", badge_key),
+                Span::styled(" Add  ", badge_label),
+                Span::styled(" n/Esc ", badge_key),
+                Span::styled(" Back  ", badge_label),
+            ]
+        }
+        InputMode::Normal => vec![
             Span::styled(" q/Esc ", badge_key),
             Span::styled(format!(" {}  ", app.leave_label), badge_label),
             Span::styled(" \u{2191}\u{2193} ", badge_key),
@@ -358,8 +458,14 @@ fn render_suggest_footer(
             Span::styled(" None  ", badge_label),
             Span::styled(" Enter ", badge_key),
             Span::styled(" Confirm ", badge_label),
-        ]
+        ],
     };
+    if let Some(status) = &app.status {
+        footer_spans.push(Span::styled(
+            format!(" {status} "),
+            Style::default().fg(t.error).add_modifier(Modifier::BOLD),
+        ));
+    }
 
     let footer = Paragraph::new(Line::from(footer_spans)).wrap(Wrap { trim: false });
     f.render_widget(footer, area);
@@ -468,6 +574,84 @@ mod tests {
         let mut app = AppState::new(make_suggestions(1), vec![]);
         let result = app.handle_input(KeyEvent::from(KeyCode::Esc));
         assert_eq!(result, Some(false));
+    }
+
+    /// The state `suv aliases add-suggested` runs with: every suggestion
+    /// selected, writes confirmed first, `existing` already taken.
+    fn adding(n: usize, existing: &[&str]) -> AppState {
+        let mut suggestions = make_suggestions(n);
+        for s in &mut suggestions {
+            s.selected = true;
+        }
+        let mut app = AppState::new(suggestions, vec![]);
+        app.existing = existing.iter().map(ToString::to_string).collect();
+        app.confirm_add = true;
+        app
+    }
+
+    #[test]
+    fn adding_asks_before_writing_anything() {
+        let mut app = adding(2, &[]);
+        assert_eq!(app.handle_input(KeyEvent::from(KeyCode::Enter)), None);
+        assert_eq!(app.input_mode, InputMode::ConfirmAdd);
+
+        // n and Esc go back to the list rather than adding or quitting.
+        assert_eq!(app.handle_input(KeyEvent::from(KeyCode::Char('n'))), None);
+        assert_eq!(app.input_mode, InputMode::Normal);
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.handle_input(KeyEvent::from(KeyCode::Esc)), None);
+        assert_eq!(app.input_mode, InputMode::Normal);
+
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(
+            app.handle_input(KeyEvent::from(KeyCode::Char('y'))),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn the_confirmation_says_how_many_aliases_it_adds() {
+        let mut app = adding(3, &[]);
+        app.toggle_selected(); // deselect the first
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        let screen = crate::test_utils::render_to_text(160, 20, |f| ui(f, &mut app));
+        assert!(screen.contains("Add 2 aliases?"), "{screen}");
+    }
+
+    #[test]
+    fn a_name_that_already_exists_is_flagged_and_cannot_be_added() {
+        let mut app = adding(2, &["alias0"]);
+        let screen = crate::test_utils::render_to_text(160, 20, |f| ui(f, &mut app));
+        assert!(screen.contains("exists"), "{screen}");
+
+        assert_eq!(app.handle_input(KeyEvent::from(KeyCode::Enter)), None);
+        assert_eq!(app.input_mode, InputMode::Normal, "no confirmation offered");
+        let status = app.status.clone().unwrap_or_default();
+        assert!(status.contains("alias0"), "{status}");
+
+        // Deselecting it clears the way.
+        app.toggle_selected();
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::ConfirmAdd);
+    }
+
+    #[test]
+    fn renaming_onto_an_existing_or_a_duplicate_name_is_refused() {
+        let mut app = adding(2, &["gst"]);
+        app.handle_input(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        app.edit_buffer = "gst".to_string();
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.suggestions[0].name, "gst");
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+
+        // Two suggestions renamed to the same new name collide too.
+        let mut app = adding(2, &[]);
+        app.suggestions[0].name = "same".to_string();
+        app.suggestions[1].name = "same".to_string();
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.status.clone().unwrap_or_default().contains("same"));
     }
 
     #[test]
