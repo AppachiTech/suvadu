@@ -61,14 +61,22 @@ pub struct TerminalGuard {
     terminal: ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
 }
 
+/// What [`TerminalGuard`] sets up, on stdout.
+const STDOUT_SETUP: [TerminalStep; 2] = [
+    TerminalStep::EnableRawMode,
+    TerminalStep::EnterAlternateScreen,
+];
+
 impl TerminalGuard {
-    /// Enter raw mode + alternate screen and return a ready terminal.
+    /// Enter raw mode + alternate screen and return a ready terminal. If any
+    /// part fails, what was already set up is undone before the error is
+    /// returned, so raw mode is never left on with no screen to show it.
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        crossterm::terminal::enable_raw_mode()?;
-        let mut stdout = std::io::stdout();
-        crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
-        let backend = ratatui::backend::CrosstermBackend::new(stdout);
-        let terminal = ratatui::Terminal::new(backend)?;
+        let terminal = set_up(
+            &STDOUT_SETUP,
+            |step| apply_step_to(&mut std::io::stdout(), step),
+            || ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(std::io::stdout())),
+        )?;
         Ok(Self { terminal })
     }
 
@@ -136,6 +144,7 @@ pub enum TerminalStep {
     LeaveAlternateScreen,
     EnableBracketedPaste,
     DisableBracketedPaste,
+    DisableMouseCapture,
     /// Erase the inline viewport so the shell prompt returns to where it was.
     ClearInlineViewport,
     ShowCursor,
@@ -196,30 +205,68 @@ pub fn apply_all(
     Ok(())
 }
 
+/// Apply `steps`, then `build` what needs them. If a step fails, or the
+/// build does, every step already applied is undone, in reverse, before the
+/// error is returned.
+fn set_up<T>(
+    steps: &[TerminalStep],
+    mut apply: impl FnMut(TerminalStep) -> std::io::Result<()>,
+    build: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    apply_all(steps, &mut apply)?;
+    build().inspect_err(|_| {
+        for undo in steps.iter().rev().filter_map(|s| undo(*s)) {
+            let _ = apply(undo);
+        }
+    })
+}
+
+/// What restoring the terminal after a panic undoes: everything any screen
+/// may have turned on, whichever stream it drew to.
+pub const fn panic_restore_steps() -> [TerminalStep; 5] {
+    [
+        TerminalStep::DisableBracketedPaste,
+        TerminalStep::DisableMouseCapture,
+        TerminalStep::LeaveAlternateScreen,
+        TerminalStep::DisableRawMode,
+        TerminalStep::ShowCursor,
+    ]
+}
+
+/// Put the terminal back after a panic in a screen: every step is tried,
+/// whatever an earlier one did.
+pub fn restore_terminal_after_panic() {
+    for step in panic_restore_steps() {
+        let _ = apply_step(step);
+    }
+}
+
 /// Apply one [`TerminalStep`] to stderr.
 pub fn apply_step(step: TerminalStep) -> std::io::Result<()> {
+    apply_step_to(&mut std::io::stderr(), step)
+}
+
+/// Apply one [`TerminalStep`], writing any escape sequence to `out`.
+fn apply_step_to(out: &mut impl std::io::Write, step: TerminalStep) -> std::io::Result<()> {
     use crossterm::{cursor, event, terminal};
     match step {
         TerminalStep::EnableRawMode => terminal::enable_raw_mode(),
         TerminalStep::DisableRawMode => terminal::disable_raw_mode(),
         TerminalStep::EnterAlternateScreen => {
-            crossterm::execute!(std::io::stderr(), terminal::EnterAlternateScreen)
+            crossterm::execute!(out, terminal::EnterAlternateScreen)
         }
         TerminalStep::LeaveAlternateScreen => {
-            crossterm::execute!(std::io::stderr(), terminal::LeaveAlternateScreen)
+            crossterm::execute!(out, terminal::LeaveAlternateScreen)
         }
-        TerminalStep::EnableBracketedPaste => {
-            crossterm::execute!(std::io::stderr(), event::EnableBracketedPaste)
-        }
+        TerminalStep::EnableBracketedPaste => crossterm::execute!(out, event::EnableBracketedPaste),
         TerminalStep::DisableBracketedPaste => {
-            crossterm::execute!(std::io::stderr(), event::DisableBracketedPaste)
+            crossterm::execute!(out, event::DisableBracketedPaste)
         }
+        TerminalStep::DisableMouseCapture => crossterm::execute!(out, event::DisableMouseCapture),
         // ratatui erases the inline viewport itself; this only makes sure
         // the cursor is back at the start of the reclaimed rows.
-        TerminalStep::ClearInlineViewport => {
-            crossterm::execute!(std::io::stderr(), cursor::MoveToColumn(0))
-        }
-        TerminalStep::ShowCursor => crossterm::execute!(std::io::stderr(), cursor::Show),
+        TerminalStep::ClearInlineViewport => crossterm::execute!(out, cursor::MoveToColumn(0)),
+        TerminalStep::ShowCursor => crossterm::execute!(out, cursor::Show),
     }
 }
 
@@ -410,8 +457,9 @@ impl<W: std::io::Write> ratatui::backend::Backend for TtyCursorBackend<W> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_all, inline_height, is_interrupt, setup_steps, teardown_steps, RecallSurface,
-        ScreenExit, TerminalStep, INLINE_MAX_HEIGHT, INLINE_MIN_HEIGHT,
+        apply_all, inline_height, is_interrupt, panic_restore_steps, set_up, setup_steps,
+        teardown_steps, RecallSurface, ScreenExit, TerminalStep, INLINE_MAX_HEIGHT,
+        INLINE_MIN_HEIGHT, STDOUT_SETUP,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -553,6 +601,96 @@ mod tests {
                 TerminalStep::DisableRawMode,
             ]
         );
+    }
+
+    #[test]
+    fn a_terminal_that_cannot_be_built_leaves_raw_mode_and_the_screen_restored() {
+        let mut calls = Vec::new();
+        let result: std::io::Result<()> = set_up(
+            &STDOUT_SETUP,
+            |step| {
+                calls.push(step);
+                Ok(())
+            },
+            || Err(std::io::Error::other("no size")),
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            calls,
+            [
+                TerminalStep::EnableRawMode,
+                TerminalStep::EnterAlternateScreen,
+                TerminalStep::LeaveAlternateScreen,
+                TerminalStep::DisableRawMode,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_alternate_screen_turns_raw_mode_back_off() {
+        let mut calls = Vec::new();
+        let mut built = false;
+        let result = set_up(
+            &STDOUT_SETUP,
+            |step| {
+                calls.push(step);
+                if step == TerminalStep::EnterAlternateScreen {
+                    Err(std::io::Error::other("no screen"))
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                built = true;
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert!(!built, "nothing is built on a half-set-up terminal");
+        assert_eq!(
+            calls,
+            [
+                TerminalStep::EnableRawMode,
+                TerminalStep::EnterAlternateScreen,
+                TerminalStep::DisableRawMode,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_built_terminal_keeps_its_setup() {
+        let mut calls = Vec::new();
+        let result = set_up(
+            &STDOUT_SETUP,
+            |step| {
+                calls.push(step);
+                Ok(())
+            },
+            || Ok(7),
+        );
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(calls, STDOUT_SETUP);
+    }
+
+    #[test]
+    fn a_panic_restores_everything_any_screen_turns_on() {
+        let steps = panic_restore_steps();
+        for needed in [
+            TerminalStep::DisableBracketedPaste,
+            TerminalStep::DisableMouseCapture,
+            TerminalStep::LeaveAlternateScreen,
+            TerminalStep::DisableRawMode,
+            TerminalStep::ShowCursor,
+        ] {
+            assert!(steps.contains(&needed), "{needed:?} missing: {steps:?}");
+        }
+        for surface in [RecallSurface::FullScreen, INLINE] {
+            for step in teardown_steps(surface) {
+                if step != TerminalStep::ClearInlineViewport {
+                    assert!(steps.contains(&step), "{step:?} missing: {steps:?}");
+                }
+            }
+        }
     }
 
     #[test]
