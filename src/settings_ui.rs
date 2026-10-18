@@ -680,15 +680,20 @@ impl AppState {
                         self.save_status = Some("Invalid number".to_string());
                     }
                     self.input_mode = InputMode::Normal;
-                } else if self.current_tab == SettingsTab::Exclusions
-                    && !self.input_buffer.is_empty()
-                {
-                    self.config.exclusions.push(self.input_buffer.clone());
-                    self.dirty = true;
-                    self.save_status = Some(format!("Added exclusion: {}", self.input_buffer));
-                    // Select the new item
-                    self.selected_item = self.config.exclusions.len() - 1;
-                    self.exclusion_list_state.select(Some(self.selected_item));
+                } else if self.current_tab == SettingsTab::Exclusions {
+                    // Exclusions match by substring: a blank one would stop
+                    // every command containing a space from being recorded.
+                    let pattern = self.input_buffer.trim().to_string();
+                    if pattern.is_empty() {
+                        self.save_status = Some("Exclusion pattern cannot be blank".to_string());
+                    } else {
+                        self.save_status = Some(format!("Added exclusion: {pattern}"));
+                        self.config.exclusions.push(pattern);
+                        self.dirty = true;
+                        // Select the new item
+                        self.selected_item = self.config.exclusions.len() - 1;
+                        self.exclusion_list_state.select(Some(self.selected_item));
+                    }
                     self.input_mode = InputMode::Normal;
                 } else if self.current_tab == SettingsTab::AutoTags {
                     // Auto-tag dual-field form
@@ -2316,6 +2321,35 @@ mod tests {
         assert_eq!(app.config.exclusions, vec!["^ls$"]);
         assert!(app.dirty);
         assert_eq!(app.selected_item, 0); // points to the new item
+    }
+
+    /// Exclusions match by substring, so a blank pattern would stop every
+    /// command containing a space from being recorded.
+    #[test]
+    fn a_blank_exclusion_is_rejected_and_others_are_trimmed() {
+        let mut app = AppState::new(Config::default());
+        app.current_tab = SettingsTab::Exclusions;
+
+        for typed in [" ", "   ", "\t"] {
+            app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+            for c in typed.chars() {
+                app.handle_input(KeyEvent::from(KeyCode::Char(c)));
+            }
+            app.handle_input(KeyEvent::from(KeyCode::Enter));
+            assert!(app.config.exclusions.is_empty(), "{typed:?} was added");
+            assert!(!app.dirty, "{typed:?}");
+        }
+        assert_eq!(
+            app.save_status.as_deref(),
+            Some("Exclusion pattern cannot be blank")
+        );
+
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        for c in "  secret-tool ".chars() {
+            app.handle_input(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.config.exclusions, vec!["secret-tool"]);
     }
 
     #[test]

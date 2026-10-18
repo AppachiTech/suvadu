@@ -809,9 +809,11 @@ fn validate_config(config: &Config) -> ConfigResult<()> {
         ));
     }
     for pattern in &config.exclusions {
-        if pattern.is_empty() {
+        // Exclusions match by substring, so a blank pattern would exclude
+        // every command containing that whitespace.
+        if pattern.trim().is_empty() {
             return Err(ConfigError::Path(
-                "exclusion patterns must not be empty".into(),
+                "exclusion patterns must not be empty or whitespace".into(),
             ));
         }
     }
@@ -1699,6 +1701,17 @@ unknown_agent_key = 1
         assert!(!capture_problem_persists(&problem));
         std::fs::remove_file(&overlay).unwrap();
         assert!(!capture_problem_persists(&problem));
+    }
+
+    #[test]
+    fn a_blank_exclusion_pattern_is_invalid() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        for pattern in ["", " ", "  \t "] {
+            std::fs::write(&path, format!("exclusions = [\"ok\", {pattern:?}]\n")).unwrap();
+            let err = read_config_file(&path).unwrap_err().to_string();
+            assert!(err.contains("exclusion"), "{pattern:?}: {err}");
+        }
     }
 
     #[test]
