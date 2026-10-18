@@ -184,7 +184,10 @@ must still appear. The results title says `ignoring punctuation (-_./:)`, the
 status row says `Match terms (loose)`, and the matched text — separators
 inside it included — is marked as usual. It never mixes with exact matches:
 if anything matches as typed, only that is shown, so the count and every page
-come from one rule. `literal`, `prefix` and `fuzzy` have no fallback.
+come from one rule. `literal`, `prefix` and `fuzzy` have no fallback. The MCP
+`search_commands` tool falls back the same way for its whole query, and its
+response notes `no exact matches; showing matches ignoring punctuation
+(-_./:)`.
 
 **Scope** — `--scope`, `^P` to cycle, `^R` to reset:
 

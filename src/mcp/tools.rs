@@ -133,7 +133,7 @@ fn search_commands_def() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": with_paging(json!({
-                "query": { "type": "string", "description": "Text to search for in commands" },
+                "query": { "type": "string", "description": "Text to search for in commands, as one case-insensitive substring. If nothing matches, it is retried ignoring whitespace and -_./: (so hiveagent finds hive-agent), and the response notes it" },
                 "directory": { "type": "string", "description": "Filter to commands run in this directory" },
                 "executor": { "type": "string", "description": "Filter by executor (e.g. claude-code, cursor, human)" },
                 "exit_code": { "type": "integer", "description": "Filter by exit code (0 = success)" },
@@ -580,7 +580,7 @@ fn page_entries(
     repo: &Repository,
     limit: usize,
     offset: usize,
-    qf: &QueryFilter,
+    qf: &impl crate::repository::EntryQuery,
 ) -> Result<(Vec<crate::models::Entry>, Option<usize>), String> {
     let mut entries = repo
         .get_entries_filtered(limit.saturating_add(1), offset, qf)
@@ -675,12 +675,44 @@ fn handle_search_commands(
         exclude_dirs: &mcp.exclude_dirs,
     };
 
-    let (entries, next) = page_entries(repo, limit, offset, &qf)?;
-    let matched = usize::try_from(
-        repo.count_filtered(&qf)
-            .map_err(|e| format!("query failed: {e}"))?,
-    )
-    .unwrap_or(entries.len());
+    let counted = |n: crate::db::DbResult<i64>| -> Result<usize, String> {
+        n.map(|n| usize::try_from(n).unwrap_or(0))
+            .map_err(|e| format!("query failed: {e}"))
+    };
+    let mut matched = counted(repo.count_filtered(&qf))?;
+    // Recall's separator fallback, for the whole query as one term: when
+    // the text as typed matches nothing, `hiveagent` should still find
+    // `hive-agent`. It replaces an empty answer only, so the count and every
+    // page come from one rule, and the response says which.
+    let loose_terms: Vec<String> = if matched == 0 {
+        Some(crate::util::normalize_separators(query))
+            .filter(|t| !t.is_empty())
+            .into_iter()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let loose = crate::repository::SeparatorInsensitive {
+        inner: QueryFilter {
+            query: None,
+            ..qf.clone()
+        },
+        terms: &loose_terms,
+        field: SearchField::Command,
+    };
+    let mut loosened = false;
+    if !loose_terms.is_empty() {
+        let found = counted(repo.count_filtered(&loose))?;
+        if found > 0 {
+            matched = found;
+            loosened = true;
+        }
+    }
+    let (entries, next) = if loosened {
+        page_entries(repo, limit, offset, &loose)?
+    } else {
+        page_entries(repo, limit, offset, &qf)?
+    };
 
     let detail = detail(args);
     let from = if offset > 0 {
@@ -688,13 +720,21 @@ fn handle_search_commands(
     } else {
         String::new()
     };
+    let how = if loosened {
+        " ignoring punctuation (-_./:)"
+    } else {
+        ""
+    };
     Ok(fit_page(&entries, offset, next, |page| {
         let mut response = conv::Response::new(
-            format!("{} commands matching \"{query}\"{from}", page.len()),
+            format!("{} commands matching \"{query}\"{how}{from}", page.len()),
             conv::Provenance::Observed,
         );
         for e in page {
             response.line(command_row(e, detail));
+        }
+        if loosened {
+            response = response.note(LOOSE_SEARCH_NOTE);
         }
         if !detail {
             response = response.note(conv::DETAIL_HINT);
@@ -702,6 +742,10 @@ fn handle_search_commands(
         response.shown(page.len()).matched(matched)
     }))
 }
+
+/// Said by `search_commands` whenever its rows come from the separator
+/// fallback, so an agent never reads them as exact matches.
+const LOOSE_SEARCH_NOTE: &str = "no exact matches; showing matches ignoring punctuation (-_./:)";
 
 fn handle_recent_commands(
     repo: &Repository,
@@ -2738,6 +2782,128 @@ mod tests {
         let text = result.unwrap();
         assert!(text.contains("cargo test"));
         assert!(text.contains("/project"));
+    }
+
+    fn seed_commands(repo: &Repository, commands: &[&str]) {
+        repo.insert_session(&crate::models::Session {
+            id: "sess-loose".to_string(),
+            hostname: "test".to_string(),
+            created_at: 1_700_000_000_000,
+            tag_id: None,
+        })
+        .unwrap();
+        for (i, cmd) in (0_i64..).zip(commands) {
+            repo.insert_entry(&crate::models::Entry::new(
+                "sess-loose".to_string(),
+                (*cmd).to_string(),
+                "/project".to_string(),
+                Some(0),
+                1_700_000_000_000 + i,
+                1_700_000_001_000 + i,
+            ))
+            .unwrap();
+        }
+    }
+
+    const LOOSE_NOTE: &str = "no exact matches; showing matches ignoring punctuation (-_./:)";
+
+    #[test]
+    fn search_commands_retries_without_separators_and_says_so() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_commands(&repo, &["ssh hive-agent", "hive_agent run", "cargo build"]);
+        let text = call_tool(
+            &repo,
+            "search_commands",
+            &json!({"query": "hiveagent"}),
+            &default_mcp(),
+        )
+        .unwrap();
+        assert!(text.contains("ssh hive-agent"), "{text}");
+        assert!(text.contains("hive_agent run"), "{text}");
+        assert!(!text.contains("cargo build"), "{text}");
+        assert!(text.contains(LOOSE_NOTE), "{text}");
+        assert!(text.contains("shown: 2 of 2"), "{text}");
+
+        // A query with separators finds the spelling without them, and the
+        // whole query is one term, spaces included.
+        seed_commands_more(&repo, &["hiveagent status"]);
+        let text = call_tool(
+            &repo,
+            "search_commands",
+            &json!({"query": "hive-agent status"}),
+            &default_mcp(),
+        )
+        .unwrap();
+        assert!(text.contains("hiveagent status"), "{text}");
+        assert!(text.contains(LOOSE_NOTE), "{text}");
+    }
+
+    fn seed_commands_more(repo: &Repository, commands: &[&str]) {
+        for (i, cmd) in (100_i64..).zip(commands) {
+            repo.insert_entry(&crate::models::Entry::new(
+                "sess-loose".to_string(),
+                (*cmd).to_string(),
+                "/project".to_string(),
+                Some(0),
+                1_700_000_000_000 + i,
+                1_700_000_001_000 + i,
+            ))
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn search_commands_shows_only_exact_matches_when_there_are_any() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_commands(&repo, &["ssh hive-agent", "hive_agent run"]);
+        let text = call_tool(
+            &repo,
+            "search_commands",
+            &json!({"query": "hive-agent"}),
+            &default_mcp(),
+        )
+        .unwrap();
+        assert!(text.contains("ssh hive-agent"), "{text}");
+        assert!(!text.contains("hive_agent run"), "{text}");
+        assert!(!text.contains("ignoring punctuation"), "{text}");
+    }
+
+    #[test]
+    fn search_commands_pages_the_fallback_with_the_same_rule() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_commands(&repo, &["hive-agent 1", "hive_agent 2", "hive.agent 3"]);
+        let page = |offset: usize| {
+            call_tool(
+                &repo,
+                "search_commands",
+                &json!({"query": "hiveagent", "limit": 2, "offset": offset}),
+                &default_mcp(),
+            )
+            .unwrap()
+        };
+        let first = page(0);
+        assert!(first.contains("shown: 2 of 3"), "{first}");
+        assert!(first.contains("next_offset: 2"), "{first}");
+        let second = page(2);
+        assert!(second.contains("shown: 1 of 3"), "{second}");
+        assert!(second.contains(LOOSE_NOTE), "{second}");
+    }
+
+    #[test]
+    fn search_commands_without_any_match_does_not_claim_a_fallback() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_commands(&repo, &["ssh hive-agent"]);
+        for query in ["hiveagentz", "--"] {
+            let text = call_tool(
+                &repo,
+                "search_commands",
+                &json!({"query": query}),
+                &default_mcp(),
+            )
+            .unwrap();
+            assert!(text.contains("shown: 0 of 0"), "{query:?}: {text}");
+            assert!(!text.contains("ignoring punctuation"), "{query:?}: {text}");
+        }
     }
 
     #[test]
