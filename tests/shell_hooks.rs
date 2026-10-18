@@ -59,22 +59,16 @@ impl Sandbox {
             .env("NO_COLOR", "1");
     }
 
-    /// The hook script `suv init <shell>` prints, saved into the sandbox.
-    fn write_hook(&self, shell: &str) -> PathBuf {
-        let out = self.suv().args(["init", shell]).output().unwrap();
-        assert!(
-            out.status.success(),
-            "suv init {shell} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let path = self.path(&format!("hook.{shell}"));
-        std::fs::write(&path, &out.stdout).unwrap();
-        path
+    /// The rc-file line that loads the hook, as `suv init` documents it.
+    /// (`suv` resolves to the binary under test through the sandbox PATH.)
+    fn load_hook_line(shell: &str) -> String {
+        format!("eval \"$(suv init {shell} 2>/dev/null)\"")
     }
 
     /// Start `shell_bin` as an interactive shell whose rc file runs
-    /// `rc_before`, sources the hook, then runs `rc_after`; then type
-    /// `lines` at its prompt and let it exit at end of input.
+    /// `rc_before`, loads the hook the way `suv init` tells users to, then
+    /// runs `rc_after`; then type `lines` at its prompt and let it exit at
+    /// end of input.
     fn run_interactive(
         &self,
         kind: ShellKind,
@@ -83,8 +77,10 @@ impl Sandbox {
         rc_after: &str,
         lines: &str,
     ) -> Output {
-        let hook = self.write_hook(kind.name());
-        let rc = format!("{rc_before}\nsource '{}'\n{rc_after}\n", hook.display());
+        let rc = format!(
+            "{rc_before}\n{}\n{rc_after}\n",
+            Self::load_hook_line(kind.name())
+        );
         let mut cmd = Command::new(shell_bin);
         self.isolate(&mut cmd);
         match kind {
@@ -477,4 +473,47 @@ fn bash_shared_history_does_not_record_other_shells_lines() {
             "PROMPT_COMMAND={prompt_command}"
         );
     }
+}
+
+// ── bash: living alongside other DEBUG traps ───────────────
+
+#[test]
+fn bash_keeps_an_existing_multiline_debug_trap_with_quotes() {
+    let Some(bash) = modern_bash() else { return };
+    let s = Sandbox::new();
+    // A trap with quotes of every kind, spread over two lines.
+    let out = s.bash(
+        &bash,
+        r#"trap -- 'printf "%s\n" "it'\''s \"quoted\" $BASH_COMMAND" >> "$HOME/trap.log"
+: "second line"' DEBUG"#,
+        "",
+        "echo hi && true\n",
+    );
+    assert_clean(&out);
+    assert_eq!(s.recorded_commands(), ["echo hi && true"]);
+    let log = std::fs::read_to_string(s.path("trap.log")).unwrap_or_default();
+    assert!(
+        log.lines().any(|l| l == r#"it's "quoted" echo hi"#),
+        "existing trap stopped running as written:\n{log}"
+    );
+}
+
+#[test]
+fn bash_loading_the_hook_twice_installs_it_once() {
+    let Some(bash) = modern_bash() else { return };
+    let s = Sandbox::new();
+    let out = s.bash(
+        &bash,
+        "trap -- ': mine' DEBUG",
+        &format!(
+            "{}\ntrap -p DEBUG > \"$HOME/trap.txt\"",
+            Sandbox::load_hook_line("bash")
+        ),
+        "echo once\n",
+    );
+    assert_clean(&out);
+    assert_eq!(s.recorded_commands(), ["echo once"]);
+    let trap = std::fs::read_to_string(s.path("trap.txt")).unwrap();
+    assert_eq!(trap.matches("__suvadu_preexec").count(), 1, "{trap}");
+    assert_eq!(trap.matches(": mine").count(), 1, "{trap}");
 }

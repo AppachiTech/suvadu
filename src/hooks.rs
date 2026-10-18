@@ -666,14 +666,29 @@ __suvadu_prompt_end() {
 
 /// Bash hook installation (DEBUG trap + `PROMPT_COMMAND`).
 const fn bash_hook_install() -> &'static str {
-    r#"# Install hooks (preserve any existing DEBUG trap)
-_suvadu_old_debug_trap=$(trap -p DEBUG | sed "s/^trap -- '\\(.*\\)' DEBUG$/\\1/")
-if [[ -n "$_suvadu_old_debug_trap" ]]; then
-    eval "trap '$_suvadu_old_debug_trap; __suvadu_preexec' DEBUG"
+    r#"# Install hooks, keeping any DEBUG trap that is already set.
+# `trap -p` prints that trap as a `trap -- '...' DEBUG` command, quoted by
+# bash itself. Running those words through a stand-in function recovers the
+# trap's exact text, whatever quotes or newlines it contains.
+__suvadu_old_trap_text() {
+    [[ "$1" == "--" ]] && shift
+    _suvadu_old_debug_trap="$1"
+}
+_suvadu_old_debug_trap=""
+_suvadu_trap_line=$(trap -p DEBUG)
+if [[ "$_suvadu_trap_line" == "trap "* ]]; then
+    eval "__suvadu_old_trap_text ${_suvadu_trap_line#trap }"
+fi
+if [[ "$_suvadu_old_debug_trap" == *__suvadu_preexec* ]]; then
+    :  # already installed (the hook was loaded again)
+elif [[ -n "$_suvadu_old_debug_trap" ]]; then
+    # A newline, not ';', so a trap ending in '&' or a comment still parses
+    trap -- "$_suvadu_old_debug_trap"$'\n''__suvadu_preexec' DEBUG
 else
     trap '__suvadu_preexec' DEBUG
 fi
-unset _suvadu_old_debug_trap
+unset _suvadu_old_debug_trap _suvadu_trap_line
+unset -f __suvadu_old_trap_text
 
 # Append to PROMPT_COMMAND (don't overwrite existing)
 if [[ -z "$PROMPT_COMMAND" ]]; then
