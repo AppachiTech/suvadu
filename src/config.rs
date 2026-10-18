@@ -167,12 +167,17 @@ const fn default_cwd_boost_percent() -> u32 {
 pub struct ShellConfig {
     #[serde(default = "default_true")]
     pub enable_arrow_navigation: bool,
+    /// Record the git branch checked out where each command started, read
+    /// from the repository's files when the command is recorded.
+    #[serde(default = "default_true")]
+    pub capture_git_branch: bool,
 }
 
 impl Default for ShellConfig {
     fn default() -> Self {
         Self {
             enable_arrow_navigation: true,
+            capture_git_branch: true,
         }
     }
 }
@@ -586,6 +591,8 @@ fn merge_toml_value(base: &mut toml::Value, overlay: toml::Value) {
 ///   redaction on; an overlay can still turn it on.
 /// - `enabled = true` is ignored when the global config has recording off;
 ///   an overlay can still turn recording off for its project.
+/// - `shell.capture_git_branch = true` is likewise ignored when the global
+///   config has it off.
 /// - `exclusions` and `redaction.extra_patterns` are the union of the
 ///   global entries and the overlay's, never a replacement.
 ///
@@ -627,6 +634,7 @@ pub fn overlay_config_for_dir(base: &Config, dir: &std::path::Path) -> ConfigRes
 /// (see [`load_config_for_dir`]).
 fn keep_global_privacy(base: &Config, merged: &mut Config) {
     merged.enabled &= base.enabled;
+    merged.shell.capture_git_branch &= base.shell.capture_git_branch;
     merged.redaction.enabled |= base.redaction.enabled;
     merged.exclusions = union_keeping_order(&base.exclusions, &merged.exclusions);
     merged.redaction.extra_patterns = union_keeping_order(
@@ -1564,6 +1572,38 @@ unknown_agent_key = 1
                 .unwrap()
                 .enabled,
             "a project may still opt out of recording"
+        );
+    }
+
+    #[test]
+    fn git_branches_are_recorded_unless_turned_off() {
+        assert!(Config::default().shell.capture_git_branch);
+        let cfg: Config = toml::from_str("[shell]\nenable_arrow_navigation = false\n").unwrap();
+        assert!(cfg.shell.capture_git_branch, "missing key means on");
+        let cfg: Config = toml::from_str("[shell]\ncapture_git_branch = false\n").unwrap();
+        assert!(!cfg.shell.capture_git_branch);
+    }
+
+    #[test]
+    fn a_project_overlay_can_stop_recording_git_branches_but_not_restart_it() {
+        let dir = TempDir::new().unwrap();
+        let overlay = dir.path().join(".suvadu.toml");
+        std::fs::write(&overlay, "[shell]\ncapture_git_branch = false\n").unwrap();
+        assert!(
+            !overlay_config_for_dir(&Config::default(), dir.path())
+                .unwrap()
+                .shell
+                .capture_git_branch
+        );
+
+        std::fs::write(&overlay, "[shell]\ncapture_git_branch = true\n").unwrap();
+        let mut base = Config::default();
+        base.shell.capture_git_branch = false;
+        assert!(
+            !overlay_config_for_dir(&base, dir.path())
+                .unwrap()
+                .shell
+                .capture_git_branch
         );
     }
 

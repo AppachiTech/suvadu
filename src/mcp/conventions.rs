@@ -42,7 +42,7 @@
 //!    same identifier `get_agent_session` returns, so a concise row can
 //!    always be followed up ([`command_id`]).
 //! 8. **Concise by default.** Rows are one line. `detail: true` adds
-//!    directory, duration, executor, session and prompt, and every concise
+//!    directory, duration, executor, session, git branch and prompt, and every concise
 //!    response says so ([`DETAIL_HINT`]).
 
 #[cfg(test)]

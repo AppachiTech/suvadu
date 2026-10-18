@@ -39,6 +39,7 @@ pub fn handle_wrap(
         executor_type: Some(executor_type.to_string()),
         executor: Some(executor.to_string()),
         context: None,
+        start_cwd: None,
     }) {
         eprintln!("suvadu: failed to record command: {e}");
     }

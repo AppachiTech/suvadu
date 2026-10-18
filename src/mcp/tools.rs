@@ -555,6 +555,9 @@ fn command_row(e: &crate::models::Entry, detail: bool) -> String {
         conv::duration(e.duration_ms),
         e.session_id
     );
+    if let Some(branch) = e.context.as_ref().and_then(|ctx| ctx.get("git_branch")) {
+        let _ = write!(row, " | branch {branch}");
+    }
     if let Some(prompt) = entry_prompt(e) {
         let _ = write!(
             row,
@@ -2545,6 +2548,29 @@ mod tests {
 
     fn default_mcp() -> crate::config::McpConfig {
         crate::config::McpConfig::default()
+    }
+
+    #[test]
+    fn a_detailed_command_row_names_the_branch_it_ran_on() {
+        let mut e = crate::models::Entry::new(
+            "s1".to_string(),
+            "cargo test".to_string(),
+            "/work/proj".to_string(),
+            Some(0),
+            1_700_000_000_000,
+            1_700_000_001_000,
+        );
+        assert!(!command_row(&e, true).contains("branch"));
+        e.context = Some(std::collections::HashMap::from([(
+            "git_branch".to_string(),
+            "feature/login".to_string(),
+        )]));
+        let row = command_row(&e, true);
+        assert!(row.contains("| branch feature/login"), "{row}");
+        assert!(
+            !command_row(&e, false).contains("branch"),
+            "concise rows stay one line"
+        );
     }
 
     #[test]

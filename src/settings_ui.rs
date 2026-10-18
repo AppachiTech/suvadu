@@ -88,7 +88,7 @@ impl SettingsTab {
     fn item_count(self, config: &Config) -> usize {
         match self {
             Self::Search => 13,
-            Self::Shell => 6,
+            Self::Shell => 7,
             Self::Exclusions => config.exclusions.len(),
             Self::AutoTags => config.auto_tags.len(),
             Self::Agents => config.agents.len(),
@@ -381,6 +381,10 @@ impl AppState {
             }
             (SettingsTab::Shell, 5) => {
                 self.config.update.check = !self.config.update.check;
+                self.dirty = true;
+            }
+            (SettingsTab::Shell, 6) => {
+                self.config.shell.capture_git_branch = !self.config.shell.capture_git_branch;
                 self.dirty = true;
             }
             (SettingsTab::Shell, 4) => {
@@ -1147,6 +1151,7 @@ const fn get_setting_description(tab: usize, item: usize) -> &'static str {
         (1, 3) => "What a bare suv opens at a terminal: home (the Home screen, to find any feature) or help (the command overview). suv home always opens Home, and scripts and pipes always get the overview. Applies from the next suv",
         (1, 4) => "Category markers in Home: ascii (plain words, for every terminal and font) or unicode (a few monochrome symbols before each category). The labels are the same either way",
         (1, 5) => "Look for a newer release once a day, in the background, and mention it before a command you run at a terminal. The request only reads the latest version number; nothing about you or your history is sent. SUVADU_NO_UPDATE_CHECK=1 also turns it off",
+        (1, 6) => "Store the git branch checked out where each command started, read from the repository's files (no git process runs). Shown in recall's detail pane. A project's .suvadu.toml can turn it off but not back on",
         (4, _) => "Custom agent detection rules. When an env var is set, suvadu tags commands with that agent name and type. Custom agents are checked before built-in agents. Restart your shell (source ~/.zshrc) after adding or removing agents.",
         (5, 0) => "Default time window in days for MCP tools (1-365). Agents use this when they don't specify a date range.",
         (5, 1) => "Default result limit for MCP tools (1-500). Agents use this when they don't specify a limit.",
@@ -1304,6 +1309,11 @@ fn render_shell_tab(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             "Check for Updates",
             app.config.update.check,
             app.selected_item == 5,
+        ),
+        setting_toggle(
+            "Record Git Branch",
+            app.config.shell.capture_git_branch,
+            app.selected_item == 6,
         ),
     ];
 
@@ -2090,8 +2100,21 @@ mod tests {
     }
 
     #[test]
+    fn git_branch_recording_can_be_switched_off_in_settings() {
+        let mut app = AppState::new(Config::default());
+        app.current_tab = SettingsTab::Shell;
+        app.selected_item = 6;
+        assert!(app.config.shell.capture_git_branch);
+        app.toggle_bool();
+        assert!(!app.config.shell.capture_git_branch);
+        assert!(app.dirty);
+        let description = get_setting_description(1, 6);
+        assert!(description.contains("branch"), "{description}");
+    }
+
+    #[test]
     fn the_home_rows_are_listed_and_explained() {
-        assert_eq!(SettingsTab::Shell.item_count(&Config::default()), 6);
+        assert_eq!(SettingsTab::Shell.item_count(&Config::default()), 7);
         let startup = get_setting_description(1, 3);
         assert!(
             startup.contains("suv home") && startup.contains("scripts"),

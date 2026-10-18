@@ -43,6 +43,10 @@ pub struct AddParams {
     pub executor_type: Option<String>,
     pub executor: Option<String>,
     pub context: Option<std::collections::HashMap<String, String>>,
+    /// The directory the command started in, when the shell has moved since
+    /// (`cd`, `pushd`, …): the git branch is read from here. `None` means
+    /// `cwd`.
+    pub start_cwd: Option<String>,
 }
 
 /// Maximum lengths for input fields (defense against malicious/buggy hooks).
@@ -144,6 +148,7 @@ fn handle_add_inner(
         executor_type,
         executor,
         context,
+        start_cwd,
     } = params;
 
     if !config.enabled {
@@ -233,6 +238,15 @@ fn handle_add_inner(
         ctx
     });
 
+    // Read only now, after the exclusion check, so an excluded command
+    // leaves no trace of where it ran either.
+    if let Some(branch) = git_branch_for(start_cwd, &entry.cwd, config) {
+        entry
+            .context
+            .get_or_insert_with(std::collections::HashMap::new)
+            .insert("git_branch".to_string(), branch);
+    }
+
     // Ensure session exists. Another `suv add` for the same session (an
     // agent running commands in parallel) may create the row between the
     // check and the insert, so the insert must tolerate it already existing.
@@ -250,6 +264,24 @@ fn handle_add_inner(
     repo.insert_entry(&entry)?;
 
     Ok(()) // Silent success
+}
+
+/// The git branch to store with a command recorded in `cwd`, read from the
+/// directory it started in (`start_cwd`, when the shell has moved since).
+/// `None` when branch recording is off or the directory is not in a
+/// repository. Redacted like the command text, should a name ever carry a
+/// token.
+fn git_branch_for(start_cwd: Option<String>, cwd: &str, config: &config::Config) -> Option<String> {
+    if !config.shell.capture_git_branch {
+        return None;
+    }
+    let dir = start_cwd.filter(|dir| dir.len() <= MAX_CWD_LEN);
+    let branch = util::git_branch(std::path::Path::new(dir.as_deref().unwrap_or(cwd)))?;
+    Some(if config.redaction.enabled {
+        crate::redact::redact_secrets_with_extra(&branch, &config.redaction.extra_patterns)
+    } else {
+        branch
+    })
 }
 
 #[allow(clippy::fn_params_excessive_bools)]
@@ -1288,6 +1320,7 @@ mod tests {
             executor_type: None,
             executor: None,
             context: None,
+            start_cwd: None,
         }
     }
 
@@ -1349,6 +1382,130 @@ mod tests {
 
     fn default_config() -> config::Config {
         config::Config::default()
+    }
+
+    /// A directory that git would say is on `branch`.
+    fn repo_on(branch: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(
+            dir.path().join(".git/HEAD"),
+            format!("ref: refs/heads/{branch}\n"),
+        )
+        .unwrap();
+        dir
+    }
+
+    fn only_entry(repo: &Repository) -> Entry {
+        let mut entries = repo
+            .get_entries_filtered(10, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        entries.remove(0)
+    }
+
+    fn branch_of(entry: &Entry) -> Option<&str> {
+        entry
+            .context
+            .as_ref()
+            .and_then(|ctx| ctx.get("git_branch"))
+            .map(String::as_str)
+    }
+
+    #[test]
+    fn the_branch_of_the_commands_directory_is_recorded() {
+        let (_dir, repo) = test_repo();
+        let project = repo_on("main");
+        let mut params = make_params("cargo build");
+        params.cwd = project.path().to_string_lossy().into_owned();
+        handle_add_inner(params, &default_config(), &repo).unwrap();
+        assert_eq!(branch_of(&only_entry(&repo)), Some("main"));
+    }
+
+    #[test]
+    fn the_branch_comes_from_where_the_command_started() {
+        let (_dir, repo) = test_repo();
+        let project = repo_on("topic");
+        // `cd /tmp` typed inside the project: the shell ends up in /tmp.
+        let mut params = make_params("cd /tmp");
+        params.start_cwd = Some(project.path().to_string_lossy().into_owned());
+        handle_add_inner(params, &default_config(), &repo).unwrap();
+        let entry = only_entry(&repo);
+        assert_eq!(entry.cwd, "/tmp");
+        assert_eq!(branch_of(&entry), Some("topic"));
+    }
+
+    #[test]
+    fn no_branch_is_recorded_outside_a_repository() {
+        let (_dir, repo) = test_repo();
+        let plain = tempfile::tempdir().unwrap();
+        let mut params = make_params("ls");
+        params.cwd = plain.path().to_string_lossy().into_owned();
+        handle_add_inner(params, &default_config(), &repo).unwrap();
+        assert_eq!(only_entry(&repo).context, None);
+    }
+
+    #[test]
+    fn no_branch_is_recorded_when_it_is_turned_off() {
+        let (_dir, repo) = test_repo();
+        let project = repo_on("main");
+        let mut cfg = default_config();
+        cfg.shell.capture_git_branch = false;
+        let mut params = make_params("cargo build");
+        params.cwd = project.path().to_string_lossy().into_owned();
+        handle_add_inner(params, &cfg, &repo).unwrap();
+        assert_eq!(only_entry(&repo).context, None);
+    }
+
+    #[test]
+    fn an_excluded_command_leaves_nothing_behind_its_branch_included() {
+        let (_dir, repo) = test_repo();
+        let project = repo_on("main");
+        let cfg = config::Config {
+            exclusions: vec!["^secret".to_string()],
+            ..default_config()
+        };
+        let mut params = make_params("secret-tool login");
+        params.cwd = project.path().to_string_lossy().into_owned();
+        handle_add_inner(params, &cfg, &repo).unwrap();
+        let entries = repo
+            .get_entries_filtered(10, 0, &crate::repository::QueryFilter::default())
+            .unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn the_branch_sits_beside_an_agent_prompt() {
+        let (_dir, repo) = test_repo();
+        let project = repo_on("main");
+        let mut params = make_params("cargo test");
+        params.cwd = project.path().to_string_lossy().into_owned();
+        params.context = Some(std::collections::HashMap::from([(
+            "agent_prompt".to_string(),
+            "run the tests".to_string(),
+        )]));
+        handle_add_inner(params, &default_config(), &repo).unwrap();
+        let entry = only_entry(&repo);
+        let ctx = entry.context.as_ref().unwrap();
+        assert_eq!(
+            ctx.get("agent_prompt").map(String::as_str),
+            Some("run the tests")
+        );
+        assert_eq!(branch_of(&entry), Some("main"));
+    }
+
+    #[test]
+    fn a_secret_in_a_branch_name_is_redacted() {
+        let (_dir, repo) = test_repo();
+        let token = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789";
+        let project = repo_on(&format!("fix/{token}"));
+        let mut params = make_params("git push");
+        params.cwd = project.path().to_string_lossy().into_owned();
+        handle_add_inner(params, &default_config(), &repo).unwrap();
+        let entry = only_entry(&repo);
+        let branch = branch_of(&entry).unwrap();
+        assert!(!branch.contains(token), "{branch}");
+        assert!(branch.starts_with("fix/"), "{branch}");
     }
 
     #[test]

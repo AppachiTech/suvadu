@@ -150,6 +150,7 @@ alias suvadu="suv"
 export SUVADU_SESSION_ID="${{SUVADU_SESSION_ID:-$(uuidgen)}}"
 _SUVADU_START_TIME=0
 _SUVADU_CMD=""
+_SUVADU_START_PWD=""
 _SUVADU_OFFSET=-1
 _SUVADU_BIN={escaped}
 
@@ -206,6 +207,9 @@ _suvadu_preexec() {
     # silently corrupting the arithmetic below. `local` scopes it to this call.
     local LC_ALL=C
     _SUVADU_CMD="$1"
+    # Where the command starts: a `cd` moves $PWD before precmd runs, and
+    # the git branch is read from here
+    _SUVADU_START_PWD="$PWD"
     # 10# reads the milliseconds as decimal even if they start with 0
     _SUVADU_START_TIME=$(( ${EPOCHREALTIME%.*} * 1000 + 10#${${EPOCHREALTIME#*.}:0:3} ))
 }
@@ -236,6 +240,10 @@ _suvadu_precmd() {
     local executor_type="${executor_info%%:*}"
     local executor="${executor_info##*:}"
 
+    # Only a command that changed directory needs its starting one passed
+    local -a start_dir=()
+    [[ -n "$_SUVADU_START_PWD" && "$_SUVADU_START_PWD" != "$PWD" ]] && start_dir=(--start-cwd "$_SUVADU_START_PWD")
+
     # Synchronous add to avoid race conditions with immediate Up arrow
     "$_SUVADU_BIN" add \
         --session-id "$SUVADU_SESSION_ID" \
@@ -245,7 +253,7 @@ _suvadu_precmd() {
         --started-at "$_SUVADU_START_TIME" \
         --ended-at "$end_time" \
         --executor-type "$executor_type" \
-        --executor "$executor" >/dev/null 2>&1
+        --executor "$executor" "${start_dir[@]}" >/dev/null 2>&1
 
     # Clear captured command so empty enters don't duplicated
     _SUVADU_CMD=""
@@ -439,6 +447,7 @@ alias suvadu="suv"
 export SUVADU_SESSION_ID="${{SUVADU_SESSION_ID:-$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null || head -c16 /dev/urandom 2>/dev/null | od -A n -t x1 | tr -d ' \n' || echo "bash-$$-$RANDOM-$RANDOM-$RANDOM")}}"
 _SUVADU_START_TIME=0
 _SUVADU_CMD=""
+_SUVADU_START_PWD=""
 _SUVADU_PROMPT_READY=""
 _SUVADU_ARMED=""
 _SUVADU_HIST_PUSHED=""
@@ -559,6 +568,9 @@ __suvadu_preexec() {
 
     _SUVADU_ARMED=1
     _SUVADU_CMD="$BASH_COMMAND"
+    # Where the line starts: a `cd` moves $PWD before PROMPT_COMMAND runs,
+    # and the git branch is read from here
+    _SUVADU_START_PWD="$PWD"
     _SUVADU_START_TIME=$(__suvadu_time_ms)
     return 0
 }
@@ -577,10 +589,12 @@ __suvadu_precmd() {
 
     local armed="$_SUVADU_ARMED" first_cmd="$_SUVADU_CMD"
     local start_time="$_SUVADU_START_TIME" pushed="$_SUVADU_HIST_PUSHED"
+    local start_pwd="$_SUVADU_START_PWD"
     # The number the typed line's history entry would have been given
     local next_num="$_SUVADU_HIST_NEXT"
     _SUVADU_ARMED=""
     _SUVADU_CMD=""
+    _SUVADU_START_PWD=""
     _SUVADU_HIST_PUSHED=""
     _SUVADU_PROMPT_DONE=""
     # Fallback in case PROMPT_COMMAND no longer reaches __suvadu_prompt_end
@@ -648,6 +662,11 @@ __suvadu_precmd() {
     local executor_type="${executor_info%%:*}"
     local executor="${executor_info##*:}"
 
+    # Only a line that changed directory needs its starting one passed
+    # (the ${a[@]+...} form keeps an empty array safe under `set -u`)
+    local -a start_dir=()
+    [[ -n "$armed" && -n "$start_pwd" && "$start_pwd" != "$PWD" ]] && start_dir=(--start-cwd "$start_pwd")
+
     "$_SUVADU_BIN" add \
         --session-id "$SUVADU_SESSION_ID" \
         --command "$cmd" \
@@ -656,7 +675,7 @@ __suvadu_precmd() {
         --started-at "$start_time" \
         --ended-at "$end_time" \
         --executor-type "$executor_type" \
-        --executor "$executor" >/dev/null 2>&1
+        --executor "$executor" ${start_dir[@]+"${start_dir[@]}"} >/dev/null 2>&1
 }
 
 # Runs last in PROMPT_COMMAND, after anything else there (e.g. a shared-

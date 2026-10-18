@@ -19,8 +19,10 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug)]
 struct Recorded {
     command: String,
+    cwd: String,
     exit_code: Option<i64>,
     duration_ms: i64,
+    git_branch: Option<String>,
 }
 
 struct Sandbox {
@@ -178,6 +180,8 @@ impl Sandbox {
                     v["id"].as_i64().unwrap_or(started),
                     Recorded {
                         command: v["command"].as_str().unwrap().to_string(),
+                        cwd: v["cwd"].as_str().unwrap().to_string(),
+                        git_branch: v["context"]["git_branch"].as_str().map(String::from),
                         exit_code: v["exit_code"].as_i64(),
                         duration_ms: ended - started,
                     },
@@ -740,6 +744,171 @@ fn removed_aliases_are_gone_from_new_shells() {
         assert!(
             aliases_defined_in_new_shell(&s, kind, &bin).is_empty(),
             "{} after removing every alias",
+            kind.name()
+        );
+    }
+}
+
+// ── both shells: the git branch each command ran on ────────
+
+/// Run `git` in `dir` with no user or system config, so the machine's own
+/// git settings cannot change what the test sees.
+fn git(s: &Sandbox, dir: &Path, args: &[&str]) -> String {
+    let mut cmd = Command::new("git");
+    s.isolate(&mut cmd);
+    let out = cmd
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+fn git_available() -> bool {
+    let found = Command::new("git")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !found {
+        eprintln!("skipping: git not found");
+    }
+    found
+}
+
+/// A sandbox holding a repository on `main` (`proj`, with `proj/sub/dir`),
+/// a linked worktree of it on `topic` (`wt`), a repository with a detached
+/// HEAD (`det`), one whose HEAD is garbage (`odd`) and a plain directory
+/// (`plain`). Returns the detached HEAD's short hash.
+fn branch_sandbox(s: &Sandbox) -> String {
+    let proj = s.path("proj");
+    std::fs::create_dir_all(proj.join("sub/dir")).unwrap();
+    git(s, &proj, &["init", "-q", "-b", "main"]);
+    git(s, &proj, &["commit", "-q", "--allow-empty", "-m", "first"]);
+    git(s, &proj, &["worktree", "add", "-q", "-b", "topic", "../wt"]);
+
+    let det = s.path("det");
+    std::fs::create_dir_all(&det).unwrap();
+    git(s, &det, &["init", "-q", "-b", "main"]);
+    git(s, &det, &["commit", "-q", "--allow-empty", "-m", "first"]);
+    git(s, &det, &["checkout", "-q", "--detach"]);
+    let short = git(s, &det, &["rev-parse", "--short=7", "HEAD"]);
+
+    std::fs::create_dir_all(s.path("odd/.git")).unwrap();
+    std::fs::write(s.path("odd/.git/HEAD"), "this is not a ref\n").unwrap();
+    std::fs::create_dir_all(s.path("plain")).unwrap();
+    short
+}
+
+const BRANCH_TOUR: &str = "cd proj\n\
+     echo in-root\n\
+     cd sub/dir\n\
+     echo in-nested\n\
+     cd ../../../wt\n\
+     echo in-worktree\n\
+     cd ../det\n\
+     echo in-detached\n\
+     cd ../odd\n\
+     echo in-odd\n\
+     cd ../plain\n\
+     echo in-plain\n";
+
+#[test]
+fn both_shells_record_the_branch_of_the_directory_each_command_started_in() {
+    if !git_available() {
+        return;
+    }
+    let shells: Vec<(ShellKind, PathBuf)> = [
+        modern_bash().map(|b| (ShellKind::Bash, b)),
+        zsh_bin().map(|z| (ShellKind::Zsh, z)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    for (kind, bin) in shells {
+        let s = Sandbox::new();
+        let short = branch_sandbox(&s);
+        let out = s.run_interactive(kind, &bin, "", "", BRANCH_TOUR);
+        assert_clean(&out);
+        let rows = s.recorded();
+        let got: Vec<(&str, Option<&str>)> = rows
+            .iter()
+            .map(|r| (r.command.as_str(), r.git_branch.as_deref()))
+            .collect();
+        // A `cd` is filed under the branch of the directory it left: the
+        // one it was typed in.
+        assert_eq!(
+            got,
+            [
+                ("cd proj", None),
+                ("echo in-root", Some("main")),
+                ("cd sub/dir", Some("main")),
+                ("echo in-nested", Some("main")),
+                ("cd ../../../wt", Some("main")),
+                ("echo in-worktree", Some("topic")),
+                ("cd ../det", Some("topic")),
+                ("echo in-detached", Some(short.as_str())),
+                ("cd ../odd", Some(short.as_str())),
+                ("echo in-odd", None),
+                ("cd ../plain", None),
+                ("echo in-plain", None),
+            ],
+            "{}",
+            kind.name()
+        );
+        // The recorded directory is unchanged: where the shell ended up.
+        assert!(rows[0].cwd.ends_with("/proj"), "{}", rows[0].cwd);
+    }
+}
+
+#[test]
+fn both_shells_record_no_branch_when_it_is_turned_off() {
+    if !git_available() {
+        return;
+    }
+    let shells: Vec<(ShellKind, PathBuf)> = [
+        modern_bash().map(|b| (ShellKind::Bash, b)),
+        zsh_bin().map(|z| (ShellKind::Zsh, z)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    for (kind, bin) in shells {
+        let s = Sandbox::new();
+        branch_sandbox(&s);
+        let config = if cfg!(target_os = "macos") {
+            s.path("Library/Application Support/tech.appachi.suvadu/config.toml")
+        } else {
+            s.path("config/suvadu/config.toml")
+        };
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "[shell]\ncapture_git_branch = false\n").unwrap();
+        // A project overlay cannot turn it back on.
+        std::fs::write(
+            s.path("proj/.suvadu.toml"),
+            "[shell]\ncapture_git_branch = true\n",
+        )
+        .unwrap();
+        let out = s.run_interactive(kind, &bin, "", "", "cd proj\necho in-root\n");
+        assert_clean(&out);
+        let rows = s.recorded();
+        assert_eq!(rows.len(), 2, "{}: {rows:?}", kind.name());
+        assert!(
+            rows.iter().all(|r| r.git_branch.is_none()),
+            "{}: {rows:?}",
             kind.name()
         );
     }

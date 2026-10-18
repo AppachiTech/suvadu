@@ -260,6 +260,11 @@ pub enum Commands {
         executor_type: Option<String>,
         #[arg(long)]
         executor: Option<String>,
+        /// The directory the command started in, when it differs from
+        /// --cwd (the command changed directory): the git branch is read
+        /// from here
+        #[arg(long)]
+        start_cwd: Option<String>,
     },
 
     /// Set up shell hooks or AI tool integrations

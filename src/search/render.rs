@@ -991,6 +991,9 @@ impl SearchApp {
         // Where it ran and how it ended lead: below the results the pane
         // shows only a few rows, and those two decide whether to reuse it.
         lines.push(field(path_label, entry.cwd.clone()));
+        if let Some(branch) = entry.context.as_ref().and_then(|ctx| ctx.get("git_branch")) {
+            lines.push(field("Branch", branch.clone()));
+        }
         lines.push(field(exit_label, exit_str));
         lines.push(field(time_label, time_str));
         if grouped {
@@ -2798,6 +2801,46 @@ mod tests {
         assert!(
             text.contains("✘ 1 (failed)"),
             "should contain failed exit code"
+        );
+    }
+
+    #[test]
+    fn the_detail_pane_shows_the_branch_when_one_was_recorded() {
+        use std::collections::HashSet;
+
+        let mut entry = Entry::new(
+            "s1".to_string(),
+            "cargo test".to_string(),
+            "/work/proj".to_string(),
+            Some(0),
+            1_700_000_000_000,
+            1_700_000_001_000,
+        );
+        let config =
+            make_default_search_config(vec![entry.clone()], HashSet::new(), HashSet::new(), false);
+        let app = super::SearchApp::new(config);
+        let text = lines_text(&app.build_detail_lines(&entry));
+        assert!(!text.contains("Branch"), "no branch, no row:\n{text}");
+
+        entry.context = Some(std::collections::HashMap::from([(
+            "git_branch".to_string(),
+            "feature/login".to_string(),
+        )]));
+        let lines = app.build_detail_lines(&entry);
+        let text = lines_text(&lines);
+        let path_row = text.lines().position(|l| l.starts_with("Path")).unwrap();
+        let branch_row = text.lines().position(|l| l.starts_with("Branch")).unwrap();
+        assert_eq!(
+            branch_row,
+            path_row + 1,
+            "the branch follows the path:\n{text}"
+        );
+        assert!(
+            text.lines()
+                .nth(branch_row)
+                .unwrap()
+                .ends_with("feature/login"),
+            "{text}"
         );
     }
 

@@ -90,6 +90,7 @@ pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
         executor_type: Some("agent".to_string()),
         executor: Some("claude-code".to_string()),
         context,
+        start_cwd: None,
     })
 }
 
@@ -307,6 +308,7 @@ pub fn handle_hook_claude_code_failure() -> Result<(), Box<dyn std::error::Error
         executor_type: Some("agent".to_string()),
         executor: Some("claude-code".to_string()),
         context,
+        start_cwd: None,
     })
 }
 
@@ -455,6 +457,7 @@ pub fn handle_hook_cursor() -> Result<(), Box<dyn std::error::Error>> {
         executor_type: Some("agent".to_string()),
         executor: Some("cursor".to_string()),
         context,
+        start_cwd: None,
     })
 }
 

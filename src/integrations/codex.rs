@@ -143,6 +143,7 @@ fn record_command(
         executor_type: Some("agent".into()),
         executor: Some("openai-codex".into()),
         context: Some(context),
+        start_cwd: None,
     })
 }
 

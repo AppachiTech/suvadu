@@ -300,6 +300,7 @@ fn run_add(cmd: Commands) -> Result<(), Box<dyn std::error::Error>> {
         ended_at,
         executor_type,
         executor,
+        start_cwd,
     } = cmd
     else {
         unreachable!()
@@ -316,6 +317,7 @@ fn run_add(cmd: Commands) -> Result<(), Box<dyn std::error::Error>> {
         executor_type,
         executor,
         context,
+        start_cwd,
     })
 }
 
@@ -533,6 +535,7 @@ mod tests {
             ended_at: 0,
             executor_type: None,
             executor: None,
+            start_cwd: None,
         }));
         assert!(!is_user_facing_command(&Commands::Get {
             query: String::new(),
