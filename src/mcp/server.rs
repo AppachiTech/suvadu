@@ -50,73 +50,136 @@ struct Server<'a> {
 
 /// Answer line-delimited JSON-RPC from `input` on `output` until `input`
 /// ends. Only protocol messages are ever written to `output`.
+///
+/// Lines are read as bytes: a line that is not valid UTF-8 is that line's
+/// parse error, not a reason to stop serving every later request.
 fn serve(
     input: &mut impl BufRead,
     output: &mut impl Write,
     server: &Server<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for line in input.lines() {
-        let line = line?;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if input.read_until(b'\n', &mut line)? == 0 {
+            return Ok(());
+        }
         if let Some(resp) = server.handle_line(&line) {
             writeln!(output, "{}", serde_json::to_string(&resp)?)?;
             output.flush()?;
         }
     }
-    Ok(())
 }
+
+/// JSON-RPC "Parse error": the line was not valid UTF-8 JSON.
+const PARSE_ERROR: i64 = -32700;
+/// JSON-RPC "Invalid Request": valid JSON, but not a request object.
+const INVALID_REQUEST: i64 = -32600;
 
 impl Server<'_> {
     /// The response to one input line, or `None` when it needs none.
-    fn handle_line(&self, line: &str) -> Option<serde_json::Value> {
-        if line.trim().is_empty() {
+    fn handle_line(&self, line: &[u8]) -> Option<serde_json::Value> {
+        let Ok(text) = std::str::from_utf8(line) else {
+            eprintln!("[suvadu-mcp] parse error: input line is not valid UTF-8");
+            return Some(protocol::error_response(
+                &serde_json::Value::Null,
+                PARSE_ERROR,
+                "Parse error",
+            ));
+        };
+        if text.trim().is_empty() {
             return None;
         }
-        match serde_json::from_str(line) {
-            Ok(request) => self.handle_message(&request),
+        match serde_json::from_str(text) {
+            Ok(message) => self.handle_message(&message),
             Err(e) => {
                 eprintln!("[suvadu-mcp] parse error: {e}");
                 Some(protocol::error_response(
                     &serde_json::Value::Null,
-                    -32700,
+                    PARSE_ERROR,
                     "Parse error",
                 ))
             }
         }
     }
 
-    fn handle_message(&self, request: &serde_json::Value) -> Option<serde_json::Value> {
-        let method = request["method"].as_str().unwrap_or("");
-        let id = request.get("id").cloned();
+    fn handle_message(&self, message: &serde_json::Value) -> Option<serde_json::Value> {
+        let null = serde_json::Value::Null;
+        if message.is_array() {
+            // MCP removed JSON-RPC batching in 2025-06-18. A batch gets one
+            // error rather than silence, so the client is not left waiting.
+            return Some(protocol::error_response(
+                &null,
+                INVALID_REQUEST,
+                "Invalid Request: batch requests are not supported",
+            ));
+        }
+        let Some(object) = message.as_object() else {
+            return Some(protocol::error_response(
+                &null,
+                INVALID_REQUEST,
+                "Invalid Request: expected a JSON-RPC object",
+            ));
+        };
+        let Some(id) = object.get("id") else {
+            // A notification is never answered, so nothing it names is run
+            // either: a tools/call without an id would execute with no way
+            // to report its result.
+            return None;
+        };
+        let method = match object.get("method") {
+            Some(serde_json::Value::String(method)) => method.as_str(),
+            // A response to a request the server never sent: not answered.
+            None if object.contains_key("result") || object.contains_key("error") => {
+                return None;
+            }
+            _ => {
+                let rid = if id.is_string() || id.is_number() {
+                    id
+                } else {
+                    &null
+                };
+                return Some(protocol::error_response(
+                    rid,
+                    INVALID_REQUEST,
+                    "Invalid Request: missing method",
+                ));
+            }
+        };
+        if !(id.is_string() || id.is_number()) {
+            return Some(protocol::error_response(
+                &null,
+                INVALID_REQUEST,
+                "Invalid Request: id must be a string or a number",
+            ));
+        }
+        Some(self.handle_request(id, method, message))
+    }
 
-        // Notifications (no id) don't get a response
-        let is_notification = id.is_none();
-        let rid = id.as_ref().unwrap_or(&serde_json::Value::Null);
-
+    /// Answer one request that has a valid id and method.
+    fn handle_request(
+        &self,
+        rid: &serde_json::Value,
+        method: &str,
+        request: &serde_json::Value,
+    ) -> serde_json::Value {
         match method {
-            "initialize" => Some(protocol::handle_initialize(rid)),
-            "notifications/initialized" => None,
-            "tools/list" => Some(tools::list_tools(rid, self.mcp)),
-            "tools/call" => Some(self.repo.map_or_else(
+            "initialize" => protocol::handle_initialize(rid),
+            "tools/list" => tools::list_tools(rid, self.mcp),
+            "tools/call" => self.repo.map_or_else(
                 || protocol::tool_error(rid, &db_unavailable_message(self.db_error)),
                 |repo| handle_tool_call(repo, rid, request, self.mcp),
-            )),
-            "resources/list" => Some(resources::list_resources(rid, self.mcp)),
-            "resources/templates/list" => Some(resources::list_resource_templates(rid)),
-            "resources/read" => Some(self.repo.map_or_else(
+            ),
+            "resources/list" => resources::list_resources(rid, self.mcp),
+            "resources/templates/list" => resources::list_resource_templates(rid),
+            "resources/read" => self.repo.map_or_else(
                 || protocol::error_response(rid, -32000, &db_unavailable_message(self.db_error)),
                 |repo| handle_resource_read(repo, rid, request, self.mcp),
-            )),
-            "prompts/list" => Some(prompts::list_prompts(rid)),
-            "prompts/get" => Some(prompts::get_prompt(rid, request)),
-            "ping" => Some(protocol::handle_ping(rid)),
-            _ => {
-                if is_notification {
-                    // Unknown notifications are silently ignored per spec
-                    None
-                } else {
-                    Some(protocol::error_response(rid, -32601, "Method not found"))
-                }
-            }
+            ),
+            "prompts/list" => prompts::list_prompts(rid),
+            "prompts/get" => prompts::get_prompt(rid, request),
+            "ping" => protocol::handle_ping(rid),
+            _ => protocol::error_response(rid, -32601, "Method not found"),
         }
     }
 }
@@ -282,6 +345,96 @@ mod tests {
         assert_eq!(responses[0]["error"]["message"], "Parse error");
         assert!(responses[0]["id"].is_null());
         assert_eq!(responses[1]["id"], 7);
+    }
+
+    #[test]
+    fn a_batch_gets_one_invalid_request_error_instead_of_silence() {
+        let responses = exchange(
+            None,
+            b"[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"},{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}]\n[]\n",
+        );
+        assert_eq!(responses.len(), 2, "{responses:?}");
+        for response in &responses {
+            assert_eq!(response["error"]["code"], -32600, "{response}");
+            assert!(response["id"].is_null(), "{response}");
+        }
+    }
+
+    #[test]
+    fn a_json_value_that_is_not_an_object_is_an_invalid_request() {
+        let responses = exchange(None, b"42\n\"ping\"\nnull\ntrue\n");
+        assert_eq!(responses.len(), 4, "{responses:?}");
+        for response in &responses {
+            assert_eq!(response["error"]["code"], -32600, "{response}");
+            assert!(response["id"].is_null(), "{response}");
+        }
+    }
+
+    #[test]
+    fn a_request_without_a_method_is_an_invalid_request_not_an_unknown_method() {
+        let responses = exchange(
+            None,
+            b"{\"jsonrpc\":\"2.0\",\"id\":4}\n{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":7}\n",
+        );
+        assert_eq!(responses.len(), 2, "{responses:?}");
+        assert_eq!(responses[0]["error"]["code"], -32600);
+        assert_eq!(responses[0]["id"], 4);
+        assert_eq!(responses[1]["error"]["code"], -32600);
+        assert_eq!(responses[1]["id"], 5);
+    }
+
+    #[test]
+    fn a_request_id_that_is_not_a_string_or_number_is_an_invalid_request() {
+        let responses = exchange(
+            None,
+            b"{\"jsonrpc\":\"2.0\",\"id\":{\"x\":1},\"method\":\"ping\"}\n",
+        );
+        assert_eq!(responses.len(), 1, "{responses:?}");
+        assert_eq!(responses[0]["error"]["code"], -32600);
+        assert!(responses[0]["id"].is_null());
+    }
+
+    #[test]
+    fn notifications_never_get_a_response_and_never_run_a_tool() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let responses = exchange(
+            Some(&repo),
+            b"{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"search_commands\",\"arguments\":{\"query\":\"x\"}}}\n\
+              {\"jsonrpc\":\"2.0\",\"method\":\"ping\"}\n\
+              {\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":1}}\n\
+              {\"jsonrpc\":\"2.0\",\"method\":\"something/unknown\"}\n\
+              {\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}\n",
+        );
+        assert_eq!(responses.len(), 1, "{responses:?}");
+        assert_eq!(responses[0]["id"], 9);
+    }
+
+    #[test]
+    fn a_response_from_the_client_is_not_answered() {
+        let responses = exchange(
+            None,
+            b"{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":1,\"message\":\"x\"}}\n",
+        );
+        assert!(responses.is_empty(), "{responses:?}");
+    }
+
+    #[test]
+    fn invalid_utf8_is_a_parse_error_and_the_server_keeps_serving() {
+        let responses = exchange(
+            None,
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"\xff\xfe\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n",
+        );
+        assert_eq!(responses.len(), 2, "{responses:?}");
+        assert_eq!(responses[0]["error"]["code"], -32700);
+        assert!(responses[0]["id"].is_null());
+        assert_eq!(responses[1]["id"], 2);
+    }
+
+    #[test]
+    fn a_final_line_without_a_newline_is_still_answered() {
+        let responses = exchange(None, b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}");
+        assert_eq!(responses.len(), 1, "{responses:?}");
+        assert_eq!(responses[0]["id"], 1);
     }
     #[test]
     fn session_json_keeps_pagination_after_large_payload() {
