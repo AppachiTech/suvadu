@@ -432,6 +432,10 @@ export SUVADU_SESSION_ID="${{SUVADU_SESSION_ID:-$(uuidgen 2>/dev/null || cat /pr
 _SUVADU_START_TIME=0
 _SUVADU_CMD=""
 _SUVADU_PROMPT_READY=""
+_SUVADU_ARMED=""
+_SUVADU_HIST_PUSHED=""
+_SUVADU_HIST_NEXT=""
+_SUVADU_PROMPT_DONE=""
 _SUVADU_BIN={escaped}
 
 # Re-resolve the suv binary if its recorded path goes stale (e.g. after
@@ -464,6 +468,9 @@ suv() {{
         selected="$("$_SUVADU_BIN" "$@")"
         if [[ -n "$selected" ]]; then
             history -s -- "$selected"
+            # The queued line replaced `suv search` as the newest history
+            # entry; tell __suvadu_precmd not to record it as having run.
+            _SUVADU_HIST_PUSHED=1
             echo "$selected"
             echo "[suv] Command added to history — press Up to recall."
         fi
@@ -476,8 +483,7 @@ suv() {{
     )
 }
 
-/// Bash time-helper, preexec via DEBUG trap, precmd via `PROMPT_COMMAND`, and
-/// hook installation.
+/// Bash time helper and preexec (run from the DEBUG trap).
 const fn bash_hook_functions() -> &'static str {
     r#"# Get current time in milliseconds (Bash 5+ has EPOCHREALTIME, fallback to date)
 __suvadu_time_ms() {
@@ -496,51 +502,138 @@ __suvadu_time_ms() {
     fi
 }
 
-# Capture command via DEBUG trap (preexec equivalent)
+# `\#` is the prompt escape for the shell's command number. Expanded with
+# ${var@P} (bash 4.4+) it tells a line typed at the prompt apart from the
+# commands PROMPT_COMMAND runs: it advances when a typed line runs, but not
+# for PROMPT_COMMAND or for an empty Enter.
+_SUVADU_CMDNUM_FMT='\#'
+_SUVADU_CMDNUM=""
+if ( : "${_SUVADU_CMDNUM_FMT@P}" ) 2>/dev/null; then
+    _SUVADU_HAS_CMDNUM=1
+else
+    _SUVADU_HAS_CMDNUM=""
+fi
+
+# True when history line $2 starts with simple command $1. Whitespace is
+# ignored: $BASH_COMMAND is re-printed from the parsed command, so its
+# spacing need not match what was typed.
+__suvadu_line_starts_with() {
+    local first="${1//[[:space:]]/}" line="${2//[[:space:]]/}" sep='[;&|]*'
+    [[ -n "$first" ]] || return 1
+    [[ "$line" == "$first" || "$line" == "$first"$sep ]]
+}
+
+# Note when a line typed at the prompt starts running (preexec equivalent).
+# The DEBUG trap fires before every simple command, so only the first one
+# after a prompt counts: `a && b`, pipelines and loops are timed as a whole.
 __suvadu_preexec() {
-    # Don't capture PROMPT_COMMAND itself or empty commands
-    if [[ "$BASH_COMMAND" == "$PROMPT_COMMAND" ]] || [[ -z "$BASH_COMMAND" ]]; then
-        return
+    # Already timing this line, or the rc file is still being sourced
+    if [[ -n "$_SUVADU_ARMED" || -z "$_SUVADU_PROMPT_READY" ]]; then
+        return 0
     fi
     # Don't capture our own functions
     if [[ "$BASH_COMMAND" == __suvadu_* ]]; then
-        return
+        return 0
     fi
     # Don't capture during tab completion (COMP_LINE is set by readline)
     if [[ -n "${COMP_LINE+x}" ]]; then
-        return
+        return 0
+    fi
+    if [[ -n "$_SUVADU_HAS_CMDNUM" ]]; then
+        # Same command number as at the prompt: PROMPT_COMMAND is running
+        if [[ "${_SUVADU_CMDNUM_FMT@P}" == "$_SUVADU_CMDNUM" ]]; then
+            return 0
+        fi
+    elif [[ -z "$_SUVADU_PROMPT_DONE" ]]; then
+        # PROMPT_COMMAND has not reached __suvadu_prompt_end yet
+        return 0
     fi
 
+    _SUVADU_ARMED=1
     _SUVADU_CMD="$BASH_COMMAND"
     _SUVADU_START_TIME=$(__suvadu_time_ms)
+    return 0
 }
 
-# Capture command completion (precmd equivalent via PROMPT_COMMAND)
+"#
+}
+
+/// Bash precmd and prompt-end functions (run from `PROMPT_COMMAND`).
+const fn bash_precmd_functions() -> &'static str {
+    r#"# Record the line that just finished (precmd equivalent via PROMPT_COMMAND).
+# The text comes from history, which holds the whole line as typed;
+# $BASH_COMMAND only ever holds one simple command of it.
 __suvadu_precmd() {
     local exit_code=$?
-
-    # The first time PROMPT_COMMAND runs, bash is drawing the shell's very
-    # first prompt — no user command has run yet. Whatever is in _SUVADU_CMD
-    # at that point is just the last command the DEBUG trap saw while the
-    # rc file (e.g. .bashrc) was still being sourced (the trap fires for
-    # every command bash runs, not just ones typed at a prompt), so it must
-    # be discarded rather than recorded as something the user ran.
-    if [[ -z "$_SUVADU_PROMPT_READY" ]]; then
-        _SUVADU_PROMPT_READY=1
-        _SUVADU_CMD=""
-        return
-    fi
-
     local end_time=$(__suvadu_time_ms)
 
-    # Skip if no command was captured
-    if [[ -z "$_SUVADU_CMD" ]]; then
+    local armed="$_SUVADU_ARMED" first_cmd="$_SUVADU_CMD"
+    local start_time="$_SUVADU_START_TIME" pushed="$_SUVADU_HIST_PUSHED"
+    # The number the typed line's history entry would have been given
+    local next_num="$_SUVADU_HIST_NEXT"
+    _SUVADU_ARMED=""
+    _SUVADU_CMD=""
+    _SUVADU_HIST_PUSHED=""
+    _SUVADU_PROMPT_DONE=""
+    # Fallback in case PROMPT_COMMAND no longer reaches __suvadu_prompt_end
+    _SUVADU_HIST_NEXT=""
+    [[ -o history ]] && _SUVADU_HIST_NEXT="$HISTCMD"
+
+    # Did a typed line run since the last prompt? An empty Enter runs
+    # nothing; a line such as `(cd x && make)` runs without a DEBUG trap.
+    local ran="$armed"
+    if [[ -n "$_SUVADU_HAS_CMDNUM" ]]; then
+        local cmdnum="${_SUVADU_CMDNUM_FMT@P}"
+        [[ "$cmdnum" != "$_SUVADU_CMDNUM" ]] && ran=1
+        _SUVADU_CMDNUM="$cmdnum"
+    fi
+
+    # The newest history entry: its number and its text
+    local hist_num="" hist_text="" hist_line
+    if [[ -o history ]]; then
+        hist_line=$(HISTTIMEFORMAT= builtin history 1)
+        hist_line="${hist_line#"${hist_line%%[![:space:]]*}"}"
+        hist_num="${hist_line%%[!0-9]*}"
+        hist_text="${hist_line:${#hist_num}+2}"
+    fi
+
+    # The first time PROMPT_COMMAND runs, bash is drawing the shell's very
+    # first prompt — no user command has run yet. Anything the DEBUG trap
+    # saw came from the rc file (e.g. .bashrc) and must not be recorded.
+    if [[ -z "$_SUVADU_PROMPT_READY" ]]; then
+        _SUVADU_PROMPT_READY=1
         return
     fi
+
+    [[ -n "$ran" ]] || return
+
+    local cmd=""
+    if [[ ! -o history || -n "$pushed" ]]; then
+        # No history entry to read: history is off, or the line's entry was
+        # replaced (the suv() wrapper queues a search pick with history -s)
+        cmd="$first_cmd"
+    elif [[ -n "$hist_text" && -n "$next_num" ]] && (( hist_num >= next_num )); then
+        # The line got its own history entry: the line as typed. A line
+        # typed with a leading space keeps it here, and `suv add` drops it.
+        cmd="$hist_text"
+    elif __suvadu_line_starts_with "$first_cmd" "$hist_text"; then
+        # It repeats the newest entry, so ignoredups / erasedups kept no
+        # second copy
+        cmd="$hist_text"
+    elif [[ ":$HISTCONTROL:" != *:ignorespace:* && ":$HISTCONTROL:" != *:ignoreboth:* ]]; then
+        # Kept out of history some other way (e.g. HISTIGNORE)
+        cmd="$first_cmd"
+    fi
+    # Otherwise ignorespace kept the line out of history: it was typed with
+    # a leading space, which asks for it not to be recorded.
+
+    [[ -n "$cmd" ]] || return
+    # No DEBUG trap fired for the line, so there is no start time to use
+    [[ -n "$armed" ]] || start_time="$end_time"
 
     # Self-heal a stale binary path; skip recording silently if unresolvable
     # (the suv() wrapper surfaces an actionable message when run interactively).
-    __suvadu_ensure_bin || { _SUVADU_CMD=""; return; }
+    __suvadu_ensure_bin || return
 
     # Detect executor
     local executor_info=$(__suvadu_detect_executor)
@@ -549,18 +642,31 @@ __suvadu_precmd() {
 
     "$_SUVADU_BIN" add \
         --session-id "$SUVADU_SESSION_ID" \
-        --command "$_SUVADU_CMD" \
+        --command "$cmd" \
         --cwd "$PWD" \
         --exit-code "$exit_code" \
-        --started-at "$_SUVADU_START_TIME" \
+        --started-at "$start_time" \
         --ended-at "$end_time" \
         --executor-type "$executor_type" \
         --executor "$executor" >/dev/null 2>&1
-
-    _SUVADU_CMD=""
 }
 
-# Install hooks (preserve any existing DEBUG trap)
+# Runs last in PROMPT_COMMAND, after anything else there (e.g. a shared-
+# history `history -n` or `history -c; history -r`) has changed the history
+# list. HISTCMD is now the number the next typed line's entry will get
+# (unless history is off, when no entry will be made).
+__suvadu_prompt_end() {
+    _SUVADU_HIST_NEXT=""
+    [[ -o history ]] && _SUVADU_HIST_NEXT="$HISTCMD"
+    _SUVADU_PROMPT_DONE=1
+}
+
+"#
+}
+
+/// Bash hook installation (DEBUG trap + `PROMPT_COMMAND`).
+const fn bash_hook_install() -> &'static str {
+    r#"# Install hooks (preserve any existing DEBUG trap)
 _suvadu_old_debug_trap=$(trap -p DEBUG | sed "s/^trap -- '\\(.*\\)' DEBUG$/\\1/")
 if [[ -n "$_suvadu_old_debug_trap" ]]; then
     eval "trap '$_suvadu_old_debug_trap; __suvadu_preexec' DEBUG"
@@ -574,6 +680,11 @@ if [[ -z "$PROMPT_COMMAND" ]]; then
     PROMPT_COMMAND="__suvadu_precmd"
 elif [[ "$PROMPT_COMMAND" != *"__suvadu_precmd"* ]]; then
     PROMPT_COMMAND="__suvadu_precmd;$PROMPT_COMMAND"
+fi
+# ...and end it with __suvadu_prompt_end (after a newline, not ';', so a
+# value ending in ';' or '&' stays valid)
+if [[ "$PROMPT_COMMAND" != *"__suvadu_prompt_end"* ]]; then
+    PROMPT_COMMAND="$PROMPT_COMMAND"$'\n'"__suvadu_prompt_end"
 fi
 
 "#
@@ -671,6 +782,8 @@ pub fn get_bash_hook(config: &config::Config) -> Result<String, Box<dyn std::err
     let mut script = bash_preexec_script(&bin_path);
     script.push_str(&executor_detection_script(config));
     script.push_str(bash_hook_functions());
+    script.push_str(bash_precmd_functions());
+    script.push_str(bash_hook_install());
     script.push_str(bash_search_widget());
 
     // Note: Bash doesn't have zsh's zle widgets for arrow key override,
