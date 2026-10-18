@@ -458,6 +458,17 @@ fn print_agent_report_json(
     Ok(())
 }
 
+/// A screen that failed after it started is the command's error, so `suv`
+/// exits non-zero like any other failure; leaving it normally is success.
+fn screen_outcome<T>(
+    result: std::io::Result<T>,
+    screen: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    result
+        .map(|_| ())
+        .map_err(|e| format!("{screen} stopped: {e}").into())
+}
+
 fn handle_agent_dashboard(
     after: &str,
     executor: Option<&str>,
@@ -482,10 +493,7 @@ fn handle_agent_dashboard(
     );
     drop(guard);
 
-    if let Err(e) = res {
-        eprintln!("Error in agent UI: {e}");
-    }
-    Ok(())
+    screen_outcome(res, "the agent dashboard")
 }
 
 fn handle_agent_prompts(
@@ -517,10 +525,7 @@ fn handle_agent_prompts(
     );
     drop(guard);
 
-    if let Err(e) = res {
-        eprintln!("Error in prompt explorer: {e}");
-    }
-    Ok(())
+    screen_outcome(res, "Prompts")
 }
 
 fn handle_agent_stats_tui(
@@ -533,10 +538,7 @@ fn handle_agent_stats_tui(
     let res = agent_ui::run_agent_stats_ui(guard.terminal(), &repo, days, executor);
     drop(guard);
 
-    if let Err(e) = res {
-        eprintln!("Error in agent stats UI: {e}");
-    }
-    Ok(())
+    screen_outcome(res, "agent stats")
 }
 
 fn handle_agent_stats_text(
@@ -810,6 +812,19 @@ fn build_agent_report_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_screen_that_failed_is_the_commands_error() {
+        let failed: std::io::Result<()> = Err(std::io::Error::other("broken pipe"));
+        let error = screen_outcome(failed, "the agent dashboard").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "the agent dashboard stopped: broken pipe"
+        );
+
+        assert!(screen_outcome(Ok(()), "agent stats").is_ok());
+        assert!(screen_outcome(Ok(crate::util::ScreenExit::Interrupted), "Prompts").is_ok());
+    }
 
     #[test]
     fn test_count_at_or_above_thresholds() {
