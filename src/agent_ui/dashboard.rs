@@ -199,6 +199,9 @@ impl AgentApp {
         key: crossterm::event::KeyEvent,
         repo: &Repository,
     ) -> DashboardAction {
+        if crate::util::is_interrupt(&key) {
+            return DashboardAction::Quit;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('p') => return DashboardAction::OpenPrompts,
@@ -915,7 +918,7 @@ where
             match app.handle_input(key, repo) {
                 DashboardAction::Quit => return Ok(()),
                 DashboardAction::OpenPrompts => {
-                    super::prompts::run_prompt_explorer(
+                    let exit = super::prompts::run_prompt_explorer(
                         terminal,
                         &app.entries,
                         Some(repo),
@@ -923,6 +926,10 @@ where
                         app.cli_executor.as_deref(),
                         app.cwd_filter.as_deref(),
                     )?;
+                    // Ctrl+C in Prompts closes the dashboard too.
+                    if exit == crate::util::ScreenExit::Interrupted {
+                        return Ok(());
+                    }
                 }
                 DashboardAction::Continue => {}
             }
@@ -1146,6 +1153,18 @@ mod tests {
             app.handle_input(esc, &repo),
             DashboardAction::Quit
         ));
+    }
+
+    #[test]
+    fn ctrl_c_quits_the_dashboard_and_types_nothing() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = make_app(vec![make_entry("ls", Some("claude"), "/tmp")]);
+        let ctrl_c = crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            app.handle_input(ctrl_c, &repo),
+            DashboardAction::Quit
+        ));
+        assert!(app.search.is_empty());
     }
 
     #[test]

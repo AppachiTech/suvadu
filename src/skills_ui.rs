@@ -355,29 +355,52 @@ pub fn run(repo: &Repository) -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        match std::mem::replace(&mut app.mode, Mode::Browse) {
-            Mode::Browse => {
-                app.mode = Mode::Browse;
-                if handle_browse_key(&mut app, key, repo)? {
-                    break;
-                }
-            }
-            Mode::ConfirmDelete { name, scope } => {
-                handle_confirm_delete_key(&mut app, key, repo, &name, &scope)?;
-            }
-            Mode::Form(form) => {
-                app.mode = Mode::Form(form);
-                handle_form_key(&mut app, key, repo, &mut terminal)?;
-            }
-            Mode::Review => {
-                app.mode = Mode::Review;
-                handle_review_key(&mut app, key, repo)?;
-            }
+        let mut edit = |initial: &str| suspend_for_editor(&mut terminal, || edit_body(initial));
+        if handle_key(&mut app, key, repo, &mut edit)? {
+            break;
         }
     }
 
     terminal.show_cursor()?;
     Ok(())
+}
+
+/// Opens a skill body in `$EDITOR` and returns the edited text, or `None`
+/// when the edit was cancelled. A parameter so the key handling can be
+/// tested without a terminal.
+type EditBody<'a> = dyn FnMut(&str) -> Result<Option<String>, Box<dyn std::error::Error>> + 'a;
+
+/// Handle one key press in whichever mode is showing. Returns `true` if the
+/// app should quit.
+fn handle_key(
+    app: &mut SkillsApp,
+    key: crossterm::event::KeyEvent,
+    repo: &Repository,
+    edit: &mut EditBody<'_>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    // Ctrl+C quits from anywhere: a half-filled form is dropped and a
+    // pending delete is not carried out.
+    if crate::util::is_interrupt(&key) {
+        return Ok(true);
+    }
+    match std::mem::replace(&mut app.mode, Mode::Browse) {
+        Mode::Browse => {
+            app.mode = Mode::Browse;
+            return handle_browse_key(app, key, repo);
+        }
+        Mode::ConfirmDelete { name, scope } => {
+            handle_confirm_delete_key(app, key, repo, &name, &scope)?;
+        }
+        Mode::Form(form) => {
+            app.mode = Mode::Form(form);
+            handle_form_key(app, key, repo, edit)?;
+        }
+        Mode::Review => {
+            app.mode = Mode::Review;
+            handle_review_key(app, key, repo)?;
+        }
+    }
+    Ok(false)
 }
 
 /// Returns `true` if the app should quit.
@@ -388,7 +411,6 @@ fn handle_browse_key(
 ) -> Result<bool, Box<dyn std::error::Error>> {
     match key.code {
         KeyCode::Esc => return Ok(true),
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.mode = Mode::Form(FormState::new_add());
         }
@@ -501,7 +523,7 @@ fn handle_form_key(
     app: &mut SkillsApp,
     key: crossterm::event::KeyEvent,
     repo: &Repository,
-    terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
+    edit: &mut EditBody<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Mode::Form(mut form) = std::mem::replace(&mut app.mode, Mode::Browse) else {
         unreachable!()
@@ -518,7 +540,7 @@ fn handle_form_key(
             }
             app.mode = Mode::Form(form);
         }
-        // Excludes Ctrl+<letter> so Browse's shortcuts (Ctrl+A/E/D/S/P/C)
+        // Excludes Ctrl+<letter> so Browse's shortcuts (Ctrl+A/E/D/S/P)
         // don't leak a literal character into whatever field has focus if
         // muscle memory triggers one of them while a form is open.
         KeyCode::Char(c)
@@ -537,7 +559,7 @@ fn handle_form_key(
         // embedded newline just moves focus forward instead of launching
         // the editor mid-paste.
         KeyCode::Enter if form.focus == FormField::Scope => {
-            submit_form(app, form, repo, terminal)?;
+            submit_form(app, form, repo, edit)?;
         }
         KeyCode::Tab | KeyCode::Enter => {
             form.next_field();
@@ -552,7 +574,7 @@ fn submit_form(
     app: &mut SkillsApp,
     form: FormState,
     repo: &Repository,
-    terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
+    edit: &mut EditBody<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Prefer a body from a previous failed save attempt over the
     // pre-existing/empty starting point, so a retry doesn't lose work.
@@ -561,7 +583,7 @@ fn submit_form(
             .as_ref()
             .map_or_else(String::new, |s| s.body.clone())
     });
-    let edited = suspend_for_editor(terminal, || edit_body(&initial))?;
+    let edited = edit(&initial)?;
     match edited {
         None => {
             app.status_message = Some((StatusLevel::Error, "Editor cancelled".to_string()));
@@ -1068,6 +1090,57 @@ mod tests {
             notes: Vec::new(),
             dry_run: false,
         }
+    }
+
+    fn ctrl_c() -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    /// An editor that must never be opened.
+    fn no_editor(_: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        panic!("the editor must not open")
+    }
+
+    fn library_with(repo: &Repository, name: &str) {
+        repo.create_skill(&crate::models::NewSkill {
+            name: name.to_string(),
+            description: "d".to_string(),
+            body: "b".to_string(),
+            triggers: Vec::new(),
+            scope: SKILL_SCOPE_GLOBAL.to_string(),
+            source: crate::models::SKILL_SOURCE_HUMAN.to_string(),
+            status: SKILL_STATUS_ACTIVE.to_string(),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn ctrl_c_closes_skills_from_the_form_the_delete_prompt_and_review() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        library_with(&repo, "release");
+
+        let mut app = SkillsApp::load(&repo).unwrap();
+        app.mode = Mode::Form(FormState::new_add());
+        assert!(handle_key(&mut app, ctrl_c(), &repo, &mut no_editor).unwrap());
+
+        let mut app = SkillsApp::load(&repo).unwrap();
+        app.mode = Mode::ConfirmDelete {
+            name: "release".to_string(),
+            scope: SKILL_SCOPE_GLOBAL.to_string(),
+        };
+        assert!(handle_key(&mut app, ctrl_c(), &repo, &mut no_editor).unwrap());
+        assert_eq!(
+            repo.list_skills(None, None).unwrap().len(),
+            1,
+            "not deleted"
+        );
+
+        let mut app = SkillsApp::load(&repo).unwrap();
+        app.mode = Mode::Review;
+        assert!(handle_key(&mut app, ctrl_c(), &repo, &mut no_editor).unwrap());
+
+        let mut app = SkillsApp::load(&repo).unwrap();
+        assert!(handle_key(&mut app, ctrl_c(), &repo, &mut no_editor).unwrap());
     }
 
     #[test]

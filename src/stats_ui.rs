@@ -203,6 +203,9 @@ impl StatsApp {
 
     /// Returns false to quit.
     fn handle_input(&mut self, key: KeyEvent, repo: &Repository) -> bool {
+        if crate::util::is_interrupt(&key) {
+            return false;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('e') => self.show_executor = !self.show_executor,
@@ -1476,6 +1479,22 @@ mod tests {
         let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None, false);
         let cont = app.handle_input(KeyEvent::from(KeyCode::Esc), &repo);
         assert!(!cont);
+    }
+
+    #[test]
+    fn ctrl_c_quits_stats_like_esc() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None, false);
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(!app.handle_input(ctrl_c, &repo), "Ctrl+C must quit");
+
+        // Ctrl+Shift+C is copy in many terminals, not quit.
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None, false);
+        let copy = KeyEvent::new(
+            KeyCode::Char('C'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert!(app.handle_input(copy, &repo));
     }
 
     #[test]

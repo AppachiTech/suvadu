@@ -15,7 +15,7 @@ use ratatui::Terminal;
 use crate::models::{Entry, Session};
 use crate::session_ui::session_data::{AiSessionData, AiTimelineItem};
 use crate::theme::theme;
-use crate::util::{dirs_home, format_duration_ms, shorten_path};
+use crate::util::{dirs_home, format_duration_ms, shorten_path, ScreenExit};
 
 use chrono::{Local, TimeZone};
 
@@ -418,6 +418,9 @@ impl SessionApp {
     }
 
     fn handle_input(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        if crate::util::is_interrupt(&key) {
+            return false;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => return false,
             KeyCode::Tab => self.detail_open = !self.detail_open,
@@ -1198,6 +1201,10 @@ impl AiSessionApp {
     }
 
     fn handle_input(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        // Closes the timeline itself, not just an open panel.
+        if crate::util::is_interrupt(&key) {
+            return false;
+        }
         if self.text_panel.is_some() {
             self.handle_text_panel_input(key);
             return true;
@@ -1862,10 +1869,12 @@ fn summary_basis_note_line(
     ))
 }
 
+/// Run the AI session timeline until it is closed; Ctrl+C anywhere in it,
+/// a prompt detail it opened included, reports an interrupt.
 pub fn run_ai_session_timeline<B: Backend>(
     terminal: &mut Terminal<B>,
     data: AiSessionData,
-) -> io::Result<()>
+) -> io::Result<ScreenExit>
 where
     io::Error: From<B::Error>,
 {
@@ -1887,12 +1896,15 @@ where
             if key.code == KeyCode::Enter {
                 if let Some(selected) = app.selected_linked_command().cloned() {
                     let entries = app.command_entries();
-                    crate::agent_ui::run_prompt_detail(terminal, &entries, &selected)?;
+                    let exit = crate::agent_ui::run_prompt_detail(terminal, &entries, &selected)?;
+                    if exit == ScreenExit::Interrupted {
+                        return Ok(exit);
+                    }
                 }
                 continue;
             }
             if !app.handle_input(key) {
-                return Ok(());
+                return Ok(ScreenExit::by(&key));
             }
         }
     }
@@ -1904,7 +1916,7 @@ pub fn run_session_timeline<B: Backend>(
     tag_name: Option<String>,
     entries: Vec<Entry>,
     noted_ids: HashSet<i64>,
-) -> io::Result<()>
+) -> io::Result<ScreenExit>
 where
     io::Error: From<B::Error>,
 {
@@ -1926,7 +1938,7 @@ where
                 continue;
             }
             if !app.handle_input(key) {
-                return Ok(());
+                return Ok(ScreenExit::by(&key));
             }
         }
     }
@@ -2305,6 +2317,35 @@ mod tests {
         let mut app = SessionApp::new(make_session(), None, entries, HashSet::new());
         let key = crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         assert!(!app.handle_input(key));
+    }
+
+    fn ctrl_c() -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_c_closes_the_session_timeline() {
+        let entries = vec![make_entry(1000, 2000)];
+        let mut app = SessionApp::new(make_session(), None, entries, HashSet::new());
+        assert!(!app.handle_input(ctrl_c()));
+    }
+
+    #[test]
+    fn ctrl_c_closes_the_ai_timeline_even_with_a_panel_open() {
+        let mut app = AiSessionApp::new(make_ai_data());
+        assert!(!app.handle_input(ctrl_c()));
+
+        let mut app = AiSessionApp::new(make_ai_data());
+        app.handle_input(crossterm::event::KeyEvent::from(KeyCode::Char('h')));
+        assert!(app.text_panel.is_some());
+        assert!(!app.handle_input(ctrl_c()), "from the handoff panel");
+
+        let mut data = make_ai_data();
+        data.summaries = vec![summary_record("s1", "Saved", true)];
+        let mut app = AiSessionApp::new(data);
+        app.handle_input(crossterm::event::KeyEvent::from(KeyCode::Char('s')));
+        assert!(app.summary_panel.is_some());
+        assert!(!app.handle_input(ctrl_c()), "from the summary panel");
     }
 
     fn summary_record(id: &str, text: &str, current: bool) -> crate::models::AiSummaryRecord {

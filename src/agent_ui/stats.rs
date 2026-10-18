@@ -179,6 +179,9 @@ impl AgentStatsApp {
     }
 
     fn handle_input(&mut self, key: crossterm::event::KeyEvent, repo: &Repository) -> bool {
+        if crate::util::is_interrupt(&key) {
+            return false;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => return false,
             KeyCode::Char('1') => {
@@ -776,6 +779,14 @@ mod tests {
             top_dirs: vec![("/tmp".into(), total)],
             high_risk_cmds,
         }
+    }
+
+    #[test]
+    fn ctrl_c_quits_agent_stats() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = make_stats_app(vec![make_agent_stat("claude", 10, 3)]);
+        let ctrl_c = crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(!app.handle_input(ctrl_c, &repo));
     }
 
     // ── selected_high_risk_count ──

@@ -21,6 +21,39 @@ pub fn stdin_is_terminal() -> bool {
     std::io::stdin().is_terminal()
 }
 
+// ── Ctrl+C ─────────────────────────────────────────────
+
+/// Whether `key` is Ctrl+C. Raw mode delivers it as a key, not SIGINT, so
+/// every screen has to recognise it itself. Lowercase only: Ctrl+Shift+C is
+/// copy in many terminals.
+pub fn is_interrupt(key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    key.code == KeyCode::Char('c')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::SHIFT)
+}
+
+/// How a screen that another screen opened was left, so Ctrl+C in the
+/// inner one closes the outer one too instead of only going back a level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScreenExit {
+    /// Closed normally (Esc, q, Back): the caller carries on.
+    Closed,
+    /// Closed with Ctrl+C: the caller closes as well.
+    Interrupted,
+}
+
+impl ScreenExit {
+    /// How a screen was left, given the key that closed it.
+    pub fn by(key: &crossterm::event::KeyEvent) -> Self {
+        if is_interrupt(key) {
+            Self::Interrupted
+        } else {
+            Self::Closed
+        }
+    }
+}
+
 /// RAII guard that sets up and tears down the terminal for TUI rendering.
 /// On creation it enters raw mode and the alternate screen.
 /// On drop (including panic unwind) it restores the terminal.
@@ -377,9 +410,43 @@ impl<W: std::io::Write> ratatui::backend::Backend for TtyCursorBackend<W> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_all, inline_height, setup_steps, teardown_steps, RecallSurface, TerminalStep,
-        INLINE_MAX_HEIGHT, INLINE_MIN_HEIGHT,
+        apply_all, inline_height, is_interrupt, setup_steps, teardown_steps, RecallSurface,
+        ScreenExit, TerminalStep, INLINE_MAX_HEIGHT, INLINE_MIN_HEIGHT,
     };
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn only_lowercase_ctrl_c_is_an_interrupt() {
+        assert!(is_interrupt(&KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
+        // Copy in many terminals.
+        assert!(!is_interrupt(&KeyEvent::new(
+            KeyCode::Char('C'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )));
+        assert!(!is_interrupt(&KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )));
+        assert!(!is_interrupt(&KeyEvent::from(KeyCode::Char('c'))));
+        assert!(!is_interrupt(&KeyEvent::from(KeyCode::Esc)));
+    }
+
+    #[test]
+    fn a_screen_closed_by_ctrl_c_reports_an_interrupt() {
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(ScreenExit::by(&ctrl_c), ScreenExit::Interrupted);
+        assert_eq!(
+            ScreenExit::by(&KeyEvent::from(KeyCode::Esc)),
+            ScreenExit::Closed
+        );
+        assert_eq!(
+            ScreenExit::by(&KeyEvent::from(KeyCode::Char('q'))),
+            ScreenExit::Closed
+        );
+    }
 
     const INLINE: RecallSurface = RecallSurface::Inline { height: 12 };
 

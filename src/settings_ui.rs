@@ -392,6 +392,11 @@ impl AppState {
     }
 
     fn handle_input(&mut self, key: event::KeyEvent) -> bool {
+        // Ctrl+C leaves from anywhere, unsaved changes discarded — as
+        // answering "n" to the unsaved-changes prompt does.
+        if crate::util::is_interrupt(&key) {
+            return false;
+        }
         match self.input_mode {
             InputMode::ConfirmQuit => return self.handle_confirm_quit(key),
             InputMode::Normal => return self.handle_normal_input(key),
@@ -2413,6 +2418,37 @@ mod tests {
         // Pressing 'n' discards and quits
         let cont = app.handle_input(KeyEvent::from(KeyCode::Char('n')));
         assert!(!cont);
+    }
+
+    #[test]
+    fn ctrl_c_leaves_settings_from_every_mode_without_saving() {
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+        // Normal mode, nothing changed.
+        let mut app = AppState::new(Config::default());
+        assert!(!app.handle_input(ctrl_c));
+
+        // Normal mode with unsaved changes: leave, discarding them, rather
+        // than asking.
+        let mut app = AppState::new(Config::default());
+        app.dirty = true;
+        assert!(!app.handle_input(ctrl_c));
+        assert_eq!(app.input_mode, InputMode::Normal);
+
+        // The unsaved-changes prompt.
+        let mut app = AppState::new(Config::default());
+        app.dirty = true;
+        app.handle_input(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(app.input_mode, InputMode::ConfirmQuit);
+        assert!(!app.handle_input(ctrl_c));
+
+        // Typing into a field: no literal 'c' lands in it.
+        let mut app = AppState::new(Config::default());
+        app.current_tab = SettingsTab::Exclusions;
+        app.handle_input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert_eq!(app.input_mode, InputMode::Editing);
+        assert!(!app.handle_input(ctrl_c));
+        assert!(app.input_buffer.is_empty(), "{:?}", app.input_buffer);
     }
 
     #[test]

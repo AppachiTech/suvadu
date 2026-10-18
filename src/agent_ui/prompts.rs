@@ -20,7 +20,7 @@ use crate::session_ui::timeline::{
     align_info_groups, command_summary_line, session_activity_text, session_info_height,
 };
 use crate::theme::theme;
-use crate::util::{dirs_home, format_duration_ms, shorten_path};
+use crate::util::{dirs_home, format_duration_ms, shorten_path, ScreenExit};
 
 use super::{
     compute_agent_counts, format_datetime, format_full_datetime, load_entries, truncate,
@@ -467,6 +467,11 @@ impl PromptExplorerApp {
         key: crossterm::event::KeyEvent,
         repo: Option<&Repository>,
     ) -> PromptAction {
+        // Ctrl+C closes the whole screen, even from a detail view that Esc
+        // would only take back to the list.
+        if crate::util::is_interrupt(&key) {
+            return PromptAction::Quit;
+        }
         match &self.view {
             View::List => self.handle_list_input(key, repo),
             View::Detail { .. } => self.handle_detail_input(key),
@@ -1385,7 +1390,7 @@ pub fn run_prompt_explorer<B: Backend>(
     after_ms: Option<i64>,
     executor: Option<&str>,
     cwd: Option<&str>,
-) -> io::Result<()>
+) -> io::Result<ScreenExit>
 where
     io::Error: From<B::Error>,
 {
@@ -1403,12 +1408,12 @@ pub fn run_prompt_detail<B: Backend>(
     terminal: &mut Terminal<B>,
     entries: &[Entry],
     selected: &Entry,
-) -> io::Result<()>
+) -> io::Result<ScreenExit>
 where
     io::Error: From<B::Error>,
 {
     let Some(app) = PromptExplorerApp::for_entry(entries, selected) else {
-        return Ok(());
+        return Ok(ScreenExit::Closed);
     };
     run_prompt_app(terminal, app, None)
 }
@@ -1417,7 +1422,7 @@ fn run_prompt_app<B: Backend>(
     terminal: &mut Terminal<B>,
     mut app: PromptExplorerApp,
     repo: Option<&Repository>,
-) -> io::Result<()>
+) -> io::Result<ScreenExit>
 where
     io::Error: From<B::Error>,
 {
@@ -1437,10 +1442,14 @@ where
                 continue;
             }
             match app.handle_input(key, repo) {
-                PromptAction::Quit => return Ok(()),
+                PromptAction::Quit => return Ok(ScreenExit::by(&key)),
                 PromptAction::OpenSession(session_id) => {
                     if let Some(repo) = repo {
-                        open_session(terminal, repo, &session_id, &mut app)?;
+                        if open_session(terminal, repo, &session_id, &mut app)?
+                            == ScreenExit::Interrupted
+                        {
+                            return Ok(ScreenExit::Interrupted);
+                        }
                     } else {
                         app.status_message =
                             Some(("Session view not available".into(), Instant::now()));
@@ -1457,13 +1466,13 @@ fn open_session<B: Backend>(
     repo: &Repository,
     session_id: &str,
     app: &mut PromptExplorerApp,
-) -> io::Result<()>
+) -> io::Result<ScreenExit>
 where
     io::Error: From<B::Error>,
 {
     let Ok(Some(session)) = repo.get_session(session_id) else {
         app.status_message = Some(("Session not found".into(), Instant::now()));
-        return Ok(());
+        return Ok(ScreenExit::Closed);
     };
     let tag_name = repo.get_tag_by_session(session_id).unwrap_or(None);
     let entries = repo
@@ -1476,11 +1485,10 @@ where
 
     if entries.is_empty() {
         app.status_message = Some(("Session has no commands".into(), Instant::now()));
-        return Ok(());
+        return Ok(ScreenExit::Closed);
     }
 
-    session_ui::run_session_timeline(terminal, session, tag_name, entries, noted_ids)?;
-    Ok(())
+    session_ui::run_session_timeline(terminal, session, tag_name, entries, noted_ids)
 }
 
 // ── Tests ───────────────────────────────────────────────────
@@ -1832,6 +1840,30 @@ mod tests {
         let esc = crossterm::event::KeyEvent::from(KeyCode::Esc);
         let action = app.handle_input(esc, None);
         assert!(matches!(action, PromptAction::Quit));
+    }
+
+    #[test]
+    fn ctrl_c_quits_prompts_from_the_list_and_from_a_detail_view() {
+        let ctrl_c = crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let entries = vec![make_entry_with_prompt(
+            "s1",
+            "ls",
+            "prompt",
+            "cc",
+            Some(0),
+            1000,
+            10,
+        )];
+        let mut app = PromptExplorerApp::new(&entries);
+        assert!(matches!(app.handle_input(ctrl_c, None), PromptAction::Quit));
+        assert!(app.search.is_empty());
+
+        // A detail view opened from the list goes back to the list on Esc;
+        // Ctrl+C closes the whole screen instead.
+        let mut app = PromptExplorerApp::new(&entries);
+        app.handle_input(crossterm::event::KeyEvent::from(KeyCode::Enter), None);
+        assert!(matches!(app.view, View::Detail { .. }));
+        assert!(matches!(app.handle_input(ctrl_c, None), PromptAction::Quit));
     }
 
     #[test]

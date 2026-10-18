@@ -82,6 +82,9 @@ impl AppState {
 
     /// Returns Some(selected suggestions) on confirm, None on quit.
     fn handle_input(&mut self, key: event::KeyEvent) -> Option<bool> {
+        if crate::util::is_interrupt(&key) {
+            return Some(false);
+        }
         match self.input_mode {
             InputMode::Normal if key.modifiers.contains(KeyModifiers::CONTROL) => match key.code {
                 KeyCode::Char('a') => self.select_all(),
@@ -460,6 +463,21 @@ mod tests {
         let mut app = AppState::new(make_suggestions(1), vec![]);
         let result = app.handle_input(KeyEvent::from(KeyCode::Esc));
         assert_eq!(result, Some(false));
+    }
+
+    #[test]
+    fn ctrl_c_quits_suggest_without_confirming() {
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let mut app = AppState::new(make_suggestions(1), vec![]);
+        assert_eq!(app.handle_input(ctrl_c), Some(false));
+
+        // While a name is being edited: quit, and no literal 'c' typed.
+        let mut app = AppState::new(make_suggestions(1), vec![]);
+        app.handle_input(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert_eq!(app.input_mode, InputMode::EditingName);
+        assert_eq!(app.handle_input(ctrl_c), Some(false));
+        assert_eq!(app.suggestions[0].name, "alias0");
+        assert_eq!(app.edit_buffer, "alias0");
     }
 
     #[test]

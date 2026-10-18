@@ -87,8 +87,12 @@ pub fn handle_session(
                 let selected = session_ui::run_session_picker(guard.terminal(), sessions.clone());
                 match selected {
                     Ok(Some(sid)) => {
-                        if let Err(e) = open_session_timeline_tui(guard.terminal(), &repo, &sid) {
-                            break Err(e);
+                        match open_session_timeline_tui(guard.terminal(), &repo, &sid) {
+                            Ok(util::ScreenExit::Closed) => {}
+                            // Ctrl+C in a timeline leaves sessions entirely,
+                            // not just back to the picker.
+                            Ok(util::ScreenExit::Interrupted) => break Ok(()),
+                            Err(e) => break Err(e),
                         }
                     }
                     Ok(None) => break Ok(()),
@@ -211,7 +215,7 @@ fn open_session_timeline(
         let mut guard = util::TerminalGuard::new()?;
         let result = session_ui::run_ai_session_timeline(guard.terminal(), data);
         guard.terminal().show_cursor()?;
-        return result.map_err(Into::into);
+        return result.map(|_| ()).map_err(Into::into);
     }
     let session = repo
         .get_session(session_id)?
@@ -236,22 +240,21 @@ fn open_session_timeline(
         session_ui::run_session_timeline(guard.terminal(), session, tag_name, entries, noted_ids);
     guard.terminal().show_cursor()?;
 
-    result.map_err(Into::into)
+    result.map(|_| ()).map_err(Into::into)
 }
 
 fn open_session_timeline_tui<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     repo: &repository::Repository,
     session_id: &str,
-) -> Result<(), Box<dyn std::error::Error>>
+) -> Result<util::ScreenExit, Box<dyn std::error::Error>>
 where
     io::Error: From<B::Error>,
 {
     let summary = unified_summary(repo, session_id)?;
     if repo.has_native_ai_session(session_id)? {
         let data = load_ai_session_data(repo, summary)?;
-        session_ui::run_ai_session_timeline(terminal, data)?;
-        return Ok(());
+        return Ok(session_ui::run_ai_session_timeline(terminal, data)?);
     }
     let session = repo
         .get_session(session_id)?
@@ -262,11 +265,12 @@ where
     let noted_ids = repo.get_noted_entry_ids().unwrap_or_default();
 
     if entries.is_empty() {
-        return Ok(());
+        return Ok(util::ScreenExit::Closed);
     }
 
-    session_ui::run_session_timeline(terminal, session, tag_name, entries, noted_ids)?;
-    Ok(())
+    Ok(session_ui::run_session_timeline(
+        terminal, session, tag_name, entries, noted_ids,
+    )?)
 }
 
 #[cfg(test)]

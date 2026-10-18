@@ -773,6 +773,20 @@ impl PickerApp {
 // ── Public entry point ──────────────────────────────────────
 
 impl PickerApp {
+    /// Handle one key press, in the popup or the list.
+    fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> PickerAction {
+        // Leaves the picker from anywhere, the filter popup included.
+        if util::is_interrupt(&key) {
+            return PickerAction::Exit(None);
+        }
+        if self.filter.popup_open {
+            self.handle_filter_popup_key(key);
+            PickerAction::Continue
+        } else {
+            self.handle_normal_key(key)
+        }
+    }
+
     fn handle_filter_popup_key(&mut self, key: crossterm::event::KeyEvent) {
         match key.code {
             KeyCode::Esc => {
@@ -893,9 +907,7 @@ where
                 continue;
             }
 
-            if app.filter.popup_open {
-                app.handle_filter_popup_key(key);
-            } else if let PickerAction::Exit(result) = app.handle_normal_key(key) {
+            if let PickerAction::Exit(result) = app.handle_key(key) {
                 return Ok(result);
             }
         }
@@ -930,6 +942,29 @@ mod tests {
             capture: None,
             revision: None,
         }
+    }
+
+    fn ctrl_c() -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_c_closes_the_picker_without_a_selection() {
+        let mut app = PickerApp::new(vec![make_summary("s1", 3)]);
+        assert!(matches!(app.handle_key(ctrl_c()), PickerAction::Exit(None)));
+        assert!(app.filter.search.is_empty());
+    }
+
+    #[test]
+    fn ctrl_c_closes_the_picker_from_the_filter_popup_too() {
+        let mut app = PickerApp::new(vec![make_summary("s1", 3)]);
+        app.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        ));
+        assert!(app.filter.popup_open);
+        assert!(matches!(app.handle_key(ctrl_c()), PickerAction::Exit(None)));
+        assert!(app.filter.tag_input.is_empty(), "no literal 'c' typed");
     }
 
     fn make_summary_tagged(id: &str, tag: &str) -> SessionSummary {

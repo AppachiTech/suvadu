@@ -234,45 +234,66 @@ pub fn pick_bookmark(repo: &Repository) -> Result<Option<String>, Box<dyn std::e
             if key.kind != KeyEventKind::Press {
                 continue;
             }
-            match &app.mode {
-                Mode::Form { .. } => handle_form_input(&mut app, repo, key)?,
-                Mode::ConfirmDelete { .. } => handle_confirm_delete_input(&mut app, repo, key)?,
-                Mode::Browse => {
-                    if key.modifiers.contains(KeyModifiers::CONTROL) {
-                        match key.code {
-                            KeyCode::Char('a') => app.start_add(),
-                            KeyCode::Char('e') => app.start_edit(),
-                            KeyCode::Char('d') => app.start_delete(),
-                            _ => {}
-                        }
-                        continue;
-                    }
-                    match key.code {
-                        // Always-on search, like suv search: Esc quits
-                        // outright rather than clearing the query first,
-                        // since there's no separate "typing mode" to fall
-                        // back out of.
-                        KeyCode::Esc => break None,
-                        KeyCode::Up => app.move_up(),
-                        KeyCode::Down => app.move_down(),
-                        KeyCode::Enter => break app.selected_command(),
-                        KeyCode::Backspace => {
-                            app.query.pop();
-                            app.apply_filter();
-                        }
-                        KeyCode::Char(c) if app.query.len() + c.len_utf8() <= MAX_FIELD_LEN => {
-                            app.query.push(c);
-                            app.apply_filter();
-                        }
-                        _ => {}
-                    }
-                }
+            if let Step::Leave(picked) = handle_key(&mut app, repo, key)? {
+                break picked;
             }
         }
     };
 
     terminal.show_cursor()?;
     Ok(result)
+}
+
+/// What the picker does after a key.
+enum Step {
+    Stay,
+    /// Close, recalling the command if one was picked.
+    Leave(Option<String>),
+}
+
+fn handle_key(
+    app: &mut PickerApp,
+    repo: &Repository,
+    key: crossterm::event::KeyEvent,
+) -> Result<Step, Box<dyn std::error::Error>> {
+    // Cancels from anywhere, a form or the delete prompt included.
+    if crate::util::is_interrupt(&key) {
+        return Ok(Step::Leave(None));
+    }
+    match &app.mode {
+        Mode::Form { .. } => handle_form_input(app, repo, key)?,
+        Mode::ConfirmDelete { .. } => handle_confirm_delete_input(app, repo, key)?,
+        Mode::Browse => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                match key.code {
+                    KeyCode::Char('a') => app.start_add(),
+                    KeyCode::Char('e') => app.start_edit(),
+                    KeyCode::Char('d') => app.start_delete(),
+                    _ => {}
+                }
+                return Ok(Step::Stay);
+            }
+            match key.code {
+                // Always-on search, like suv search: Esc quits outright
+                // rather than clearing the query first, since there's no
+                // separate "typing mode" to fall back out of.
+                KeyCode::Esc => return Ok(Step::Leave(None)),
+                KeyCode::Up => app.move_up(),
+                KeyCode::Down => app.move_down(),
+                KeyCode::Enter => return Ok(Step::Leave(app.selected_command())),
+                KeyCode::Backspace => {
+                    app.query.pop();
+                    app.apply_filter();
+                }
+                KeyCode::Char(c) if app.query.len() + c.len_utf8() <= MAX_FIELD_LEN => {
+                    app.query.push(c);
+                    app.apply_filter();
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(Step::Stay)
 }
 
 fn handle_form_input(
@@ -657,6 +678,38 @@ mod tests {
         let app = PickerApp::new(vec![make_bookmark(1, "git status", None)]);
         assert_eq!(app.list_state.selected(), Some(0));
         assert_eq!(app.filtered, vec![0]);
+    }
+
+    fn ctrl_c() -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_c_cancels_the_bookmark_picker_from_every_mode() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        repo.add_bookmark("git status", None).unwrap();
+
+        let mut app = PickerApp::new(repo.list_bookmarks().unwrap());
+        assert!(matches!(
+            handle_key(&mut app, &repo, ctrl_c()).unwrap(),
+            Step::Leave(None)
+        ));
+        assert!(app.query.is_empty());
+
+        let mut app = PickerApp::new(repo.list_bookmarks().unwrap());
+        app.start_add();
+        assert!(matches!(
+            handle_key(&mut app, &repo, ctrl_c()).unwrap(),
+            Step::Leave(None)
+        ));
+
+        let mut app = PickerApp::new(repo.list_bookmarks().unwrap());
+        app.start_delete();
+        assert!(matches!(
+            handle_key(&mut app, &repo, ctrl_c()).unwrap(),
+            Step::Leave(None)
+        ));
+        assert_eq!(repo.list_bookmarks().unwrap().len(), 1, "nothing deleted");
     }
 
     #[test]

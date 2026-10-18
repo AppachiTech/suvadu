@@ -245,43 +245,59 @@ pub fn run_alias_manager(repo: &Repository) -> Result<(), Box<dyn std::error::Er
             if key.kind != KeyEventKind::Press {
                 continue;
             }
-            match &app.mode {
-                Mode::Form { .. } => handle_form_input(&mut app, repo, key)?,
-                Mode::ConfirmDelete { .. } => handle_confirm_delete_input(&mut app, repo, key)?,
-                Mode::Browse => {
-                    if key.modifiers.contains(KeyModifiers::CONTROL) {
-                        match key.code {
-                            KeyCode::Char('a') => app.start_add(),
-                            KeyCode::Char('e') => app.start_edit(),
-                            KeyCode::Char('d') => app.start_delete(),
-                            _ => {}
-                        }
-                        continue;
-                    }
-                    match key.code {
-                        // Always-on search, like suv search: Esc quits
-                        // outright rather than clearing the query first.
-                        KeyCode::Esc => break,
-                        KeyCode::Up => app.move_up(),
-                        KeyCode::Down => app.move_down(),
-                        KeyCode::Enter => app.start_edit(),
-                        KeyCode::Backspace => {
-                            app.query.pop();
-                            app.apply_filter();
-                        }
-                        KeyCode::Char(c) if app.query.len() + c.len_utf8() <= MAX_FIELD_LEN => {
-                            app.query.push(c);
-                            app.apply_filter();
-                        }
-                        _ => {}
-                    }
-                }
+            if handle_key(&mut app, repo, key)? {
+                break;
             }
         }
     }
 
     terminal.show_cursor()?;
     Ok(())
+}
+
+/// Handle one key press. Returns `true` when the manager should close.
+fn handle_key(
+    app: &mut AliasManagerApp,
+    repo: &Repository,
+    key: crossterm::event::KeyEvent,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    // Closes from anywhere, a form or the delete prompt included.
+    if crate::util::is_interrupt(&key) {
+        return Ok(true);
+    }
+    match &app.mode {
+        Mode::Form { .. } => handle_form_input(app, repo, key)?,
+        Mode::ConfirmDelete { .. } => handle_confirm_delete_input(app, repo, key)?,
+        Mode::Browse => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                match key.code {
+                    KeyCode::Char('a') => app.start_add(),
+                    KeyCode::Char('e') => app.start_edit(),
+                    KeyCode::Char('d') => app.start_delete(),
+                    _ => {}
+                }
+                return Ok(false);
+            }
+            match key.code {
+                // Always-on search, like suv search: Esc quits outright
+                // rather than clearing the query first.
+                KeyCode::Esc => return Ok(true),
+                KeyCode::Up => app.move_up(),
+                KeyCode::Down => app.move_down(),
+                KeyCode::Enter => app.start_edit(),
+                KeyCode::Backspace => {
+                    app.query.pop();
+                    app.apply_filter();
+                }
+                KeyCode::Char(c) if app.query.len() + c.len_utf8() <= MAX_FIELD_LEN => {
+                    app.query.push(c);
+                    app.apply_filter();
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn handle_form_input(
@@ -669,6 +685,29 @@ mod tests {
         let app = AliasManagerApp::new(vec![make_alias(1, "gst", "git status")]);
         assert_eq!(app.list_state.selected(), Some(0));
         assert_eq!(app.filtered, vec![0]);
+    }
+
+    fn ctrl_c() -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_c_closes_the_alias_manager_from_every_mode() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        repo.add_alias("gst", "git status").unwrap();
+
+        let mut app = AliasManagerApp::new(repo.list_aliases().unwrap());
+        assert!(handle_key(&mut app, &repo, ctrl_c()).unwrap());
+        assert!(app.query.is_empty());
+
+        let mut app = AliasManagerApp::new(repo.list_aliases().unwrap());
+        app.start_add();
+        assert!(handle_key(&mut app, &repo, ctrl_c()).unwrap());
+
+        let mut app = AliasManagerApp::new(repo.list_aliases().unwrap());
+        app.start_delete();
+        assert!(handle_key(&mut app, &repo, ctrl_c()).unwrap());
+        assert_eq!(repo.list_aliases().unwrap().len(), 1, "nothing deleted");
     }
 
     #[test]
