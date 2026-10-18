@@ -231,6 +231,20 @@ pub fn command_id(id: Option<i64>) -> String {
     )
 }
 
+/// The most text one tool response may carry, in bytes. The transport cuts
+/// anything longer, trailer and all, so paged tools stop adding rows before
+/// they reach it and point `next_offset` at the first row left out.
+pub const MAX_RESPONSE_BYTES: usize = 50_000;
+
+/// Said by a page that stopped early to stay under [`MAX_RESPONSE_BYTES`].
+pub fn size_limit_note(shown: usize, fetched: usize) -> String {
+    format!(
+        "this page stopped after {shown} of the {fetched} rows it read, to stay under the \
+         {MAX_RESPONSE_BYTES}-byte response size limit; pass next_offset to continue from the \
+         first row left out"
+    )
+}
+
 /// The one way a response admits it elided rows.
 pub fn more_not_shown(count: usize) -> String {
     format!("… {count} more not shown")

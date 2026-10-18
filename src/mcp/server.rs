@@ -454,6 +454,123 @@ mod tests {
         assert_eq!(responses[calls.len()]["id"], "last");
     }
 
+    /// 600 agent commands in one session, each with its own prompt and a
+    /// command long enough to be clipped, all in the last hour: enough that
+    /// a 500-row detailed page is far over the response size limit.
+    fn seed_long_rows(repo: &Repository) {
+        let now = chrono::Utc::now().timestamp_millis();
+        repo.insert_session(&crate::models::Session {
+            id: "claude-big".into(),
+            hostname: "test".into(),
+            created_at: now - 1_800_000,
+            tag_id: None,
+        })
+        .unwrap();
+        let tx = repo.transaction().unwrap();
+        for i in 0..600 {
+            let mut e = crate::models::Entry::new(
+                "claude-big".into(),
+                format!("rm -rf /tmp/build-{i:04}-{}", "x".repeat(200)),
+                "/work/project".into(),
+                Some(0),
+                now - 1_800_000 + i * 1000,
+                now - 1_800_000 + i * 1000 + 10,
+            );
+            e.executor_type = Some("agent".into());
+            e.executor = Some("claude-code".into());
+            e.context = Some(std::collections::HashMap::from([(
+                "agent_prompt".to_string(),
+                format!("prompt {i:04} {}", "y".repeat(200)),
+            )]));
+            repo.insert_entry(&e).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    fn call_text(repo: &Repository, name: &str, args: &serde_json::Value) -> String {
+        let responses = exchange(Some(repo), &tool_call_line(1, name, args));
+        assert_eq!(responses[0]["result"]["isError"], false, "{responses:?}");
+        responses[0]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn an_oversized_page_stops_early_and_keeps_its_pagination_cursor() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_long_rows(&repo);
+        for (name, args) in [
+            (
+                "search_commands",
+                json!({"query": "rm", "limit": 500, "detail": true}),
+            ),
+            ("recent_commands", json!({"limit": 500, "detail": true})),
+            ("what_changed", json!({"limit": 500, "detail": true})),
+            (
+                "replay_agent_session",
+                json!({"session_id": "claude-big", "limit": 500, "detail": true}),
+            ),
+            ("get_prompts", json!({"limit": 500, "detail": true})),
+            (
+                "session_history",
+                json!({"session_id": "claude-big", "limit": 500, "detail": true}),
+            ),
+            (
+                "command_status",
+                json!({"command": "rm", "limit": 500, "detail": true}),
+            ),
+            ("what_failed", json!({"limit": 500, "detail": true})),
+            ("suggest_next", json!({"limit": 500})),
+        ] {
+            let text = call_text(&repo, name, &args);
+            assert!(
+                !text.contains("(output truncated)"),
+                "{name}: cut mid-response"
+            );
+            let trailer = super::super::conventions::parse_trailer(&text)
+                .unwrap_or_else(|| panic!("{name}: no trailer"));
+            if name == "what_failed" {
+                // Nothing failed; the page is small and complete.
+                assert_eq!(trailer["next_offset"], "none", "{name}");
+                continue;
+            }
+            let shown: usize = trailer["shown"]
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!(shown > 0 && shown < 500, "{name}: shown {shown}");
+            assert_eq!(trailer["next_offset"], shown.to_string(), "{name}");
+            assert!(text.contains("response size limit"), "{name}: no note");
+        }
+    }
+
+    #[test]
+    fn following_next_offset_through_oversized_pages_loses_no_rows() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_long_rows(&repo);
+        let mut seen = std::collections::BTreeSet::new();
+        let mut offset = 0;
+        for _ in 0..100 {
+            let text = call_text(
+                &repo,
+                "search_commands",
+                &json!({"query": "rm", "limit": 500, "detail": true, "offset": offset}),
+            );
+            assert!(text.len() <= 50_000, "{}", text.len());
+            let ids = super::super::conventions::command_ids(&text);
+            seen.extend(ids);
+            let trailer = super::super::conventions::parse_trailer(&text).unwrap();
+            match trailer["next_offset"].as_str() {
+                "none" => break,
+                next => offset = next.parse().unwrap(),
+            }
+        }
+        assert_eq!(seen.len(), 600);
+    }
+
     #[test]
     fn a_panic_inside_a_tool_becomes_an_error_result() {
         let result = guard_tool_panics(|| panic!("boom"));

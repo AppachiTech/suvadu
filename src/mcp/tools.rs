@@ -590,6 +590,44 @@ fn page_entries(
     Ok((entries, more.then(|| offset.saturating_add(limit))))
 }
 
+/// Render the longest prefix of a fetched page that fits in
+/// [`conv::MAX_RESPONSE_BYTES`].
+///
+/// `render` builds the whole response for the rows it is given, without a
+/// `next_offset`. When every fetched row fits, the response gets the page's
+/// own `next`. Otherwise the page ends at a row boundary, `next_offset`
+/// points at the first row left out, and a note says why — so the cursor
+/// survives, where cutting the finished text would remove the trailer that
+/// carries it.
+fn fit_page<T>(
+    rows: &[T],
+    offset: usize,
+    next: Option<usize>,
+    render: impl Fn(&[T]) -> conv::Response,
+) -> String {
+    let full = render(rows).next_offset(next).render();
+    if full.len() <= conv::MAX_RESPONSE_BYTES {
+        return full;
+    }
+    let cut = |n: usize| {
+        render(&rows[..n])
+            .next_offset(Some(offset.saturating_add(n)))
+            .note(conv::size_limit_note(n, rows.len()))
+            .render()
+    };
+    // Largest prefix that fits: `lo` fits (or is 0), `hi` does not.
+    let (mut lo, mut hi) = (0, rows.len());
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if cut(mid).len() <= conv::MAX_RESPONSE_BYTES {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    cut(lo)
+}
+
 /// Append rows to a response, honouring rule 5: anything elided is counted
 /// and announced rather than quietly dropped.
 fn write_rows<T>(
@@ -645,29 +683,24 @@ fn handle_search_commands(
     .unwrap_or(entries.len());
 
     let detail = detail(args);
-    let mut response = conv::Response::new(
-        format!(
-            "{} commands matching \"{query}\"{}",
-            entries.len(),
-            if offset > 0 {
-                format!(" (from offset {offset})")
-            } else {
-                String::new()
-            }
-        ),
-        conv::Provenance::Observed,
-    );
-    for e in &entries {
-        response.line(command_row(e, detail));
-    }
-    if !detail {
-        response = response.note(conv::DETAIL_HINT);
-    }
-    Ok(response
-        .shown(entries.len())
-        .matched(matched)
-        .next_offset(next)
-        .render())
+    let from = if offset > 0 {
+        format!(" (from offset {offset})")
+    } else {
+        String::new()
+    };
+    Ok(fit_page(&entries, offset, next, |page| {
+        let mut response = conv::Response::new(
+            format!("{} commands matching \"{query}\"{from}", page.len()),
+            conv::Provenance::Observed,
+        );
+        for e in page {
+            response.line(command_row(e, detail));
+        }
+        if !detail {
+            response = response.note(conv::DETAIL_HINT);
+        }
+        response.shown(page.len()).matched(matched)
+    }))
 }
 
 fn handle_recent_commands(
@@ -708,21 +741,19 @@ fn handle_recent_commands(
 
     let detail = detail(args);
     let ctx = directory.map_or_else(String::new, |d| format!(" in {d}"));
-    let mut response = conv::Response::new(
-        format!("{} most recent commands{ctx}", entries.len()),
-        conv::Provenance::Observed,
-    );
-    for e in &entries {
-        response.line(command_row(e, detail));
-    }
-    if !detail {
-        response = response.note(conv::DETAIL_HINT);
-    }
-    Ok(response
-        .shown(entries.len())
-        .matched(matched)
-        .next_offset(next)
-        .render())
+    Ok(fit_page(&entries, offset, next, |page| {
+        let mut response = conv::Response::new(
+            format!("{} most recent commands{ctx}", page.len()),
+            conv::Provenance::Observed,
+        );
+        for e in page {
+            response.line(command_row(e, detail));
+        }
+        if !detail {
+            response = response.note(conv::DETAIL_HINT);
+        }
+        response.shown(page.len()).matched(matched)
+    }))
 }
 
 fn handle_command_status(
@@ -756,33 +787,32 @@ fn handle_command_status(
     )
     .unwrap_or(entries.len());
 
-    let successes = entries.iter().filter(|e| e.exit_code == Some(0)).count();
-    let unknown = entries.iter().filter(|e| e.exit_code.is_none()).count();
     let detail = detail(args);
-    let mut response = conv::Response::new(
-        format!(
-            "\"{command}\" — {} runs on this page, {} succeeded{}",
-            entries.len(),
-            conv::rate(successes, entries.len()),
-            if unknown > 0 {
-                format!(", {unknown} with no recorded exit code")
-            } else {
-                String::new()
-            }
-        ),
-        conv::Provenance::Observed,
-    );
-    for e in &entries {
-        response.line(command_row(e, detail));
-    }
-    if !detail {
-        response = response.note(conv::DETAIL_HINT);
-    }
-    Ok(response
-        .shown(entries.len())
-        .matched(matched)
-        .next_offset(more.then(|| offset.saturating_add(limit)))
-        .render())
+    let next = more.then(|| offset.saturating_add(limit));
+    Ok(fit_page(&entries, offset, next, |page| {
+        let successes = page.iter().filter(|e| e.exit_code == Some(0)).count();
+        let unknown = page.iter().filter(|e| e.exit_code.is_none()).count();
+        let mut response = conv::Response::new(
+            format!(
+                "\"{command}\" — {} runs on this page, {} succeeded{}",
+                page.len(),
+                conv::rate(successes, page.len()),
+                if unknown > 0 {
+                    format!(", {unknown} with no recorded exit code")
+                } else {
+                    String::new()
+                }
+            ),
+            conv::Provenance::Observed,
+        );
+        for e in page {
+            response.line(command_row(e, detail));
+        }
+        if !detail {
+            response = response.note(conv::DETAIL_HINT);
+        }
+        response.shown(page.len()).matched(matched)
+    }))
 }
 
 fn handle_get_prompts(
@@ -842,30 +872,28 @@ fn handle_get_prompts(
 
     let detail = detail(args);
     let per_prompt = if detail { 20 } else { 3 };
-    let mut response = conv::Response::new(
-        format!("{} prompts on this page", page.len()),
-        conv::Provenance::Observed,
-    );
-    for ((session_id, prompt), cmds) in &page {
-        let successes = cmds.iter().filter(|e| e.exit_code == Some(0)).count();
-        response.line(format!(
-            "{session_id} | {} ok | \"{}\"",
-            conv::rate(successes, cmds.len()),
-            conv::clip(prompt, conv::PROMPT_MAX_CHARS)
-        ));
-        write_rows(&mut response, cmds, per_prompt, |cmd| {
-            format!("  {}", command_row(cmd, false))
-        });
-        response.blank();
-    }
-    if !detail {
-        response = response.note(conv::DETAIL_HINT);
-    }
-    Ok(response
-        .shown(page.len())
-        .matched(matched)
-        .next_offset(next)
-        .render())
+    Ok(fit_page(&page, offset, next, |page| {
+        let mut response = conv::Response::new(
+            format!("{} prompts on this page", page.len()),
+            conv::Provenance::Observed,
+        );
+        for ((session_id, prompt), cmds) in page {
+            let successes = cmds.iter().filter(|e| e.exit_code == Some(0)).count();
+            response.line(format!(
+                "{session_id} | {} ok | \"{}\"",
+                conv::rate(successes, cmds.len()),
+                conv::clip(prompt, conv::PROMPT_MAX_CHARS)
+            ));
+            write_rows(&mut response, cmds, per_prompt, |cmd| {
+                format!("  {}", command_row(cmd, false))
+            });
+            response.blank();
+        }
+        if !detail {
+            response = response.note(conv::DETAIL_HINT);
+        }
+        response.shown(page.len()).matched(matched)
+    }))
 }
 
 fn handle_session_history(
@@ -895,23 +923,23 @@ fn handle_session_history(
         .map_or_else(|| session_id.unwrap_or(conv::UNKNOWN), |e| &e.session_id)
         .to_string();
     let detail = detail(args);
-    let mut response = conv::Response::new(
-        format!("Session {sid} — {} commands on this page", entries.len()),
-        conv::Provenance::Observed,
-    );
-    for e in &entries {
-        response.line(command_row(e, detail));
-    }
-    if !mcp.exclude_dirs.is_empty() {
-        response = response.note(EXCLUSION_NOTE);
-    }
-    if !detail {
-        response = response.note(conv::DETAIL_HINT);
-    }
-    Ok(response
-        .shown(entries.len())
-        .next_offset(more.then(|| offset.saturating_add(limit)))
-        .render())
+    let next = more.then(|| offset.saturating_add(limit));
+    Ok(fit_page(&entries, offset, next, |page| {
+        let mut response = conv::Response::new(
+            format!("Session {sid} — {} commands on this page", page.len()),
+            conv::Provenance::Observed,
+        );
+        for e in page {
+            response.line(command_row(e, detail));
+        }
+        if !mcp.exclude_dirs.is_empty() {
+            response = response.note(EXCLUSION_NOTE);
+        }
+        if !detail {
+            response = response.note(conv::DETAIL_HINT);
+        }
+        response.shown(page.len())
+    }))
 }
 
 /// Said whenever a response was filtered by `mcp.exclude_dirs`, so a
@@ -1040,43 +1068,43 @@ fn handle_list_sessions(
     sessions.truncate(limit);
 
     let detail = detail(args);
-    let mut response = conv::Response::new(
-        format!("{} shell sessions on this page", sessions.len()),
-        conv::Provenance::Observed,
-    );
-    for s in &sessions {
-        let tag_str = s
-            .tag_name
-            .as_deref()
-            .map_or_else(String::new, |t| format!(" [{t}]"));
-        let success = usize::try_from(s.success_count).unwrap_or(0);
-        let total = usize::try_from(s.cmd_count).unwrap_or(0);
-        response.line(format!(
-            "{}{tag_str} | {total} cmds | {} ok | {} → {}",
-            s.id,
-            conv::rate(success, total),
-            conv::timestamp(s.first_activity_at),
-            conv::timestamp(s.last_activity_at),
-        ));
-        if detail {
+    let next = more.then(|| offset.saturating_add(limit));
+    Ok(fit_page(&sessions, offset, next, |page| {
+        let mut response = conv::Response::new(
+            format!("{} shell sessions on this page", page.len()),
+            conv::Provenance::Observed,
+        );
+        for s in page {
+            let tag_str = s
+                .tag_name
+                .as_deref()
+                .map_or_else(String::new, |t| format!(" [{t}]"));
+            let success = usize::try_from(s.success_count).unwrap_or(0);
+            let total = usize::try_from(s.cmd_count).unwrap_or(0);
             response.line(format!(
-                "    host {} | dir {} | agent {}",
-                conv::or_unknown(Some(s.hostname.as_str())),
-                conv::or_unknown(s.cwd.as_deref()),
-                conv::or_unknown(s.agent.as_deref()),
+                "{}{tag_str} | {total} cmds | {} ok | {} → {}",
+                s.id,
+                conv::rate(success, total),
+                conv::timestamp(s.first_activity_at),
+                conv::timestamp(s.last_activity_at),
             ));
+            if detail {
+                response.line(format!(
+                    "    host {} | dir {} | agent {}",
+                    conv::or_unknown(Some(s.hostname.as_str())),
+                    conv::or_unknown(s.cwd.as_deref()),
+                    conv::or_unknown(s.agent.as_deref()),
+                ));
+            }
         }
-    }
-    if !mcp.exclude_dirs.is_empty() {
-        response = response.note(EXCLUSION_NOTE);
-    }
-    if !detail {
-        response = response.note(conv::DETAIL_HINT);
-    }
-    Ok(response
-        .shown(sessions.len())
-        .next_offset(more.then(|| offset.saturating_add(limit)))
-        .render())
+        if !mcp.exclude_dirs.is_empty() {
+            response = response.note(EXCLUSION_NOTE);
+        }
+        if !detail {
+            response = response.note(conv::DETAIL_HINT);
+        }
+        response.shown(page.len())
+    }))
 }
 
 // ── Smart tools ─────────────────────────────────────────────
@@ -1188,101 +1216,97 @@ fn handle_what_changed(
     )
     .unwrap_or(entries.len());
 
-    // Two lists, never one. `succeeded` holds commands whose recorded exit
-    // code was 0 — the only ones whose intended effect is even plausible.
-    // `attempted` holds the rest: a `rm -rf` that exited 1 changed nothing,
-    // and reporting it under "deletions" is the exact false claim this
-    // tool used to make. A command with no recorded exit code goes in
-    // `attempted` too: suvadu does not know how it ended.
-    let mut succeeded: std::collections::HashMap<&str, Vec<&crate::models::Entry>> =
-        std::collections::HashMap::new();
-    let mut attempted: Vec<&crate::models::Entry> = Vec::new();
-    let mut unclassified = 0usize;
-
-    for entry in &entries {
-        let Some(category) = classify_command(&entry.command) else {
-            unclassified += 1;
-            continue;
-        };
-        if entry.exit_code == Some(0) {
-            succeeded.entry(category).or_default().push(entry);
-        } else {
-            attempted.push(entry);
-        }
-    }
-
     let ctx = directory.map_or_else(String::new, |d| format!(" in {d}"));
     let detail = detail(args);
     let per_category = if detail { 50 } else { 3 };
-    let mut response = conv::Response::new(
-        format!(
-            "{} of {matched} commands recorded in the {}{ctx} on this page; {} of them looked \
-             file-modifying",
-            entries.len(),
-            conv::window_hours(hours),
-            succeeded.values().map(Vec::len).sum::<usize>() + attempted.len()
-        ),
-        conv::Provenance::ObservedAndInferred,
-    );
+    Ok(fit_page(&entries, offset, next, |page| {
+        // Two lists, never one. `succeeded` holds commands whose recorded
+        // exit code was 0 — the only ones whose intended effect is even
+        // plausible. `attempted` holds the rest: a `rm -rf` that exited 1
+        // changed nothing, and reporting it under "deletions" is the exact
+        // false claim this tool used to make. A command with no recorded
+        // exit code goes in `attempted` too: suvadu does not know how it
+        // ended.
+        let mut succeeded: std::collections::HashMap<&str, Vec<&crate::models::Entry>> =
+            std::collections::HashMap::new();
+        let mut attempted: Vec<&crate::models::Entry> = Vec::new();
+        let mut unclassified = 0usize;
 
-    response.line("OBSERVED — commands suvadu recorded, with the exit code it recorded:");
-    if entries.is_empty() {
-        response.line("  (none)");
-    }
-    write_rows(
-        &mut response,
-        &entries,
-        if detail { limit } else { 5 },
-        |e| format!("  {}", command_row(e, detail)),
-    );
-    response.blank();
+        for entry in page {
+            let Some(category) = classify_command(&entry.command) else {
+                unclassified += 1;
+                continue;
+            };
+            if entry.exit_code == Some(0) {
+                succeeded.entry(category).or_default().push(entry);
+            } else {
+                attempted.push(entry);
+            }
+        }
 
-    response.line(
-        "INFERRED — likely effect, worked out from the command text alone. suvadu did not \
-         observe any file change; a command that exited 0 may still have done nothing:",
-    );
-    let mut sorted: Vec<_> = succeeded.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
-    if sorted.is_empty() {
-        response.line("  (no successful file-modifying command in this window)");
-    }
-    for (category, cmds) in &sorted {
-        response.line(format!("  {} ({}):", category.to_uppercase(), cmds.len()));
-        write_rows(&mut response, cmds, per_category, |cmd| {
-            format!("    {}", conv::clip(&cmd.command, conv::ROW_MAX_CHARS))
-        });
-    }
-
-    if !attempted.is_empty() {
-        response.blank();
-        response.line(format!(
-            "ATTEMPTED — {} file-modifying command(s) that did not succeed, so no effect is \
-             inferred from them:",
-            attempted.len()
-        ));
-        write_rows(&mut response, &attempted, per_category, |cmd| {
+        let mut response = conv::Response::new(
             format!(
-                "    {} | {}",
-                conv::exit(cmd.exit_code),
-                conv::clip(&cmd.command, conv::ROW_MAX_CHARS)
-            )
-        });
-    }
+                "{} of {matched} commands recorded in the {}{ctx} on this page; {} of them \
+                 looked file-modifying",
+                page.len(),
+                conv::window_hours(hours),
+                succeeded.values().map(Vec::len).sum::<usize>() + attempted.len()
+            ),
+            conv::Provenance::ObservedAndInferred,
+        );
 
-    if unclassified > 0 {
-        response = response.note(format!(
-            "{unclassified} further recorded command(s) matched no change category and are not \
-             listed under INFERRED"
-        ));
-    }
-    if !detail {
-        response = response.note(conv::DETAIL_HINT);
-    }
-    Ok(response
-        .shown(entries.len())
-        .matched(matched)
-        .next_offset(next)
-        .render())
+        response.line("OBSERVED — commands suvadu recorded, with the exit code it recorded:");
+        if page.is_empty() {
+            response.line("  (none)");
+        }
+        write_rows(&mut response, page, if detail { limit } else { 5 }, |e| {
+            format!("  {}", command_row(e, detail))
+        });
+        response.blank();
+
+        response.line(
+            "INFERRED — likely effect, worked out from the command text alone. suvadu did not \
+             observe any file change; a command that exited 0 may still have done nothing:",
+        );
+        let mut sorted: Vec<_> = succeeded.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
+        if sorted.is_empty() {
+            response.line("  (no successful file-modifying command in this window)");
+        }
+        for (category, cmds) in &sorted {
+            response.line(format!("  {} ({}):", category.to_uppercase(), cmds.len()));
+            write_rows(&mut response, cmds, per_category, |cmd| {
+                format!("    {}", conv::clip(&cmd.command, conv::ROW_MAX_CHARS))
+            });
+        }
+
+        if !attempted.is_empty() {
+            response.blank();
+            response.line(format!(
+                "ATTEMPTED — {} file-modifying command(s) that did not succeed, so no effect is \
+                 inferred from them:",
+                attempted.len()
+            ));
+            write_rows(&mut response, &attempted, per_category, |cmd| {
+                format!(
+                    "    {} | {}",
+                    conv::exit(cmd.exit_code),
+                    conv::clip(&cmd.command, conv::ROW_MAX_CHARS)
+                )
+            });
+        }
+
+        if unclassified > 0 {
+            response = response.note(format!(
+                "{unclassified} further recorded command(s) matched no change category and are \
+                 not listed under INFERRED"
+            ));
+        }
+        if !detail {
+            response = response.note(conv::DETAIL_HINT);
+        }
+        response.shown(page.len()).matched(matched)
+    }))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1336,68 +1360,67 @@ fn handle_what_failed(
     )
     .unwrap_or(0);
 
-    // Group failures by prompt (if available)
-    let mut by_prompt: std::collections::HashMap<&str, Vec<&crate::models::Entry>> =
-        std::collections::HashMap::new();
-    let mut no_prompt_failures: Vec<&crate::models::Entry> = Vec::new();
-
-    for entry in &failures {
-        if let Some(prompt) = entry_prompt(entry) {
-            by_prompt.entry(prompt).or_default().push(entry);
-        } else {
-            no_prompt_failures.push(entry);
-        }
-    }
-
     let ctx = directory.map_or_else(String::new, |d| format!(" in {d}"));
     let detail = detail(args);
     let per_group = if detail { limit } else { 5 };
-    let mut response = conv::Response::new(
-        format!(
-            "{} failed commands on this page ({} of {total} recorded commands failed in the {}{ctx})",
-            failures.len(),
-            matched,
-            conv::window_hours(hours),
-        ),
-        conv::Provenance::Observed,
-    );
+    Ok(fit_page(&failures, offset, next, |page| {
+        // Group failures by prompt (if available)
+        let mut by_prompt: std::collections::HashMap<&str, Vec<&crate::models::Entry>> =
+            std::collections::HashMap::new();
+        let mut no_prompt_failures: Vec<&crate::models::Entry> = Vec::new();
 
-    if !by_prompt.is_empty() {
-        response.line("FAILURES UNDER A RECORDED PROMPT:");
-        let mut sorted: Vec<_> = by_prompt.into_iter().collect();
-        sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
-        for (prompt, cmds) in &sorted {
-            response.line(format!(
-                "  prompt \"{}\" — {} failed",
-                conv::clip(prompt, conv::PROMPT_MAX_CHARS),
-                cmds.len()
-            ));
-            write_rows(&mut response, cmds, per_group, |cmd| {
-                format!("    {}", command_row(cmd, detail))
+        for entry in page {
+            if let Some(prompt) = entry_prompt(entry) {
+                by_prompt.entry(prompt).or_default().push(entry);
+            } else {
+                no_prompt_failures.push(entry);
+            }
+        }
+
+        let mut response = conv::Response::new(
+            format!(
+                "{} failed commands on this page ({} of {total} recorded commands failed in the \
+                 {}{ctx})",
+                page.len(),
+                matched,
+                conv::window_hours(hours),
+            ),
+            conv::Provenance::Observed,
+        );
+
+        if !by_prompt.is_empty() {
+            response.line("FAILURES UNDER A RECORDED PROMPT:");
+            let mut sorted: Vec<_> = by_prompt.into_iter().collect();
+            sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
+            for (prompt, cmds) in &sorted {
+                response.line(format!(
+                    "  prompt \"{}\" — {} failed",
+                    conv::clip(prompt, conv::PROMPT_MAX_CHARS),
+                    cmds.len()
+                ));
+                write_rows(&mut response, cmds, per_group, |cmd| {
+                    format!("    {}", command_row(cmd, detail))
+                });
+            }
+            response.blank();
+        }
+
+        if !no_prompt_failures.is_empty() {
+            response.line("FAILURES WITH NO PROMPT RECORDED:");
+            write_rows(&mut response, &no_prompt_failures, per_group, |cmd| {
+                format!("  {}", command_row(cmd, detail))
             });
         }
-        response.blank();
-    }
 
-    if !no_prompt_failures.is_empty() {
-        response.line("FAILURES WITH NO PROMPT RECORDED:");
-        write_rows(&mut response, &no_prompt_failures, per_group, |cmd| {
-            format!("  {}", command_row(cmd, detail))
-        });
-    }
-
-    response = response.note(
-        "the exit code is all suvadu recorded; the error text these commands printed was never \
-         captured, so why each one failed is not available here",
-    );
-    if !detail {
-        response = response.note(conv::DETAIL_HINT);
-    }
-    Ok(response
-        .shown(failures.len())
-        .matched(matched)
-        .next_offset(next)
-        .render())
+        response = response.note(
+            "the exit code is all suvadu recorded; the error text these commands printed was \
+             never captured, so why each one failed is not available here",
+        );
+        if !detail {
+            response = response.note(conv::DETAIL_HINT);
+        }
+        response.shown(page.len()).matched(matched)
+    }))
 }
 
 fn handle_suggest_next(
@@ -1472,28 +1495,26 @@ fn handle_suggest_next(
     let page: Vec<_> = sorted.into_iter().skip(offset).take(limit).collect();
 
     let ctx = directory.map_or_else(String::new, |d| format!(" in {d}"));
-    let mut response = conv::Response::new(
-        format!("{} suggested next commands{ctx}", page.len()),
-        conv::Provenance::Inferred,
-    );
-    for (cmd, (score, count, last_exit)) in &page {
-        response.line(format!(
-            "  {} | ran {count}x | frecency score {score:.0} | last {}",
-            conv::clip(cmd, conv::ROW_MAX_CHARS),
-            conv::exit(*last_exit),
-        ));
-    }
-    Ok(response
-        .shown(page.len())
-        .matched(matched)
-        .next_offset((offset.saturating_add(limit) < matched).then(|| offset.saturating_add(limit)))
-        .note(format!(
+    let next = (offset.saturating_add(limit) < matched).then(|| offset.saturating_add(limit));
+    Ok(fit_page(&page, offset, next, |page| {
+        let mut response = conv::Response::new(
+            format!("{} suggested next commands{ctx}", page.len()),
+            conv::Provenance::Inferred,
+        );
+        for (cmd, (score, count, last_exit)) in page {
+            response.line(format!(
+                "  {} | ran {count}x | frecency score {score:.0} | last {}",
+                conv::clip(cmd, conv::ROW_MAX_CHARS),
+                conv::exit(*last_exit),
+            ));
+        }
+        response.shown(page.len()).matched(matched).note(format!(
             "ranked by frecency (frequency plus recency) over the {} most recent commands in the \
              last 7d; a suggestion is a guess about what you might run, never a recommendation \
              that it is safe or correct",
             entries.len()
         ))
-        .render())
+    }))
 }
 
 fn handle_assess_risk(args: &Value) -> Result<String, String> {
@@ -1748,68 +1769,71 @@ fn find_agent_sessions(
     let matched = sessions.len();
     let page: Vec<_> = sessions.into_iter().skip(offset).take(limit).collect();
     let detail = detail(args);
+    let next = (offset.saturating_add(limit) < matched).then(|| offset.saturating_add(limit));
 
-    let mut response = conv::Response::new(
-        format!("{} agent sessions on this page", page.len()),
-        conv::Provenance::ObservedAndInferred,
-    );
-    for s in &page {
-        response.line(format!(
-            "{} | {} | {} commands, {} ok | last activity {}",
-            s.session_id,
-            s.executor,
-            s.command_count,
-            conv::rate(s.success_count, s.command_count),
-            conv::when(s.last_command_at),
-        ));
-        if !s.first_prompt.is_empty() {
-            response.line(format!(
-                "    first prompt \"{}\"",
-                conv::clip(&s.first_prompt, conv::PROMPT_MAX_CHARS)
+    Ok(fit_page(&page, offset, next, |page| {
+        let mut response = conv::Response::new(
+            format!("{} agent sessions on this page", page.len()),
+            conv::Provenance::ObservedAndInferred,
+        );
+        for s in page {
+            write_agent_session_row(&mut response, s, detail);
+        }
+        if !detail {
+            response = response.note(conv::DETAIL_HINT);
+        }
+        if capped {
+            response = response.note(format!(
+                "only the newest {max_commands} agent commands matching these filters were \
+                 grouped, so older sessions are missing from the {matched} counted here and the \
+                 oldest one listed may be incomplete; narrow with after, before, directory or \
+                 executor to look further back"
             ));
         }
-        if detail {
-            response.line(format!(
-                "    started {} | ran {} | directories {} | failed {}",
-                conv::timestamp(s.first_command_at),
-                conv::duration(s.last_command_at - s.first_command_at),
-                if s.directories.is_empty() {
-                    conv::UNKNOWN.to_string()
-                } else {
-                    s.directories.join(", ")
-                },
-                s.failure_count,
-            ));
-            response.line(format!("    risk (inferred): {}", s.risk_summary));
-            if s.session_id.starts_with("claude-") {
-                response.line(format!(
-                    "    resume: claude --resume {}",
-                    resume_id(&s.session_id)
-                ));
-            }
-        }
-    }
-    if !detail {
-        response = response.note(conv::DETAIL_HINT);
-    }
-    if capped {
-        response = response.note(format!(
-            "only the newest {max_commands} agent commands matching these filters were grouped, \
-             so older sessions are missing from the {matched} counted here and the oldest one \
-             listed may be incomplete; narrow with after, before, directory or executor to \
-             look further back"
-        ));
-    }
-    Ok(response
-        .shown(page.len())
-        .matched(matched)
-        .next_offset((offset.saturating_add(limit) < matched).then(|| offset.saturating_add(limit)))
-        .note(
+        response.shown(page.len()).matched(matched).note(
             "sessions here are grouped from recorded shell commands; the risk summary is a rule \
              match on command text, not an observed outcome. For sessions captured from an \
              agent's own transcript use list_agent_sessions",
         )
-        .render())
+    }))
+}
+
+/// One `find_agent_session` row, with its detail lines when asked for.
+fn write_agent_session_row(response: &mut conv::Response, s: &AgentSessionSummary, detail: bool) {
+    response.line(format!(
+        "{} | {} | {} commands, {} ok | last activity {}",
+        s.session_id,
+        s.executor,
+        s.command_count,
+        conv::rate(s.success_count, s.command_count),
+        conv::when(s.last_command_at),
+    ));
+    if !s.first_prompt.is_empty() {
+        response.line(format!(
+            "    first prompt \"{}\"",
+            conv::clip(&s.first_prompt, conv::PROMPT_MAX_CHARS)
+        ));
+    }
+    if detail {
+        response.line(format!(
+            "    started {} | ran {} | directories {} | failed {}",
+            conv::timestamp(s.first_command_at),
+            conv::duration(s.last_command_at - s.first_command_at),
+            if s.directories.is_empty() {
+                conv::UNKNOWN.to_string()
+            } else {
+                s.directories.join(", ")
+            },
+            s.failure_count,
+        ));
+        response.line(format!("    risk (inferred): {}", s.risk_summary));
+        if s.session_id.starts_with("claude-") {
+            response.line(format!(
+                "    resume: claude --resume {}",
+                resume_id(&s.session_id)
+            ));
+        }
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1869,14 +1893,29 @@ fn handle_replay_agent_session(
         .and_then(|e| e.executor.as_deref())
         .unwrap_or(conv::UNKNOWN)
         .to_string();
-    let total = entries.len();
-    let success = entries.iter().filter(|e| e.exit_code == Some(0)).count();
-    let failure = entries
+    let detail = detail(args);
+    let next = more.then(|| offset.saturating_add(limit));
+    Ok(fit_page(&entries, offset, next, |page| {
+        render_replay_page(page, &session_id, &executor, detail, mcp)
+    }))
+}
+
+/// One page of `replay_agent_session`: the timeline of `page`, then a
+/// summary computed over exactly those rows.
+fn render_replay_page(
+    page: &[crate::models::Entry],
+    session_id: &str,
+    executor: &str,
+    detail: bool,
+    mcp: &crate::config::McpConfig,
+) -> conv::Response {
+    let total = page.len();
+    let success = page.iter().filter(|e| e.exit_code == Some(0)).count();
+    let failure = page
         .iter()
         .filter(|e| e.exit_code.is_some_and(|c| c != 0))
         .count();
 
-    let detail = detail(args);
     let mut response = conv::Response::new(
         format!(
             "Session {session_id} ({executor}) — {total} commands on this page, {} ok, {failure} failed",
@@ -1887,7 +1926,7 @@ fn handle_replay_agent_session(
     response.line("TIMELINE (observed records, chronological):");
 
     let mut last_prompt = String::new();
-    for entry in &entries {
+    for entry in page {
         if let Some(prompt) = entry_prompt(entry) {
             if prompt != last_prompt {
                 response.line(format!(
@@ -1901,7 +1940,7 @@ fn handle_replay_agent_session(
         response.line(format!("  {}", command_row(entry, detail)));
     }
 
-    let mut dirs: Vec<&str> = entries
+    let mut dirs: Vec<&str> = page
         .iter()
         .map(|e| e.cwd.as_str())
         .collect::<std::collections::BTreeSet<_>>()
@@ -1909,7 +1948,7 @@ fn handle_replay_agent_session(
         .collect();
     dirs.sort_unstable();
 
-    let risk_data = crate::risk::session_risk(&entries);
+    let risk_data = crate::risk::session_risk(page);
     let mut risk_parts = Vec::new();
     for (count, label) in [
         (risk_data.critical_count, "critical"),
@@ -1922,8 +1961,8 @@ fn handle_replay_agent_session(
         }
     }
 
-    let first_at = entries.iter().map(|e| e.started_at).min().unwrap_or(0);
-    let last_at = entries.iter().map(|e| e.ended_at).max().unwrap_or(0);
+    let first_at = page.iter().map(|e| e.started_at).min().unwrap_or(0);
+    let last_at = page.iter().map(|e| e.ended_at).max().unwrap_or(0);
 
     response.blank();
     response.line("SUMMARY of this page:");
@@ -1949,7 +1988,7 @@ fn handle_replay_agent_session(
     if session_id.starts_with("claude-") {
         response.line(format!(
             "  resume: claude --resume {}",
-            resume_id(&session_id)
+            resume_id(session_id)
         ));
     }
 
@@ -1959,14 +1998,10 @@ fn handle_replay_agent_session(
     if !detail {
         response = response.note(conv::DETAIL_HINT);
     }
-    Ok(response
-        .shown(total)
-        .next_offset(more.then(|| offset.saturating_add(limit)))
-        .note(
-            "the summary describes this page only; follow next_offset until it is none before \
-             treating it as the whole session",
-        )
-        .render())
+    response.shown(total).note(
+        "the summary describes this page only; follow next_offset until it is none before \
+         treating it as the whole session",
+    )
 }
 
 struct CmdFailStats {
@@ -2045,46 +2080,47 @@ fn handle_learn_from_failures(
     let (limit, offset) = paging(args, 10);
     let page: Vec<_> = problem_cmds.into_iter().skip(offset).take(limit).collect();
 
-    let mut response = conv::Response::new(
-        format!(
-            "{} command(s) in the {} failed on 40% or more of their recorded runs \
-             (3 runs minimum)",
-            matched,
-            conv::window_days(days)
-        ),
-        conv::Provenance::ObservedAndInferred,
-    );
-    for (cmd, s) in &page {
-        response.line(format!(
-            "{} | failed {} | last failure {}",
-            conv::clip(cmd, conv::ROW_MAX_CHARS),
-            conv::rate(s.fails, s.total),
-            conv::when(s.last_fail_at),
-        ));
-        if s.agent_total > 0 && s.total > s.agent_total {
-            let human_total = s.total - s.agent_total;
-            let human_fails = s.fails - s.agent_fails;
+    let next = (offset.saturating_add(limit) < matched).then(|| offset.saturating_add(limit));
+    Ok(fit_page(&page, offset, next, |page| {
+        let mut response = conv::Response::new(
+            format!(
+                "{} command(s) in the {} failed on 40% or more of their recorded runs \
+                 (3 runs minimum)",
+                matched,
+                conv::window_days(days)
+            ),
+            conv::Provenance::ObservedAndInferred,
+        );
+        for (cmd, s) in page {
             response.line(format!(
-                "    agents failed {} | humans failed {}",
-                conv::rate(s.agent_fails, s.agent_total),
-                conv::rate(human_fails, human_total),
+                "{} | failed {} | last failure {}",
+                conv::clip(cmd, conv::ROW_MAX_CHARS),
+                conv::rate(s.fails, s.total),
+                conv::when(s.last_fail_at),
             ));
+            if s.agent_total > 0 && s.total > s.agent_total {
+                let human_total = s.total - s.agent_total;
+                let human_fails = s.fails - s.agent_fails;
+                response.line(format!(
+                    "    agents failed {} | humans failed {}",
+                    conv::rate(s.agent_fails, s.agent_total),
+                    conv::rate(human_fails, human_total),
+                ));
+            }
         }
-    }
-    Ok(response
-        .shown(page.len())
-        .matched(matched)
-        .next_offset((offset.saturating_add(limit) < matched).then(|| offset.saturating_add(limit)))
-        .note(format!(
-            "computed over the {} most recent commands in this window",
-            entries.len()
-        ))
-        .note(
-            "these are failure rates, not explanations: suvadu recorded that the command exited \
-             non-zero and nothing about why. Whether a later run fixed anything is not something \
-             suvadu observed either",
-        )
-        .render())
+        response
+            .shown(page.len())
+            .matched(matched)
+            .note(format!(
+                "computed over the {} most recent commands in this window",
+                entries.len()
+            ))
+            .note(
+                "these are failure rates, not explanations: suvadu recorded that the command \
+                 exited non-zero and nothing about why. Whether a later run fixed anything is not \
+                 something suvadu observed either",
+            )
+    }))
 }
 
 fn is_build_test_lint(cmd: &str) -> bool {
@@ -2286,24 +2322,23 @@ fn handle_list_skills(
     let matched = visible.len();
     let page: Vec<_> = visible.into_iter().skip(offset).take(limit).collect();
 
-    let mut response = conv::Response::new(
-        format!("{} active shared skills on this page", page.len()),
-        conv::Provenance::CallerReported,
-    );
-    for s in &page {
-        response.line(format_skill_summary(s));
-    }
-    if page.is_empty() {
-        response.line("(none — add one with `suv skills add <name>`)");
-    }
-    Ok(response
-        .shown(page.len())
-        .matched(matched)
-        .next_offset(
-            (offset.saturating_add(limit) < matched).then(|| offset.saturating_add(limit)),
-        )
-        .note("skill text is written by people and agents, not observed by suvadu; use get_skill(name) for one skill's full body")
-        .render())
+    let next = (offset.saturating_add(limit) < matched).then(|| offset.saturating_add(limit));
+    Ok(fit_page(&page, offset, next, |page| {
+        let mut response = conv::Response::new(
+            format!("{} active shared skills on this page", page.len()),
+            conv::Provenance::CallerReported,
+        );
+        for s in page {
+            response.line(format_skill_summary(s));
+        }
+        if page.is_empty() {
+            response.line("(none — add one with `suv skills add <name>`)");
+        }
+        response
+            .shown(page.len())
+            .matched(matched)
+            .note("skill text is written by people and agents, not observed by suvadu; use get_skill(name) for one skill's full body")
+    }))
 }
 
 fn handle_get_skill(
@@ -2361,19 +2396,20 @@ fn handle_search_skills(
     let matched = visible.len();
     let page: Vec<_> = visible.into_iter().skip(offset).take(limit).collect();
 
-    let mut response = conv::Response::new(
-        format!("{} skills matching \"{query}\"", page.len()),
-        conv::Provenance::CallerReported,
-    );
-    for s in &page {
-        response.line(format_skill_summary(s));
-    }
-    Ok(response
-        .shown(page.len())
-        .matched(matched)
-        .next_offset((offset.saturating_add(limit) < matched).then(|| offset.saturating_add(limit)))
-        .note("skill text is written by people and agents, not observed by suvadu")
-        .render())
+    let next = (offset.saturating_add(limit) < matched).then(|| offset.saturating_add(limit));
+    Ok(fit_page(&page, offset, next, |page| {
+        let mut response = conv::Response::new(
+            format!("{} skills matching \"{query}\"", page.len()),
+            conv::Provenance::CallerReported,
+        );
+        for s in page {
+            response.line(format_skill_summary(s));
+        }
+        response
+            .shown(page.len())
+            .matched(matched)
+            .note("skill text is written by people and agents, not observed by suvadu")
+    }))
 }
 
 /// Writes a proposed skill with `status = pending_review`. Unlike every
@@ -4116,5 +4152,41 @@ mod tests {
         assert!(text.contains("claude-abc123"), "{text}");
         assert!(!text.contains("cursor-def456"), "{text}");
         assert!(text.contains("newest 3 agent commands"), "{text}");
+    }
+
+    #[test]
+    fn fit_page_cuts_at_a_row_boundary_and_points_next_offset_at_the_first_row_left_out() {
+        let rows: Vec<String> = (0..200)
+            .map(|i| format!("row-{i:03} {}", "z".repeat(990)))
+            .collect();
+        let render = |page: &[String]| {
+            let mut response =
+                conv::Response::new(format!("{} rows", page.len()), conv::Provenance::Observed);
+            for row in page {
+                response.line(row);
+            }
+            response.shown(page.len()).matched(1000)
+        };
+
+        let text = fit_page(&rows, 40, Some(240), render);
+        assert!(text.len() <= conv::MAX_RESPONSE_BYTES, "{}", text.len());
+        let trailer = conv::parse_trailer(&text).unwrap();
+        let shown: usize = trailer["shown"].split(' ').next().unwrap().parse().unwrap();
+        assert!(shown > 40 && shown < 50, "{shown}");
+        assert_eq!(trailer["next_offset"], (40 + shown).to_string());
+        assert!(
+            text.contains(&format!("row-{:03}", shown - 1)),
+            "last row kept whole"
+        );
+        assert!(
+            !text.contains(&format!("row-{shown:03}")),
+            "next row left out"
+        );
+        assert!(text.contains("response size limit"), "{text}");
+
+        // A page that fits is untouched and keeps its own cursor.
+        let small = fit_page(&rows[..3], 40, Some(43), render);
+        assert_eq!(conv::parse_trailer(&small).unwrap()["next_offset"], "43");
+        assert!(!small.contains("response size limit"), "{small}");
     }
 }

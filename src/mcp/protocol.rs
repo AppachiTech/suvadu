@@ -12,8 +12,9 @@ pub const PROTOCOL_VERSION: &str = "2025-11-25";
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
     &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
-/// Maximum number of characters in a tool result before truncation.
-const MAX_OUTPUT_CHARS: usize = 50_000;
+/// Maximum number of bytes in a tool result before truncation. Paged tools
+/// keep under it themselves, so this cut is a last resort.
+const MAX_OUTPUT_CHARS: usize = super::conventions::MAX_RESPONSE_BYTES;
 
 /// The protocol version to answer `initialize` with: the client's own when
 /// we support it, otherwise our latest, which the client may then reject.
