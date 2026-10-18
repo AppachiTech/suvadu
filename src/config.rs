@@ -648,6 +648,133 @@ pub fn load_config_for_cwd() -> ConfigResult<Config> {
     std::env::current_dir().map_or_else(|_| load_config(), |cwd| load_config_for_dir(&cwd))
 }
 
+// ── Capture-path fallback ──────────────────────────────────────
+
+/// A config file the capture path could not use, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureConfigProblem {
+    /// The global `config.toml` or the project `.suvadu.toml` that failed.
+    pub path: PathBuf,
+    pub message: String,
+}
+
+/// The config to record a command run in `dir` with. Unlike
+/// [`load_config_for_dir`] this never fails, because a capture that errors
+/// out records nothing and its stderr goes nowhere (shell hooks discard it):
+/// a typo in a config file would silently stop all recording.
+///
+/// - The global config does not load: the built-in defaults are used, with
+///   redaction on, and a project overlay still applies on top of them.
+/// - Only the project overlay does not load: the global config is used.
+///
+/// The second value names the file that failed, so the caller can note it.
+pub fn load_capture_config_for_dir(
+    dir: &std::path::Path,
+) -> (Config, Option<CaptureConfigProblem>) {
+    let (base, global_problem) = match load_config() {
+        Ok(config) => (config, None),
+        Err(e) => (
+            Config::default(),
+            Some(CaptureConfigProblem {
+                path: get_config_path().unwrap_or_else(|_| PathBuf::from("config.toml")),
+                message: e.to_string(),
+            }),
+        ),
+    };
+    match overlay_config_for_dir(&base, dir) {
+        Ok(config) => (config, global_problem),
+        Err(e) => {
+            let problem = global_problem.unwrap_or_else(|| CaptureConfigProblem {
+                path: find_project_overlay(dir).unwrap_or_else(|| dir.join(".suvadu.toml")),
+                message: e.to_string(),
+            });
+            (base, Some(problem))
+        }
+    }
+}
+
+/// The most recent [`CaptureConfigProblem`] the capture path hit, as left in
+/// the data directory for `suv doctor`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureProblemNote {
+    /// When it was first seen (RFC 3339, local time).
+    pub at: String,
+    pub problem: CaptureConfigProblem,
+}
+
+const CAPTURE_PROBLEM_FILE: &str = "last-capture-error";
+
+/// `<data dir>/last-capture-error`: one small file, overwritten, holding the
+/// latest config failure the capture path fell back from.
+pub fn capture_problem_note_path() -> Option<PathBuf> {
+    crate::util::project_dirs().map(|dirs| dirs.data_dir().join(CAPTURE_PROBLEM_FILE))
+}
+
+/// Note `problem` for `suv doctor`. Best effort and cheap: the file is only
+/// rewritten when the problem differs from the one already noted, so a
+/// broken config costs one small read per recorded command, not a write.
+pub fn record_capture_problem(problem: &CaptureConfigProblem) {
+    if let Some(file) = capture_problem_note_path() {
+        let now = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+        let _ = write_capture_problem_note(&file, problem, &now);
+    }
+}
+
+fn write_capture_problem_note(
+    file: &std::path::Path,
+    problem: &CaptureConfigProblem,
+    at: &str,
+) -> std::io::Result<()> {
+    if read_capture_problem_note_at(file).is_some_and(|note| note.problem == *problem) {
+        return Ok(());
+    }
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let contents = format!("{at}\n{}\n{}\n", problem.path.display(), problem.message);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    std::io::Write::write_all(&mut options.open(file)?, contents.as_bytes())
+}
+
+/// The note [`record_capture_problem`] left, if any.
+pub fn read_capture_problem_note() -> Option<CaptureProblemNote> {
+    read_capture_problem_note_at(&capture_problem_note_path()?)
+}
+
+fn read_capture_problem_note_at(file: &std::path::Path) -> Option<CaptureProblemNote> {
+    let contents = std::fs::read_to_string(file).ok()?;
+    let mut parts = contents.splitn(3, '\n');
+    let at = parts.next()?.to_string();
+    let path = PathBuf::from(parts.next()?);
+    let message = parts.next()?.trim_end().to_string();
+    Some(CaptureProblemNote {
+        at,
+        problem: CaptureConfigProblem { path, message },
+    })
+}
+
+/// Whether the file `problem` names still fails to load today, so a note
+/// about a file that has since been fixed (or deleted) is not reported.
+pub fn capture_problem_persists(problem: &CaptureConfigProblem) -> bool {
+    if get_config_path().is_ok_and(|global| global == problem.path) {
+        return load_config().is_err();
+    }
+    if !problem.path.is_file() {
+        return false;
+    }
+    let base = load_config().unwrap_or_default();
+    problem
+        .path
+        .parent()
+        .is_some_and(|dir| overlay_config_for_dir(&base, dir).is_err())
+}
+
 /// Validate config values after loading.
 fn validate_config(config: &Config) -> ConfigResult<()> {
     if config.search.page_limit == 0 {
@@ -1268,6 +1395,102 @@ unknown_mcp_key = 7
             merged.redaction.extra_patterns,
             vec!["CORP-[0-9]{6}".to_string(), "PRJ-[a-z]{8}".to_string()]
         );
+    }
+
+    #[test]
+    fn capture_uses_the_global_config_when_only_the_overlay_is_broken() {
+        with_config_file("exclusions = [\"global-only\"]\n", |_| {
+            let dir = TempDir::new().unwrap();
+            let overlay = dir.path().join(".suvadu.toml");
+            std::fs::write(&overlay, "[search]\nmatch_mode = \"sideways\"\n").unwrap();
+
+            let (config, problem) = load_capture_config_for_dir(dir.path());
+            assert_eq!(config.exclusions, vec!["global-only".to_string()]);
+            let problem = problem.expect("the broken overlay must be reported");
+            assert_eq!(problem.path, overlay);
+            assert!(problem.message.contains("sideways"), "{}", problem.message);
+        });
+    }
+
+    #[test]
+    fn capture_uses_redacting_defaults_when_the_global_config_is_broken() {
+        with_config_file(
+            "[redaction]\nenabled = false\n[home]\nstartup = \"sideways\"\n",
+            |path| {
+                let dir = TempDir::new().unwrap();
+                std::fs::write(dir.path().join(".suvadu.toml"), "exclusions = [\"prj\"]\n")
+                    .unwrap();
+
+                let (config, problem) = load_capture_config_for_dir(dir.path());
+                assert!(config.redaction.enabled);
+                assert_eq!(
+                    config.exclusions,
+                    vec!["prj".to_string()],
+                    "overlay applies"
+                );
+                assert_eq!(problem.unwrap().path, path);
+            },
+        );
+    }
+
+    #[test]
+    fn capture_reports_nothing_when_every_config_loads() {
+        with_config_file("enabled = true\n", |_| {
+            let dir = TempDir::new().unwrap();
+            let (_, problem) = load_capture_config_for_dir(dir.path());
+            assert!(problem.is_none());
+        });
+    }
+
+    #[test]
+    fn a_capture_problem_note_is_written_once_per_distinct_problem() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("data").join("last-capture-error");
+        let first = CaptureConfigProblem {
+            path: PathBuf::from("/p/.suvadu.toml"),
+            message: "TOML parse error at line 1\n  |\n1 | x =\n  |    ^\ninvalid string".into(),
+        };
+
+        write_capture_problem_note(&file, &first, "2026-01-01T00:00:00+00:00").unwrap();
+        write_capture_problem_note(&file, &first, "2026-01-02T00:00:00+00:00").unwrap();
+        let note = read_capture_problem_note_at(&file).unwrap();
+        assert_eq!(
+            note.at, "2026-01-01T00:00:00+00:00",
+            "same problem: not rewritten"
+        );
+        assert_eq!(note.problem, first);
+
+        let second = CaptureConfigProblem {
+            path: PathBuf::from("/q/.suvadu.toml"),
+            message: "unknown variant".into(),
+        };
+        write_capture_problem_note(&file, &second, "2026-01-03T00:00:00+00:00").unwrap();
+        let note = read_capture_problem_note_at(&file).unwrap();
+        assert_eq!(note.at, "2026-01-03T00:00:00+00:00");
+        assert_eq!(note.problem, second);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn a_fixed_overlay_is_no_longer_a_capture_problem() {
+        let dir = TempDir::new().unwrap();
+        let overlay = dir.path().join(".suvadu.toml");
+        std::fs::write(&overlay, "[search]\nmatch_mode = \"sideways\"\n").unwrap();
+        let problem = CaptureConfigProblem {
+            path: overlay.clone(),
+            message: String::new(),
+        };
+        assert!(capture_problem_persists(&problem));
+        std::fs::write(&overlay, "[search]\nmatch_mode = \"fuzzy\"\n").unwrap();
+        assert!(!capture_problem_persists(&problem));
+        std::fs::remove_file(&overlay).unwrap();
+        assert!(!capture_problem_persists(&problem));
     }
 
     #[test]

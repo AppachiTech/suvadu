@@ -38,6 +38,7 @@ Inside the data directory:
 | `prompts/` | the live prompt cache pairing an agent prompt with the commands run for it, as `<session>.prompt` files. The only thing anything prunes: `suv gc` deletes cache files older than 7 days |
 | `aliases.sh` | the managed alias file your shell sources |
 | `reconcile.key` | 32 random bytes, used to key the HMAC that links a command to its prompt without storing a bare hash of the prompt text |
+| `last-capture-error` | written only when recording had to fall back because `config.toml` or a `.suvadu.toml` did not load: when, which file, and the parse error. Written `0o600`, overwritten by the next different failure, reported by `suv doctor` while that file still fails. Nothing prunes it; delete it freely |
 
 `config.toml` lives in the config directory, and a per-project
 `.suvadu.toml` lives wherever you put it in your own repositories.

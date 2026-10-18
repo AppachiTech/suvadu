@@ -93,8 +93,14 @@ pub fn handle_add_with_context(params: AddParams) -> Result<(), Box<dyn std::err
     }
 
     // Project-aware: a .suvadu.toml found by walking up from the command's
-    // own cwd overrides the global config's matching fields.
-    let config = config::load_config_for_dir(std::path::Path::new(&params.cwd))?;
+    // own cwd overrides the global config's matching fields. A config file
+    // that does not load falls back instead of failing — hooks discard
+    // stderr, so an error here would silently stop recording — and the
+    // failure is noted for `suv doctor`.
+    let (config, problem) = config::load_capture_config_for_dir(std::path::Path::new(&params.cwd));
+    if let Some(problem) = problem {
+        config::record_capture_problem(&problem);
+    }
 
     // Initialize database
     let repo = Repository::init()?;

@@ -88,6 +88,7 @@ pub fn handle_doctor() {
         check_recording(),
         assess_capture(&gather_capture_facts(repo.as_ref())),
     ];
+    checks.extend(check_capture_config());
     checks.extend(check_agents(repo.as_ref()));
 
     print_report(&checks, &storage_lines(repo.as_ref()), color);
@@ -355,6 +356,63 @@ fn check_config() -> CheckResult {
             "fix or delete {} to fall back to defaults",
             abbreviate_home(&config_path)
         )),
+    }
+}
+
+/// A config file recording had to fall back from, if it still fails.
+fn check_capture_config() -> Option<CheckResult> {
+    let note = config::read_capture_problem_note()?;
+    let global = config::get_config_path().ok();
+    assess_capture_config(
+        &note,
+        global.as_deref() == Some(note.problem.path.as_path()),
+        config::capture_problem_persists(&note.problem),
+    )
+}
+
+/// Report a noted capture-config failure, or nothing once the file named in
+/// it loads again.
+fn assess_capture_config(
+    note: &config::CaptureProblemNote,
+    is_global: bool,
+    persists: bool,
+) -> Option<CheckResult> {
+    if !persists {
+        return None;
+    }
+    let path = abbreviate_home(&note.problem.path);
+    let fallback = if is_global {
+        "the built-in defaults".to_string()
+    } else {
+        let dir = note
+            .problem
+            .path
+            .parent()
+            .map_or_else(|| path.clone(), abbreviate_home);
+        format!("the global config under {dir}")
+    };
+    Some(
+        CheckResult::blocker(
+            "Capture config",
+            Status::Warn,
+            format!(
+                "recording has used {fallback} since {}: {path} does not load ({})",
+                note.at,
+                summarize_config_error(&note.problem.message)
+            ),
+        )
+        .with_fix(format!("fix {path}")),
+    )
+}
+
+/// One line from a possibly multi-line TOML error: its heading, plus the
+/// explanation a parse error puts on its last line.
+fn summarize_config_error(message: &str) -> String {
+    let mut lines = message.lines().map(str::trim).filter(|l| !l.is_empty());
+    let first = lines.next().unwrap_or_default();
+    match lines.next_back() {
+        Some(last) if last != first => format!("{first}: {last}"),
+        _ => first.to_string(),
     }
 }
 
@@ -774,6 +832,60 @@ mod tests {
             !fix.contains("suv enable"),
             "`suv enable` cannot clear SUVADU_PAUSED: {fix}"
         );
+    }
+
+    fn capture_note(path: &str, message: &str) -> config::CaptureProblemNote {
+        config::CaptureProblemNote {
+            at: "2026-10-01T09:00:00+00:00".into(),
+            problem: config::CaptureConfigProblem {
+                path: PathBuf::from(path),
+                message: message.into(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_broken_overlay_noted_by_capture_is_a_warning_naming_the_file() {
+        let note = capture_note(
+            "/work/repo/.suvadu.toml",
+            "TOML deserialization error: unknown variant `sideways`",
+        );
+        let r = assess_capture_config(&note, false, true).unwrap();
+        assert_eq!(r.status, Status::Warn);
+        assert!(
+            r.detail.contains("the global config under /work/repo"),
+            "{}",
+            r.detail
+        );
+        assert!(
+            r.detail.contains("since 2026-10-01T09:00:00+00:00"),
+            "{}",
+            r.detail
+        );
+        assert!(r.detail.contains("sideways"), "{}", r.detail);
+        assert_eq!(r.fix.as_deref(), Some("fix /work/repo/.suvadu.toml"));
+    }
+
+    #[test]
+    fn a_broken_global_config_noted_by_capture_says_defaults_are_in_use() {
+        let note = capture_note(
+            "/cfg/config.toml",
+            "TOML parse error at line 4, column 11\n  |\n4 | x = \n  |     ^\ninvalid string",
+        );
+        let r = assess_capture_config(&note, true, true).unwrap();
+        assert!(r.detail.contains("the built-in defaults"), "{}", r.detail);
+        assert!(
+            r.detail
+                .contains("(TOML parse error at line 4, column 11: invalid string)"),
+            "{}",
+            r.detail
+        );
+    }
+
+    #[test]
+    fn a_capture_note_about_a_since_fixed_file_is_not_reported() {
+        let note = capture_note("/work/repo/.suvadu.toml", "old");
+        assert!(assess_capture_config(&note, false, false).is_none());
     }
 
     #[test]

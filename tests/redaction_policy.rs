@@ -84,8 +84,24 @@ impl Sandbox {
         path
     }
 
+    /// Where the data directory (database, capture error note) is for this
+    /// platform, under the sandbox's HOME.
+    fn data_dir(&self) -> PathBuf {
+        let home = self.home.path();
+        if cfg!(target_os = "macos") {
+            home.join("Library/Application Support/tech.appachi.suvadu")
+        } else {
+            home.join("data/suvadu")
+        }
+    }
+
     /// Record one command the way a shell hook does.
     fn record(&self, command: &str, at: i64) {
+        self.record_in(command, at, "/work/project");
+    }
+
+    /// [`Self::record`], with the command run in `cwd`.
+    fn record_in(&self, command: &str, at: i64, cwd: &str) {
         let at = at.to_string();
         self.stdout(&[
             "add",
@@ -94,7 +110,7 @@ impl Sandbox {
             "--command",
             command,
             "--cwd",
-            "/work/project",
+            cwd,
             "--exit-code",
             "0",
             "--started-at",
@@ -152,6 +168,75 @@ fn live_recording_redacts_known_and_custom_secrets_and_drops_excluded_commands()
         !stored.contains("quiet"),
         "a space-prefixed command was stored:\n{stored}"
     );
+}
+
+/// A `.suvadu.toml` that does not load must not stop recording: shell hooks
+/// discard stderr, so a failing `suv add` would lose every command in that
+/// tree without anyone being told. The global policy applies instead, and
+/// the failure is noted where `suv doctor` reports it.
+#[test]
+fn a_broken_project_overlay_still_records_under_the_global_policy() {
+    let s = Sandbox::new();
+    let project = s.home.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let overlay = project.join(".suvadu.toml");
+    std::fs::write(&overlay, "[search]\nmatch_mode = \"sideways\"\n").unwrap();
+    let cwd = project.to_str().unwrap();
+
+    s.record_in(SECRET_COMMAND, 1_700_000_000_000, cwd);
+    s.record_in(EXCLUDED_COMMAND, 1_700_000_001_000, cwd);
+
+    let stored = s.stored_commands().join("\n");
+    assert!(
+        stored.contains("REDACTED"),
+        "nothing was recorded:\n{stored}"
+    );
+    assert!(
+        !stored.contains("ghp_abcdefghijklmnopqrstuvwxyz0123"),
+        "{stored}"
+    );
+    assert!(!stored.contains("vault login"), "{stored}");
+
+    let note = std::fs::read_to_string(s.data_dir().join("last-capture-error"))
+        .expect("the failure must be noted");
+    assert!(note.contains(overlay.to_str().unwrap()), "{note}");
+    assert!(note.contains("sideways"), "{note}");
+
+    let doctor = String::from_utf8(s.run(&["doctor"]).stdout).unwrap();
+    assert!(doctor.contains(".suvadu.toml"), "{doctor}");
+    assert!(doctor.contains("sideways"), "{doctor}");
+
+    // Once the file is fixed, doctor stops reporting it.
+    std::fs::write(&overlay, "[search]\nmatch_mode = \"fuzzy\"\n").unwrap();
+    let doctor = String::from_utf8(s.run(&["doctor"]).stdout).unwrap();
+    assert!(!doctor.contains("sideways"), "{doctor}");
+}
+
+/// A global config that does not load falls back to the defaults, which
+/// redact, rather than recording nothing.
+#[test]
+fn a_broken_global_config_still_records_with_redaction_on() {
+    let s = Sandbox::new();
+    std::fs::write(
+        s.config_path(),
+        "[redaction]\nenabled = false\n[home]\nstartup = \"sideways\"\n",
+    )
+    .unwrap();
+
+    s.record(SECRET_COMMAND, 1_700_000_000_000);
+
+    let stored = s.stored_commands().join("\n");
+    assert!(
+        stored.contains("REDACTED"),
+        "nothing was recorded:\n{stored}"
+    );
+    assert!(
+        !stored.contains("ghp_abcdefghijklmnopqrstuvwxyz0123"),
+        "{stored}"
+    );
+    let note = std::fs::read_to_string(s.data_dir().join("last-capture-error"))
+        .expect("the failure must be noted");
+    assert!(note.contains("config.toml"), "{note}");
 }
 
 /// The Bash importer is an ingestion path like any other, and applies the
