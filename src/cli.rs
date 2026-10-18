@@ -241,7 +241,8 @@ pub enum Commands {
     Add {
         #[arg(long)]
         session_id: String,
-        #[arg(long)]
+        /// The command line as typed; it may start with '-'
+        #[arg(long, allow_hyphen_values = true)]
         command: String,
         #[arg(long)]
         cwd: String,
@@ -321,8 +322,8 @@ pub enum Commands {
 
     #[command(hide = true)]
     Get {
-        /// Query string
-        #[arg(long, default_value = "")]
+        /// Query string (the line being typed; it may start with '-')
+        #[arg(long, default_value = "", allow_hyphen_values = true)]
         query: String,
 
         /// Offset (0 = most recent)
@@ -354,8 +355,8 @@ pub enum Commands {
     /// Interactive search through history (Ctrl+R replacement)
     #[command(after_help = SEARCH_AFTER_HELP)]
     Search {
-        /// Optional initial query
-        #[arg(short, long)]
+        /// Optional initial query (may start with '-')
+        #[arg(short, long, allow_hyphen_values = true)]
         query: Option<String>,
 
         /// Start in the Commands view (identical commands grouped into one row),
@@ -1140,6 +1141,51 @@ mod tests {
                 assert!(unique);
             }
             _ => panic!("Expected Search command"),
+        }
+    }
+
+    /// The shell hooks pass whatever was typed as the value of `add
+    /// --command`, `get --query` and `search --query`; a line that starts
+    /// with a dash is still a value, not an option.
+    #[test]
+    fn hook_values_may_start_with_a_dash() {
+        for typed in ["-n foo", "--x", "- ls", "-"] {
+            let cli = Cli::try_parse_from([
+                "suv",
+                "add",
+                "--session-id",
+                "s",
+                "--command",
+                typed,
+                "--cwd",
+                "/",
+                "--started-at",
+                "1",
+                "--ended-at",
+                "2",
+            ])
+            .unwrap_or_else(|e| panic!("add --command {typed:?}: {e}"));
+            match cli.command.unwrap() {
+                Commands::Add { command, .. } => assert_eq!(command, typed),
+                _ => panic!("Expected Add command"),
+            }
+
+            let cli = Cli::try_parse_from(["suv", "get", "--query", typed, "--prefix"])
+                .unwrap_or_else(|e| panic!("get --query {typed:?}: {e}"));
+            match cli.command.unwrap() {
+                Commands::Get { query, prefix, .. } => {
+                    assert_eq!(query, typed);
+                    assert!(prefix);
+                }
+                _ => panic!("Expected Get command"),
+            }
+
+            let cli = Cli::try_parse_from(["suv", "search", "--query", typed])
+                .unwrap_or_else(|e| panic!("search --query {typed:?}: {e}"));
+            match cli.command.unwrap() {
+                Commands::Search { query, .. } => assert_eq!(query.as_deref(), Some(typed)),
+                _ => panic!("Expected Search command"),
+            }
         }
     }
 

@@ -124,3 +124,18 @@ fn parallel_first_commands_of_one_session_are_all_recorded() {
     expected.sort();
     assert_eq!(s.commands(), expected);
 }
+
+/// A typed line that starts with a dash is recorded like any other.
+#[test]
+fn commands_that_start_with_a_dash_are_recorded() {
+    let s = Sandbox::new();
+    for typed in ["-n foo", "--x", "-"] {
+        let out = Sandbox::add(&s.home(), "dash-session", typed);
+        assert!(
+            out.status.success(),
+            "suv add --command {typed:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert_eq!(s.commands(), ["-", "--x", "-n foo"]);
+}
