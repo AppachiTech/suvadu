@@ -700,7 +700,8 @@ impl Repository {
 
     /// Insert a session row only if `id` is not already present.
     /// Used by `suv import` to satisfy the entries → sessions FK when the export
-    /// did not include the source machine's session metadata.
+    /// did not include the source machine's session metadata, and by `suv add`,
+    /// where parallel commands of one new session race to create its row.
     pub fn insert_session_if_missing(
         &self,
         id: &str,

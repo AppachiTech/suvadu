@@ -233,7 +233,9 @@ fn handle_add_inner(
         ctx
     });
 
-    // Ensure session exists
+    // Ensure session exists. Another `suv add` for the same session (an
+    // agent running commands in parallel) may create the row between the
+    // check and the insert, so the insert must tolerate it already existing.
     if repo.get_session(&session_id)?.is_none() {
         let session = Session {
             id: session_id,
@@ -241,7 +243,7 @@ fn handle_add_inner(
             created_at: started_at,
             tag_id: None,
         };
-        repo.insert_session(&session)?;
+        repo.insert_session_if_missing(&session.id, &session.hostname, session.created_at)?;
     }
 
     // Insert entry
