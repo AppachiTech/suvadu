@@ -540,7 +540,7 @@ fn handle_browse_key(
             app.refresh_filter();
         }
         KeyCode::Char(c) => {
-            app.query.push(c);
+            push_capped(&mut app.query, c.encode_utf8(&mut [0; 4]));
             app.refresh_filter();
         }
         _ => {}
@@ -1174,6 +1174,23 @@ mod tests {
             status: SKILL_STATUS_ACTIVE.to_string(),
         })
         .unwrap();
+    }
+
+    #[test]
+    fn a_typed_search_query_is_capped_like_a_pasted_one() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = SkillsApp::load(&repo).unwrap();
+        for _ in 0..MAX_FIELD_LEN + 10 {
+            let key = crossterm::event::KeyEvent::from(KeyCode::Char('x'));
+            handle_key(&mut app, key, &repo, &mut no_editor).unwrap();
+        }
+        assert_eq!(app.query.len(), MAX_FIELD_LEN);
+
+        // In bytes, and never part of a character.
+        app.query = "x".repeat(MAX_FIELD_LEN - 1);
+        let key = crossterm::event::KeyEvent::from(KeyCode::Char('é'));
+        handle_key(&mut app, key, &repo, &mut no_editor).unwrap();
+        assert_eq!(app.query.len(), MAX_FIELD_LEN - 1);
     }
 
     #[test]

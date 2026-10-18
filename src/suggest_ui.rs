@@ -12,6 +12,10 @@ use ratatui::{
 use std::collections::HashSet;
 use std::io;
 
+/// Longest an alias name being edited may grow, in bytes: a guard against a
+/// stray huge paste.
+const MAX_FIELD_LEN: usize = 200;
+
 #[derive(Debug, PartialEq)]
 enum InputMode {
     Normal,
@@ -203,7 +207,8 @@ impl AppState {
                 }
                 KeyCode::Char(c)
                     // Only allow valid alias name chars
-                    if (c.is_alphanumeric() || c == '_' || c == '-') => {
+                    if (c.is_alphanumeric() || c == '_' || c == '-')
+                        && self.edit_buffer.len() + c.len_utf8() <= MAX_FIELD_LEN => {
                         self.edit_buffer.push(c);
                     }
                 _ => {}
@@ -745,6 +750,21 @@ mod tests {
         app.handle_input(KeyEvent::from(KeyCode::Enter));
         assert_eq!(app.input_mode, InputMode::Normal);
         assert_eq!(app.suggestions[0].name, "gst");
+    }
+
+    #[test]
+    fn edit_mode_caps_the_name() {
+        let mut app = AppState::new(make_suggestions(1), vec![]);
+        app.handle_input(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        app.edit_buffer.clear();
+        for _ in 0..MAX_FIELD_LEN + 10 {
+            app.handle_input(KeyEvent::from(KeyCode::Char('g')));
+        }
+        assert_eq!(app.edit_buffer.len(), MAX_FIELD_LEN);
+        // In bytes: a two-byte letter does not fit in the last byte.
+        app.edit_buffer.pop();
+        app.handle_input(KeyEvent::from(KeyCode::Char('é')));
+        assert_eq!(app.edit_buffer.len(), MAX_FIELD_LEN - 1);
     }
 
     #[test]

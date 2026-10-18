@@ -28,6 +28,19 @@ enum PickerAction {
 
 const NUM_FILTER_FIELDS: usize = 3;
 const PAGE_SIZE: usize = 50;
+/// Longest the search query or a filter field may grow, in bytes: a guard
+/// against a stray huge paste.
+const MAX_FIELD_LEN: usize = 200;
+
+/// Add `c` to `field` if it still fits in [`MAX_FIELD_LEN`] bytes; whether
+/// it did.
+fn push_capped(field: &mut String, c: char) -> bool {
+    let fits = field.len() + c.len_utf8() <= MAX_FIELD_LEN;
+    if fits {
+        field.push(c);
+    }
+    fits
+}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum KindFilter {
@@ -890,12 +903,13 @@ impl PickerApp {
             }
             KeyCode::Char(c) => {
                 self.filter.error = None;
-                match self.filter.focus_index {
-                    0 => self.filter.tag_input.push(c),
-                    1 => self.filter.start_date_input.push(c),
-                    2 => self.filter.end_date_input.push(c),
-                    _ => {}
-                }
+                let field = match self.filter.focus_index {
+                    0 => &mut self.filter.tag_input,
+                    1 => &mut self.filter.start_date_input,
+                    2 => &mut self.filter.end_date_input,
+                    _ => return,
+                };
+                push_capped(field, c);
             }
             _ => {}
         }
@@ -928,8 +942,8 @@ impl PickerApp {
                 self.filter.search.pop();
                 self.rebuild_visible();
             }
-            KeyCode::Char(c) => {
-                self.filter.search.push(c);
+            // Adds the character when it fits; one that does not changes nothing.
+            KeyCode::Char(c) if push_capped(&mut self.filter.search, c) => {
                 self.rebuild_visible();
             }
             _ => {}
@@ -1217,6 +1231,31 @@ mod tests {
         assert_eq!(app.filter.before_ms, None);
         let screen = crate::test_utils::render_to_text(140, 30, |f| app.render_picker(f));
         assert!(screen.contains("Can't read the end date"), "{screen}");
+    }
+
+    #[test]
+    fn the_search_query_and_every_filter_field_are_capped() {
+        let mut app = PickerApp::new(vec![make_summary("s1", 3)]);
+        type_text(&mut app, &"x".repeat(MAX_FIELD_LEN + 10));
+        assert_eq!(app.filter.search.len(), MAX_FIELD_LEN);
+        // In bytes: a two-byte character does not fit in the last byte.
+        app.filter.search.pop();
+        type_text(&mut app, "é");
+        assert_eq!(app.filter.search.len(), MAX_FIELD_LEN - 1);
+
+        open_filters(&mut app);
+        for _ in 0..NUM_FILTER_FIELDS {
+            type_text(&mut app, &"€".repeat(MAX_FIELD_LEN));
+            press(&mut app, KeyCode::Tab);
+        }
+        for field in [
+            &app.filter.tag_input,
+            &app.filter.start_date_input,
+            &app.filter.end_date_input,
+        ] {
+            assert!(field.len() <= MAX_FIELD_LEN, "{} bytes", field.len());
+            assert_eq!(field.len(), MAX_FIELD_LEN / 3 * 3);
+        }
     }
 
     fn make_summary_tagged(id: &str, tag: &str) -> SessionSummary {
