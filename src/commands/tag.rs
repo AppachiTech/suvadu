@@ -127,6 +127,11 @@ fn handle_tag_associate(
         return Err("No session ID provided or found in env.".into());
     }
 
+    // Run as the first command of a new shell, this comes before the shell
+    // has recorded anything, so its session row may not exist yet; create
+    // it so the tag has something to stick to.
+    let hostname = hostname::get()?.to_string_lossy().to_string();
+    repo.insert_session_if_missing(&sid, &hostname, chrono::Utc::now().timestamp_millis())?;
     repo.tag_session(&sid, Some(tag_id))?;
     println!("✓ Session '{sid}' associated with tag '{tag_name}'");
     Ok(())
@@ -248,6 +253,31 @@ mod tests {
 
         let s = repo.get_session(&session.id).unwrap().unwrap();
         assert_eq!(s.tag_id, Some(tags[0].id));
+    }
+
+    /// `suv tag associate` as the first command of a new shell runs before
+    /// that shell has recorded anything, so its session row doesn't exist
+    /// yet. The tag must still stick.
+    #[test]
+    fn test_tag_associate_before_the_session_has_a_row() {
+        let (_dir, repo) = setup_test_db();
+        let tag_id = repo.create_tag("work", None).unwrap();
+        assert!(repo.get_session("fresh-shell").unwrap().is_none());
+
+        handle_tag_associate(&repo, "work", Some("fresh-shell".to_string())).unwrap();
+
+        let s = repo.get_session("fresh-shell").unwrap().unwrap();
+        assert_eq!(s.tag_id, Some(tag_id));
+        assert_eq!(
+            repo.get_tag_by_session("fresh-shell").unwrap().as_deref(),
+            Some("work")
+        );
+
+        // Associating again (or with another tag) updates the same row.
+        let other = repo.create_tag("home", None).unwrap();
+        handle_tag_associate(&repo, "home", Some("fresh-shell".to_string())).unwrap();
+        let s = repo.get_session("fresh-shell").unwrap().unwrap();
+        assert_eq!(s.tag_id, Some(other));
     }
 
     /// Test the logic: when `session_id` is None and `SUVADU_SESSION_ID` env var
