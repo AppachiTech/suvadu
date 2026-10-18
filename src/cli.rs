@@ -718,8 +718,11 @@ pub enum Commands {
     },
 
     /// Remove orphaned data and compact the database
+    ///
+    /// Also rebuilds the search index when it no longer matches your
+    /// history (`suv doctor` reports when it does not).
     #[command(
-        after_help = "Examples:\n  suv gc              # Remove orphaned sessions/notes\n  suv gc --dry-run    # Preview what would be cleaned\n  suv gc --vacuum     # Also compact the database file"
+        after_help = "Examples:\n  suv gc              # Remove orphaned sessions/notes, repair the search index\n  suv gc --dry-run    # Preview what would be cleaned\n  suv gc --vacuum     # Also compact the database file"
     )]
     Gc {
         /// Preview what would be deleted without deleting

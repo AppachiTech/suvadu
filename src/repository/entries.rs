@@ -792,4 +792,14 @@ impl Repository {
         self.conn.execute_batch("VACUUM")?;
         Ok(())
     }
+
+    /// See [`crate::db::search_index_is_consistent`].
+    pub fn search_index_is_consistent(&self) -> DbResult<bool> {
+        crate::db::search_index_is_consistent(&self.conn)
+    }
+
+    /// See [`crate::db::rebuild_search_index`].
+    pub fn rebuild_search_index(&self) -> DbResult<()> {
+        crate::db::rebuild_search_index(&self.conn)
+    }
 }

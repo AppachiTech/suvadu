@@ -478,7 +478,28 @@ fn check_database() -> CheckResult {
             ..Default::default()
         })
         .unwrap_or(0);
+    // The check only reads; an error running it is not evidence of drift.
+    let index_consistent = repo.search_index_is_consistent().unwrap_or(true);
 
+    assess_database(version, count, index_consistent)
+}
+
+/// The Database line for a database that opened and passed `SQLite`'s own
+/// integrity check. A search index that no longer matches the history —
+/// rows indexed twice by shells that raced an older schema upgrade — leaves
+/// results correct but the index larger and slower, so it is a warning
+/// with `suv gc` as the repair.
+fn assess_database(version: i64, count: i64, index_consistent: bool) -> CheckResult {
+    if !index_consistent {
+        return CheckResult::blocker(
+            "Database",
+            Status::Warn,
+            format!(
+                "schema v{version}, {count} entries \u{2014} the search index no longer matches your history"
+            ),
+        )
+        .with_fix("run `suv gc` to rebuild the search index (search results are unaffected)");
+    }
     CheckResult::blocker(
         "Database",
         Status::Pass,
@@ -819,6 +840,24 @@ mod tests {
             native_sessions: None,
             mcp: McpState::NotRegistered,
         }
+    }
+
+    #[test]
+    fn a_healthy_database_reports_its_schema_and_size() {
+        let r = assess_database(10, 42, true);
+        assert!(matches!(r.status, Status::Pass), "{}", r.detail);
+        assert!(r.detail.contains("schema v10"), "{}", r.detail);
+        assert!(r.detail.contains("42 entries"), "{}", r.detail);
+        assert!(r.fix.is_none());
+    }
+
+    #[test]
+    fn a_drifted_search_index_is_a_warning_repaired_by_gc() {
+        let r = assess_database(10, 42, false);
+        assert!(matches!(r.status, Status::Warn), "{}", r.detail);
+        assert!(r.detail.contains("search index"), "{}", r.detail);
+        let fix = r.fix.unwrap_or_default();
+        assert!(fix.contains("suv gc"), "{fix}");
     }
 
     #[test]

@@ -562,11 +562,16 @@ pub fn handle_gc(dry_run: bool, vacuum: bool) -> Result<(), Box<dyn std::error::
 
     if dry_run {
         let (orphaned_sessions, orphaned_notes) = count_gc_candidates(&repo)?;
+        let index_drifted = repair_search_index(&repo, true)?;
         println!("Dry run — nothing will be deleted.\n");
         println!("  Orphaned sessions (no entries): {orphaned_sessions}");
         println!("  Orphaned notes (missing entry): {orphaned_notes}");
         println!("  Stale prompt cache files:       {stale_prompts}");
-        if orphaned_sessions == 0 && orphaned_notes == 0 && stale_prompts == 0 {
+        println!(
+            "  Search index needs a rebuild:   {}",
+            if index_drifted { "yes" } else { "no" }
+        );
+        if orphaned_sessions == 0 && orphaned_notes == 0 && stale_prompts == 0 && !index_drifted {
             println!("\nNothing to clean up.");
         }
         return Ok(());
@@ -574,6 +579,10 @@ pub fn handle_gc(dry_run: bool, vacuum: bool) -> Result<(), Box<dyn std::error::
 
     let (deleted_sessions, deleted_notes) = handle_gc_with_repo(&repo, false, vacuum)?;
     let deleted_prompts = clean_prompt_caches();
+    let rebuilt_index = repair_search_index(&repo, false)?;
+    if rebuilt_index {
+        println!("Rebuilt the search index, which no longer matched your history.");
+    }
 
     if deleted_sessions > 0 {
         println!("Removed {deleted_sessions} orphaned sessions.");
@@ -584,11 +593,29 @@ pub fn handle_gc(dry_run: bool, vacuum: bool) -> Result<(), Box<dyn std::error::
     if deleted_prompts > 0 {
         println!("Removed {deleted_prompts} stale prompt cache files.");
     }
-    if deleted_sessions == 0 && deleted_notes == 0 && deleted_prompts == 0 {
+    if deleted_sessions == 0 && deleted_notes == 0 && deleted_prompts == 0 && !rebuilt_index {
         println!("Nothing to clean up.");
     }
 
     Ok(())
+}
+
+/// Rebuild the search index when it no longer matches `entries` — for
+/// example rows indexed twice by shells that raced an older schema upgrade.
+/// Search results stay correct either way; a drifted index is only larger
+/// and slower. Returns whether a rebuild was needed (and, unless `dry_run`,
+/// done).
+fn repair_search_index(
+    repo: &Repository,
+    dry_run: bool,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    if repo.search_index_is_consistent()? {
+        return Ok(false);
+    }
+    if !dry_run {
+        repo.rebuild_search_index()?;
+    }
+    Ok(true)
 }
 
 /// Count repo-level GC candidates (orphaned sessions and notes).
@@ -1142,6 +1169,43 @@ mod tests {
     }
 
     // ── handle_gc tests ─────────────────────────────────────────
+
+    /// Index every entry a second time, as two shells racing the old
+    /// search-index backfill could.
+    fn double_index(dir: &tempfile::TempDir) {
+        rusqlite::Connection::open(dir.path().join("test.db"))
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO entries_fts(rowid, command) SELECT id, command FROM entries;",
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn test_gc_rebuilds_a_search_index_that_drifted_from_history() {
+        let (dir, repo) = test_repo();
+        seed_entries(&repo, &["git status", "cargo build"]);
+        double_index(&dir);
+        assert!(!repo.search_index_is_consistent().unwrap());
+
+        assert!(repair_search_index(&repo, false).unwrap());
+        assert!(repo.search_index_is_consistent().unwrap());
+        // Nothing left to repair on a second run.
+        assert!(!repair_search_index(&repo, false).unwrap());
+    }
+
+    #[test]
+    fn test_gc_dry_run_reports_a_drifted_search_index_without_rebuilding_it() {
+        let (dir, repo) = test_repo();
+        seed_entries(&repo, &["git status"]);
+        assert!(!repair_search_index(&repo, true).unwrap());
+        double_index(&dir);
+        assert!(repair_search_index(&repo, true).unwrap());
+        assert!(
+            !repo.search_index_is_consistent().unwrap(),
+            "a dry run must not rebuild"
+        );
+    }
 
     #[test]
     fn test_handle_gc_dry_run_no_orphans() {

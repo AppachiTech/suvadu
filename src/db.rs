@@ -636,6 +636,36 @@ fn migrate_v7(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Whether `entries_fts` holds exactly what `entries` does.
+///
+/// Uses FTS5's thorough `integrity-check` (`rank = 1`), which compares the
+/// index against its content table; the plain check passes even when every
+/// row is indexed twice, as two shells racing the old v7 backfill could
+/// leave it. The check reads only — it changes nothing — so `suv doctor`
+/// can run it. A mismatch is `Ok(false)`; any other failure is an error.
+pub fn search_index_is_consistent(conn: &Connection) -> DbResult<bool> {
+    match conn.execute(
+        "INSERT INTO entries_fts(entries_fts, rank) VALUES('integrity-check', 1)",
+        [],
+    ) {
+        Ok(_) => Ok(true),
+        Err(rusqlite::Error::SqliteFailure(e, _))
+            if e.code == rusqlite::ErrorCode::DatabaseCorrupt =>
+        {
+            Ok(false)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Rebuild `entries_fts` from `entries`. Search results never depend on
+/// the old index contents, so this is always safe; it takes about a second
+/// per 100,000 entries and holds the write lock meanwhile.
+pub fn rebuild_search_index(conn: &Connection) -> DbResult<()> {
+    conn.execute("INSERT INTO entries_fts(entries_fts) VALUES('rebuild')", [])?;
+    Ok(())
+}
+
 /// Migration v10: re-index a row only when its indexed text can change.
 ///
 /// v7's update trigger fired on every `UPDATE` of `entries`, so attaching
@@ -925,6 +955,35 @@ mod tests {
             )
             .unwrap();
         assert_eq!(hits, 1);
+    }
+
+    #[test]
+    fn test_a_double_indexed_search_index_is_found_and_rebuilt() {
+        let temp_dir = TempDir::new().unwrap();
+        let conn = init_db(&temp_dir.path().join("test.db")).unwrap();
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'host', 1000, NULL)", [])
+            .unwrap();
+        for (id, cmd) in [(1, "git status"), (2, "cargo build --release")] {
+            conn.execute(
+                "INSERT INTO entries VALUES (?1, 's1', ?2, '/tmp', 0, 1000, 1100, 100, NULL, NULL, NULL, NULL)",
+                params![id, cmd],
+            )
+            .unwrap();
+        }
+        assert!(search_index_is_consistent(&conn).unwrap());
+
+        // What two processes racing the old v7 backfill left behind: every
+        // row indexed a second time.
+        conn.execute_batch(
+            "INSERT INTO entries_fts(rowid, command) SELECT id, command FROM entries;",
+        )
+        .unwrap();
+        assert!(!search_index_is_consistent(&conn).unwrap());
+
+        rebuild_search_index(&conn).unwrap();
+        assert!(search_index_is_consistent(&conn).unwrap());
+        assert_eq!(fts_hits(&conn, "%release%"), 1);
+        assert_eq!(fts_hits(&conn, "%status%"), 1);
     }
 
     /// Every block FTS5 has written for `entries_fts`, in order. Any write to
