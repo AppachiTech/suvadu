@@ -676,20 +676,9 @@ fn handle_recent_commands(
         bookmarked_only: false,
         exclude_dirs: &mcp.exclude_dirs,
     };
-    let (entries, next) = if executor.is_some() || after.is_some() {
-        page_entries(repo, limit, offset, &qf)?
-    } else {
-        let filter = QueryFilter {
-            exclude_dirs: &mcp.exclude_dirs,
-            ..QueryFilter::default()
-        };
-        let mut entries = repo
-            .get_recent_entries(limit.saturating_add(1), offset, &filter, directory)
-            .map_err(|e| format!("query failed: {e}"))?;
-        let more = entries.len() > limit;
-        entries.truncate(limit);
-        (entries, more.then(|| offset.saturating_add(limit)))
-    };
+    // One filter for the page and for its count, so `directory` narrows
+    // both and `shown` can never exceed `matched`.
+    let (entries, next) = page_entries(repo, limit, offset, &qf)?;
     let matched = usize::try_from(
         repo.count_filtered(&qf)
             .map_err(|e| format!("query failed: {e}"))?,
@@ -3967,6 +3956,34 @@ mod tests {
                     assert!(description.contains(needle), "{tool}.{key}: {description}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn recent_commands_keeps_to_the_directory_asked_for() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_two_dirs(&repo);
+        let project = "/Users/test/project";
+        for args in [
+            json!({"directory": project}),
+            json!({"directory": project, "limit": 1}),
+            json!({"directory": project, "after": "7 days ago"}),
+            json!({"directory": project, "executor": "human"}),
+        ] {
+            let text = call_tool(&repo, "recent_commands", &args, &default_mcp()).unwrap();
+            let trailer = conv::parse_trailer(&text).unwrap();
+            if args.get("executor").is_some() {
+                // Seeded rows have no executor, so this one finds nothing.
+                assert_eq!(trailer["shown"], "0 of 0", "{args}: {text}");
+                continue;
+            }
+            assert!(text.contains("cargo build"), "{args}: {text}");
+            assert!(
+                !text.contains("id_rsa"),
+                "{args}: other directory leaked: {text}"
+            );
+            assert_eq!(trailer["shown"], "1 of 1", "{args}: {text}");
+            assert_eq!(trailer["next_offset"], "none", "{args}: {text}");
         }
     }
 }
