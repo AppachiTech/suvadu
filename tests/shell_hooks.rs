@@ -913,3 +913,140 @@ fn both_shells_record_no_branch_when_it_is_turned_off() {
         );
     }
 }
+
+// ── zsh: the zsh-autosuggestions strategy ──────────────────
+
+impl Sandbox {
+    /// Record `command` as if a shell hook had, starting at `started_at`.
+    fn seed(&self, command: &str, executor_type: &str, started_at: i64) {
+        let out = self
+            .suv()
+            .args([
+                "add",
+                "--session-id",
+                "seeded",
+                "--command",
+                command,
+                "--cwd",
+                &self.home.to_string_lossy(),
+                "--exit-code",
+                "0",
+                "--started-at",
+                &started_at.to_string(),
+                "--ended-at",
+                &(started_at + 5).to_string(),
+                "--executor-type",
+                executor_type,
+                "--executor",
+                if executor_type == "human" {
+                    "terminal"
+                } else {
+                    "claude-code"
+                },
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "seeding {command:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// Lines that call the strategy the way zsh-autosuggestions does, each
+/// printing `<label>=[<suggestion>]`, plus whatever the call itself printed.
+fn strategy_probe(label: &str, buffer: &str) -> String {
+    // The buffer is single-quoted for the shell; none of the test buffers
+    // contain a single quote.
+    format!(
+        "suggestion=stale; _zsh_autosuggest_strategy_suvadu '{buffer}'; \
+         print -r -- \"{label}=[$suggestion]\"\n\
+         print -r -- \"{label}-out=[$(_zsh_autosuggest_strategy_suvadu '{buffer}' 2>&1)]\"\n"
+    )
+}
+
+fn probe_value<'a>(stdout: &'a str, label: &str) -> &'a str {
+    let start = format!("{label}=[");
+    let line = stdout
+        .lines()
+        .find(|l| l.starts_with(&start))
+        .unwrap_or_else(|| panic!("no {label} line in:\n{stdout}"));
+    &line[start.len()..line.len() - 1]
+}
+
+#[test]
+fn zsh_autosuggest_strategy_suggests_the_newest_command_starting_with_the_buffer() {
+    let Some(zsh) = zsh_bin() else { return };
+    let s = Sandbox::new();
+    let t = 1_700_000_000_000;
+    s.seed("git checkout main", "human", t);
+    s.seed("git cherry-pick abc123", "human", t + 1000);
+    s.seed("git checkout older", "human", t + 2000);
+    s.seed("git checkout from-an-agent", "agent", t + 3000);
+    s.seed("--version --verbose", "human", t + 4000);
+    s.seed("GIT STATUS", "human", t + 5000);
+    s.seed("--help me", "human", t + 6000);
+
+    let lines = [
+        strategy_probe("checkout", "git ch"),
+        strategy_probe("empty", ""),
+        strategy_probe("nomatch", "zz-no-such-command"),
+        strategy_probe("hyphen", "--vers"),
+        strategy_probe("help", "--help"),
+        strategy_probe("case", "git st"),
+        // Alt+A's per-shell switch shows agent commands, as in Up-arrow.
+        "_SUVADU_SHOW_AGENTS=1\n".to_string(),
+        strategy_probe("agents", "git ch"),
+        "unset _SUVADU_SHOW_AGENTS\n".to_string(),
+        // Options a user may have set must not change the result.
+        "setopt SH_WORD_SPLIT KSH_ARRAYS NO_UNSET GLOB_SUBST\n".to_string(),
+        strategy_probe("options", "git ch"),
+        "unsetopt SH_WORD_SPLIT KSH_ARRAYS NO_UNSET GLOB_SUBST\n".to_string(),
+        // No binary anywhere: nothing suggested, nothing printed.
+        "PATH=/usr/bin:/bin; _SUVADU_BIN=/no/such/suv\n".to_string(),
+        strategy_probe("missing", "git ch"),
+    ]
+    .concat();
+    let out = s.zsh(&zsh, "", "", &lines);
+    assert_clean(&out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert_eq!(probe_value(&stdout, "checkout"), "git checkout older");
+    assert_eq!(probe_value(&stdout, "empty"), "");
+    assert_eq!(probe_value(&stdout, "nomatch"), "");
+    assert_eq!(probe_value(&stdout, "hyphen"), "--version --verbose");
+    assert_eq!(probe_value(&stdout, "help"), "--help me");
+    // History search ignores ASCII case; a suggestion must extend what
+    // was typed exactly, so a differently-cased match is not offered.
+    assert_eq!(probe_value(&stdout, "case"), "");
+    assert_eq!(probe_value(&stdout, "agents"), "git checkout from-an-agent");
+    assert_eq!(probe_value(&stdout, "options"), "git checkout older");
+    assert_eq!(probe_value(&stdout, "missing"), "");
+    for label in [
+        "checkout", "empty", "nomatch", "hyphen", "help", "case", "agents", "options", "missing",
+    ] {
+        assert_eq!(
+            probe_value(&stdout, &format!("{label}-out")),
+            "",
+            "the strategy printed something for {label}"
+        );
+    }
+}
+
+#[test]
+fn zsh_init_explains_how_to_enable_the_autosuggest_strategy() {
+    let s = Sandbox::new();
+    let out = s.suv().args(["init", "zsh"]).output().unwrap();
+    let script = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        script.contains("ZSH_AUTOSUGGEST_STRATEGY=(suvadu history)"),
+        "{script}"
+    );
+    assert!(
+        !script
+            .lines()
+            .any(|l| l.trim_start().starts_with("ZSH_AUTOSUGGEST_STRATEGY")),
+        "the hook must not change the user's strategy itself"
+    );
+}

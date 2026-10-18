@@ -130,6 +130,8 @@ fn zsh_preexec_script(bin_path: &str) -> String {
         r#"# Suvadu - Shell History Integration
 # Add this to your ~/.zshrc:
 # eval "$(suv init zsh)"
+# With zsh-autosuggestions, add this line too to suggest from Suvadu first:
+# ZSH_AUTOSUGGEST_STRATEGY=(suvadu history)
 
 # Require Zsh 5.1+ for EPOCHREALTIME support
 autoload -Uz is-at-least
@@ -420,6 +422,29 @@ _suvadu_toggle_agents_widget() {
 zle -N suvadu-up-arrow _suvadu_up_arrow_widget
 zle -N suvadu-down-arrow _suvadu_down_arrow_widget
 zle -N suvadu-toggle-agents _suvadu_toggle_agents_widget
+
+"#
+}
+
+/// A zsh-autosuggestions strategy (`ZSH_AUTOSUGGEST_STRATEGY=(suvadu …)`).
+/// The plugin calls it with the line typed so far, on every keystroke, and
+/// takes `$suggestion` as the completion to offer.
+const fn zsh_autosuggest_strategy_script() -> &'static str {
+    r#"# zsh-autosuggestions strategy: suggest the command Up-arrow would recall
+# first. Enable it with ZSH_AUTOSUGGEST_STRATEGY=(suvadu history).
+_zsh_autosuggest_strategy_suvadu() {
+    emulate -L zsh
+    typeset -g suggestion=""
+    [[ -n "$1" ]] || return
+    __suvadu_ensure_bin || return
+    local result _suvadu_agents_flag=""
+    [[ -n "$_SUVADU_SHOW_AGENTS" ]] && _suvadu_agents_flag="--include-agents"
+    result="$("$_SUVADU_BIN" get --query "$1" --prefix --cwd "$PWD" $_suvadu_agents_flag 2>/dev/null)"
+    # History search ignores ASCII case; only offer what extends the line
+    # exactly as typed.
+    [[ "$result" == "$1"* ]] && typeset -g suggestion="$result"
+    return 0
+}
 
 "#
 }
@@ -797,6 +822,7 @@ pub fn get_zsh_hook(config: &config::Config) -> Result<String, Box<dyn std::erro
     script.push_str(zsh_hook_functions());
     script.push_str(zsh_search_widget_script());
     script.push_str(zsh_arrow_widgets_script());
+    script.push_str(zsh_autosuggest_strategy_script());
 
     if config.shell.enable_arrow_navigation {
         script.push_str(
@@ -895,9 +921,9 @@ mod tests {
             "search widget missing emulate -L zsh"
         );
         assert!(
-            hook.matches("emulate -L zsh").count() == 6,
-            "expected emulate -L zsh in all 4 widgets (search, up, down, toggle-agents) \
-             and both hooks (preexec, precmd)"
+            hook.matches("emulate -L zsh").count() == 7,
+            "expected emulate -L zsh in all 4 widgets (search, up, down, toggle-agents), \
+             both hooks (preexec, precmd) and the autosuggest strategy"
         );
         // Widgets must use LBUFFER/RBUFFER (not BUFFER/CURSOR) for buffer placement
         assert!(hook.contains("LBUFFER=\"$selected\""));
