@@ -1095,14 +1095,8 @@ fn build_alias_map(repo: &Repository, programs: &[&str]) -> HashMap<String, Stri
 /// Run a single shell invocation to detect which programs are shell aliases
 /// and resolve them to their underlying program name.
 fn detect_shell_aliases(programs: &[&str]) -> Option<HashMap<String, String>> {
+    let script = type_probe_script(programs)?;
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-
-    // Build a single command: type prog1; type prog2; ...
-    let type_cmds: Vec<String> = programs
-        .iter()
-        .map(|p| format!("type {p} 2>/dev/null"))
-        .collect();
-    let script = type_cmds.join("; ");
 
     let mut cmd = std::process::Command::new(&shell);
     cmd.args(["-ic", &script]);
@@ -1112,6 +1106,34 @@ fn detect_shell_aliases(programs: &[&str]) -> Option<HashMap<String, String>> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     Some(parse_type_output(&stdout))
+}
+
+/// Build the single `type 'prog1'; type 'prog2'; ...` script that
+/// [`detect_shell_aliases`] runs.
+///
+/// The names come from the first word of recorded history, which is
+/// attacker-influenced text (a pasted `ls;touch${IFS}/tmp/x` is one "word"),
+/// and the script runs in an interactive shell. Only names made of
+/// `[A-Za-z0-9_.+-]` are probed — no alias worth resolving needs more — and
+/// each is single-quoted as well, so nothing in a name is ever interpreted.
+fn type_probe_script(programs: &[&str]) -> Option<String> {
+    let type_cmds: Vec<String> = programs
+        .iter()
+        .filter(|p| is_probeable_program_name(p))
+        .map(|p| format!("type '{p}' 2>/dev/null"))
+        .collect();
+    if type_cmds.is_empty() {
+        return None;
+    }
+    Some(type_cmds.join("; "))
+}
+
+/// Whether `name` matches `^[A-Za-z0-9_.+-]+$`.
+fn is_probeable_program_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'+' | b'-'))
 }
 
 /// Put a spawned interactive shell into its own session so it has no
@@ -1731,6 +1753,38 @@ mod tests {
         let map = parse_type_output(output);
         assert_eq!(map.len(), 1);
         assert_eq!(map.get("gst").unwrap(), "git");
+    }
+
+    #[test]
+    fn type_probe_script_quotes_plain_program_names() {
+        let script = type_probe_script(&["git", "gst", "g++", "docker-compose", "py3.12"]).unwrap();
+        assert_eq!(
+            script,
+            "type 'git' 2>/dev/null; type 'gst' 2>/dev/null; type 'g++' 2>/dev/null; \
+             type 'docker-compose' 2>/dev/null; type 'py3.12' 2>/dev/null"
+        );
+    }
+
+    #[test]
+    fn type_probe_script_never_embeds_shell_metacharacters() {
+        let hostile = [
+            "ls;touch${IFS}/tmp/x",
+            "$(touch /tmp/x)",
+            "`id`",
+            "a|b",
+            "x'y",
+            "a&&b",
+            "a b",
+            "",
+        ];
+        for name in hostile {
+            let script = type_probe_script(&["git", name]).unwrap();
+            assert_eq!(
+                script, "type 'git' 2>/dev/null",
+                "{name:?} leaked into {script:?}"
+            );
+        }
+        assert!(type_probe_script(&["ls;touch${IFS}/tmp/x"]).is_none());
     }
 
     #[test]
