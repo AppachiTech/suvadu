@@ -450,8 +450,8 @@ const fn is_ordinary_invisible(c: char) -> bool {
 /// Whether `c` has to be escaped to be seen: anything that is not drawn as
 /// itself.
 // Not `const`: `char::is_control` became callable in a const fn only after
-// Rust 1.96, and `cargo install` must keep building on older toolchains.
-#[allow(clippy::missing_const_for_fn)]
+// Rust 1.96, and `cargo install` must keep building back to the declared
+// `rust-version` (1.95), which also keeps clippy from suggesting it.
 fn needs_escape(c: char) -> bool {
     c.is_control() || (c.is_whitespace() && c != ' ') || is_invisible(c)
 }
