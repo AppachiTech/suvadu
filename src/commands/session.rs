@@ -82,9 +82,12 @@ pub fn handle_session(
             // Esc/q on the picker itself (no selection) is the only way out.
             // RAII guard ensures terminal is restored even on panic
             let mut guard = util::TerminalGuard::new()?;
+            // One picker for the whole visit, so coming back from a
+            // timeline keeps the query, filters, page and selection.
+            let mut picker = session_ui::SessionPicker::new(sessions);
 
             let result = loop {
-                let selected = session_ui::run_session_picker(guard.terminal(), sessions.clone());
+                let selected = session_ui::run_session_picker(guard.terminal(), &mut picker);
                 match selected {
                     Ok(Some(sid)) => {
                         match open_session_timeline_tui(guard.terminal(), &repo, &sid) {

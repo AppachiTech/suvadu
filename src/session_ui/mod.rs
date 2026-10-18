@@ -2,7 +2,7 @@ mod picker;
 mod session_data;
 pub mod timeline;
 
-pub use picker::run_session_picker;
+pub use picker::{run_session_picker, SessionPicker};
 pub use session_data::{build_ai_session_data, AiSessionData};
 pub use timeline::{run_ai_session_timeline, run_session_timeline};
 

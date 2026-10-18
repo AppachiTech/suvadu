@@ -29,7 +29,7 @@ enum PickerAction {
 const NUM_FILTER_FIELDS: usize = 3;
 const PAGE_SIZE: usize = 50;
 
-#[derive(Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum KindFilter {
     #[default]
     All,
@@ -894,20 +894,47 @@ impl PickerApp {
     }
 }
 
+/// The session picker's state. The caller keeps it across trips into a
+/// session's timeline, so the query, filters, page and selection are where
+/// they were left on coming back.
+pub struct SessionPicker {
+    app: PickerApp,
+}
+
+impl SessionPicker {
+    pub fn new(sessions: Vec<SessionSummary>) -> Self {
+        let mut app = PickerApp::new(sessions);
+        app.leave_label = crate::home::runner::leave_label();
+        Self { app }
+    }
+}
+
+/// Run the picker until a session is chosen (`Some(id)`) or it is left.
 pub fn run_session_picker<B: Backend>(
     terminal: &mut Terminal<B>,
-    sessions: Vec<SessionSummary>,
+    picker: &mut SessionPicker,
 ) -> io::Result<Option<String>>
 where
     io::Error: From<B::Error>,
 {
-    let mut app = PickerApp::new(sessions);
-    app.leave_label = crate::home::runner::leave_label();
+    run_picker_loop(terminal, picker, event::read)
+}
 
+/// The picker's event loop, reading keys from `read_event`. Generic over
+/// the error so a test terminal, which cannot fail, can drive it too.
+fn run_picker_loop<B: Backend, E>(
+    terminal: &mut Terminal<B>,
+    picker: &mut SessionPicker,
+    mut read_event: impl FnMut() -> io::Result<Event>,
+) -> Result<Option<String>, E>
+where
+    E: From<B::Error> + From<io::Error>,
+{
+    let app = &mut picker.app;
     loop {
         terminal.draw(|f| app.render_picker(f))?;
 
-        if let Event::Key(key) = event::read()? {
+        if let Event::Key(key) = read_event()? {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
@@ -982,6 +1009,62 @@ mod tests {
         assert!(app.filter.popup_open);
         assert!(matches!(app.handle_key(ctrl_c()), PickerAction::Exit(None)));
         assert!(app.filter.tag_input.is_empty(), "no literal 'c' typed");
+    }
+
+    /// Feeds `keys` to the picker's event loop on a test terminal.
+    fn run_with_keys(
+        picker: &mut SessionPicker,
+        keys: Vec<crossterm::event::KeyEvent>,
+    ) -> Option<String> {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+        let mut keys = keys.into_iter();
+        run_picker_loop::<_, Box<dyn std::error::Error>>(&mut terminal, picker, || {
+            Ok(Event::Key(
+                keys.next().expect("the picker asked for another key"),
+            ))
+        })
+        .unwrap()
+    }
+
+    /// Going into a session's timeline and back reuses the same picker, so
+    /// the query, filters, page and selection are where they were left.
+    #[test]
+    fn a_reused_picker_keeps_its_query_filters_page_and_selection() {
+        let mut sessions: Vec<SessionSummary> = (0..60)
+            .map(|index| make_summary(&format!("work-{index:02}"), 1))
+            .collect();
+        let mut ai = make_summary("work-ai", 1);
+        ai.kind = crate::models::SessionKind::Ai;
+        sessions.push(ai);
+        sessions.push(make_summary("other", 1));
+        let mut picker = SessionPicker::new(sessions);
+
+        let ctrl = |c| crossterm::event::KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let key = crossterm::event::KeyEvent::from;
+        let mut first = "work"
+            .chars()
+            .map(|c| key(KeyCode::Char(c)))
+            .collect::<Vec<_>>();
+        first.extend([
+            ctrl('t'), // humans only
+            key(KeyCode::Right),
+            key(KeyCode::Down),
+            key(KeyCode::Enter),
+        ]);
+        assert_eq!(
+            run_with_keys(&mut picker, first).as_deref(),
+            Some("work-51")
+        );
+
+        // Back from the timeline: Enter picks the same row again.
+        assert_eq!(
+            run_with_keys(&mut picker, vec![key(KeyCode::Enter)]).as_deref(),
+            Some("work-51")
+        );
+        assert_eq!(picker.app.filter.search, "work");
+        assert_eq!(picker.app.filter.kind, KindFilter::Human);
+        assert_eq!(picker.app.page, 2);
     }
 
     fn make_summary_tagged(id: &str, tag: &str) -> SessionSummary {
