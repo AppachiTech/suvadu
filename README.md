@@ -15,7 +15,7 @@
 
 **Suvadu** replaces your shell history with a SQLite-backed store. Every command gets structured context — exit code, duration, directory, executor, session. AI agents can query it via MCP. 100% local.
 
-- **Measured, not asserted** — at 100,000 entries on one M4 Max: **151 µs** p95 to record a command, **10–44 ms** p95 for a judged search that scans the whole history. One machine, one run — the harness, the corpus and what is still unmeasured are in [BENCHMARKS.md](BENCHMARKS.md)
+- **Measured, not asserted** — at 100,000 entries on one M4 Max: **219 µs** p95 to record a command, **0.05–22 ms** p95 for a judged search over the whole history. One machine, one run — the harness, the corpus and what is still unmeasured are in [BENCHMARKS.md](BENCHMARKS.md)
 - **AI agent tracking** — full session capture for Claude Code, Codex and OpenCode; commands and prompts for Cursor and pi.dev; command tagging alone for Antigravity, Windsurf, Aider, Continue and Copilot ([what each tier means](#what-each-agent-actually-gives-you))
 - **Prompt Explorer** — trace every recorded command back to the prompt that triggered it
 - **MCP Server** — **21 read-only tools, 8 resources and 6 prompts, all read-only by default.** The two write tools stay off until you turn their opt-in on. Agent session discovery, project context, failure learning, risk assessment, a shared skills library. Configurable via `suv settings`
