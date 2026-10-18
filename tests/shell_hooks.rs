@@ -91,6 +91,9 @@ impl Sandbox {
         );
         let mut cmd = Command::new(shell_bin);
         self.isolate(&mut cmd);
+        // A fixed session ID, so the hook doesn't depend on `uuidgen` being
+        // installed on the machine running the tests.
+        cmd.env("SUVADU_SESSION_ID", "shell-hook-test");
         match kind {
             ShellKind::Bash => {
                 let rc_path = self.path("bashrc");
