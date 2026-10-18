@@ -283,6 +283,9 @@ struct PromptExplorerApp {
     executor_names: Vec<String>,
     cwd_filter: Option<String>,
     search: String,
+    /// The list's quit hint: "Back" when opened from the dashboard, "Home"
+    /// when opened from Suvadu Home — wherever Esc goes.
+    leave_label: &'static str,
 }
 
 impl PromptExplorerApp {
@@ -312,6 +315,7 @@ impl PromptExplorerApp {
             executor_names,
             cwd_filter: None,
             search: String::new(),
+            leave_label: "Quit",
         }
     }
 
@@ -973,7 +977,7 @@ impl PromptExplorerApp {
 
         let mut spans = vec![
             Span::styled(" Esc ", badge_key),
-            Span::styled(" Quit  ", badge_label),
+            Span::styled(format!(" {}  ", self.leave_label), badge_label),
             Span::styled(" ↑↓ ", badge_key),
             Span::styled(" Navigate  ", badge_label),
             Span::styled(" ←→ ", badge_key),
@@ -1383,23 +1387,33 @@ impl PromptExplorerApp {
 
 // ── Public entry point ──────────────────────────────────────
 
+/// The filters Prompts opens with.
+#[derive(Clone, Copy)]
+pub struct ExplorerScope<'a> {
+    pub after_ms: Option<i64>,
+    pub executor: Option<&'a str>,
+    pub cwd: Option<&'a str>,
+}
+
+/// Run Prompts until it is closed. `leave_label` names where Esc on the
+/// list goes ("Quit", "Home", or "Back" to the dashboard).
 pub fn run_prompt_explorer<B: Backend>(
     terminal: &mut Terminal<B>,
     entries: &[Entry],
     repo: Option<&Repository>,
-    after_ms: Option<i64>,
-    executor: Option<&str>,
-    cwd: Option<&str>,
+    scope: ExplorerScope<'_>,
+    leave_label: &'static str,
 ) -> io::Result<ScreenExit>
 where
     io::Error: From<B::Error>,
 {
     let mut app = PromptExplorerApp::new(entries);
-    app.period = Period::from_after_ms(after_ms);
-    app.cwd_filter = cwd.map(String::from);
-    if let Some(name) = executor {
+    app.period = Period::from_after_ms(scope.after_ms);
+    app.cwd_filter = scope.cwd.map(String::from);
+    if let Some(name) = scope.executor {
         app.executor_filter = app.executor_names.iter().position(|n| n == name);
     }
+    app.leave_label = leave_label;
 
     run_prompt_app(terminal, app, repo)
 }
@@ -1840,6 +1854,30 @@ mod tests {
         let esc = crossterm::event::KeyEvent::from(KeyCode::Esc);
         let action = app.handle_input(esc, None);
         assert!(matches!(action, PromptAction::Quit));
+    }
+
+    #[test]
+    fn the_list_quit_hint_names_where_esc_goes() {
+        let entries = vec![make_entry_with_prompt(
+            "s1",
+            "ls",
+            "prompt",
+            "cc",
+            Some(0),
+            1000,
+            10,
+        )];
+        let mut app = PromptExplorerApp::new(&entries);
+        let screen = crate::test_utils::render_to_text(160, 40, |f| app.render(f));
+        assert!(screen.contains("Esc  Quit"), "{screen}");
+
+        // Opened from Home, or from the dashboard.
+        for label in ["Home", "Back"] {
+            app.leave_label = label;
+            let screen = crate::test_utils::render_to_text(160, 40, |f| app.render(f));
+            assert!(screen.contains(&format!("Esc  {label}")), "{screen}");
+            assert!(!screen.contains("Quit"), "{screen}");
+        }
     }
 
     #[test]

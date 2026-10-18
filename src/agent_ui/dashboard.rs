@@ -61,6 +61,9 @@ struct AgentApp {
 
     home: String,
     status_message: Option<(String, std::time::Instant)>,
+    /// The quit hint's label: "Home" when Suvadu Home opened this screen,
+    /// since leaving returns there.
+    leave_label: &'static str,
 }
 
 impl AgentApp {
@@ -101,6 +104,7 @@ impl AgentApp {
             detail_open: true,
             home,
             status_message: None,
+            leave_label: "Quit",
         };
         if !app.visible.is_empty() {
             app.pager.state.select(Some(0));
@@ -843,7 +847,7 @@ impl AgentApp {
 
         let mut spans = vec![
             Span::styled(" Esc ", badge_key),
-            Span::styled(" Quit  ", badge_label),
+            Span::styled(format!(" {}  ", self.leave_label), badge_label),
             Span::styled(" ^F ", badge_key),
             Span::styled(" Period  ", badge_label),
             Span::styled(" ^A ", badge_key),
@@ -898,6 +902,7 @@ where
     io::Error: From<B::Error>,
 {
     let mut app = AgentApp::new(repo, initial_after_ms, executor, cwd);
+    app.leave_label = crate::home::runner::leave_label();
 
     loop {
         terminal.draw(|f| app.render(f))?;
@@ -918,13 +923,17 @@ where
             match app.handle_input(key, repo) {
                 DashboardAction::Quit => return Ok(()),
                 DashboardAction::OpenPrompts => {
+                    // Esc in Prompts comes back here.
                     let exit = super::prompts::run_prompt_explorer(
                         terminal,
                         &app.entries,
                         Some(repo),
-                        app.period.after_ms(),
-                        app.cli_executor.as_deref(),
-                        app.cwd_filter.as_deref(),
+                        super::prompts::ExplorerScope {
+                            after_ms: app.period.after_ms(),
+                            executor: app.cli_executor.as_deref(),
+                            cwd: app.cwd_filter.as_deref(),
+                        },
+                        "Back",
                     )?;
                     // Ctrl+C in Prompts closes the dashboard too.
                     if exit == crate::util::ScreenExit::Interrupted {
@@ -981,6 +990,7 @@ mod tests {
             detail_open: true,
             home: "/home/test".into(),
             status_message: None,
+            leave_label: "Quit",
         };
         if !app.visible.is_empty() {
             app.pager.state.select(Some(0));
@@ -1153,6 +1163,18 @@ mod tests {
             app.handle_input(esc, &repo),
             DashboardAction::Quit
         ));
+    }
+
+    #[test]
+    fn opened_from_home_the_quit_hint_says_home() {
+        let mut app = make_app(vec![make_entry("ls", Some("claude"), "/tmp")]);
+        let screen = crate::test_utils::render_to_text(160, 40, |f| app.render(f));
+        assert!(screen.contains("Esc  Quit"), "{screen}");
+
+        app.leave_label = "Home";
+        let screen = crate::test_utils::render_to_text(160, 40, |f| app.render(f));
+        assert!(screen.contains("Esc  Home"), "{screen}");
+        assert!(!screen.contains("Quit"), "{screen}");
     }
 
     #[test]

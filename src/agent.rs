@@ -508,9 +508,12 @@ fn handle_agent_prompts(
         guard.terminal(),
         &entries,
         Some(&repo),
-        after_ms,
-        executor,
-        cwd_filter.as_deref(),
+        agent_ui::ExplorerScope {
+            after_ms,
+            executor,
+            cwd: cwd_filter.as_deref(),
+        },
+        crate::home::runner::leave_label(),
     );
     drop(guard);
 

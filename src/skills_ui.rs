@@ -298,6 +298,9 @@ pub struct SkillsApp {
     mode: Mode,
     pending: Vec<Skill>,
     pending_state: ListState,
+    /// The quit hint's label: "Home" when Suvadu Home opened this screen,
+    /// since leaving returns there.
+    leave_label: &'static str,
 }
 
 impl SkillsApp {
@@ -317,6 +320,7 @@ impl SkillsApp {
             mode: Mode::Browse,
             pending: Vec::new(),
             pending_state: ListState::default(),
+            leave_label: "Quit",
         })
     }
 
@@ -341,6 +345,7 @@ pub fn run(repo: &Repository) -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = SkillsApp::load(repo)?;
+    app.leave_label = crate::home::runner::leave_label();
 
     loop {
         terminal.draw(|f| render(f, &mut app))?;
@@ -883,7 +888,7 @@ fn render_browse_footer(
     let badge_label = Style::default().fg(t.text_secondary);
     let mut spans = vec![
         Span::styled(" Esc ", badge_key),
-        Span::styled(" Quit  ", badge_label),
+        Span::styled(format!(" {}  ", app.leave_label), badge_label),
         Span::styled(" ↑↓ ", badge_key),
         Span::styled(" Navigate  ", badge_label),
         Span::styled(" Enter ", badge_key),
@@ -1112,6 +1117,19 @@ mod tests {
             status: SKILL_STATUS_ACTIVE.to_string(),
         })
         .unwrap();
+    }
+
+    #[test]
+    fn opened_from_home_the_quit_hint_says_home() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = SkillsApp::load(&repo).unwrap();
+        let screen = crate::test_utils::render_to_text(160, 30, |f| render(f, &mut app));
+        assert!(screen.contains("Esc  Quit"), "{screen}");
+
+        app.leave_label = "Home";
+        let screen = crate::test_utils::render_to_text(160, 30, |f| render(f, &mut app));
+        assert!(screen.contains("Esc  Home"), "{screen}");
+        assert!(!screen.contains("Quit"), "{screen}");
     }
 
     #[test]

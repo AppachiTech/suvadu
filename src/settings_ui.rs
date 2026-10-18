@@ -156,6 +156,9 @@ struct AppState {
     /// Set when an MCP setting changed, so the save message can say that a
     /// running MCP server won't see it until the client restarts.
     mcp_dirty: bool,
+    /// The quit hint's label: "Home" when Suvadu Home opened this screen,
+    /// since leaving returns there.
+    leave_label: &'static str,
 }
 
 impl AppState {
@@ -180,6 +183,7 @@ impl AppState {
             save_status: None,
             dirty: false,
             mcp_dirty: false,
+            leave_label: "Quit",
         }
     }
 
@@ -882,6 +886,7 @@ where
     io::Error: From<B::Error>,
 {
     let mut app = AppState::new(config);
+    app.leave_label = crate::home::runner::leave_label();
 
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
@@ -947,7 +952,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut AppState) {
     let mut help_badges = match app.input_mode {
         InputMode::Normal => vec![
             Span::styled(" q/Esc ", badge_key),
-            Span::styled(" Quit  ", badge_label),
+            Span::styled(format!(" {}  ", app.leave_label), badge_label),
             Span::styled(" ^S ", badge_key),
             Span::styled(" Save  ", badge_label),
             Span::styled(" ↑/↓ ", badge_key),
@@ -3741,6 +3746,18 @@ mod tests {
         assert!(app.dirty);
         app.handle_input(KeyEvent::from(KeyCode::Enter));
         assert!(!app.config.search.compact);
+    }
+
+    #[test]
+    fn opened_from_home_the_quit_hint_says_home() {
+        let mut app = AppState::new(Config::default());
+        let screen = crate::test_utils::render_to_text(100, 30, |f| ui(f, &mut app));
+        assert!(screen.contains("q/Esc  Quit"), "{screen}");
+
+        app.leave_label = "Home";
+        let screen = crate::test_utils::render_to_text(100, 30, |f| ui(f, &mut app));
+        assert!(screen.contains("q/Esc  Home"), "{screen}");
+        assert!(!screen.contains("Quit"), "{screen}");
     }
 
     #[test]

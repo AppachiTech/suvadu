@@ -75,6 +75,9 @@ struct PickerApp {
     /// One-based page within the filtered session list.
     page: usize,
     filter: PickerFilter,
+    /// The quit hint's label: "Home" when Suvadu Home opened this screen,
+    /// since leaving returns there.
+    leave_label: &'static str,
 }
 
 fn compact_model(summary: &SessionSummary) -> String {
@@ -121,6 +124,7 @@ impl PickerApp {
             table_state,
             page: 1,
             filter: PickerFilter::default(),
+            leave_label: "Quit",
         }
     }
 
@@ -621,7 +625,7 @@ impl PickerApp {
 
         let mut footer_spans = vec![
             Span::styled(" Esc ", badge_key),
-            Span::styled(" Quit  ", badge_label),
+            Span::styled(format!(" {}  ", self.leave_label), badge_label),
             Span::styled(" \u{2191}\u{2193} ", badge_key),
             Span::styled(" Navigate  ", badge_label),
             Span::styled(" Enter ", badge_key),
@@ -898,6 +902,7 @@ where
     io::Error: From<B::Error>,
 {
     let mut app = PickerApp::new(sessions);
+    app.leave_label = crate::home::runner::leave_label();
 
     loop {
         terminal.draw(|f| app.render_picker(f))?;
@@ -946,6 +951,18 @@ mod tests {
 
     fn ctrl_c() -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn opened_from_home_the_quit_hint_says_home() {
+        let mut app = PickerApp::new(vec![make_summary("s1", 3)]);
+        let screen = crate::test_utils::render_to_text(140, 30, |f| app.render_picker(f));
+        assert!(screen.contains("Esc  Quit"), "{screen}");
+
+        app.leave_label = "Home";
+        let screen = crate::test_utils::render_to_text(140, 30, |f| app.render_picker(f));
+        assert!(screen.contains("Esc  Home"), "{screen}");
+        assert!(!screen.contains("Quit"), "{screen}");
     }
 
     #[test]

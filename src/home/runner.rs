@@ -28,6 +28,17 @@ pub const CAPTURE_LIMIT: usize = 1024 * 1024;
 /// screen would cover. The shell's own widgets never set it.
 pub const LAUNCHED_BY_HOME: &str = "SUVADU_LAUNCHED_BY_HOME";
 
+/// What a screen calls leaving it in its footer: "Home" when Home opened
+/// it, since closing it returns there, otherwise "Quit". Read once by each
+/// screen's entry point, so drawing never depends on the environment.
+pub fn leave_label() -> &'static str {
+    if std::env::var_os(LAUNCHED_BY_HOME).is_some() {
+        "Home"
+    } else {
+        "Quit"
+    }
+}
+
 /// How long a report may take before it is stopped.
 pub const REPORT_TIMEOUT: Duration = Duration::from_secs(5);
 

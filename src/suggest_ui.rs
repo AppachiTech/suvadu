@@ -24,6 +24,9 @@ struct AppState {
     input_mode: InputMode,
     edit_buffer: String,
     skipped: Vec<String>,
+    /// The quit hint's label: "Home" when Suvadu Home opened this screen,
+    /// since leaving returns there.
+    leave_label: &'static str,
 }
 
 impl AppState {
@@ -39,6 +42,7 @@ impl AppState {
             input_mode: InputMode::Normal,
             edit_buffer: String::new(),
             skipped,
+            leave_label: "Quit",
         }
     }
 
@@ -141,6 +145,7 @@ where
     io::Error: From<B::Error>,
 {
     let mut app = AppState::new(suggestions, skipped);
+    app.leave_label = crate::home::runner::leave_label();
 
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
@@ -340,7 +345,7 @@ fn render_suggest_footer(
     } else {
         vec![
             Span::styled(" q/Esc ", badge_key),
-            Span::styled(" Quit  ", badge_label),
+            Span::styled(format!(" {}  ", app.leave_label), badge_label),
             Span::styled(" \u{2191}\u{2193} ", badge_key),
             Span::styled(" Navigate  ", badge_label),
             Span::styled(" Space ", badge_key),
@@ -463,6 +468,18 @@ mod tests {
         let mut app = AppState::new(make_suggestions(1), vec![]);
         let result = app.handle_input(KeyEvent::from(KeyCode::Esc));
         assert_eq!(result, Some(false));
+    }
+
+    #[test]
+    fn opened_from_home_the_quit_hint_says_home() {
+        let mut app = AppState::new(make_suggestions(2), vec![]);
+        let screen = crate::test_utils::render_to_text(160, 20, |f| ui(f, &mut app));
+        assert!(screen.contains("q/Esc  Quit"), "{screen}");
+
+        app.leave_label = "Home";
+        let screen = crate::test_utils::render_to_text(160, 20, |f| ui(f, &mut app));
+        assert!(screen.contains("q/Esc  Home"), "{screen}");
+        assert!(!screen.contains("Quit"), "{screen}");
     }
 
     #[test]

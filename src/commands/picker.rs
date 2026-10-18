@@ -50,6 +50,9 @@ struct PickerApp {
     list_state: ListState,
     mode: Mode,
     status: Option<(String, Instant)>,
+    /// The quit hint's label: "Home" when Suvadu Home opened this screen,
+    /// since leaving returns there.
+    leave_label: &'static str,
 }
 
 impl PickerApp {
@@ -61,6 +64,7 @@ impl PickerApp {
             list_state: ListState::default(),
             mode: Mode::Browse,
             status: None,
+            leave_label: "Quit",
         };
         if !app.filtered.is_empty() {
             app.list_state.select(Some(0));
@@ -223,6 +227,7 @@ pub fn pick_bookmark(repo: &Repository) -> Result<Option<String>, Box<dyn std::e
 
     let bookmarks = repo.list_bookmarks()?;
     let mut app = PickerApp::new(bookmarks);
+    app.leave_label = crate::home::runner::leave_label();
 
     let result = loop {
         terminal.draw(|f| render(f, &mut app))?;
@@ -507,7 +512,7 @@ fn render_footer(f: &mut ratatui::Frame, app: &PickerApp, area: Rect, t: &crate:
         ],
         Mode::Browse => vec![
             Span::styled(" Esc ", badge_key),
-            Span::styled(" Quit  ", badge_label),
+            Span::styled(format!(" {}  ", app.leave_label), badge_label),
             Span::styled(" ↑↓ ", badge_key),
             Span::styled(" Navigate  ", badge_label),
             Span::styled(" Enter ", badge_key),
@@ -682,6 +687,18 @@ mod tests {
 
     fn ctrl_c() -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn opened_from_home_the_quit_hint_says_home() {
+        let mut app = PickerApp::new(vec![make_bookmark(1, "ls -la", None)]);
+        let screen = crate::test_utils::render_to_text(120, 20, |f| render(f, &mut app));
+        assert!(screen.contains("Esc  Quit"), "{screen}");
+
+        app.leave_label = "Home";
+        let screen = crate::test_utils::render_to_text(120, 20, |f| render(f, &mut app));
+        assert!(screen.contains("Esc  Home"), "{screen}");
+        assert!(!screen.contains("Quit"), "{screen}");
     }
 
     #[test]

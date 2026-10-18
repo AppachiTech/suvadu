@@ -60,6 +60,9 @@ struct AgentStatsApp {
     risk_selected: usize, // Which high risk row
     cli_executor: Option<String>,
     status_message: Option<(String, std::time::Instant)>,
+    /// The quit hint's label: "Home" when Suvadu Home opened this screen,
+    /// since leaving returns there.
+    leave_label: &'static str,
 }
 
 impl AgentStatsApp {
@@ -78,6 +81,7 @@ impl AgentStatsApp {
             risk_selected: 0,
             cli_executor: executor.map(String::from),
             status_message: None,
+            leave_label: "Quit",
         }
     }
 
@@ -299,7 +303,7 @@ impl AgentStatsApp {
         };
         let mut footer = vec![
             Span::styled(" q/Esc ", badge_key),
-            Span::styled(" Quit  ", badge_label),
+            Span::styled(format!(" {}  ", self.leave_label), badge_label),
             Span::styled(" 1-4 ", badge_key),
             Span::styled(" Period  ", badge_label),
             Span::styled(" Tab ", badge_key),
@@ -719,6 +723,7 @@ where
     io::Error: From<B::Error>,
 {
     let mut app = AgentStatsApp::new(repo, days, executor);
+    app.leave_label = crate::home::runner::leave_label();
 
     loop {
         terminal.draw(|f| app.render(f))?;
@@ -755,6 +760,7 @@ mod tests {
             risk_selected: 0,
             cli_executor: None,
             status_message: None,
+            leave_label: "Quit",
         }
     }
 
@@ -779,6 +785,18 @@ mod tests {
             top_dirs: vec![("/tmp".into(), total)],
             high_risk_cmds,
         }
+    }
+
+    #[test]
+    fn opened_from_home_the_quit_hint_says_home() {
+        let mut app = make_stats_app(vec![make_agent_stat("claude", 10, 3)]);
+        let screen = crate::test_utils::render_to_text(160, 40, |f| app.render(f));
+        assert!(screen.contains("q/Esc  Quit"), "{screen}");
+
+        app.leave_label = "Home";
+        let screen = crate::test_utils::render_to_text(160, 40, |f| app.render(f));
+        assert!(screen.contains("q/Esc  Home"), "{screen}");
+        assert!(!screen.contains("Quit"), "{screen}");
     }
 
     #[test]

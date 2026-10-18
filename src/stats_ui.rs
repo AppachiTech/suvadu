@@ -103,6 +103,9 @@ struct StatsApp {
     top_n: usize,
     tag_id: Option<i64>,
     tag_name: Option<String>,
+    /// The quit hint's label: "Home" when Suvadu Home opened this screen,
+    /// since leaving returns there.
+    leave_label: &'static str,
 }
 
 impl StatsApp {
@@ -155,6 +158,7 @@ impl StatsApp {
             top_n,
             tag_id,
             tag_name,
+            leave_label: "Quit",
         };
 
         if !app.stats.top_commands.is_empty() {
@@ -919,7 +923,7 @@ impl StatsApp {
 
         let spans = vec![
             Span::styled(" q/Esc ", badge_key),
-            Span::styled(" Quit  ", badge_label),
+            Span::styled(format!(" {}  ", self.leave_label), badge_label),
             Span::styled(" 1 ", badge_key),
             Span::styled(" 7d  ", badge_label),
             Span::styled(" 2 ", badge_key),
@@ -983,6 +987,7 @@ where
         tag_name.map(String::from),
         human_only,
     );
+    app.leave_label = crate::home::runner::leave_label();
 
     loop {
         terminal.draw(|f| app.render(f))?;
@@ -1495,6 +1500,19 @@ mod tests {
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
         );
         assert!(app.handle_input(copy, &repo));
+    }
+
+    #[test]
+    fn opened_from_home_the_quit_hint_says_home() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = StatsApp::new(&repo, Period::Days7, 10, None, None, false);
+        let screen = crate::test_utils::render_to_text(140, 40, |f| app.render(f));
+        assert!(screen.contains("q/Esc  Quit"), "{screen}");
+
+        app.leave_label = "Home";
+        let screen = crate::test_utils::render_to_text(140, 40, |f| app.render(f));
+        assert!(screen.contains("q/Esc  Home"), "{screen}");
+        assert!(!screen.contains("Quit"), "{screen}");
     }
 
     #[test]
