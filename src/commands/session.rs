@@ -216,7 +216,11 @@ fn open_session_timeline(
     if repo.has_native_ai_session(session_id)? {
         let data = load_ai_session_data(repo, summary)?;
         let mut guard = util::TerminalGuard::new()?;
-        let result = session_ui::run_ai_session_timeline(guard.terminal(), data);
+        let result = session_ui::run_ai_session_timeline(
+            guard.terminal(),
+            data,
+            crate::home::runner::leave_label(),
+        );
         guard.terminal().show_cursor()?;
         return result.map(|_| ()).map_err(Into::into);
     }
@@ -239,8 +243,14 @@ fn open_session_timeline(
     // RAII guard ensures terminal is restored even on panic
     let mut guard = util::TerminalGuard::new()?;
 
-    let result =
-        session_ui::run_session_timeline(guard.terminal(), session, tag_name, entries, noted_ids);
+    let result = session_ui::run_session_timeline(
+        guard.terminal(),
+        session,
+        tag_name,
+        entries,
+        noted_ids,
+        crate::home::runner::leave_label(),
+    );
     guard.terminal().show_cursor()?;
 
     result.map(|_| ()).map_err(Into::into)
@@ -257,7 +267,8 @@ where
     let summary = unified_summary(repo, session_id)?;
     if repo.has_native_ai_session(session_id)? {
         let data = load_ai_session_data(repo, summary)?;
-        return Ok(session_ui::run_ai_session_timeline(terminal, data)?);
+        // q/Esc goes back to the picker.
+        return Ok(session_ui::run_ai_session_timeline(terminal, data, "Back")?);
     }
     let session = repo
         .get_session(session_id)?
@@ -272,7 +283,7 @@ where
     }
 
     Ok(session_ui::run_session_timeline(
-        terminal, session, tag_name, entries, noted_ids,
+        terminal, session, tag_name, entries, noted_ids, "Back",
     )?)
 }
 

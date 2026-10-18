@@ -323,6 +323,9 @@ struct SessionApp {
     detail_open: bool,
     home: String,
     status_message: Option<(String, std::time::Instant)>,
+    /// The quit hint's label: "Back" when the session picker or Prompts
+    /// opened this timeline, "Home" when Suvadu Home did, else "Quit".
+    leave_label: &'static str,
 }
 
 impl SessionApp {
@@ -345,6 +348,7 @@ impl SessionApp {
             detail_open: true,
             home: dirs_home(),
             status_message: None,
+            leave_label: "Quit",
         };
         if !app.timeline.is_empty() {
             app.table_state.select(Some(0));
@@ -855,7 +859,7 @@ impl SessionApp {
 
         let mut spans = vec![
             Span::styled(" q/Esc ", badge_key),
-            Span::styled(" Quit  ", badge_label),
+            Span::styled(format!(" {}  ", self.leave_label), badge_label),
             Span::styled(" ↑↓ ", badge_key),
             Span::styled(" Navigate  ", badge_label),
             Span::styled(" ←→ ", badge_key),
@@ -1024,6 +1028,9 @@ struct AiSessionApp {
     /// The command whose prompt detail Enter asked for, opened by the run
     /// loop (which owns the terminal) and then cleared.
     prompt_request: Option<Entry>,
+    /// The quit hint's label: "Back" when the session picker or Prompts
+    /// opened this timeline, "Home" when Suvadu Home did, else "Quit".
+    leave_label: &'static str,
 }
 
 impl AiSessionApp {
@@ -1043,6 +1050,7 @@ impl AiSessionApp {
             summary_panel: None,
             text_panel: None,
             prompt_request: None,
+            leave_label: "Quit",
         }
     }
 
@@ -1528,7 +1536,7 @@ impl AiSessionApp {
         let label = Style::default().fg(t.text_secondary);
         let mut spans = vec![
             Span::styled(" q/Esc ", key),
-            Span::styled(" Back  ", label),
+            Span::styled(format!(" {}  ", self.leave_label), label),
             Span::styled(" ↑↓ ", key),
             Span::styled(" Navigate  ", label),
             Span::styled(" ←→ ", key),
@@ -1882,15 +1890,19 @@ fn summary_basis_note_line(
 }
 
 /// Run the AI session timeline until it is closed; Ctrl+C anywhere in it,
-/// a prompt detail it opened included, reports an interrupt.
+/// a prompt detail it opened included, reports an interrupt. `leave_label`
+/// names where q/Esc goes ("Quit", "Home", or "Back" to the screen that
+/// opened it).
 pub fn run_ai_session_timeline<B: Backend>(
     terminal: &mut Terminal<B>,
     data: AiSessionData,
+    leave_label: &'static str,
 ) -> io::Result<ScreenExit>
 where
     io::Error: From<B::Error>,
 {
     let mut app = AiSessionApp::new(data);
+    app.leave_label = leave_label;
     loop {
         terminal.draw(|frame| app.render(frame))?;
         let timeout = if app.status_message.is_some() {
@@ -1919,17 +1931,22 @@ where
     }
 }
 
+/// Run a shell session's timeline until it is closed. `leave_label` names
+/// where q/Esc goes ("Quit", "Home", or "Back" to the screen that opened
+/// it).
 pub fn run_session_timeline<B: Backend>(
     terminal: &mut Terminal<B>,
     session: Session,
     tag_name: Option<String>,
     entries: Vec<Entry>,
     noted_ids: HashSet<i64>,
+    leave_label: &'static str,
 ) -> io::Result<ScreenExit>
 where
     io::Error: From<B::Error>,
 {
     let mut app = SessionApp::new(session, tag_name, entries, noted_ids);
+    app.leave_label = leave_label;
 
     loop {
         terminal.draw(|f| app.render(f))?;
@@ -2377,6 +2394,38 @@ mod tests {
         assert!(app.handle_input(crossterm::event::KeyEvent::from(KeyCode::Enter)));
         assert!(app.take_prompt_request().is_none());
         assert!(app.summary_panel.is_some());
+    }
+
+    /// The quit hint names where q/Esc goes: back to the session picker or
+    /// Prompts that opened the timeline, to Home, or out of `suv`.
+    #[test]
+    fn the_session_timeline_quit_hint_names_where_esc_goes() {
+        let entries = vec![make_entry(1000, 2000)];
+        let mut app = SessionApp::new(make_session(), None, entries, HashSet::new());
+        let screen = crate::test_utils::render_to_text(200, 30, |f| app.render(f));
+        assert!(screen.contains("q/Esc  Quit"), "{screen}");
+
+        for label in ["Back", "Home"] {
+            app.leave_label = label;
+            let screen = crate::test_utils::render_to_text(200, 30, |f| app.render(f));
+            assert!(screen.contains(&format!("q/Esc  {label}")), "{screen}");
+            assert!(!screen.contains("Quit"), "{screen}");
+        }
+    }
+
+    #[test]
+    fn the_ai_timeline_quit_hint_names_where_esc_goes() {
+        let mut app = AiSessionApp::new(make_ai_data());
+        let screen = crate::test_utils::render_to_text(200, 30, |f| app.render(f));
+        assert!(screen.contains("q/Esc  Quit"), "{screen}");
+        assert!(!screen.contains("Back"), "{screen}");
+
+        for label in ["Back", "Home"] {
+            app.leave_label = label;
+            let screen = crate::test_utils::render_to_text(200, 30, |f| app.render(f));
+            assert!(screen.contains(&format!("q/Esc  {label}")), "{screen}");
+            assert!(!screen.contains("Quit"), "{screen}");
+        }
     }
 
     #[test]

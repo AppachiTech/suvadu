@@ -1501,7 +1501,8 @@ where
         return Ok(ScreenExit::Closed);
     }
 
-    session_ui::run_session_timeline(terminal, session, tag_name, entries, noted_ids)
+    // q/Esc goes back to Prompts.
+    session_ui::run_session_timeline(terminal, session, tag_name, entries, noted_ids, "Back")
 }
 
 // ── Tests ───────────────────────────────────────────────────
