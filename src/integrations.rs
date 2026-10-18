@@ -513,8 +513,12 @@ pub fn handle_hook_cursor_prompt() -> Result<(), Box<dyn std::error::Error>> {
 fn parse_exit_code_from_error(error: &str) -> Option<i32> {
     // Look for "status code N" or "exit code N" patterns
     let patterns = ["status code ", "exit code "];
+    // ASCII-only lowercasing keeps every byte offset the same as in `error`,
+    // so a position found here can be used to slice `error`. (Full Unicode
+    // lowercasing changes lengths: `İ` is 2 bytes, its lowercase 3.)
+    let lowered = error.to_ascii_lowercase();
     for pat in patterns {
-        if let Some(pos) = error.to_lowercase().find(pat) {
+        if let Some(pos) = lowered.find(pat) {
             let after = &error[pos + pat.len()..];
             let num_str: String = after.chars().take_while(char::is_ascii_digit).collect();
             if let Ok(code) = num_str.parse::<i32>() {
@@ -1945,6 +1949,22 @@ mod tests {
             parse_exit_code_from_error("Process terminated with exit code 2"),
             Some(2)
         );
+    }
+
+    /// Characters whose lowercase form has a different UTF-8 length (`İ` is
+    /// 2 bytes, its lowercase `i̇` is 3) must not throw off where the code
+    /// is read from.
+    #[test]
+    fn test_parse_exit_code_from_error_after_non_ascii_text() {
+        assert_eq!(
+            parse_exit_code_from_error("İstanbul: Command exited with non-zero status code 3"),
+            Some(3)
+        );
+        assert_eq!(
+            parse_exit_code_from_error("İİİİİİİİ Exit Code 42"),
+            Some(42)
+        );
+        assert_eq!(parse_exit_code_from_error("İ status code"), None);
     }
 
     #[test]
