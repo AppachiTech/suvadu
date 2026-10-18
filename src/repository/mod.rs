@@ -158,6 +158,17 @@ impl EntryQuery for SessionScoped<'_> {
     }
 }
 
+/// Any entry query narrowed to commands an AI agent ran
+/// (`executor_type = 'agent'`), so a caller grouping agent sessions reads
+/// only those rows instead of a prefix of everything.
+pub struct AgentCommands<Q: EntryQuery>(pub Q);
+
+impl<Q: EntryQuery> EntryQuery for AgentCommands<Q> {
+    fn entry_filter_builder(&self) -> FilterBuilder {
+        self.0.entry_filter_builder().with_agent_commands_only()
+    }
+}
+
 /// Any entry query plus the `fuzzy` mode's subsequence rule.
 ///
 /// Wrapping rather than adding a field to [`QueryFilter`] keeps the rule where
@@ -467,6 +478,12 @@ impl FilterBuilder {
                 "(e.executor_type IS NULL OR e.executor_type NOT IN ({list}))"
             ));
         }
+        self
+    }
+
+    /// Restrict to commands an AI agent ran. Hardcoded SQL, no parameters.
+    pub fn with_agent_commands_only(mut self) -> Self {
+        self.clauses.push("e.executor_type = 'agent'".into());
         self
     }
 

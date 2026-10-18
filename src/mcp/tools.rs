@@ -24,6 +24,10 @@ const STATS_SAMPLE: usize = 200;
 const FRECENCY_SAMPLE: usize = 2000;
 const ANALYSIS_SAMPLE: usize = 5000;
 
+/// Most agent commands `find_agent_session` groups into sessions in one
+/// call. Reaching it is announced in the response, never silent.
+const MAX_AGENT_SESSION_COMMANDS: usize = 50_000;
+
 /// The JSON-RPC definition of one catalog tool.
 ///
 /// Deliberately an explicit `match`, not a table of function pointers: a
@@ -1684,6 +1688,17 @@ fn handle_find_agent_session(
     args: &Value,
     mcp: &crate::config::McpConfig,
 ) -> Result<String, String> {
+    find_agent_sessions(repo, args, mcp, MAX_AGENT_SESSION_COMMANDS)
+}
+
+/// `find_agent_session`, grouping at most `max_commands` agent commands.
+#[allow(clippy::too_many_lines)]
+fn find_agent_sessions(
+    repo: &Repository,
+    args: &Value,
+    mcp: &crate::config::McpConfig,
+    max_commands: usize,
+) -> Result<String, String> {
     let (limit, offset) = paging(args, 10);
     let directory = get_str(args, "directory");
     let executor = get_str(args, "executor");
@@ -1710,9 +1725,17 @@ fn handle_find_agent_session(
         exclude_dirs: &mcp.exclude_dirs,
     };
 
-    let entries = repo
-        .get_entries_filtered(5000, 0, &qf)
+    // Only agent commands, newest first: human commands can no longer crowd
+    // older agent sessions out of the rows that get grouped.
+    let mut entries = repo
+        .get_entries_filtered(
+            max_commands.saturating_add(1),
+            0,
+            &crate::repository::AgentCommands(qf),
+        )
         .map_err(|e| format!("query failed: {e}"))?;
+    let capped = entries.len() > max_commands;
+    entries.truncate(max_commands);
 
     let mut sessions = build_session_groups(&entries);
 
@@ -1768,6 +1791,14 @@ fn handle_find_agent_session(
     }
     if !detail {
         response = response.note(conv::DETAIL_HINT);
+    }
+    if capped {
+        response = response.note(format!(
+            "only the newest {max_commands} agent commands matching these filters were grouped, \
+             so older sessions are missing from the {matched} counted here and the oldest one \
+             listed may be incomplete; narrow with after, before, directory or executor to \
+             look further back"
+        ));
     }
     Ok(response
         .shown(page.len())
@@ -4040,5 +4071,50 @@ mod tests {
         )
         .unwrap();
         assert!(text.contains("shown: 2 of 2"), "{text}");
+    }
+
+    #[test]
+    fn find_agent_session_sees_sessions_older_than_thousands_of_human_commands() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_agent_sessions(&repo);
+        let now = chrono::Utc::now().timestamp_millis();
+        repo.insert_session(&crate::models::Session {
+            id: "human-shell".into(),
+            hostname: "test".into(),
+            created_at: now - 600_000,
+            tag_id: None,
+        })
+        .unwrap();
+        let tx = repo.transaction().unwrap();
+        for i in 0..6_000 {
+            let mut e = crate::models::Entry::new(
+                "human-shell".into(),
+                format!("ls {i}"),
+                "/project".into(),
+                Some(0),
+                now - 600_000 + i,
+                now - 600_000 + i + 1,
+            );
+            e.executor_type = Some("human".into());
+            repo.insert_entry(&e).unwrap();
+        }
+        tx.commit().unwrap();
+
+        let text = call_tool(&repo, "find_agent_session", &json!({}), &default_mcp()).unwrap();
+        assert!(text.contains("claude-abc123"), "{text}");
+        assert!(text.contains("cursor-def456"), "{text}");
+        assert!(text.contains("shown: 2 of 2"), "{text}");
+        assert!(!text.contains("newest"), "no cap was reached: {text}");
+    }
+
+    #[test]
+    fn find_agent_session_says_so_when_it_could_not_read_every_agent_command() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_agent_sessions(&repo);
+        // Five agent commands are seeded; read only the newest three.
+        let text = find_agent_sessions(&repo, &json!({}), &default_mcp(), 3).unwrap();
+        assert!(text.contains("claude-abc123"), "{text}");
+        assert!(!text.contains("cursor-def456"), "{text}");
+        assert!(text.contains("newest 3 agent commands"), "{text}");
     }
 }
