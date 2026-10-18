@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -71,13 +71,26 @@ fn get_schema_version(conn: &Connection) -> DbResult<i64> {
         [],
     )?;
 
-    let version: i64 = conn
+    // Only "no row yet" means version 0. Any other error (a busy or damaged
+    // database) must surface, not be mistaken for a fresh one and migrated.
+    let version: Option<i64> = conn
         .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
             row.get(0)
         })
-        .unwrap_or(0);
+        .optional()?;
 
-    Ok(version)
+    Ok(version.unwrap_or(0))
+}
+
+/// Refuse a database written by a newer Suvadu rather than downgrade it.
+fn ensure_supported_version(version: i64) -> DbResult<()> {
+    if version > SCHEMA_VERSION {
+        return Err(DbError::Path(format!(
+            "Database schema version ({version}) is newer than this version of Suvadu supports ({SCHEMA_VERSION}). \
+             Please upgrade Suvadu or use the version that created this database."
+        )));
+    }
+    Ok(())
 }
 
 /// Set the schema version after a successful migration.
@@ -368,21 +381,27 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
     conn.pragma_update(None, "synchronous", "NORMAL")?;
 
     let version = get_schema_version(&conn)?;
-
-    // Reject databases created by a newer version of Suvadu
-    if version > SCHEMA_VERSION {
-        return Err(DbError::Path(format!(
-            "Database schema version ({version}) is newer than this version of Suvadu supports ({SCHEMA_VERSION}). \
-             Please upgrade Suvadu or use the version that created this database."
-        )));
-    }
+    ensure_supported_version(version)?;
 
     // Fast path: skip migration checks if already current
     if version >= SCHEMA_VERSION {
         return Ok(conn);
     }
 
-    // Each migration runs in an RAII transaction that auto-rolls-back on error.
+    run_migrations(&mut conn)?;
+    Ok(conn)
+}
+
+/// Bring the schema up to `SCHEMA_VERSION`, one migration per transaction.
+///
+/// Several shells often start together right after an upgrade, each opening
+/// the old database. Each step therefore takes the write lock first
+/// (`BEGIN IMMEDIATE`, which waits out `busy_timeout` for whoever holds it)
+/// and only then reads the version, so a step another process has already
+/// applied is skipped rather than run twice. A deferred transaction would
+/// read the version first and fail with `SQLITE_BUSY` at its first write,
+/// without waiting, once another process had committed in between.
+fn run_migrations(conn: &mut Connection) -> DbResult<()> {
     #[allow(clippy::type_complexity)]
     let migrations: &[(i64, fn(&Connection) -> DbResult<()>)] = &[
         (1, migrate_v1),
@@ -396,16 +415,20 @@ pub fn init_db(path: &PathBuf) -> DbResult<Connection> {
         (9, migrate_v9),
     ];
 
-    for &(target_version, migrate_fn) in migrations {
-        if version < target_version {
-            let tx = conn.transaction()?;
-            migrate_fn(&tx)?;
-            set_schema_version(&tx, target_version)?;
-            tx.commit()?;
-        }
+    loop {
+        // RAII: dropping the transaction on an early return rolls it back.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let applied = get_schema_version(&tx)?;
+        ensure_supported_version(applied)?;
+        let Some(&(target_version, migrate_fn)) =
+            migrations.iter().find(|(target, _)| *target > applied)
+        else {
+            return Ok(());
+        };
+        migrate_fn(&tx)?;
+        set_schema_version(&tx, target_version)?;
+        tx.commit()?;
     }
-
-    Ok(conn)
 }
 
 /// Register a `REGEXP(pattern, value)` scalar function with `SQLite`.
@@ -582,8 +605,10 @@ fn migrate_v6(conn: &Connection) -> DbResult<()> {
 /// `entries_fts` is an "external content" table — it stores only the
 /// trigram index, not a second copy of `command` — kept in sync with
 /// `entries` by the three triggers below (`SQLite`'s documented pattern for
-/// external-content FTS5 tables). The final `INSERT` backfills the index
-/// for rows that existed before this migration ran.
+/// external-content FTS5 tables). The final `rebuild` indexes the rows that
+/// existed before this migration ran. Unlike inserting them, rebuilding
+/// replaces whatever the index held, so running it a second time cannot
+/// index a row twice and corrupt the index.
 fn migrate_v7(conn: &Connection) -> DbResult<()> {
     conn.execute(
         "CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
@@ -606,10 +631,7 @@ fn migrate_v7(conn: &Connection) -> DbResult<()> {
             INSERT INTO entries_fts(rowid, command) VALUES (new.id, new.command);
          END;",
     )?;
-    conn.execute(
-        "INSERT INTO entries_fts(rowid, command) SELECT id, command FROM entries",
-        [],
-    )?;
+    conn.execute("INSERT INTO entries_fts(entries_fts) VALUES('rebuild')", [])?;
     Ok(())
 }
 
@@ -848,6 +870,56 @@ mod tests {
             )
             .unwrap();
         assert_eq!(git_count, 0);
+    }
+
+    #[test]
+    fn test_fts_backfill_can_run_twice_without_corrupting_the_index() {
+        let temp_dir = TempDir::new().unwrap();
+        let conn = init_db(&temp_dir.path().join("test.db")).unwrap();
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'host', 1000, NULL)", [])
+            .unwrap();
+        for (id, cmd) in [(1, "git status"), (2, "cargo build --release")] {
+            conn.execute(
+                "INSERT INTO entries VALUES (?1, 's1', ?2, '/tmp', 0, 1000, 1100, 100, NULL, NULL, NULL, NULL)",
+                params![id, cmd],
+            )
+            .unwrap();
+        }
+
+        // As if a second process had applied v7 again over the same rows.
+        migrate_v7(&conn).unwrap();
+
+        // `rank = 1` also compares the index against `entries`; without it
+        // a row indexed twice still passes.
+        conn.execute_batch(
+            "INSERT INTO entries_fts(entries_fts, rank) VALUES('integrity-check', 1);",
+        )
+        .expect("re-running the backfill must leave a consistent index");
+        let hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entries e WHERE e.id IN \
+                 (SELECT rowid FROM entries_fts WHERE command LIKE '%release%')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 1);
+    }
+
+    #[test]
+    fn test_an_unreadable_schema_version_is_an_error_not_version_zero() {
+        // Reading as version 0 would re-run every migration over the data.
+        let temp_dir = TempDir::new().unwrap();
+        let conn = Connection::open(temp_dir.path().join("test.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_version (v INTEGER); INSERT INTO schema_version VALUES (9);",
+        )
+        .unwrap();
+        assert!(get_schema_version(&conn).is_err());
+
+        // An empty table is the one case that does mean "nothing applied".
+        conn.execute_batch("DROP TABLE schema_version").unwrap();
+        assert_eq!(get_schema_version(&conn).unwrap(), 0);
     }
 
     #[test]

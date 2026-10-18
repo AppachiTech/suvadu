@@ -157,14 +157,10 @@ fn released_database(dir: &Path, version: i64) -> std::path::PathBuf {
     if version >= 6 {
         conn.execute_batch(V6_TO_V7).unwrap();
     }
+    // v0.4.0 kept the index in sync from the moment it was created: its
+    // triggers, created above, index the seed rows as they are written.
+    // Indexing them again here would hand the upgrade a corrupt index.
     conn.execute_batch(SEED_DATA).unwrap();
-    if version >= 7 {
-        // v0.4.0 kept the index in sync from the moment it was created.
-        conn.execute_batch(
-            "INSERT INTO entries_fts(rowid, command) SELECT id, command FROM entries;",
-        )
-        .unwrap();
-    }
     set_version(&conn, version);
     drop(conn);
     path
@@ -214,8 +210,10 @@ fn assert_fts_covers_all_entries(conn: &Connection) {
     let entries = scalar_i64(conn, "SELECT COUNT(*) FROM entries");
     let indexed = scalar_i64(conn, "SELECT COUNT(*) FROM entries_fts");
     assert_eq!(indexed, entries, "every entry must be indexed exactly once");
-    conn.execute_batch("INSERT INTO entries_fts(entries_fts) VALUES('integrity-check');")
-        .expect("FTS index must pass its own integrity check after upgrade");
+    // `rank = 1` makes FTS5 also compare the index against `entries`, which
+    // is the only way it notices a row indexed twice.
+    conn.execute_batch("INSERT INTO entries_fts(entries_fts, rank) VALUES('integrity-check', 1);")
+        .expect("FTS index must match the entries it indexes after upgrade");
     let hits = scalar_i64(
         conn,
         "SELECT COUNT(*) FROM entries_fts WHERE command LIKE '%ancient history%'",
@@ -409,6 +407,104 @@ fn upgrading_twice_changes_nothing() {
     assert_eq!(schema_version(&conn), 9);
     assert_eq!(scalar_i64(&conn, "SELECT COUNT(*) FROM entries_fts"), first);
     assert_seed_data_intact(&conn);
+}
+
+/// Several shells starting at once after an upgrade all open the old
+/// database together. Exactly one may migrate it; the rest must wait for it
+/// (within the busy timeout) rather than fail, and must not re-run a step
+/// it already applied.
+#[test]
+fn shells_opening_an_old_database_at_once_all_upgrade_it_safely() {
+    // How the openers interleave is up to the scheduler, so race them a few
+    // times; any one bad interleaving is a failure.
+    for _ in 0..4 {
+        race_shells_to_upgrade();
+    }
+}
+
+fn race_shells_to_upgrade() {
+    const SHELLS: usize = 12;
+    const EXTRA_ROWS: i64 = 5_000;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = released_database(dir.path(), 5);
+    {
+        // Released databases are already in WAL mode, and enough history
+        // makes the FTS backfill slow enough for the openers to overlap.
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        conn.execute_batch("BEGIN").unwrap();
+        let mut insert = conn
+            .prepare(
+                "INSERT INTO entries (session_id, command, cwd, exit_code, started_at, ended_at, duration_ms)
+                 VALUES ('shell-2', ?1, '/work', 0, ?2, ?2, 1)",
+            )
+            .unwrap();
+        for i in 0..EXTRA_ROWS {
+            insert
+                .execute(rusqlite::params![
+                    format!("echo history line {i}"),
+                    10_000 + i
+                ])
+                .unwrap();
+        }
+        drop(insert);
+        conn.execute_batch("COMMIT").unwrap();
+    }
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(SHELLS));
+    // Every shell must be spawned before any is joined, or the barrier never
+    // releases.
+    #[allow(clippy::needless_collect)]
+    let handles: Vec<_> = (0..SHELLS)
+        .map(|shell| {
+            let path = path.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || -> Result<(), String> {
+                barrier.wait();
+                let conn = db::init_db(&path).map_err(|e| format!("open: {e}"))?;
+                // What `suv add` does next: record the command it was run for.
+                let repo = Repository::new(conn);
+                let stamp = 1_000_000 + i64::try_from(shell).unwrap();
+                repo.insert_entry(&suvadu::models::Entry::new(
+                    "shell-2".to_string(),
+                    format!("echo recorded by shell {shell}"),
+                    "/work".to_string(),
+                    Some(0),
+                    stamp,
+                    stamp,
+                ))
+                .map(|_| ())
+                .map_err(|e| format!("record: {e}"))
+            })
+        })
+        .collect();
+    let outcomes: Vec<Result<(), String>> =
+        handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert!(
+        outcomes.iter().all(Result::is_ok),
+        "every shell must open the database and record its command: {outcomes:?}"
+    );
+
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(schema_version(&conn), 9);
+    let shells = i64::try_from(SHELLS).unwrap();
+    assert_eq!(
+        scalar_i64(&conn, "SELECT COUNT(*) FROM entries"),
+        3 + EXTRA_ROWS + shells
+    );
+    assert_fts_covers_all_entries(&conn);
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT COUNT(*) FROM entries_fts WHERE command LIKE '%recorded by shell%'"
+        ),
+        shells
+    );
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
 }
 
 #[test]
