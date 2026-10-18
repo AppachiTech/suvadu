@@ -104,10 +104,7 @@ pub fn handle_add_with_context(params: AddParams) -> Result<(), Box<dyn std::err
     // that does not load falls back instead of failing — hooks discard
     // stderr, so an error here would silently stop recording — and the
     // failure is noted for `suv doctor`.
-    let (config, problem) = config::load_capture_config_for_dir(std::path::Path::new(&params.cwd));
-    if let Some(problem) = problem {
-        config::record_capture_problem(&problem);
-    }
+    let config = config::capture_config_for_dir(std::path::Path::new(&params.cwd));
 
     // Initialize database
     let repo = Repository::init()?;

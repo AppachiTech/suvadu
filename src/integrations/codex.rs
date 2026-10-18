@@ -51,7 +51,10 @@ pub fn handle_hook() -> Result<()> {
     if config::is_paused() {
         return Ok(());
     }
-    let cfg = config::load_config_cached()?;
+    // Falls back as recording does when a config file does not load, so a
+    // broken config neither drops the command nor caches an unredacted
+    // prompt.
+    let cfg = config::capture_config_for_dir(Path::new(event["cwd"].as_str().unwrap_or(".")));
     if !cfg.enabled {
         return Ok(());
     }

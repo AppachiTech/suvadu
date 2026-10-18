@@ -38,7 +38,7 @@ Inside the data directory:
 | `prompts/` | the live prompt cache pairing an agent prompt with the commands run for it, as `<session>.prompt` files. The only thing anything prunes: `suv gc` deletes cache files older than 7 days |
 | `aliases.sh` | the managed alias file your shell sources |
 | `reconcile.key` | 32 random bytes, used to key the HMAC that links a command to its prompt without storing a bare hash of the prompt text |
-| `last-capture-error` | written only when recording had to fall back because `config.toml` or a `.suvadu.toml` did not load: when, which file, and the parse error. Written `0o600`, overwritten by the next different failure, reported by `suv doctor` while that file still fails. Nothing prunes it; delete it freely |
+| `last-capture-error` | written only when recording, a transcript import or a prompt cache had to fall back because `config.toml` or a `.suvadu.toml` did not load: when, which file, and the parse error. Written `0o600`, overwritten by the next different failure, reported by `suv doctor` while that file still fails. Nothing prunes it; delete it freely |
 
 `config.toml` lives in the config directory, and a per-project
 `.suvadu.toml` lives wherever you put it in your own repositories.
@@ -170,6 +170,13 @@ machine, falls back to the global config. The Bash and Zsh importers cannot
 do this: their history files have no directory at all, so only the global
 config applies to them, and a project overlay's extra patterns and exclusions
 will **not** be honoured for what they import.
+
+**A config file that does not load never turns the policy off.** Live
+recording, native transcript ingestion and the agent prompt caches all
+resolve their policy the same way: if a `.suvadu.toml` does not load, the
+global config applies; if `config.toml` itself does not load, the built-in
+defaults apply, with redaction on. The failure is noted in
+`last-capture-error` for `suv doctor` rather than failing the capture.
 
 Redaction rewrites the text before it is stored, so a secret already sitting
 in `~/.zsh_history` is redacted on the way in rather than copied verbatim. It

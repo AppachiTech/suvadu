@@ -14,6 +14,17 @@ fn capture_policy(cfg: config::Config, paused: bool) -> CapturePolicy {
     }
 }
 
+/// The capture policy for records from `cwd`. A config file that does not
+/// load falls back exactly as recording a command does -- the global config,
+/// or the defaults with redaction on -- and is noted for `suv doctor`, so a
+/// typo in a `.suvadu.toml` cannot fail every import and lose the session.
+fn capture_policy_for_dir(cwd: &str, paused: bool) -> CapturePolicy {
+    capture_policy(
+        config::capture_config_for_dir(std::path::Path::new(cwd)),
+        paused,
+    )
+}
+
 pub fn import_native(path: &std::path::Path, expected: Option<&str>) -> Result<serde_json::Value> {
     let paused = config::is_paused();
     let repo = crate::repository::Repository::init()?;
@@ -23,9 +34,7 @@ pub fn import_native(path: &std::path::Path, expected: Option<&str>) -> Result<s
         if let Some(policy) = policies.borrow().get(cwd) {
             return Ok(policy.clone());
         }
-        let policy = config::load_config_for_dir(std::path::Path::new(cwd))
-            .map(|cfg| capture_policy(cfg, paused))
-            .map_err(|error| crate::db::DbError::Validation(error.to_string()))?;
+        let policy = capture_policy_for_dir(cwd, paused);
         policies.borrow_mut().insert(cwd.to_owned(), policy.clone());
         Ok(policy)
     })?)
@@ -43,9 +52,7 @@ pub fn import_native_claude(
         if let Some(policy) = policies.borrow().get(cwd) {
             return Ok(policy.clone());
         }
-        let policy = config::load_config_for_dir(std::path::Path::new(cwd))
-            .map(|cfg| capture_policy(cfg, paused))
-            .map_err(|error| crate::db::DbError::Validation(error.to_string()))?;
+        let policy = capture_policy_for_dir(cwd, paused);
         policies.borrow_mut().insert(cwd.to_owned(), policy.clone());
         Ok(policy)
     })?)
@@ -58,9 +65,7 @@ pub fn import_native_opencode(
 ) -> Result<serde_json::Value> {
     let paused = config::is_paused();
     let repo = crate::repository::Repository::init()?;
-    let policy = config::load_config_for_dir(std::path::Path::new(cwd))
-        .map(|cfg| capture_policy(cfg, paused))
-        .map_err(|error| crate::db::DbError::Validation(error.to_string()))?;
+    let policy = capture_policy_for_dir(cwd, paused);
     Ok(repo.import_opencode_session(session_id, cwd, messages_json, |_| Ok(policy.clone()))?)
 }
 

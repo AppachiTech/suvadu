@@ -78,6 +78,30 @@ impl Sandbox {
         String::from_utf8(out.stdout).unwrap()
     }
 
+    /// Run `suv` with `input` on stdin, as an agent runs a hook.
+    fn run_with_stdin(&self, args: &[&str], input: &str) -> Output {
+        use std::io::Write;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_suv"))
+            .args(args)
+            .env("HOME", self.home.path())
+            .env("XDG_DATA_HOME", self.home.path().join("data"))
+            .env("XDG_CONFIG_HOME", self.home.path().join("config"))
+            .env_remove("SUVADU_PAUSED")
+            .env("NO_COLOR", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    }
+
     fn fixture(&self, name: &str, contents: &str) -> PathBuf {
         let path = self.home.path().join(name);
         std::fs::write(&path, contents).unwrap();
@@ -521,5 +545,177 @@ fn atuin_import_preview_shows_redacted_text_only() {
     assert!(
         preview.contains("Redacted before storage: 1"),
         "the dry run must count what the apply would redact:\n{preview}"
+    );
+}
+
+/// A project directory under the sandbox whose `.suvadu.toml` does not load.
+fn project_with_broken_overlay(s: &Sandbox) -> PathBuf {
+    let project = s.home.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join(".suvadu.toml"),
+        "[search]\nmatch_mode = \"sideways\"\n",
+    )
+    .unwrap();
+    project
+}
+
+fn assert_noted(s: &Sandbox, file: &str) {
+    let note = std::fs::read_to_string(s.data_dir().join("last-capture-error"))
+        .expect("the failure must be noted");
+    assert!(note.contains(file), "{note}");
+}
+
+fn cached_prompts(s: &Sandbox) -> String {
+    fn walk(dir: &std::path::Path, out: &mut String) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            if entry.path().is_dir() {
+                walk(&entry.path(), out);
+            } else if entry.path().extension().is_some_and(|ext| ext == "prompt") {
+                out.push_str(&std::fs::read_to_string(entry.path()).unwrap());
+                out.push('\n');
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(&s.data_dir().join("prompts"), &mut out);
+    out
+}
+
+/// Native transcript import is a capture path: a global config that does
+/// not load falls back to the defaults, which redact, instead of failing
+/// the import and losing the session.
+#[test]
+fn a_broken_global_config_still_imports_a_transcript_with_redaction_on() {
+    let s = Sandbox::new();
+    std::fs::write(
+        s.config_path(),
+        "[redaction]\nenabled = false\n[home]\nstartup = \"sideways\"\n",
+    )
+    .unwrap();
+    let transcript = s.fixture(
+        "codex.jsonl",
+        &format!(
+            "{}\n{}\n",
+            r#"{"timestamp":"2026-09-12T12:00:00Z","type":"session_meta","payload":{"id":"native-7","cwd":"/work/project"}}"#,
+            r#"{"timestamp":"2026-09-12T12:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"use GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123"}}"#,
+        ),
+    );
+
+    s.stdout(&["agent", "import-session", transcript.to_str().unwrap()]);
+    let session = s.stdout(&["agent", "session", "codex-native-7"]);
+    assert!(session.contains("GITHUB_TOKEN=***REDACTED***"), "{session}");
+    assert!(
+        !session.contains("ghp_abcdefghijklmnopqrstuvwxyz0123"),
+        "{session}"
+    );
+    assert_noted(&s, "config.toml");
+}
+
+/// A broken `.suvadu.toml` in the transcript's project falls back to the
+/// global policy, custom patterns included.
+#[test]
+fn a_broken_project_overlay_still_imports_a_claude_transcript_under_the_global_policy() {
+    let s = Sandbox::new();
+    let project = project_with_broken_overlay(&s);
+    let record = serde_json::json!({
+        "type":"user", "sessionId":"claude-7", "uuid":"u1", "cwd":project,
+        "timestamp":"2026-09-12T12:00:00Z",
+        "message":{"role":"user","content":"deploy --key corp-ab12cd"}
+    });
+    let transcript = s.fixture("claude.jsonl", &format!("{record}\n"));
+
+    s.stdout(&["agent", "import-session", transcript.to_str().unwrap()]);
+    let session = s.stdout(&["agent", "session", "claude-claude-7"]);
+    assert!(session.contains("deploy --key ***REDACTED***"), "{session}");
+    assert_noted(&s, ".suvadu.toml");
+}
+
+#[test]
+fn a_broken_project_overlay_still_imports_an_opencode_session() {
+    let s = Sandbox::new();
+    let project = project_with_broken_overlay(&s);
+    let messages = serde_json::json!([{
+        "info": {"id":"msg_u1","role":"user","time":{"created":1000}},
+        "parts": [{"type":"text","text":"deploy --key corp-ab12cd"}]
+    }]);
+    let out = s.run_with_stdin(
+        &[
+            "hook-opencode-session",
+            "--session-id",
+            "ses7",
+            "--directory",
+            project.to_str().unwrap(),
+        ],
+        &messages.to_string(),
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let session = s.stdout(&["agent", "session", "opencode-ses7"]);
+    assert!(session.contains("deploy --key ***REDACTED***"), "{session}");
+    assert_noted(&s, ".suvadu.toml");
+}
+
+/// The prompt caches feed the prompt shown beside each agent command. They
+/// fall back the same way, and still redact.
+#[test]
+fn agent_prompt_caches_still_redact_when_a_config_file_does_not_load() {
+    let s = Sandbox::new();
+    let project = project_with_broken_overlay(&s);
+    let out = s.run_with_stdin(
+        &[
+            "hook-opencode-prompt",
+            "--session-id",
+            "ses7",
+            "--directory",
+            project.to_str().unwrap(),
+        ],
+        "first: deploy --key corp-ab12cd",
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_noted(&s, ".suvadu.toml");
+
+    std::fs::write(s.config_path(), "[home]\nstartup = \"sideways\"\n").unwrap();
+    for (hook, event) in [
+        (
+            "hook-claude-prompt",
+            serde_json::json!({"hook_event_name":"UserPromptSubmit","session_id":"claude-7","cwd":"/work","prompt":"second: GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123"}),
+        ),
+        (
+            "hook-codex",
+            serde_json::json!({"hook_event_name":"UserPromptSubmit","session_id":"codex-7","turn_id":"t1","cwd":"/work","prompt":"third: GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123"}),
+        ),
+    ] {
+        let out = s.run_with_stdin(&[hook], &event.to_string());
+        assert!(
+            out.status.success(),
+            "{hook}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert_noted(&s, "config.toml");
+
+    let cached = cached_prompts(&s);
+    for prompt in [
+        "first: deploy --key",
+        "second: GITHUB_TOKEN=",
+        "third: GITHUB_TOKEN=",
+    ] {
+        assert!(
+            cached.contains(prompt),
+            "{prompt} was not cached:\n{cached}"
+        );
+    }
+    assert!(!cached.contains("corp-ab12cd"), "{cached}");
+    assert!(
+        !cached.contains("ghp_abcdefghijklmnopqrstuvwxyz0123"),
+        "{cached}"
     );
 }

@@ -32,7 +32,12 @@ const CLAUDE_TOOL_FIELDS: &[Field] = &[
     whole("session_id"),
     whole("prompt_id"),
 ];
-const CLAUDE_PROMPT_FIELDS: &[Field] = &[whole("session_id"), whole("prompt"), whole("prompt_id")];
+const CLAUDE_PROMPT_FIELDS: &[Field] = &[
+    whole("session_id"),
+    whole("prompt"),
+    whole("prompt_id"),
+    whole("cwd"),
+];
 const SESSION_END_FIELDS: &[Field] = &[
     whole("hook_event_name"),
     whole("session_id"),
@@ -165,7 +170,13 @@ pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
     if crate::config::is_paused() {
         return Ok(());
     }
-    let cfg = crate::config::load_config_cached()?;
+    // The prompt's own project policy, falling back as recording does when
+    // a config file does not load, so the cache is still written redacted.
+    let cwd = event
+        .get("cwd")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(".");
+    let cfg = crate::config::capture_config_for_dir(Path::new(cwd));
     if !cfg.enabled {
         return Ok(());
     }
@@ -207,9 +218,9 @@ pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
 /// `reconcile_agent_command_turns`'s exact-text match against the imported
 /// `prompt` `AiEvent` (which goes through the same policy via
 /// `sanitize_event`) still succeeds for prompts that get redacted or
-/// truncated. Uses `load_config_for_dir(directory)` rather than the global
+/// truncated. Uses `capture_config_for_dir(directory)` rather than the global
 /// config, matching `import_native_opencode`'s per-project policy for the
-/// same directory — a project `.suvadu.toml` that changes redaction or
+/// same directory, with the same fallback when a config file does not load — a project `.suvadu.toml` that changes redaction or
 /// `prompt_capture_max_chars` would otherwise reintroduce a cache/import
 /// mismatch, or leave a secret unredacted in the cache when the project
 /// (unlike global config) turns redaction on.
@@ -237,7 +248,7 @@ pub fn handle_hook_opencode_prompt(
     if crate::config::is_paused() {
         return Ok(());
     }
-    let cfg = crate::config::load_config_for_dir(Path::new(directory))?;
+    let cfg = crate::config::capture_config_for_dir(Path::new(directory));
     if !cfg.enabled {
         return Ok(());
     }

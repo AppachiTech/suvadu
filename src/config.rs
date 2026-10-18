@@ -705,6 +705,18 @@ pub fn load_capture_config_for_dir(
     }
 }
 
+/// [`load_capture_config_for_dir`], noting any file that failed for
+/// `suv doctor` with [`record_capture_problem`]. What every capture path --
+/// recording a command, caching an agent prompt, importing a transcript --
+/// resolves its policy with.
+pub fn capture_config_for_dir(dir: &std::path::Path) -> Config {
+    let (config, problem) = load_capture_config_for_dir(dir);
+    if let Some(problem) = problem {
+        record_capture_problem(&problem);
+    }
+    config
+}
+
 /// The most recent [`CaptureConfigProblem`] the capture path hit, as left in
 /// the data directory for `suv doctor`.
 #[derive(Debug, Clone, PartialEq, Eq)]
