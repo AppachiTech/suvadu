@@ -183,30 +183,17 @@ impl MatchMode {
                 prefix: true,
                 ..QueryPlan::default()
             },
-            // A subsequence match must contain every character of the query,
-            // so "each distinct character appears somewhere" is a sound
-            // superset — narrow enough for SQL to do real work, never so
-            // narrow that it hides a true fuzzy match.
+            // The subsequence predicate alone decides eligibility. Narrowing
+            // first with one `LIKE '%c%'` per letter cost more than it saved:
+            // a single character has no trigram to look up, so every one of
+            // those clauses tested the whole history on its own.
             Self::Fuzzy => QueryPlan {
-                tokens: distinct_chars(q),
                 rerank: true,
                 allow_subsequence: true,
                 ..QueryPlan::default()
             },
         }
     }
-}
-
-/// The distinct characters of `q` (whitespace dropped), each as its own token.
-fn distinct_chars(q: &str) -> Vec<String> {
-    let mut seen = Vec::new();
-    for c in q.chars().filter(|c| !c.is_whitespace()) {
-        let lower = c.to_lowercase().to_string();
-        if !seen.contains(&lower) {
-            seen.push(lower);
-        }
-    }
-    seen
 }
 
 /// The one definition of `fuzzy` eligibility, shared with the SQL predicate
@@ -344,46 +331,17 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_narrows_by_distinct_characters_so_old_matches_are_not_lost() {
-        let plan = MatchMode::Fuzzy.plan("gco");
-        assert_eq!(
-            plan.tokens,
-            vec!["g".to_string(), "c".to_string(), "o".to_string()]
-        );
-        assert!(plan.allow_subsequence);
-        assert!(plan.rerank);
-    }
-
-    #[test]
-    fn fuzzy_character_narrowing_never_excludes_a_real_subsequence_match() {
-        // The SQL superset must admit every entry the mode would accept.
-        let corpus = [
-            "git checkout main",
-            "gcc -o out main.c",
-            "echo going",
-            "ls -la",
-        ];
-        for query in ["gco", "gcm", "gc", "g c o"] {
+    fn fuzzy_is_decided_by_the_subsequence_rule_alone() {
+        // No per-character substring clauses: a one-letter LIKE has no
+        // trigram to look up, so each one scanned the whole index only to
+        // admit a superset the subsequence predicate then had to test anyway.
+        for query in ["gco", "kubectl", "a a  B"] {
             let plan = MatchMode::Fuzzy.plan(query);
-            for cmd in corpus {
-                let lc = cmd.to_ascii_lowercase();
-                let sql_admits = plan.tokens.iter().all(|t| lc.contains(t.as_str()));
-                if MatchMode::Fuzzy.matches(cmd, query) {
-                    assert!(
-                        sql_admits,
-                        "{query:?} matches {cmd:?} but SQL narrowing would drop it"
-                    );
-                }
-            }
+            assert!(plan.tokens.is_empty(), "{query:?}: {:?}", plan.tokens);
+            assert_eq!(plan.query, None, "{query:?}");
+            assert!(plan.allow_subsequence);
+            assert!(plan.rerank);
         }
-    }
-
-    #[test]
-    fn fuzzy_tokens_are_deduplicated_and_ignore_whitespace() {
-        assert_eq!(
-            MatchMode::Fuzzy.plan("a a  B").tokens,
-            vec!["a".to_string(), "b".to_string()]
-        );
     }
 
     #[test]

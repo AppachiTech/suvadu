@@ -2920,9 +2920,9 @@ fn a_broad_fuzzy_query_reports_a_total_it_can_page_to() {
 
 #[test]
 fn a_fuzzy_total_never_counts_a_candidate_the_mode_would_reject() {
-    // SQL narrows fuzzy by distinct characters, which admits far more than
-    // the subsequence rule accepts. The reported total must be the accepted
-    // set, or the footer promises pages that hold nothing.
+    // These all hold every letter of the query, but only some in order. The
+    // reported total must be the accepted set, or the footer promises pages
+    // that hold nothing.
     let (_d, repo) = repo_with(&["git checkout", "ocg", "cog", "go cook"]);
 
     let mut app = SearchApp::new(test_search_config(vec![], 0));
@@ -2938,6 +2938,43 @@ fn a_fuzzy_total_never_counts_a_candidate_the_mode_would_reject() {
         app.entries.iter().map(|e| &e.command).collect::<Vec<_>>()
     );
     assert_eq!(app.entries.len(), expected.len());
+}
+
+#[test]
+fn fuzzy_search_returns_exactly_the_entries_the_mode_accepts() {
+    // The database must neither drop a true subsequence match nor admit a
+    // command the rule rejects, whatever the query's case or spacing.
+    let corpus = [
+        "git checkout main",
+        "gcc -o out main.c",
+        "echo going",
+        "ls -la",
+        "Kubectl Get Pods",
+        "kubectl get pods -n kube-system",
+        "cat \u{c9}mile.txt",
+        "ocg",
+    ];
+    let (_d, repo) = repo_with(&corpus);
+    for query in [
+        "gco",
+        "gcm",
+        "gc",
+        "g c o",
+        "KUBECTL",
+        "kgp",
+        "\u{e9}mile",
+        "zz",
+    ] {
+        let mut expected: Vec<String> = corpus
+            .iter()
+            .filter(|cmd| MatchMode::Fuzzy.matches(cmd, query))
+            .map(|cmd| (*cmd).to_string())
+            .collect();
+        expected.sort();
+        let mut found = search_in_mode(&repo, MatchMode::Fuzzy, query);
+        found.sort();
+        assert_eq!(found, expected, "fuzzy {query:?}");
+    }
 }
 
 /// Rough guard that matching across the whole history stays interactive.
@@ -2965,9 +3002,9 @@ fn typed_search_latency_on_a_large_history() {
 #[test]
 #[ignore = "builds a 100k-entry database; run explicitly with --ignored"]
 fn matching_mode_latency_on_a_large_history() {
-    // Fuzzy narrows by single characters, which no trigram index can serve,
-    // so it is expected to be the slowest mode. This prints the cost rather
-    // than asserting it: latency is machine-dependent.
+    // Fuzzy tests every row with its subsequence rule, which no index can
+    // serve, so it is expected to be the slowest mode. This prints the cost
+    // rather than asserting it: latency is machine-dependent.
     let (_dir, repo) = repo_with_old_command("cargo test --workspace rare_old", 100_000);
 
     for (mode, query) in [

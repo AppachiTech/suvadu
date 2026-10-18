@@ -386,10 +386,10 @@ impl FilterBuilder {
     /// Require `field` to contain `needle` as a case-insensitive subsequence
     /// — the `fuzzy` recall mode's own rule, evaluated by the database.
     ///
-    /// The per-character `LIKE` clauses from `with_query_tokens` narrow the
-    /// rows this has to look at; this clause then decides eligibility exactly,
-    /// so `count_filtered`/`count_unique_filtered` return a number the caller
-    /// can really page to and `LIMIT`/`OFFSET` walk only accepted matches.
+    /// This clause decides eligibility exactly, so `count_filtered`/
+    /// `count_unique_filtered` return a number the caller can really page to
+    /// and `LIMIT`/`OFFSET` walk only accepted matches. No index can answer
+    /// it, so it tests every row the other clauses leave.
     pub fn with_subsequence(mut self, needle: Option<&str>, field: SearchField) -> Self {
         let Some(needle) = needle.filter(|n| !n.trim().is_empty()) else {
             return self;
