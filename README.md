@@ -66,6 +66,28 @@ echo 'eval "$(suv init bash)"' >> ~/.bashrc && source ~/.bashrc
 
 Verify: `suv status`
 
+Each command is recorded with its directory and, inside a git repository, the
+branch it started on (the short commit hash for a detached HEAD). The branch
+is read from the repository's files — no `git` runs at your prompt — and shows
+in recall's detail pane. A command that changes directory, like `cd ../other`,
+is filed under the branch it was typed on; one that switches branches, under
+the branch it switched to. Turn it off with *Record Git Branch* in
+`suv settings` or `[shell] capture_git_branch = false`.
+
+**zsh-autosuggestions.** The zsh hook ships a strategy for
+[zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions) that
+suggests what Up-arrow would recall — the newest command starting with what you
+typed, with AI-agent commands hidden unless `Alt+A` revealed them. Enable it in
+`~/.zshrc`, falling back to zsh's own history when Suvadu has nothing:
+
+```zsh
+ZSH_AUTOSUGGEST_STRATEGY=(suvadu history)
+```
+
+Each suggestion is one `suv get` lookup, the same one Up-arrow makes (its
+cost is in BENCHMARKS.md). zsh-autosuggestions 0.7 fetches suggestions
+asynchronously by default, so typing does not wait for it.
+
 **Staying up to date.** Once a day, in the background, Suvadu looks up the
 newest release number (the same `version.txt` that `suv update` reads) and,
 when there is a newer one, says so in one line before a command you run at a
@@ -496,7 +518,8 @@ See the [full integration guide](https://suvadu.sh/blog/track-ai-agent-commands-
 | **Doctor** | `suv doctor` separates what blocks shell-history capture from optional integrations, gives each check its own repair, reports what the stored data actually proves, and lists storage by category next to the retention rule that changes it |
 | **Organization** | Tags, bookmarks (`suv bookmarks` opens an interactive picker that recalls one into your prompt), notes, and `suv aliases` — an interactive manager (add/edit/delete) for shell aliases, plus suggestions for your frequently-typed long commands |
 | **Privacy & Safety** | Space-prefix exclusion, regex patterns, secret redaction (extend via `redaction.extra_patterns`), local-only — applied to every ingestion path, imports and saved summaries included. `suv backup`, an automatic snapshot before any `suv delete`, and `suv delete --dry-run` to see the matched commands and what a delete leaves behind. See [SECURITY.md](SECURITY.md). |
-| **Arrow Keys** | Recency-first Up/Down recall — your most recent commands surface first, prefix-matched, with the current directory used only to separate commands recorded at the same millisecond. Agent commands are hidden by default; reveal them with `Alt+A` (per shell) or `--include-agents`. |
+| **Arrow Keys** | Recency-first Up/Down recall — your most recent commands surface first, prefix-matched, with the current directory used only to separate commands recorded at the same millisecond. Agent commands are hidden by default; reveal them with `Alt+A` (per shell) or `--include-agents`. The same lookup drives a [zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions) strategy: `ZSH_AUTOSUGGEST_STRATEGY=(suvadu history)`. |
+| **Git Branch** | Every command recorded inside a git repository keeps the branch it started on, read from `.git` with no `git` process, shown in recall's detail pane and in detailed MCP rows. Worktrees and submodules are followed; a detached HEAD is kept as its short hash. |
 | **Vim Bindings** | Optional vim-style `j`/`k`/`Ctrl+U`/`Ctrl+D` navigation in search TUI |
 
 Full feature documentation at [suvadu.sh/cli](https://suvadu.sh/cli/).

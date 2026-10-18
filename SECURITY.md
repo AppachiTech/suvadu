@@ -83,13 +83,16 @@ governs it.
 
 | Category | Holds | Goes away when |
 |---|---|---|
-| Commands | command text, directory, exit code, start/end times, duration, executor type and name, an optional tag, and a `context` JSON blob; plus their notes, bookmarks, aliases, tags and the two trigram search indexes (one over the command as typed, one with its separators removed) | you run `suv delete <pattern>` |
+| Commands | command text, directory, exit code, start/end times, duration, executor type and name, an optional tag, and a `context` JSON blob (which holds the git branch, when there was one); plus their notes, bookmarks, aliases, tags and the two trigram search indexes (one over the command as typed, one with its separators removed) | you run `suv delete <pattern>` |
 | Sessions | shell sessions (id, **machine hostname**, creation time, tag), and agent sessions with their captured transcript events and the adapter checkpoints that record which transcript files were read and how far | an agent session is removed with `suv agent delete-session <id>`; a shell session row stays behind after its commands are deleted |
 | Summaries | session summaries written over MCP, with their cited evidence IDs, the session revision they were written from, and the caller-declared agent and model | their agent session is deleted — editing or deleting commands only marks a summary *stale*, it does not remove it |
 | Skills | shared skill documents | you run `suv skills remove`; a sync rewrites agent-side copies, not the stored row |
 | Backups | full database copies from `suv backup`, the automatic pre-delete snapshot, and the pre-import snapshot taken by `suv import --from atuin-db` | **you delete the files yourself** |
 
-The `context` blob is empty for an ordinary typed command. It carries the
+The `context` blob of a command recorded live carries `git_branch` — the
+branch checked out where the command started, or the short commit hash of a
+detached HEAD — when that directory is inside a git repository, and is
+otherwise empty for an ordinary typed command. It also carries the
 captured agent prompt and turn id for an agent-run command (re-redacted with
 that command's own directory policy before it is stored), and import
 provenance — source, import time, whether the timestamp was real or
@@ -364,6 +367,7 @@ Shell hooks are installed with `eval "$(suv init zsh)"` or
 |---|---|
 | The **whole command line as you typed it, arguments included** | zsh's `preexec` argument / bash's `$BASH_COMMAND` |
 | Working directory | `$PWD` |
+| Git branch | read by `suv add` from the repository's own `HEAD` (the nearest `.git` above the directory the command started in; no `git` process runs). A detached HEAD is stored as its 7-character commit hash; outside a repository nothing is stored. Off with *Record Git Branch* in `suv settings` or `[shell] capture_git_branch = false`; a project's `.suvadu.toml` can turn it off but not back on |
 | Exit code | `$?` — left unrecorded rather than guessed when it is unknown |
 | Start and end time (and the duration computed from them) | `$EPOCHREALTIME` at the prompt |
 | Session id | `$SUVADU_SESSION_ID`, a UUID the hook generates per shell |
@@ -384,7 +388,9 @@ their *presence* is tested; none of their values is stored. What is stored
 is the conclusion: an executor type (`human`, `agent`, `ide`, `ci`,
 `programmatic`, `unknown`) and a name (`claude-code`, `openai-codex`,
 `terminal`, …). The only environment values that reach the database are
-`$PWD` and `$SUVADU_SESSION_ID`. An environment assignment typed on the
+`$PWD` and `$SUVADU_SESSION_ID`. (When a command changes directory, the
+hook also passes the `$PWD` it started in, only so `suv add` can read that
+directory's branch; that path is not stored.) An environment assignment typed on the
 command line is part of the command text and *is* stored, subject to
 redaction.
 
@@ -394,6 +400,10 @@ hostname**.
 **Never captured:** command output, file contents, and anything another
 program read or wrote. Suvadu records that a command ran, how it exited and
 how long it took — nothing about what it did.
+
+The branch name goes through the same redaction as the command text, and is
+read only after the exclusion check, so an excluded command leaves no branch
+behind either.
 
 **Nothing is recorded at all when** the command starts with a space, matches
 one of your exclusion patterns, `SUVADU_PAUSED` is set in that shell,
