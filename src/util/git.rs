@@ -222,4 +222,30 @@ mod tests {
         }
         std::fs::set_permissions(&head, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
+
+    /// What reading the branch adds to recording a command. Run with
+    /// `cargo test --release --lib branch_lookup_latency -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing, not correctness"]
+    fn branch_lookup_latency() {
+        const RUNS: u32 = 20_000;
+        let repo = repo_with_head("ref: refs/heads/main\n");
+        let nested = repo.path().join("a/b/c/d/e/f/g/h");
+        std::fs::create_dir_all(&nested).unwrap();
+        let plain = tempfile::tempdir().unwrap();
+        let plain_nested = plain.path().join("a/b/c/d/e/f/g/h");
+        std::fs::create_dir_all(&plain_nested).unwrap();
+        for (label, dir) in [
+            ("repository root", repo.path()),
+            ("8 levels below the root", nested.as_path()),
+            ("not in a repository, 8 levels deep", plain_nested.as_path()),
+        ] {
+            let started = std::time::Instant::now();
+            for _ in 0..RUNS {
+                std::hint::black_box(git_branch(std::hint::black_box(dir)));
+            }
+            let per = started.elapsed() / RUNS;
+            println!("{label}: {per:?} per lookup ({})", dir.display());
+        }
+    }
 }

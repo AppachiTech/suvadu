@@ -161,6 +161,45 @@ not re-run.
   0.68 s at 100,000 entries (other shells wait up to 5 s). `suv gc`'s full
   rebuild of both indexes took 1.47 s.
 
+### Git branch capture and the zsh-autosuggestions strategy, 18 October 2026
+
+Measured on **Apple M4 Max, 128 GB RAM, macOS 27.2, rustc 1.96.0**, release
+profile, one run each. The full baseline above was not re-run.
+
+- **Reading the branch** takes 11 µs at a repository's root, 21 µs eight
+  directories below it and 14 µs in a directory outside any repository
+  (`cargo test --release --lib branch_lookup_latency -- --ignored
+  --nocapture`, 20,000 lookups each). It reads files only; no `git` process
+  runs.
+- **A whole `suv add`**, as a shell hook runs it at each prompt, took
+  13.4 ms p50 / 14.3 ms p95 with branch capture on and 13.3 ms / 14.1 ms
+  with it off, from a directory seven levels inside a repository (300
+  interleaved runs of each through a fresh process). The difference is
+  inside run-to-run noise; process start-up and opening the database are
+  what a prompt pays. The hook itself adds one variable assignment when a
+  command starts and one string comparison when it ends.
+- **One zsh-autosuggestions lookup** is one `suv get --prefix` process, the
+  same one Up-arrow runs. On a 100,000-command history (50 MB, 200
+  directories, a fifth of it agent commands, imported from JSONL) each
+  query ran 200 times through a fresh process:
+
+  | Line typed | p50 | p95 |
+  |---|---:|---:|
+  | `g` | 22.3 ms | 24.1 ms |
+  | `cargo t` | 14.2 ms | 15.4 ms |
+  | `git ch` | 16.2 ms | 18.7 ms |
+  | `git checkout feature/x12` | 12.6 ms | 14.4 ms |
+  | `terraform plan -var x=4999` | 12.1 ms | 13.5 ms |
+  | `zz-no-such-command` (no match) | 12.2 ms | 14.0 ms |
+  | `--` (no match) | 12.4 ms | 13.9 ms |
+
+  `suv --version` alone took 4.7 ms p50, so about 5 ms of each lookup is
+  starting the process. A one-character line, which matches the most
+  history, is the slowest and exceeds 20 ms at p95. zsh-autosuggestions 0.7
+  runs strategies asynchronously by default, so this delays the suggestion,
+  not the keystroke; with `ZSH_AUTOSUGGEST_USE_ASYNC` unset in older versions
+  it would delay typing by the same amount.
+
 ## Known gaps
 
 - **Ranking quality is not measured.** The judged set records which command
