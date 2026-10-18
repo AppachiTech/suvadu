@@ -412,10 +412,10 @@ pub fn handle_hook_opencode_session(
     if input.len() as u64 > MAX_OPENCODE_HOOK_INPUT_BYTES {
         return Err("OpenCode hook input exceeds 16 MB".into());
     }
-    match crate::commands::agent_session::import_native_opencode(session_id, directory, &input) {
-        Ok(_) => {}
-        Err(error) => eprintln!("suvadu: OpenCode session capture: {error}"),
-    }
+    // A failure exits non-zero: the plugin then keeps these messages and
+    // sends them again on the next idle instead of treating them as done.
+    crate::commands::agent_session::import_native_opencode(session_id, directory, &input)
+        .map_err(|error| format!("OpenCode session capture: {error}"))?;
     Ok(())
 }
 
@@ -1200,7 +1200,11 @@ pub fn try_merge_claude_settings(
 /// differently on each side. On `session.idle` -- and once more on plugin
 /// `dispose()` as a best-effort final flush -- it fetches this session's
 /// full message history via `OpenCode`'s own documented API and hands it to
-/// `suv hook-opencode-session`, which does the incremental import.
+/// `suv hook-opencode-session`, which does the incremental import. Only
+/// what the importer reads is sent (`trimMessage`: no tool output, no
+/// reasoning), only messages not already imported complete, and in batches
+/// well under the hook's input cap, so a long session costs each idle only
+/// its new messages.
 ///
 /// The default export must be the bare `async (input) => Hooks` factory
 /// function below, not an `{ id, setup }` (or `{ id, effect }`) object --
@@ -1239,15 +1243,81 @@ function cachePrompt(sessionID, prompt, directory) {
   }
 }
 
+// Only what `suv hook-opencode-session` reads from a message: its identity,
+// role, times, model and token counts, and its text parts (a prompt or a
+// final answer). Tool parts carry the tool's whole output and reasoning
+// parts are never stored, so they are not sent at all.
+function trimMessage(message) {
+  const info = message?.info ?? {};
+  return {
+    info: {
+      id: info.id,
+      role: info.role,
+      parentID: info.parentID,
+      time: { created: info.time?.created, completed: info.time?.completed },
+      modelID: info.modelID,
+      model: info.model ? { modelID: info.model.modelID } : undefined,
+      tokens: info.tokens,
+    },
+    parts: (message?.parts ?? [])
+      .filter((part) => part?.type === "text")
+      .map((part) => ({ type: "text", messageID: part.messageID, text: part.text })),
+  };
+}
+
+// An assistant message still streaming has no completion time yet; the
+// importer leaves it for a later call, so it must be sent again.
+function isComplete(message) {
+  return message.info.role !== "assistant" || message.info.time.completed != null;
+}
+
+// Message IDs per session that suv has already imported complete. The
+// importer skips a message it has seen, so this only saves resending
+// them; after a restart the first import sends the history once more.
+const sentMessageIDs = new Map();
+
+// Stay well under the hook's 16 MB input cap, however long the session.
+const MAX_BATCH_BYTES = 4 * 1024 * 1024;
+
+function sendBatch(sessionID, directory, batch) {
+  const result = spawnSync(
+    "suv",
+    ["hook-opencode-session", "--session-id", sessionID, "--directory", directory],
+    { input: JSON.stringify(batch), stdio: ["pipe", "ignore", "inherit"], timeout: 10000 }
+  );
+  return result.status === 0;
+}
+
 async function importSession(client, sessionID, directory) {
   try {
     const response = await client.session.messages({ path: { id: sessionID } });
     const messages = response.data ?? response;
-    spawnSync(
-      "suv",
-      ["hook-opencode-session", "--session-id", sessionID, "--directory", directory],
-      { input: JSON.stringify(messages), stdio: ["pipe", "ignore", "inherit"], timeout: 10000 }
-    );
+    if (!Array.isArray(messages)) return;
+    const sent = sentMessageIDs.get(sessionID) ?? new Set();
+    sentMessageIDs.set(sessionID, sent);
+    let batch = [];
+    let batchBytes = 2;
+    const flush = () => {
+      if (batch.length === 0) return true;
+      if (!sendBatch(sessionID, directory, batch)) return false;
+      for (const message of batch) {
+        if (isComplete(message)) sent.add(message.info.id);
+      }
+      batch = [];
+      batchBytes = 2;
+      return true;
+    };
+    for (const message of messages) {
+      const trimmed = trimMessage(message);
+      if (!trimmed.info.id || sent.has(trimmed.info.id)) continue;
+      const bytes = Buffer.byteLength(JSON.stringify(trimmed)) + 1;
+      // Send in order and stop at a failure, so a later call resends from
+      // the first message that did not get through.
+      if (batch.length > 0 && batchBytes + bytes > MAX_BATCH_BYTES && !flush()) return;
+      batch.push(trimmed);
+      batchBytes += bytes;
+    }
+    flush();
   } catch {
     // Best-effort — don't break OpenCode if suvadu fails
   }
@@ -2355,6 +2425,23 @@ mod tests {
         assert!(OPENCODE_PLUGIN_SCRIPT.contains("message.part.updated"));
         // stderr must not be swallowed, or a handler failure is invisible on both sides.
         assert!(OPENCODE_PLUGIN_SCRIPT.contains(r#"stdio: ["pipe", "ignore", "inherit"]"#));
+    }
+
+    #[test]
+    fn opencode_plugin_sends_only_new_trimmed_messages_in_bounded_batches() {
+        // Tool parts hold the tool's whole output: sending them made every
+        // idle re-send the whole session and, past 16 MB, fail outright.
+        assert!(OPENCODE_PLUGIN_SCRIPT.contains("function trimMessage(message)"));
+        assert!(OPENCODE_PLUGIN_SCRIPT.contains(r#".filter((part) => part?.type === "text")"#));
+        assert!(OPENCODE_PLUGIN_SCRIPT.contains("JSON.stringify(batch)"));
+        assert!(!OPENCODE_PLUGIN_SCRIPT.contains("JSON.stringify(messages)"));
+        // Only messages not yet imported complete, and only once suv says so.
+        assert!(OPENCODE_PLUGIN_SCRIPT.contains("sent.has(trimmed.info.id)"));
+        assert!(OPENCODE_PLUGIN_SCRIPT.contains("return result.status === 0;"));
+        assert!(
+            OPENCODE_PLUGIN_SCRIPT.contains("if (isComplete(message)) sent.add(message.info.id);")
+        );
+        assert!(OPENCODE_PLUGIN_SCRIPT.contains("const MAX_BATCH_BYTES = 4 * 1024 * 1024;"));
     }
 
     #[test]

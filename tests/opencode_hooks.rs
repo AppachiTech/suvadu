@@ -591,3 +591,209 @@ fn suv_init_opencode_does_not_corrupt_a_jsonc_config_it_cannot_parse() {
     assert!(stdout.contains("\"mcp\""));
     assert!(stdout.contains("mcp-serve"));
 }
+
+/// One turn of a long `OpenCode` session as `client.session.messages()`
+/// returns it: the assistant's message carries a bash tool part with a
+/// large output, as a test run or a log dump produces.
+fn turn(i: usize, completed: bool) -> [serde_json::Value; 2] {
+    let user = format!("msg_u{i:04}");
+    let assistant = format!("msg_a{i:04}");
+    let created = i64::try_from(i).unwrap() * 1000;
+    let mut time = serde_json::json!({"created": created + 1});
+    if completed {
+        time["completed"] = serde_json::json!(created + 2);
+    }
+    [
+        serde_json::json!({
+            "info": {
+                "id": user, "sessionID": "ses_long", "role": "user",
+                "time": {"created": created}, "agent": "build",
+                "model": {"providerID": "anthropic", "modelID": "claude-sonnet-5"}
+            },
+            "parts": [{"id": format!("{user}-p"), "sessionID": "ses_long", "messageID": user, "type": "text", "text": format!("prompt {i}")}]
+        }),
+        serde_json::json!({
+            "info": {
+                "id": assistant, "sessionID": "ses_long", "role": "assistant",
+                "parentID": user, "time": time, "modelID": "claude-sonnet-5",
+                "providerID": "anthropic", "cost": 0.01, "mode": "build",
+                "path": {"cwd": "/project", "root": "/project"},
+                "tokens": {"input": 10, "output": 5, "reasoning": 0, "cache": {"read": 0, "write": 0}}
+            },
+            "parts": [
+                {"id": format!("{assistant}-r"), "messageID": assistant, "type": "reasoning", "text": "thinking"},
+                {"id": format!("{assistant}-t"), "messageID": assistant, "type": "tool", "tool": "bash", "callID": "c1",
+                 "state": {"status": "completed", "input": {"command": "cargo test"}, "output": "test output line\n".repeat(16_000),
+                           "metadata": {"exit": 0, "output": "test output line\n".repeat(16_000)}, "title": "cargo test"}},
+                {"id": format!("{assistant}-p"), "messageID": assistant, "type": "text", "text": format!("answer {i}")}
+            ]
+        }),
+    ]
+}
+
+fn session(turns: std::ops::RangeInclusive<usize>, last_completed: bool) -> serde_json::Value {
+    let last = *turns.end();
+    serde_json::Value::Array(
+        turns
+            .flat_map(|i| turn(i, i != last || last_completed))
+            .collect(),
+    )
+}
+
+/// Install a `suv` wrapper, first on the returned PATH, that logs the size
+/// of every session payload the plugin sends to `<home>/sizes` and then
+/// hands it to the real binary.
+#[cfg(unix)]
+fn logging_suv_path(s: &Sandbox) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = s.home.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let wrapper = bin.join("suv");
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\nif [ \"$1\" = hook-opencode-session ]; then\n  tmp=\"$SUV_LOG_DIR/payload.$$\"\n  cat > \"$tmp\"\n  wc -c < \"$tmp\" | tr -d ' ' >> \"$SUV_LOG_DIR/sizes\"\n  \"$SUV_REAL\" \"$@\" < \"$tmp\"\n  status=$?\n  rm -f \"$tmp\"\n  exit $status\nfi\nexec \"$SUV_REAL\" \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+/// Load the installed plugin under node and fire `session.idle` once per
+/// phase, with `client.session.messages()` returning that phase's history.
+#[cfg(unix)]
+fn run_plugin_idles(s: &Sandbox, phases: &[serde_json::Value]) -> Vec<usize> {
+    let mut phase_files = Vec::new();
+    for (index, phase) in phases.iter().enumerate() {
+        let path = s.home.path().join(format!("phase{index}.json"));
+        std::fs::write(&path, phase.to_string()).unwrap();
+        phase_files.push(path);
+    }
+    let driver = s.home.path().join("driver.mjs");
+    std::fs::write(
+        &driver,
+        r#"import { readFileSync } from "fs";
+import { pathToFileURL } from "url";
+const [plugin, ...phases] = process.argv.slice(2);
+let current = [];
+const client = { session: { messages: async () => ({ data: current }) } };
+const hooks = await (await import(pathToFileURL(plugin).href)).default({ client, directory: "/project" });
+for (const phase of phases) {
+  current = JSON.parse(readFileSync(phase, "utf8"));
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_long" } } });
+}
+"#,
+    )
+    .unwrap();
+    let result = Command::new("node")
+        .env("HOME", s.home.path())
+        .env("XDG_DATA_HOME", s.home.path().join("data"))
+        .env("XDG_CONFIG_HOME", s.home.path().join("config"))
+        .env_remove("SUVADU_PAUSED")
+        .env("PATH", logging_suv_path(s))
+        .env("SUV_REAL", env!("CARGO_BIN_EXE_suv"))
+        .env("SUV_LOG_DIR", s.home.path())
+        .arg(&driver)
+        .arg(plugin_path(s))
+        .args(&phase_files)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    std::fs::read_to_string(s.home.path().join("sizes"))
+        .unwrap()
+        .lines()
+        .map(|line| line.parse().unwrap())
+        .collect()
+}
+
+/// Every event of a captured session, read page by page, and its usage.
+fn all_session_events(s: &Sandbox, id: &str) -> (Vec<serde_json::Value>, serde_json::Value) {
+    let mut events = Vec::new();
+    loop {
+        let offset = events.len().to_string();
+        let out = s.run(&[
+            "agent", "session", id, "--limit", "100", "--offset", &offset,
+        ]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!out.stdout.windows(16).any(|w| w == b"test output line"));
+        let page: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let page_events = page["events"].as_array().unwrap();
+        if page_events.is_empty() {
+            return (events, page["session"]["usage"].clone());
+        }
+        events.extend(page_events.iter().cloned());
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn opencode_plugin_sends_long_sessions_trimmed_and_only_once() {
+    if Command::new("node").arg("--version").output().is_err() {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let s = Sandbox::new();
+    assert!(s.run(&["init", "opencode"]).status.success());
+
+    // 100 turns carry about 50 MB of tool output in all; the untrimmed
+    // history is past the hook's 16 MB cap.
+    let phases = [
+        session(1..=100, true),
+        session(1..=101, false),
+        session(1..=101, true),
+    ];
+    assert!(phases[0].to_string().len() > 16 * 1024 * 1024);
+    let sizes = run_plugin_idles(&s, &phases);
+
+    // One payload per idle: the whole trimmed history, then only the new
+    // turn, then only the assistant message that was still streaming.
+    assert_eq!(sizes.len(), 3, "{sizes:?}");
+    assert!(sizes[0] < 100 * 1024, "{sizes:?}");
+    assert!(sizes[1] < 2 * 1024, "{sizes:?}");
+    assert!(sizes[2] < 1024, "{sizes:?}");
+
+    let (events, usage) = all_session_events(&s, "opencode-ses_long");
+    let count = |kind: &str| events.iter().filter(|e| e["kind"] == kind).count();
+    assert_eq!(count("prompt"), 101);
+    assert_eq!(count("response"), 101);
+    assert_eq!(usage["total_tokens"], 101 * 15);
+}
+
+#[test]
+fn a_failed_opencode_import_exits_with_an_error_so_the_plugin_resends_it() {
+    let s = Sandbox::new();
+    let mut child = s
+        .command()
+        .args([
+            "hook-opencode-session",
+            "--session-id",
+            "ses_bad",
+            "--directory",
+            "/project",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"[{"info":{"role":"user"},"parts":[]}]"#)
+        .unwrap();
+    let result = child.wait_with_output().unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("OpenCode session capture"));
+}

@@ -309,6 +309,67 @@ mod tests {
         })
     }
 
+    /// The form the plugin sends: only the fields the importer reads.
+    fn trimmed(message: &Value) -> Value {
+        let info = &message["info"];
+        let mut info_out = json!({
+            "id": info["id"], "role": info["role"],
+            "time": {"created": info["time"]["created"]}
+        });
+        if !info["time"]["completed"].is_null() {
+            info_out["time"]["completed"] = info["time"]["completed"].clone();
+        }
+        for field in ["parentID", "modelID", "tokens"] {
+            if !info[field].is_null() {
+                info_out[field] = info[field].clone();
+            }
+        }
+        if !info["model"].is_null() {
+            info_out["model"] = json!({"modelID": info["model"]["modelID"]});
+        }
+        let parts = message["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|part| part["type"] == "text")
+            .map(|part| json!({"type":"text","messageID":part["messageID"],"text":part["text"]}))
+            .collect::<Vec<_>>();
+        json!({"info": info_out, "parts": parts})
+    }
+
+    #[test]
+    fn the_trimmed_form_imports_exactly_as_the_full_messages_do() {
+        let mut assistant = assistant_message("msg_a1", "msg_u1", "Done.", 2000);
+        let output = "x".repeat(1_000_000);
+        assistant["parts"].as_array_mut().unwrap().splice(
+            0..0,
+            [
+                json!({"id":"r","messageID":"msg_a1","type":"reasoning","text":"private thinking"}),
+                json!({"id":"t","messageID":"msg_a1","type":"tool","tool":"bash",
+                       "state":{"status":"completed","input":{"command":"ls"},"output":output,"metadata":{"output":output}}}),
+            ],
+        );
+        let full = vec![user_message("msg_u1", "Fix it", 1000), assistant];
+        let trimmed_messages = full.iter().map(trimmed).collect::<Vec<_>>();
+        assert!(serde_json::to_string(&trimmed_messages).unwrap().len() < 2_000);
+
+        let mut full_state = OpencodeState::default();
+        let mut trimmed_state = OpencodeState::default();
+        let from_full = parse_messages(&full, "/work", &mut full_state).unwrap();
+        let from_trimmed = parse_messages(&trimmed_messages, "/work", &mut trimmed_state).unwrap();
+        assert_eq!(
+            serde_json::to_value(&from_full).unwrap(),
+            serde_json::to_value(&from_trimmed).unwrap()
+        );
+        assert_eq!(full_state, trimmed_state);
+        assert_eq!(from_full.len(), 3);
+
+        // State stored from full payloads keeps deduplicating trimmed ones.
+        assert!(parse_messages(&trimmed_messages, "/work", &mut full_state)
+            .unwrap()
+            .is_empty());
+    }
+
     #[test]
     fn extracts_prompt_and_response_text_from_matching_parts() {
         let messages = vec![
