@@ -523,10 +523,9 @@ pub fn handle_import_zsh_history(
     file: &str,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Read file with lossy UTF-8 conversion (zsh_history may contain binary data)
     let raw = std::fs::read(file)?;
-    let text = String::from_utf8_lossy(&raw);
-    if matches!(text, std::borrow::Cow::Owned(_)) {
+    let (text, lossy) = decode_zsh_history(&raw);
+    if lossy {
         eprintln!(
             "Warning: {file} contains invalid UTF-8 bytes; those bytes were replaced with \u{FFFD}"
         );
@@ -620,6 +619,51 @@ pub fn handle_import_zsh_history(
     Ok(())
 }
 
+/// zsh's Meta marker. zsh writes $HISTFILE "metafied": each byte it treats
+/// as special (NUL, and 0x83..=0xa2, which covers most UTF-8 continuation
+/// and lead bytes of non-ASCII text) is stored as `0x83, byte ^ 0x20`.
+const ZSH_META: u8 = 0x83;
+
+/// Reverse zsh's history metafication.
+fn zsh_unmetafy(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut bytes = raw.iter();
+    while let Some(&b) = bytes.next() {
+        if b == ZSH_META {
+            if let Some(&next) = bytes.next() {
+                out.push(next ^ 0x20);
+                continue;
+            }
+        }
+        out.push(b);
+    }
+    out
+}
+
+/// Decode a zsh history file to text. Returns the text and whether any bytes
+/// had to be replaced with U+FFFD.
+///
+/// The file is unmetafied before UTF-8 decoding, so `echo 日本` reads back as
+/// written instead of as mojibake. A file that is valid UTF-8 as-is but not
+/// after unmetafying was not written by zsh (a 0x83 there is an ordinary
+/// UTF-8 continuation byte, as in "ă"), so it is used unchanged.
+fn decode_zsh_history(raw: &[u8]) -> (String, bool) {
+    if !raw.contains(&ZSH_META) {
+        return match String::from_utf8_lossy(raw) {
+            std::borrow::Cow::Borrowed(s) => (s.to_string(), false),
+            std::borrow::Cow::Owned(s) => (s, true),
+        };
+    }
+    let unmetafied = zsh_unmetafy(raw);
+    match String::from_utf8(unmetafied) {
+        Ok(text) => (text, false),
+        Err(err) => std::str::from_utf8(raw).map_or_else(
+            |_| (String::from_utf8_lossy(err.as_bytes()).into_owned(), true),
+            |text| (text.to_string(), false),
+        ),
+    }
+}
+
 /// Parse zsh history text into a list of (command, `started_at_ms`, `duration_ms`) tuples.
 fn parse_zsh_history(text: &str) -> Vec<(String, i64, i64)> {
     let mut parsed: Vec<(String, i64, i64)> = Vec::new();
@@ -704,8 +748,6 @@ fn print_zsh_import_preview(parsed: &[(String, i64, i64)]) {
     }
 }
 
-/// Insert parsed entries in a batch. Returns (imported, skipped) counts.
-/// Errors are fatal — the caller is responsible for rolling back the transaction.
 /// Provenance stamped on every row the zsh importer writes.
 ///
 /// Without it a zsh-imported row was indistinguishable from one the live
@@ -722,8 +764,8 @@ fn zsh_import_context(imported_at_ms: i64, timestamp_from_file: bool) -> HashMap
             "file".to_string()
         } else {
             // A plain (non-extended) ~/.zsh_history carries no times at all,
-            // so the import's own clock stands in. Say so rather than let it
-            // read as the moment the command actually ran.
+            // so a placeholder in the synthetic window stands in. Say so
+            // rather than let it read as the moment the command actually ran.
             "synthetic".to_string()
         },
     );
@@ -734,15 +776,40 @@ fn zsh_import_context(imported_at_ms: i64, timestamp_from_file: bool) -> HashMap
     context
 }
 
+/// Plain-format zsh rows (no `: ts:dur;` prefix) are stored in the upper
+/// half of the synthetic-timestamp sentinel window, so they never dedup
+/// against plain-format Bash rows, which count up from
+/// [`SYNTHETIC_TS_BASE_MS`]. Both stay below [`SYNTHETIC_TS_CEILING_MS`].
+const ZSH_SYNTHETIC_TS_BASE_MS: i64 = SYNTHETIC_TS_CEILING_MS / 2;
+
+/// Insert parsed entries in a batch. Returns (imported, skipped) counts.
+/// Errors are fatal — the caller is responsible for rolling back the transaction.
+///
+/// Re-importing the same file is a no-op, and commands live capture already
+/// recorded are not duplicated:
+///
+/// * Every record gets an ordinal: how many times that same command was seen
+///   before with the same file timestamp. zsh timestamps are whole seconds,
+///   so a command run twice in one second is two records, not one.
+/// * Timestamped records are stored at `ts + ordinal` ms. A record is skipped
+///   when the database already holds more than `ordinal` rows of that command
+///   inside that second — live rows store milliseconds, so this matches them
+///   as well as rows an earlier import wrote.
+/// * Plain records carry no time at all; they are stored at a deterministic
+///   synthetic placeholder (`ZSH_SYNTHETIC_TS_BASE_MS + ordinal`) and skipped
+///   when that exact (command, placeholder) row already exists.
 fn import_entries_batch(
     repo: &Repository,
     parsed: &[(String, i64, i64)],
     session_id: &str,
     now: i64,
 ) -> Result<(u64, u64), Box<dyn std::error::Error>> {
+    const MS_PER_SEC: i64 = 1000;
+
     let mut imported = 0u64;
     let mut skipped = 0u64;
     let total = parsed.len();
+    let mut occurrences: HashMap<(String, Option<i64>), i64> = HashMap::new();
 
     for (i, (cmd, ts, dur)) in parsed.iter().enumerate() {
         // Skip empty or space-prefixed commands
@@ -751,14 +818,26 @@ fn import_entries_batch(
             continue;
         }
 
-        // Dedup: skip if (command, timestamp_ms) already exists.
-        // Uses indexed SQL lookup instead of loading all entries into memory.
-        if *ts > 0 && repo.entry_exists(cmd, *ts)? {
+        let from_file = *ts > 0;
+        let ordinal = next_occurrence(&mut occurrences, (cmd.clone(), from_file.then_some(*ts)));
+
+        // Indexed SQL lookups instead of loading all entries into memory.
+        let (started_at, duplicate) = if from_file {
+            let second_start = ts - ts.rem_euclid(MS_PER_SEC);
+            let already =
+                repo.count_entries_between(cmd, second_start, second_start + MS_PER_SEC)?;
+            // Stay inside the source second even for absurd repeat counts.
+            (ts + ordinal.min(MS_PER_SEC - 1), already > ordinal)
+        } else {
+            let started_at = ZSH_SYNTHETIC_TS_BASE_MS
+                + ordinal.min(SYNTHETIC_TS_CEILING_MS - ZSH_SYNTHETIC_TS_BASE_MS - 1);
+            (started_at, repo.entry_exists(cmd, started_at)?)
+        };
+        if duplicate {
             skipped += 1;
             continue;
         }
 
-        let started_at = if *ts > 0 { *ts } else { now };
         let ended_at = started_at + dur;
 
         let mut entry = Entry::new(
@@ -769,7 +848,7 @@ fn import_entries_batch(
             started_at,
             ended_at,
         );
-        entry.context = Some(zsh_import_context(now, *ts > 0));
+        entry.context = Some(zsh_import_context(now, from_file));
 
         repo.insert_entry(&entry)?;
         imported += 1;
@@ -1585,6 +1664,202 @@ mod tests {
             skipped, 3,
             "Empty, whitespace, and space-prefixed should be skipped"
         );
+    }
+
+    // ── zsh history: metafied bytes, idempotent re-import, live dedup ────
+
+    /// Encode text the way zsh writes $HISTFILE: every byte zsh treats as
+    /// special (NUL, 0x83..=0xa2) becomes Meta (0x83) + (byte ^ 0x20).
+    fn zsh_metafy(text: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        for &b in text.as_bytes() {
+            if b == 0 || (0x83..=0xa2).contains(&b) {
+                out.push(0x83);
+                out.push(b ^ 0x20);
+            } else {
+                out.push(b);
+            }
+        }
+        out
+    }
+
+    fn zsh_session(repo: &Repository, id: &str) -> Session {
+        let session = Session {
+            id: id.to_string(),
+            hostname: "test-host".to_string(),
+            created_at: 1_000,
+            tag_id: None,
+        };
+        repo.insert_session(&session).unwrap();
+        session
+    }
+
+    /// Run a history file on disk through the zsh import pipeline
+    /// (decode → parse → batch insert). Returns (imported, skipped).
+    fn import_zsh_file(repo: &Repository, path: &std::path::Path, session_id: &str) -> (u64, u64) {
+        let raw = std::fs::read(path).unwrap();
+        let (text, _lossy) = decode_zsh_history(&raw);
+        let parsed = parse_zsh_history(&text);
+        let tx = repo.transaction().unwrap();
+        let counts = import_entries_batch(repo, &parsed, session_id, 9_999_999).unwrap();
+        tx.commit().unwrap();
+        counts
+    }
+
+    fn stored_commands(repo: &Repository) -> Vec<(String, i64)> {
+        let mut rows = Vec::new();
+        repo.stream_export_entries(None, None, |e| {
+            rows.push((e.command, e.started_at));
+            Ok(())
+        })
+        .unwrap();
+        rows.sort();
+        rows
+    }
+
+    #[test]
+    fn zsh_history_bytes_are_unmetafied_before_decoding() {
+        let original = ": 1700000000:0;echo 日本 → 🎉\n";
+        let raw = zsh_metafy(original);
+        assert_ne!(raw, original.as_bytes(), "fixture must contain meta bytes");
+        let (text, lossy) = decode_zsh_history(&raw);
+        assert!(!lossy);
+        assert_eq!(text, original);
+        assert_eq!(parse_zsh_history(&text)[0].0, "echo 日本 → 🎉");
+    }
+
+    #[test]
+    fn zsh_history_already_plain_utf8_is_left_alone() {
+        // "ă" is C4 83 in UTF-8 — a 0x83 that is not zsh's Meta marker.
+        let original = "echo ăb\n";
+        let (text, lossy) = decode_zsh_history(original.as_bytes());
+        assert!(!lossy);
+        assert_eq!(text, original);
+    }
+
+    #[test]
+    fn zsh_history_invalid_bytes_are_replaced_and_reported() {
+        let (text, lossy) = decode_zsh_history(b"echo \xff\n");
+        assert!(lossy);
+        assert_eq!(text, "echo \u{FFFD}\n");
+    }
+
+    #[test]
+    fn zsh_import_of_metafied_file_stores_the_real_text() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let session = zsh_session(&repo, "import-zsh-meta");
+        let path = dir.path().join("zsh_history");
+        std::fs::write(&path, zsh_metafy(": 1700000000:0;echo 日本 → 🎉\n")).unwrap();
+
+        assert_eq!(import_zsh_file(&repo, &path, &session.id), (1, 0));
+        assert_eq!(
+            stored_commands(&repo),
+            vec![("echo 日本 → 🎉".to_string(), 1_700_000_000_000)]
+        );
+    }
+
+    #[test]
+    fn zsh_plain_format_reimport_is_a_no_op() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let session = zsh_session(&repo, "import-zsh-plain-1");
+        let path = dir.path().join("zsh_history");
+        std::fs::write(&path, "ls\nls\ngit status\n").unwrap();
+
+        assert_eq!(import_zsh_file(&repo, &path, &session.id), (3, 0));
+        let again = zsh_session(&repo, "import-zsh-plain-2");
+        assert_eq!(
+            import_zsh_file(&repo, &path, &again.id),
+            (0, 3),
+            "a second import of the same plain file must add nothing"
+        );
+        let rows = stored_commands(&repo);
+        assert_eq!(rows.len(), 3, "repeats are kept once each: {rows:?}");
+        assert!(
+            rows.iter().all(|(_, ts)| *ts < SYNTHETIC_TS_CEILING_MS),
+            "plain-format rows carry a synthetic placeholder time: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn zsh_plain_import_does_not_dedup_against_plain_bash_import() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let config = crate::config::Config::default();
+        let stats = import_bash_history(
+            &repo,
+            std::io::Cursor::new("ls\n"),
+            &config,
+            &BashImportOptions {
+                session_id: "import-bash-x",
+                hostname: "test-host",
+                imported_at_ms: 9_999_999,
+                dry_run: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(stats.imported, 1);
+
+        let session = zsh_session(&repo, "import-zsh-y");
+        let path = dir.path().join("zsh_history");
+        std::fs::write(&path, "ls\n").unwrap();
+        assert_eq!(
+            import_zsh_file(&repo, &path, &session.id),
+            (1, 0),
+            "a plain zsh `ls` is a different record from a plain bash `ls`"
+        );
+    }
+
+    #[test]
+    fn zsh_same_command_twice_in_one_second_keeps_both() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let session = zsh_session(&repo, "import-zsh-repeat-1");
+        let path = dir.path().join("zsh_history");
+        std::fs::write(&path, ": 1700000000:0;make\n: 1700000000:0;make\n").unwrap();
+
+        assert_eq!(import_zsh_file(&repo, &path, &session.id), (2, 0));
+        let again = zsh_session(&repo, "import-zsh-repeat-2");
+        assert_eq!(import_zsh_file(&repo, &path, &again.id), (0, 2));
+        assert_eq!(stored_commands(&repo).len(), 2);
+    }
+
+    #[test]
+    fn zsh_import_skips_commands_already_captured_live() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let live = zsh_session(&repo, "live-session");
+        // Live capture stores milliseconds; zsh history stores whole seconds.
+        repo.insert_entry(&Entry::new(
+            live.id,
+            "cargo test".to_string(),
+            "/tmp".to_string(),
+            Some(0),
+            1_700_000_000_457,
+            1_700_000_003_100,
+        ))
+        .unwrap();
+
+        let session = zsh_session(&repo, "import-zsh-live");
+        let path = dir.path().join("zsh_history");
+        std::fs::write(&path, ": 1700000000:3;cargo test\n").unwrap();
+        assert_eq!(
+            import_zsh_file(&repo, &path, &session.id),
+            (0, 1),
+            "the history line is the live row, stored in ms"
+        );
+
+        std::fs::write(
+            &path,
+            ": 1700000000:3;cargo test\n: 1700000000:0;cargo test\n: 1700000001:0;cargo test\n",
+        )
+        .unwrap();
+        // The first line is the live row; the second (same second, not
+        // captured live) and third (next second) are new.
+        assert_eq!(import_zsh_file(&repo, &path, &session.id), (2, 1));
+        let ts: Vec<i64> = stored_commands(&repo).into_iter().map(|(_, t)| t).collect();
+        assert_eq!(
+            ts,
+            vec![1_700_000_000_001, 1_700_000_000_457, 1_700_000_001_000]
+        );
+        // Re-import adds nothing.
+        assert_eq!(import_zsh_file(&repo, &path, &session.id), (0, 3));
     }
 
     // ── JSONL roundtrip test ────────────────────────────────────────────

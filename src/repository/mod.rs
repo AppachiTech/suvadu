@@ -718,6 +718,17 @@ impl Repository {
         let exists = stmt.exists(params![command, started_at])?;
         Ok(exists)
     }
+
+    /// Count rows of `command` with `from_ms <= started_at < to_ms`. Used by
+    /// the zsh import to match whole-second history timestamps against rows
+    /// stored with millisecond precision (live capture, earlier imports).
+    pub fn count_entries_between(&self, command: &str, from_ms: i64, to_ms: i64) -> DbResult<i64> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT COUNT(*) FROM entries WHERE command = ? AND started_at >= ? AND started_at < ?",
+        )?;
+        let count = stmt.query_row(params![command, from_ms, to_ms], |row| row.get(0))?;
+        Ok(count)
+    }
 }
 
 #[cfg(test)]
