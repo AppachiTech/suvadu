@@ -153,22 +153,16 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
     println!("Checking for updates...");
 
     let latest_version = fetch_latest_version();
-
-    if let Some(ref latest) = latest_version {
-        if latest == current_version {
-            show_up_to_date_banner(current_version);
-            return Ok(());
-        }
-        println!();
-        if crate::util::color_enabled() {
-            println!("  \x1b[33mv{current_version}\x1b[0m → \x1b[32;1mv{latest}\x1b[0m");
-        } else {
-            println!("  v{current_version} → v{latest}");
-        }
+    let plan = plan_update(latest_version.as_deref(), current_version);
+    if !announce_plan(&plan, current_version) {
+        return Ok(());
     }
+    // Only a well-formed, newer advertised version is held against the
+    // download; without one the signed version must still be newer.
+    let advertised = plan.advertised();
     println!();
 
-    display_release_notes(latest_version.as_deref());
+    display_release_notes(advertised);
 
     let target = ReleaseTarget::current().ok_or_else(|| {
         format!(
@@ -200,14 +194,15 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
         extract_dir: &update_dir_str,
         binary_path: &binary_path,
         update_dir: update_dir.path(),
+        advertised_version: advertised,
+        current_version,
     };
-    download_and_verify(&params)?;
+    let new_version = download_and_verify(&params)?;
 
     let installed = install_binary(&binary_path)?;
 
     if installed {
-        let new_version = latest_version.as_deref().unwrap_or("latest");
-        show_success_banner(current_version, new_version);
+        show_success_banner(current_version, &new_version);
         println!("{}", crate::upgrade_notice::AGENT_UPGRADE);
     }
 
@@ -215,6 +210,140 @@ pub fn handle_update() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // ── Version check ────────────────────────────────────────
+
+/// Tell the user what the update check found. Returns whether to go on and
+/// download the update.
+fn announce_plan(plan: &UpdatePlan, current_version: &str) -> bool {
+    match plan {
+        UpdatePlan::UpToDate => {
+            show_up_to_date_banner(current_version);
+            false
+        }
+        UpdatePlan::NewerInstalled { latest } => {
+            println!();
+            println!(
+                "  v{current_version} is newer than the latest published release (v{latest})."
+            );
+            println!("  Nothing to update.");
+            false
+        }
+        UpdatePlan::Update { latest } => {
+            println!();
+            if crate::util::color_enabled() {
+                println!("  \x1b[33mv{current_version}\x1b[0m → \x1b[32;1mv{latest}\x1b[0m");
+            } else {
+                println!("  v{current_version} → v{latest}");
+            }
+            true
+        }
+        UpdatePlan::LatestUnknown => {
+            println!(
+                "Could not fetch the latest version number; the download's signed version \
+                 will be checked before installing."
+            );
+            true
+        }
+    }
+}
+
+/// What `suv update` should do, given the published and installed versions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UpdatePlan {
+    /// The published release is the installed one.
+    UpToDate,
+    /// The installed build is newer than the published release (a local or
+    /// pre-release build). Installing the release would be a downgrade.
+    NewerInstalled { latest: String },
+    /// A strictly newer release is published.
+    Update { latest: String },
+    /// The published version could not be fetched (or was not a version).
+    /// The download's signed version still has to be newer before anything
+    /// is installed.
+    LatestUnknown,
+}
+
+impl UpdatePlan {
+    /// The advertised newer version, when there is one.
+    fn advertised(&self) -> Option<&str> {
+        match self {
+            Self::Update { latest } => Some(latest),
+            _ => None,
+        }
+    }
+}
+
+fn plan_update(latest: Option<&str>, current: &str) -> UpdatePlan {
+    let Some(latest) = latest else {
+        return UpdatePlan::LatestUnknown;
+    };
+    let Some(latest) = plain_version(latest.trim().trim_start_matches('v')) else {
+        return UpdatePlan::LatestUnknown;
+    };
+    let latest = latest.to_string();
+    if crate::update_check::is_newer(&latest, current) {
+        UpdatePlan::Update { latest }
+    } else if crate::update_check::is_newer(current, &latest) {
+        UpdatePlan::NewerInstalled { latest }
+    } else {
+        UpdatePlan::UpToDate
+    }
+}
+
+/// The release version named in a minisign trusted comment. The release
+/// workflow signs each archive with `suvadu v<version> <platform>`; the
+/// trusted comment is covered by the signature, so this binds the
+/// otherwise unversioned `*-latest.tar.gz` to the release it came from.
+fn signed_release_version(trusted_comment: &str) -> Option<&str> {
+    let mut words = trusted_comment.split_whitespace();
+    if words.next()? != "suvadu" {
+        return None;
+    }
+    plain_version(words.next()?.strip_prefix('v')?)
+}
+
+/// `version` if it is a dotted-number version (optionally with a `-pre` or
+/// `+build` suffix), the shape `is_newer` can compare.
+fn plain_version(version: &str) -> Option<&str> {
+    let core = version.split(['-', '+']).next()?;
+    let dotted_numbers = core
+        .split('.')
+        .all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    dotted_numbers.then_some(version)
+}
+
+/// Accept the downloaded archive only if its signed version is the newer
+/// release that was advertised (or, when the advertisement could not be
+/// fetched, is at least newer than the installed version). A download
+/// server serving an older — but validly signed — build is refused here.
+fn check_archive_version(
+    signed: Option<&str>,
+    advertised: Option<&str>,
+    current: &str,
+) -> Result<String, String> {
+    let Some(signed) = signed else {
+        return Err(format!(
+            "The release signature does not name a version, so the download cannot be \
+             shown to be newer than v{current}. Aborting update."
+        ));
+    };
+    if let Some(advertised) = advertised {
+        let advertised = advertised.trim().trim_start_matches('v');
+        if signed != advertised {
+            return Err(format!(
+                "The downloaded archive is signed as v{signed}, but v{advertised} was \
+                 advertised. Aborting update: the download server may be serving a \
+                 different (possibly older) build. Try again later."
+            ));
+        }
+    }
+    if !crate::update_check::is_newer(signed, current) {
+        return Err(format!(
+            "The downloaded archive is v{signed}, which is not newer than the installed \
+             v{current}. Aborting update."
+        ));
+    }
+    Ok(signed.to_string())
+}
 
 pub fn fetch_latest_version() -> Option<String> {
     let output = std::process::Command::new("curl")
@@ -353,9 +482,14 @@ struct DownloadParams<'a> {
     extract_dir: &'a str,
     binary_path: &'a std::path::Path,
     update_dir: &'a std::path::Path,
+    /// The version `version.txt` advertised, if it could be fetched.
+    advertised_version: Option<&'a str>,
+    current_version: &'a str,
 }
 
-fn download_and_verify(p: &DownloadParams) -> Result<(), Box<dyn std::error::Error>> {
+/// Download, verify and extract the update. Returns the verified version of
+/// the downloaded release.
+fn download_and_verify(p: &DownloadParams) -> Result<String, Box<dyn std::error::Error>> {
     println!(
         "Downloading {} build from: {}",
         p.platform_label, p.archive_url
@@ -376,7 +510,13 @@ fn download_and_verify(p: &DownloadParams) -> Result<(), Box<dyn std::error::Err
         return Err("Failed to download update. Please check your internet connection.".into());
     }
 
-    verify_signature(p.signature_url, p.tarball_path)?;
+    let trusted_comment = verify_signature(p.signature_url, p.tarball_path)?;
+    let version = check_archive_version(
+        signed_release_version(&trusted_comment),
+        p.advertised_version,
+        p.current_version,
+    )?;
+    println!("  Signed release version: v{version}");
     verify_checksum(p.checksum_url, p.tarball_path)?;
 
     let status = std::process::Command::new("tar")
@@ -403,17 +543,18 @@ fn download_and_verify(p: &DownloadParams) -> Result<(), Box<dyn std::error::Err
 
     println!("  Download complete");
     println!();
-    Ok(())
+    Ok(version)
 }
 
 /// Verify the tarball's detached minisign signature against the embedded public key.
 ///
 /// This is the primary security gate: the public key is compiled into the binary,
-/// so a compromised download server cannot forge valid signatures.
+/// so a compromised download server cannot forge valid signatures. Returns the
+/// signature's trusted comment, which the signature also covers.
 fn verify_signature(
     signature_url: &str,
     tarball_str: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<String, Box<dyn std::error::Error>> {
     let pk = PublicKey::from_base64(MINISIGN_PUBLIC_KEY)
         .map_err(|e| format!("Invalid embedded public key (binary may need rebuild): {e}"))?;
 
@@ -447,7 +588,7 @@ fn verify_signature(
     })?;
 
     println!("  Signature verified (minisign)");
-    Ok(())
+    Ok(sig.trusted_comment().to_string())
 }
 
 fn verify_checksum(
@@ -1073,6 +1214,125 @@ mod tests {
     #[test]
     fn version_url_is_https() {
         assert!(VERSION_URL.starts_with("https://"));
+    }
+
+    // ── Downgrade protection ─────────────────────────────
+
+    #[test]
+    fn plan_update_only_updates_to_a_strictly_newer_release() {
+        let cases = [
+            (Some("0.5.0"), "0.5.0", UpdatePlan::UpToDate),
+            (Some("v0.5.0"), "0.5.0", UpdatePlan::UpToDate),
+            (
+                Some("0.4.9"),
+                "0.5.0",
+                UpdatePlan::NewerInstalled {
+                    latest: "0.4.9".to_string(),
+                },
+            ),
+            (
+                Some("0.5.1"),
+                "0.5.0",
+                UpdatePlan::Update {
+                    latest: "0.5.1".to_string(),
+                },
+            ),
+            // numeric, not lexicographic
+            (
+                Some("0.10.0"),
+                "0.9.3",
+                UpdatePlan::Update {
+                    latest: "0.10.0".to_string(),
+                },
+            ),
+            (
+                Some("0.9.3"),
+                "0.10.0",
+                UpdatePlan::NewerInstalled {
+                    latest: "0.9.3".to_string(),
+                },
+            ),
+            (None, "0.5.0", UpdatePlan::LatestUnknown),
+            // a version.txt that is not a version is not "up to date"
+            (Some("<html>"), "0.5.0", UpdatePlan::LatestUnknown),
+            (Some(""), "0.5.0", UpdatePlan::LatestUnknown),
+        ];
+        for (latest, current, expected) in cases {
+            assert_eq!(
+                plan_update(latest, current),
+                expected,
+                "latest={latest:?} current={current}"
+            );
+        }
+    }
+
+    #[test]
+    fn signed_release_version_reads_the_trusted_comment() {
+        assert_eq!(signed_release_version("suvadu v0.5.1 macos"), Some("0.5.1"));
+        assert_eq!(
+            signed_release_version("suvadu v1.2.3 linux-aarch64"),
+            Some("1.2.3")
+        );
+        // minisign's default trusted comment names no release
+        assert_eq!(
+            signed_release_version("timestamp:1700000000\tfile:suv-macos-latest.tar.gz\thashed"),
+            None
+        );
+        assert_eq!(signed_release_version("other v1.0.0 macos"), None);
+        assert_eq!(signed_release_version("suvadu latest macos"), None);
+        assert_eq!(signed_release_version(""), None);
+    }
+
+    #[test]
+    fn archive_version_must_match_the_advertised_newer_release() {
+        // the signed archive is the release version.txt advertised
+        assert_eq!(
+            check_archive_version(Some("0.5.1"), Some("0.5.1"), "0.5.0"),
+            Ok("0.5.1".to_string())
+        );
+        // version.txt unreachable: the signed version alone must be newer
+        assert_eq!(
+            check_archive_version(Some("0.5.1"), None, "0.5.0"),
+            Ok("0.5.1".to_string())
+        );
+    }
+
+    #[test]
+    fn archive_version_mismatch_aborts_the_update() {
+        // an older, validly signed build served in place of the advertised one
+        let err = check_archive_version(Some("0.4.0"), Some("0.5.1"), "0.5.0").unwrap_err();
+        assert!(err.contains("v0.4.0") && err.contains("v0.5.1"), "{err}");
+        // same version as installed, or older, with no advertised version
+        assert!(check_archive_version(Some("0.5.0"), None, "0.5.0").is_err());
+        assert!(check_archive_version(Some("0.4.0"), None, "0.5.0").is_err());
+        // a signature that names no version cannot prove anything
+        assert!(check_archive_version(None, Some("0.5.1"), "0.5.0").is_err());
+        // advertised newer but archive is a different newer build
+        assert!(check_archive_version(Some("0.5.2"), Some("0.5.1"), "0.5.0").is_err());
+    }
+
+    /// The updater reads the release version from the minisign trusted
+    /// comment, so the release workflow must keep writing it in that shape.
+    #[test]
+    fn release_workflow_signs_the_version_into_the_trusted_comment() {
+        let workflow = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/release.yml"),
+        )
+        .expect(".github/workflows/release.yml must be readable");
+        let template = workflow
+            .lines()
+            .find_map(|l| l.split("-t \"").nth(1))
+            .and_then(|rest| rest.split('"').next())
+            .expect("the release workflow signs with a trusted comment (-t \"...\")");
+        let rendered = template
+            .replace("${{ github.ref_name }}", "v9.8.7")
+            .replace("${{ matrix.os }}", "macos")
+            .replace("${{ matrix.suffix }}", "-x86_64");
+        assert_eq!(
+            signed_release_version(&rendered),
+            Some("9.8.7"),
+            "trusted comment template: {template}"
+        );
     }
 
     #[test]
