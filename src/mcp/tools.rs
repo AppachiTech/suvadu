@@ -133,8 +133,8 @@ fn search_commands_def() -> Value {
                 "directory": { "type": "string", "description": "Filter to commands run in this directory" },
                 "executor": { "type": "string", "description": "Filter by executor (e.g. claude-code, cursor, human)" },
                 "exit_code": { "type": "integer", "description": "Filter by exit code (0 = success)" },
-                "after": { "type": "string", "description": "Start date (e.g. today, yesterday, 7 days ago, 2026-01-01)" },
-                "before": { "type": "string", "description": "End date (e.g. today, yesterday, 7 days ago, 2026-01-01)" }
+                "after": date_schema("Only commands at or after this time"),
+                "before": date_schema("Only commands at or before this time; a bare date includes that whole day")
             }), 20),
             "required": ["query"]
         }
@@ -150,7 +150,7 @@ fn recent_commands_def() -> Value {
             "properties": with_paging(json!({
                 "directory": { "type": "string", "description": "Filter to commands run in this directory" },
                 "executor": { "type": "string", "description": "Filter by executor (e.g. claude-code, cursor)" },
-                "after": { "type": "string", "description": "Start date (e.g. today, yesterday, 7 days ago, 2026-01-01)" }
+                "after": date_schema("Only commands at or after this time")
             }), 20)
         }
     })
@@ -180,7 +180,7 @@ fn get_prompts_def() -> Value {
             "properties": with_paging(json!({
                 "executor": { "type": "string", "description": "Filter by executor (e.g. claude-code, cursor)" },
                 "session_id": { "type": "string", "description": "Filter to a specific session" },
-                "after": { "type": "string", "description": "Start date" }
+                "after": date_schema("Only prompts whose commands ran at or after this time")
             }), 10)
         }
     })
@@ -296,8 +296,8 @@ fn find_agent_session_def() -> Value {
                 "directory": { "type": "string", "description": "Filter to sessions that ran commands in this directory or its subtree" },
                 "executor": { "type": "string", "description": "Filter by agent name (e.g. claude-code, cursor)" },
                 "prompt_text": { "type": "string", "description": "Search across the first prompt of each session (substring match)" },
-                "after": { "type": "string", "description": "Only sessions after this date (ISO 8601 or relative like '3 days ago')" },
-                "before": { "type": "string", "description": "Only sessions before this date" }
+                "after": date_schema("Only sessions' commands at or after this time"),
+                "before": date_schema("Only sessions' commands at or before this time; a bare date includes that whole day")
             }), 10)
         }
     })
@@ -429,6 +429,31 @@ fn days_arg(args: &Value, default: i64) -> i64 {
 /// An `hours` window argument, clamped to at most [`MAX_WINDOW_DAYS`].
 fn hours_arg(args: &Value, default: i64) -> i64 {
     get_int(args, "hours", default).clamp(1, MAX_WINDOW_DAYS * 24)
+}
+
+/// A date argument (`after`, `before`). Absent is `Ok(None)`; present but
+/// unreadable is an error, never a silently dropped filter — an agent that
+/// asked for "since last tuesday" must not get the whole history back as if
+/// it had been honoured.
+fn date_arg(args: &Value, key: &str, end_of_day: bool) -> Result<Option<i64>, String> {
+    get_str(args, key).map_or(Ok(None), |text| {
+        util::parse_date_input(text, end_of_day)
+            .map(Some)
+            .ok_or_else(|| {
+                format!(
+                    "could not read {key} \"{text}\" as a date. Accepted: {}",
+                    util::DATE_INPUT_FORMATS
+                )
+            })
+    })
+}
+
+/// Schema description for a date argument, listing what it accepts.
+fn date_schema(what: &str) -> Value {
+    json!({
+        "type": "string",
+        "description": format!("{what}: {}", util::DATE_INPUT_FORMATS)
+    })
 }
 
 fn get_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
@@ -564,8 +589,8 @@ fn handle_search_commands(
 ) -> Result<String, String> {
     let query = get_str(args, "query").unwrap_or("");
     let (limit, offset) = paging(args, i64::from(mcp.default_limit));
-    let after = get_str(args, "after").and_then(|s| util::parse_date_input(s, false));
-    let before = get_str(args, "before").and_then(|s| util::parse_date_input(s, true));
+    let after = date_arg(args, "after", false)?;
+    let before = date_arg(args, "before", true)?;
     let executor = get_str(args, "executor");
     let directory = get_str(args, "directory");
     let exit_code = args
@@ -632,7 +657,7 @@ fn handle_recent_commands(
     let (limit, offset) = paging(args, i64::from(mcp.default_limit));
     let directory = get_str(args, "directory");
     let executor = get_str(args, "executor");
-    let after = get_str(args, "after").and_then(|s| util::parse_date_input(s, false));
+    let after = date_arg(args, "after", false)?;
 
     let qf = QueryFilter {
         query_tokens: &[],
@@ -756,7 +781,7 @@ fn handle_get_prompts(
     mcp: &crate::config::McpConfig,
 ) -> Result<String, String> {
     let (limit, offset) = paging(args, 10);
-    let after = get_str(args, "after").and_then(|s| util::parse_date_input(s, false));
+    let after = date_arg(args, "after", false)?;
     let executor = get_str(args, "executor");
     let session_filter = get_str(args, "session_id");
 
@@ -1657,8 +1682,8 @@ fn handle_find_agent_session(
     let directory = get_str(args, "directory");
     let executor = get_str(args, "executor");
     let prompt_text = get_str(args, "prompt_text");
-    let after = get_str(args, "after").and_then(|s| util::parse_date_input(s, false));
-    let before = get_str(args, "before").and_then(|s| util::parse_date_input(s, true));
+    let after = date_arg(args, "after", false)?;
+    let before = date_arg(args, "before", true)?;
 
     let qf = QueryFilter {
         query_tokens: &[],
@@ -3846,5 +3871,102 @@ mod tests {
             !text.contains("ls -la"),
             "~-prefixed exclude_dirs should match its subtree: {text}"
         );
+    }
+
+    #[test]
+    fn an_unreadable_date_is_an_error_naming_the_accepted_formats() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let cases = [
+            (
+                "search_commands",
+                json!({"query": "x", "after": "last tuesday"}),
+                "after",
+            ),
+            (
+                "search_commands",
+                json!({"query": "x", "before": "soonish"}),
+                "before",
+            ),
+            ("recent_commands", json!({"after": "last tuesday"}), "after"),
+            ("get_prompts", json!({"after": "2026-13-01"}), "after"),
+            (
+                "find_agent_session",
+                json!({"after": "a while ago"}),
+                "after",
+            ),
+            (
+                "find_agent_session",
+                json!({"before": "5 fortnights ago"}),
+                "before",
+            ),
+        ];
+        for (tool, args, key) in cases {
+            let err = call_tool(&repo, tool, &args, &default_mcp())
+                .expect_err(&format!("{tool} {args} should be rejected"));
+            assert!(err.contains(key), "{tool}: {err}");
+            assert!(err.contains("YYYY-MM-DD"), "{tool}: {err}");
+            assert!(err.contains("hours ago"), "{tool}: {err}");
+        }
+    }
+
+    #[test]
+    fn an_iso_date_time_filters_search_commands_to_that_instant() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        repo.insert_session(&crate::models::Session {
+            id: "s".to_string(),
+            hostname: "test".to_string(),
+            created_at: 1_700_000_000_000,
+            tag_id: None,
+        })
+        .unwrap();
+        // 2023-11-14T22:13:20Z and one hour later.
+        for (cmd, at) in [
+            ("echo early", 1_700_000_000_000),
+            ("echo late", 1_700_003_600_000),
+        ] {
+            repo.insert_entry(&crate::models::Entry::new(
+                "s".to_string(),
+                cmd.to_string(),
+                "/p".to_string(),
+                Some(0),
+                at,
+                at + 1,
+            ))
+            .unwrap();
+        }
+        let text = call_tool(
+            &repo,
+            "search_commands",
+            &json!({"query": "echo", "after": "2023-11-14T22:30:00Z"}),
+            &default_mcp(),
+        )
+        .unwrap();
+        assert!(text.contains("echo late"), "{text}");
+        assert!(!text.contains("echo early"), "{text}");
+    }
+
+    #[test]
+    fn date_arguments_describe_every_accepted_format() {
+        for (tool, keys) in [
+            ("search_commands", &["after", "before"][..]),
+            ("recent_commands", &["after"][..]),
+            ("get_prompts", &["after"][..]),
+            ("find_agent_session", &["after", "before"][..]),
+        ] {
+            let def = tool_definition(tool).unwrap();
+            for key in keys {
+                let description = def["inputSchema"]["properties"][key]["description"]
+                    .as_str()
+                    .unwrap();
+                for needle in [
+                    "YYYY-MM-DD",
+                    "hours ago",
+                    "weeks ago",
+                    "2026-10-18T10:00:00Z",
+                ] {
+                    assert!(description.contains(needle), "{tool}.{key}: {description}");
+                }
+            }
+        }
     }
 }
