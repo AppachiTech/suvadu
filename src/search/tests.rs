@@ -3012,6 +3012,10 @@ fn matching_mode_latency_on_a_large_history() {
         (MatchMode::Literal, "workspace rare_old"),
         (MatchMode::Prefix, "cargo test"),
         (MatchMode::Fuzzy, "wrkspc"),
+        // Nothing matches as typed, so these also pay for the separator
+        // fallback: one that finds the command, one that finds nothing.
+        (MatchMode::Terms, "workspacerareold"),
+        (MatchMode::Terms, "no-such-command"),
     ] {
         let mut app = SearchApp::new(test_search_config(vec![], 100_001));
         app.recall.match_mode = mode;

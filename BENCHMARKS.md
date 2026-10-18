@@ -134,6 +134,33 @@ trigram index, so each character costs a scan — roughly 3.5x the default
 mode here. That is the price of the mode, not a regression in it, and
 `fuzzy` is opt-in. `terms` remains the default and is unchanged.
 
+### Separator-insensitive fallback (schema v11), 18 October 2026
+
+Measured before and after the `terms` fallback that ignores separators
+(`hiveagent` → `hive-agent`), on **Apple M4 Max, 128 GB RAM, macOS 27.2,
+rustc 1.96.0**, release profile, one run each. The full baseline above was
+not re-run.
+
+- **Queries that match as typed are unchanged.** The fallback only runs
+  when the strict query found nothing. `typed_search_latency_on_a_large_history`
+  (100,000 entries) took 93–208 µs per query before and 102–199 µs after;
+  `matching_mode_latency_on_a_large_history` took 591 µs / 361 µs / 15.8 ms /
+  23.9 ms (terms / literal / prefix / fuzzy) before and 553 µs / 336 µs /
+  15.4 ms / 23.3 ms after. The judged harness at 100,000 entries stayed
+  within run-to-run noise (46 µs – 22 ms p50 both times).
+- **The fallback itself** — `terms` `workspacerareold`, which matches nothing
+  as typed and one command with separators ignored — took 526 µs at 100,000
+  entries; `no-such-command`, which matches nothing either way, 190 µs.
+- **Recording a command costs about 25 µs more**, because each insert now
+  updates a second trigram index: p50 ~78 µs → ~103 µs, p95 ~138 µs →
+  ~207 µs at 100,000 entries (`search_benchmark`, two runs each).
+- **Database size**: the harness corpus at 100,000 entries grew from 33 MB to
+  37 MB. A corpus of longer commands (`v11_migration_cost_on_a_large_history`
+  in `src/db.rs`, about 55 characters each) grew from 53.6 MB to 67.1 MB.
+- **Upgrading** builds the new index once, holding the write lock for
+  0.68 s at 100,000 entries (other shells wait up to 5 s). `suv gc`'s full
+  rebuild of both indexes took 1.47 s.
+
 ## Known gaps
 
 - **Ranking quality is not measured.** The judged set records which command
