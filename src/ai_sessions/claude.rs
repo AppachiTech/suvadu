@@ -22,43 +22,21 @@ pub struct ClaudeState {
 }
 
 /// Parse complete records, leaving an unfinished tail for the next import.
-/// State changes are committed only when every complete record is valid.
+/// State changes are committed only when every complete record is valid;
+/// malformed lines are skipped as [`super::for_each_jsonl_record`] describes.
 pub fn parse_chunk(
     bytes: &[u8],
     offset: u64,
     state: &mut ClaudeState,
-) -> Result<(Vec<AiEvent>, usize), String> {
-    const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
+) -> Result<super::ParsedChunk, String> {
     let mut next = state.clone();
     let mut events = Vec::new();
-    let mut consumed = 0;
-    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
-        let complete = line.last() == Some(&b'\n');
-        let content = if complete {
-            &line[..line.len() - 1]
-        } else {
-            line
-        };
-        if content.len() > MAX_LINE_BYTES {
-            return Err("Claude JSONL record exceeds 16 MiB".into());
-        }
-        if !complete {
-            break;
-        }
-        let absolute = offset
-            .checked_add(consumed as u64)
-            .ok_or("Claude source offset overflow")?;
-        let record: Value = serde_json::from_slice(content)
-            .map_err(|error| format!("Invalid Claude JSON at byte {absolute}: {error}"))?;
-        if !record.is_object() || !record["type"].is_string() {
-            return Err(format!("Invalid Claude record at byte {absolute}"));
-        }
-        parse_record(&record, absolute, &mut next, &mut events)
-            .map_err(|error| format!("Claude record at byte {absolute}: {error}"))?;
-        consumed += line.len();
-    }
+    let (consumed, malformed) =
+        super::for_each_jsonl_record(bytes, offset, "Claude", |record, absolute| {
+            parse_record(record, absolute, &mut next, &mut events)
+        })?;
     *state = next;
-    Ok((events, consumed))
+    Ok((events, consumed, malformed))
 }
 
 fn parse_record(
@@ -348,5 +326,83 @@ fn optional_string(value: &Value, field: &str) -> Result<Option<String>, String>
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) => Ok(Some(value.clone())),
         Some(_) => Err(format!("invalid {field}: expected string")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prompt(text: &str) -> String {
+        format!(
+            "{}\n",
+            json!({
+                "type":"user","sessionId":"native-1","cwd":"/work",
+                "timestamp":"2026-09-12T10:00:00Z","uuid":"u1",
+                "message":{"role":"user","content":text}
+            })
+        )
+    }
+
+    #[test]
+    fn a_complete_transcript_imports_its_prompts() {
+        let input = prompt("one") + &prompt("two");
+        let mut state = ClaudeState::default();
+        let (events, consumed, malformed) = parse_chunk(input.as_bytes(), 0, &mut state).unwrap();
+        assert_eq!(consumed, input.len());
+        assert_eq!(malformed, 0);
+        assert_eq!(
+            events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
+            ["session_started", "prompt", "prompt"]
+        );
+    }
+
+    #[test]
+    fn an_incomplete_final_line_waits_for_the_writer() {
+        let first = prompt("one");
+        let second = prompt("two");
+        let input = first.clone() + &second[..second.len() - 5];
+        let (events, consumed, malformed) =
+            parse_chunk(input.as_bytes(), 0, &mut ClaudeState::default()).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(consumed, first.len());
+        assert_eq!(malformed, 0);
+    }
+
+    #[test]
+    fn a_torn_line_followed_by_complete_records_is_skipped_and_counted() {
+        let one = prompt("one");
+        let torn = format!("{}{}", &one[..30], prompt("two"));
+        let input = one.clone() + &torn + &prompt("three");
+        let mut state = ClaudeState::default();
+        let (events, consumed, malformed) = parse_chunk(input.as_bytes(), 0, &mut state).unwrap();
+        assert_eq!(consumed, input.len());
+        assert_eq!(malformed, 1);
+        let texts = events
+            .iter()
+            .filter_map(|e| e.data["text"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(texts, ["one", "three"]);
+        assert_eq!(
+            events.last().unwrap().id,
+            format!("claude-{}-prompt", one.len() + torn.len())
+        );
+    }
+
+    #[test]
+    fn a_malformed_final_line_waits_for_a_later_record() {
+        let one = prompt("one");
+        let input = one.clone() + "{\"type\":\"user\",\"sessionId\n";
+        let (events, consumed, malformed) =
+            parse_chunk(input.as_bytes(), 0, &mut ClaudeState::default()).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(consumed, one.len());
+        assert_eq!(malformed, 0);
+    }
+
+    #[test]
+    fn invalid_records_that_parse_as_json_still_error() {
+        let input = prompt("one").replace("2026-09-12T10:00:00Z", "yesterday");
+        assert!(parse_chunk(input.as_bytes(), 0, &mut ClaudeState::default()).is_err());
     }
 }

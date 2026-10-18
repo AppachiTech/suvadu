@@ -228,6 +228,10 @@ fn sanitize_event(
 struct CaptureGaps {
     all_before: u64,
     dirs: std::collections::HashMap<String, u64>,
+    /// Complete transcript lines skipped because they were not valid
+    /// records -- typically a torn write the agent appended past.
+    #[serde(default)]
+    malformed_lines: u64,
 }
 impl CaptureGaps {
     fn observe(&mut self, cwd: &str, policy: &CapturePolicy, end: u64) {
@@ -433,8 +437,12 @@ impl Repository {
         file.seek(SeekFrom::Start(offset))?;
         let mut bytes = Vec::new();
         file.take(MAX_CHUNK).read_to_end(&mut bytes)?;
-        let (events, consumed) = codex::parse_chunk(&bytes, offset, &mut state).map_err(invalid)?;
+        let (events, consumed, malformed) =
+            codex::parse_chunk(&bytes, offset, &mut state).map_err(invalid)?;
         reject_non_advancing_oversized_record(&bytes, consumed, offset, metadata.len())?;
+        // Codex totals are cumulative snapshots, so a skipped line leaves
+        // later totals intact; only its own content is lost.
+        gaps.malformed_lines += malformed as u64;
         let native = state
             .native_id
             .as_deref()
@@ -473,7 +481,7 @@ impl Repository {
         tx.execute("INSERT INTO ai_sources(path,session_id,identity,byte_offset,state,adapter_version,skipped,gaps) VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(path) DO UPDATE SET byte_offset=excluded.byte_offset,state=excluded.state,skipped=excluded.skipped,gaps=excluded.gaps", params![path_text.as_ref(),id,identity,i64::try_from(offset+consumed as u64).map_err(|_| invalid("Transcript too large"))?,serde_json::to_string(&state).map_err(|_| invalid("Cannot encode checkpoint"))?,codex::ADAPTER_VERSION,skipped,serde_json::to_string(&gaps).map_err(|_| invalid("Cannot encode capture gaps"))?])?;
         tx.commit()?;
         Ok(
-            json!({"session_id":id,"imported_events":inserted,"byte_offset":offset+consumed as u64,"has_more":metadata.len()>offset+bytes.len() as u64,"incomplete_tail":consumed<bytes.len(),"coverage":"partial","usage_complete":!skipped}),
+            json!({"session_id":id,"imported_events":inserted,"byte_offset":offset+consumed as u64,"has_more":metadata.len()>offset+bytes.len() as u64,"incomplete_tail":consumed<bytes.len(),"skipped_malformed_lines":malformed,"coverage":"partial","usage_complete":!skipped}),
         )
     }
 
@@ -538,9 +546,13 @@ impl Repository {
         file.seek(SeekFrom::Start(offset))?;
         let mut bytes = Vec::new();
         file.take(MAX_CHUNK).read_to_end(&mut bytes)?;
-        let (events, consumed) =
+        let (events, consumed, malformed) =
             claude::parse_chunk(&bytes, offset, &mut state).map_err(invalid)?;
         reject_non_advancing_oversized_record(&bytes, consumed, offset, metadata.len())?;
+        // Claude usage is summed per message, so a skipped line may have
+        // carried usage the totals never saw.
+        gaps.malformed_lines += malformed as u64;
+        skipped |= malformed > 0;
         let native = state
             .native_id
             .as_deref()
@@ -579,7 +591,7 @@ impl Repository {
         tx.execute("INSERT INTO ai_sources(path,session_id,identity,byte_offset,state,adapter_version,skipped,gaps) VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(path) DO UPDATE SET byte_offset=excluded.byte_offset,state=excluded.state,skipped=excluded.skipped,gaps=excluded.gaps", params![path_text.as_ref(),id,identity,i64::try_from(offset+consumed as u64).map_err(|_| invalid("Transcript too large"))?,serde_json::to_string(&state).map_err(|_| invalid("Cannot encode checkpoint"))?,claude::ADAPTER_VERSION,skipped,serde_json::to_string(&gaps).map_err(|_| invalid("Cannot encode capture gaps"))?])?;
         tx.commit()?;
         Ok(
-            json!({"session_id":id,"imported_events":inserted,"byte_offset":offset+consumed as u64,"has_more":metadata.len()>offset+bytes.len() as u64,"incomplete_tail":consumed<bytes.len(),"coverage":"partial","usage_complete":!skipped}),
+            json!({"session_id":id,"imported_events":inserted,"byte_offset":offset+consumed as u64,"has_more":metadata.len()>offset+bytes.len() as u64,"incomplete_tail":consumed<bytes.len(),"skipped_malformed_lines":malformed,"coverage":"partial","usage_complete":!skipped}),
         )
     }
 
@@ -778,6 +790,7 @@ impl Repository {
             .conn
             .prepare("SELECT gaps,adapter_version FROM ai_sources WHERE session_id=?1")?;
         let mut paused_window = false;
+        let mut malformed_lines = 0_u64;
         let mut disabled_dirs = Vec::new();
         let mut future_versions: Vec<u32> = Vec::new();
         for row in statement.query_map([id], |row| {
@@ -794,6 +807,7 @@ impl Repository {
             }
             let gaps = decode::<CaptureGaps>(&gaps)?;
             paused_window |= gaps.all_before > 0;
+            malformed_lines += gaps.malformed_lines;
             for dir in gaps.dirs.keys() {
                 if !disabled_dirs.contains(dir) {
                     disabled_dirs.push(dir.clone());
@@ -830,6 +844,12 @@ impl Repository {
             known_missing.push(format!(
                 "Records from {hidden_dirs} {noun} were skipped while capture was off there; \
                  the path is withheld by mcp.exclude_dirs"
+            ));
+        }
+        if malformed_lines > 0 {
+            known_missing.push(format!(
+                "{malformed_lines} malformed line(s) in the native transcript could not be read \
+                 and were skipped"
             ));
         }
         if !usage_complete {
@@ -1794,17 +1814,59 @@ mod tests {
     }
 
     #[test]
-    fn malformed_transcript_and_wrong_identity_leave_no_partial_import() {
+    fn a_torn_line_is_skipped_once_the_transcript_moves_past_it() {
         let (dir, repo) = crate::test_utils::test_repo();
         let path = dir.path().join("fixture.jsonl");
-        std::fs::write(&path, format!("{}invalid\n", records())).unwrap();
-        assert!(repo
-            .import_codex_session(&path, None, |_| Ok(CapturePolicy::default()))
-            .is_err());
-        assert_eq!(
-            repo.list_ai_sessions(20, 0, &[]).unwrap()["sessions"],
-            json!([])
-        );
+        std::fs::write(&path, format!("{}{{\"timestamp\":\"2026\n", records())).unwrap();
+        let first = import(&repo, &path);
+        assert_eq!(first["imported_events"], 5);
+        assert_eq!(first["incomplete_tail"], true);
+        assert_eq!(first["skipped_malformed_lines"], 0);
+
+        append(&path, &prompt("after the torn write"));
+        let second = import(&repo, &path);
+        assert_eq!(second["imported_events"], 1);
+        assert_eq!(second["incomplete_tail"], false);
+        assert_eq!(second["skipped_malformed_lines"], 1);
+        let session = repo.get_ai_session("codex-fixture", 100, 0, &[]).unwrap();
+        assert_eq!(session["session"]["usage"]["total_tokens"], 180);
+        let capture = &session["session"]["capture"];
+        assert_eq!(capture["complete"], false);
+        assert!(capture["known_missing"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| gap.as_str().unwrap().starts_with("1 malformed line(s)")));
+        assert_eq!(import(&repo, &path)["imported_events"], 0);
+    }
+
+    #[test]
+    fn a_skipped_claude_line_marks_its_usage_incomplete() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("claude.jsonl");
+        let line = |text: &str| {
+            format!(
+                "{}\n",
+                json!({"type":"user","sessionId":"native","cwd":"/work","timestamp":"2026-09-12T12:00:00Z","message":{"role":"user","content":text}})
+            )
+        };
+        std::fs::write(
+            &path,
+            format!("{}{{\"type\":\"assi\n{}", line("one"), line("two")),
+        )
+        .unwrap();
+        let result = repo
+            .import_claude_session(&path, None, |_| Ok(CapturePolicy::default()))
+            .unwrap();
+        assert_eq!(result["skipped_malformed_lines"], 1);
+        assert_eq!(result["usage_complete"], false);
+        assert_eq!(result["imported_events"], 3);
+    }
+
+    #[test]
+    fn wrong_identity_and_rewrites_leave_no_partial_import() {
+        let (dir, repo) = crate::test_utils::test_repo();
+        let path = dir.path().join("fixture.jsonl");
         std::fs::write(&path, records()).unwrap();
         assert!(repo
             .import_codex_session(&path, Some("another"), |_| Ok(CapturePolicy::default()))

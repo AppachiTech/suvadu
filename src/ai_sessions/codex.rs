@@ -20,49 +20,24 @@ pub struct CodexState {
 }
 
 /// Parse complete records, leaving an unfinished tail for the next import.
-/// State changes are committed only when every complete record is valid.
+/// State changes are committed only when every complete record is valid;
+/// malformed lines are skipped as [`super::for_each_jsonl_record`] describes.
 pub fn parse_chunk(
     bytes: &[u8],
     offset: u64,
     state: &mut CodexState,
-) -> Result<(Vec<AiEvent>, usize), String> {
-    // Codex can embed image inputs and compaction snapshots in a single JSONL
-    // record. Keep this aligned with the repository's bounded import chunk so
-    // those records can be consumed without allowing unbounded allocation.
-    const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
+) -> Result<super::ParsedChunk, String> {
     let mut next = state.clone();
     let mut events = Vec::new();
-    let mut consumed = 0;
-    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
-        let complete = line.last() == Some(&b'\n');
-        let content = if complete {
-            &line[..line.len() - 1]
-        } else {
-            line
-        };
-        if content.len() > MAX_LINE_BYTES {
-            return Err("Codex JSONL record exceeds 16 MiB".into());
-        }
-        if !complete {
-            break;
-        }
-        let absolute = offset
-            .checked_add(consumed as u64)
-            .ok_or("Codex source offset overflow")?;
-        let record: Value = serde_json::from_slice(content)
-            .map_err(|error| format!("Invalid Codex JSON at byte {absolute}: {error}"))?;
-        if !record.is_object() || !record["type"].is_string() {
-            return Err(format!("Invalid Codex record at byte {absolute}"));
-        }
-        if let Some(event) = parse_record(&record, absolute, &mut next)
-            .map_err(|error| format!("Codex record at byte {absolute}: {error}"))?
-        {
-            events.push(event);
-        }
-        consumed += line.len();
-    }
+    let (consumed, malformed) =
+        super::for_each_jsonl_record(bytes, offset, "Codex", |record, absolute| {
+            if let Some(event) = parse_record(record, absolute, &mut next)? {
+                events.push(event);
+            }
+            Ok(())
+        })?;
     *state = next;
-    Ok((events, consumed))
+    Ok((events, consumed, malformed))
 }
 
 fn parse_record(
@@ -402,7 +377,7 @@ mod tests {
                 json!({"type":"user_message","message":"Explain this repo"}),
             );
         let mut state = CodexState::default();
-        let (events, consumed) = parse_chunk(input.as_bytes(), 0, &mut state).unwrap();
+        let (events, consumed, _) = parse_chunk(input.as_bytes(), 0, &mut state).unwrap();
         assert_eq!(consumed, input.len());
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].kind, "session_started");
@@ -443,7 +418,7 @@ mod tests {
             }),
         );
 
-        let (events, _) = parse_chunk(input.as_bytes(), 0, &mut initialized()).unwrap();
+        let (events, _, _) = parse_chunk(input.as_bytes(), 0, &mut initialized()).unwrap();
 
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].kind, "prompt");
@@ -493,7 +468,7 @@ mod tests {
             }),
         );
 
-        let (events, _) = parse_chunk(input.as_bytes(), 0, &mut initialized()).unwrap();
+        let (events, _, _) = parse_chunk(input.as_bytes(), 0, &mut initialized()).unwrap();
 
         assert!(events.is_empty());
     }
@@ -519,7 +494,7 @@ mod tests {
             "event_msg",
             json!({"type":"task_complete","turn_id":"t1","last_agent_message":"answer"}),
         );
-        let (events, _) = parse_chunk(input.as_bytes(), 200, &mut initialized()).unwrap();
+        let (events, _, _) = parse_chunk(input.as_bytes(), 200, &mut initialized()).unwrap();
         assert_eq!(
             events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
             ["response", "response", "turn_completed"]
@@ -535,8 +510,8 @@ mod tests {
             "event_msg",
             json!({"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"output_tokens":null,"total_tokens":50,"future_counter":99},"last_token_usage":{"cached_input_tokens":0},"model_context_window":1000}}),
         );
-        let (events, _) = parse_chunk(input.as_bytes(), 432, &mut initialized()).unwrap();
-        let (replay, _) = parse_chunk(input.as_bytes(), 432, &mut initialized()).unwrap();
+        let (events, _, _) = parse_chunk(input.as_bytes(), 432, &mut initialized()).unwrap();
+        let (replay, _, _) = parse_chunk(input.as_bytes(), 432, &mut initialized()).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "usage");
         assert_eq!(events[0].id, "codex-432");
@@ -555,10 +530,10 @@ mod tests {
         let cut = prompt.len() - 4;
         let input = first.clone() + &prompt[..cut];
         let mut state = CodexState::default();
-        let (events, consumed) = parse_chunk(input.as_bytes(), 0, &mut state).unwrap();
+        let (events, consumed, _) = parse_chunk(input.as_bytes(), 0, &mut state).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(consumed, first.len());
-        let (events, consumed) =
+        let (events, consumed, _) =
             parse_chunk(prompt.as_bytes(), first.len() as u64, &mut state).unwrap();
         assert_eq!(consumed, prompt.len());
         assert_eq!(events[0].id, format!("codex-{}", first.len()));
@@ -581,7 +556,7 @@ mod tests {
                 json!({"type":"agent_message","message":"two","phase":"final_answer"}),
             )
             + &record("event_msg", json!({"type":"turn_aborted","turn_id":"t2"}));
-        let (events, _) = parse_chunk(input.as_bytes(), 0, &mut initialized()).unwrap();
+        let (events, _, _) = parse_chunk(input.as_bytes(), 0, &mut initialized()).unwrap();
         assert_eq!(events.len(), 4);
         assert_eq!(events[0].kind, "turn_started");
         assert_eq!(events[1].model.as_deref(), Some("model-a"));
@@ -592,10 +567,45 @@ mod tests {
     }
 
     #[test]
-    fn malformed_complete_lines_and_invalid_timestamps_error() {
-        for input in ["{broken}\n".to_owned(), "null\n".to_owned(), "{\"type\":\"event_msg\",\"timestamp\":\"bad\",\"payload\":{\"type\":\"user_message\",\"message\":\"hi\"}}\n".to_owned()] {
-            assert!(parse_chunk(input.as_bytes(), 0, &mut initialized()).is_err(), "{input}");
+    fn invalid_timestamps_error() {
+        let input = "{\"type\":\"event_msg\",\"timestamp\":\"bad\",\"payload\":{\"type\":\"user_message\",\"message\":\"hi\"}}\n";
+        assert!(parse_chunk(input.as_bytes(), 0, &mut initialized()).is_err());
+    }
+
+    #[test]
+    fn a_malformed_line_followed_by_complete_records_is_skipped_and_counted() {
+        let prompt = record(
+            "event_msg",
+            json!({"type":"user_message","message":"after"}),
+        );
+        // A torn write leaves a fragment that the next append ends with its
+        // own record and newline; the writer has moved on past it.
+        let torn_write = format!("{}{prompt}", &prompt[..20]);
+        for torn in [torn_write.as_str(), "null\n", "{\"payload\":{}}\n"] {
+            let input = format!("{torn}{prompt}");
+            let mut state = initialized();
+            let (events, consumed, malformed) =
+                parse_chunk(input.as_bytes(), 0, &mut state).unwrap();
+            assert_eq!(consumed, input.len(), "{torn}");
+            assert_eq!(malformed, 1, "{torn}");
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].data, json!({"text":"after"}));
+            assert_eq!(events[0].id, format!("codex-{}", torn.len()));
         }
+    }
+
+    #[test]
+    fn a_malformed_final_line_waits_for_a_later_record() {
+        let prompt = record(
+            "event_msg",
+            json!({"type":"user_message","message":"before"}),
+        );
+        let input = format!("{prompt}{{broken}}\n");
+        let mut state = initialized();
+        let (events, consumed, malformed) = parse_chunk(input.as_bytes(), 0, &mut state).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(consumed, prompt.len());
+        assert_eq!(malformed, 0);
     }
 
     #[test]
@@ -619,7 +629,7 @@ mod tests {
             );
 
         let mut state = CodexState::default();
-        let (events, consumed) = parse_chunk(input.as_bytes(), 0, &mut state).unwrap();
+        let (events, consumed, _) = parse_chunk(input.as_bytes(), 0, &mut state).unwrap();
 
         assert_eq!(consumed, input.len());
         assert_eq!(
@@ -656,7 +666,7 @@ mod tests {
             }),
         );
 
-        let (events, consumed) = parse_chunk(input.as_bytes(), 0, &mut initialized()).unwrap();
+        let (events, consumed, _) = parse_chunk(input.as_bytes(), 0, &mut initialized()).unwrap();
 
         assert_eq!(consumed, input.len());
         assert_eq!(events.len(), 1);
@@ -768,7 +778,7 @@ mod tests {
         let (head, child) = forked_rollout();
         let input = head + &child;
         let mut state = CodexState::default();
-        let (events, consumed) = parse_chunk(input.as_bytes(), 0, &mut state).unwrap();
+        let (events, consumed, _) = parse_chunk(input.as_bytes(), 0, &mut state).unwrap();
 
         assert_eq!(consumed, input.len());
         assert_eq!(state.native_id.as_deref(), Some("child-1"));
@@ -795,7 +805,7 @@ mod tests {
     fn a_fork_split_inside_the_replayed_history_resumes_without_crediting_it() {
         let (head, child) = forked_rollout();
         let mut state = CodexState::default();
-        let (first, consumed) = parse_chunk(head.as_bytes(), 0, &mut state).unwrap();
+        let (first, consumed, _) = parse_chunk(head.as_bytes(), 0, &mut state).unwrap();
         assert_eq!(consumed, head.len());
         assert_eq!(
             first.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
@@ -804,7 +814,7 @@ mod tests {
         // The checkpoint survives a round trip through its stored form.
         let mut state: CodexState =
             serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
-        let (events, _) = parse_chunk(child.as_bytes(), head.len() as u64, &mut state).unwrap();
+        let (events, _, _) = parse_chunk(child.as_bytes(), head.len() as u64, &mut state).unwrap();
         assert_eq!(events.len(), 4);
         assert_eq!(events[1].data, json!({"text":"child answer"}));
     }
