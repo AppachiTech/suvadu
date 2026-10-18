@@ -26,9 +26,14 @@ use rusqlite::{params, Connection, OpenFlags};
 /// Shared entry column list for SELECT queries
 pub const ENTRY_COLUMNS: &str = "e.id, e.session_id, e.command, e.cwd, e.exit_code, e.started_at, e.ended_at, e.duration_ms, e.context, COALESCE(et.name, st.name) as tag_name, e.tag_id, e.executor_type, e.executor";
 
-/// Shared FROM/JOIN clause for entry queries
+/// Shared FROM/JOIN clause for entry queries.
+///
+/// `sessions` is a `LEFT JOIN` so that an entry whose session row is missing is
+/// still listed — and listed exactly when `count_filtered` and
+/// `count_unique_filtered`, which use the same join, count it. Only
+/// `s.tag_id` is read from the session, and a missing row reads as no tag.
 pub const ENTRY_JOINS: &str = "FROM entries e
-             JOIN sessions s ON e.session_id = s.id
+             LEFT JOIN sessions s ON e.session_id = s.id
              LEFT JOIN tags st ON s.tag_id = st.id
              LEFT JOIN tags et ON e.tag_id = et.id";
 

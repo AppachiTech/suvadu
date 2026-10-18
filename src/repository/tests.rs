@@ -3231,3 +3231,78 @@ fn literal_substring_search_still_folds_only_ascii_case() {
     assert_eq!(found("écho"), vec!["echo écho".to_string()]);
     assert_eq!(found("git status"), vec!["Git Status".to_string()]);
 }
+
+// ── Entries whose session row is missing ────────────────────────────────────
+
+/// Two entries in a real session plus one whose session row does not exist,
+/// written with foreign keys off the way an older or damaged database can
+/// hold it. The orphan carries its own tag so tag filters can reach it.
+fn repo_with_orphan_entry() -> (tempfile::TempDir, Repository, i64) {
+    let (dir, repo) = repo_with_commands(&["git status", "git push"]);
+    let tag = repo.create_tag("work", None).unwrap();
+    repo.conn
+        .pragma_update(None, "foreign_keys", "OFF")
+        .unwrap();
+    repo.conn
+        .execute(
+            "INSERT INTO entries (session_id, command, cwd, exit_code, started_at, ended_at, duration_ms, tag_id)
+             VALUES ('vanished-session', 'git orphan', '/tmp', 0, 5000, 5001, 1, ?1)",
+            params![tag],
+        )
+        .unwrap();
+    repo.conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+    (dir, repo, tag)
+}
+
+#[test]
+fn an_entry_without_a_session_row_is_counted_and_listed_alike() {
+    let (_d, repo, tag) = repo_with_orphan_entry();
+    let tokens = vec!["git".to_string()];
+    let filters = [
+        QueryFilter::default(),
+        QueryFilter {
+            query_tokens: &tokens,
+            ..Default::default()
+        },
+        QueryFilter {
+            tag_id: Some(tag),
+            ..Default::default()
+        },
+    ];
+    for (i, filter) in filters.iter().enumerate() {
+        let listed = repo.get_entries_filtered(100, 0, filter).unwrap();
+        let count = repo.count_filtered(filter).unwrap();
+        assert_eq!(
+            i64::try_from(listed.len()).unwrap(),
+            count,
+            "filter {i}: counted {count}, listed {:?}",
+            listed.iter().map(|e| &e.command).collect::<Vec<_>>()
+        );
+        assert!(
+            listed.iter().any(|e| e.command == "git orphan"),
+            "filter {i}: the orphan must be listed"
+        );
+
+        let unique = repo
+            .get_unique_entries_filtered(100, 0, filter, false)
+            .unwrap();
+        assert_eq!(
+            i64::try_from(unique.len()).unwrap(),
+            repo.count_unique_filtered(filter).unwrap(),
+            "filter {i}: unique count and unique list disagree"
+        );
+        assert!(unique.iter().any(|(e, _)| e.command == "git orphan"));
+
+        let recent = repo.get_recent_entries(100, 0, filter, None).unwrap();
+        assert_eq!(recent.len(), listed.len(), "filter {i}: recent list");
+    }
+
+    let orphan = repo
+        .get_entries_filtered(100, 0, &QueryFilter::default())
+        .unwrap()
+        .into_iter()
+        .find(|e| e.command == "git orphan")
+        .unwrap();
+    assert_eq!(orphan.session_id, "vanished-session");
+    assert_eq!(orphan.tag_name.as_deref(), Some("work"));
+}

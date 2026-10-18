@@ -10,6 +10,12 @@ use rusqlite::{params, OptionalExtension};
 
 use super::{entry_from_row, FilterBuilder, Repository, ENTRY_COLUMNS, ENTRY_JOINS};
 
+/// The rows `count_filtered` and `count_unique_filtered` count: the same
+/// entries `ENTRY_JOINS` lists, without the tag joins a count does not need.
+/// Keep the session join identical to `ENTRY_JOINS`, or a count and the list
+/// it describes disagree.
+const COUNT_JOINS: &str = "FROM entries e LEFT JOIN sessions s ON e.session_id = s.id";
+
 impl Repository {
     /// Insert a new entry
     pub fn insert_entry(&self, entry: &Entry) -> DbResult<i64> {
@@ -425,8 +431,7 @@ impl Repository {
         let fb = filter.entry_filter_builder();
 
         let sql = format!(
-            "SELECT COUNT(DISTINCT command) FROM entries e
-             JOIN sessions s ON e.session_id = s.id{}",
+            "SELECT COUNT(DISTINCT command) {COUNT_JOINS}{}",
             fb.build_where()
         );
 
@@ -588,10 +593,7 @@ impl Repository {
     pub fn count_filtered(&self, filter: &impl super::EntryQuery) -> DbResult<i64> {
         let fb = filter.entry_filter_builder();
 
-        let sql = format!(
-            "SELECT COUNT(*) FROM entries e LEFT JOIN sessions s ON e.session_id = s.id{}",
-            fb.build_where()
-        );
+        let sql = format!("SELECT COUNT(*) {COUNT_JOINS}{}", fb.build_where());
 
         let mut stmt = self.conn.prepare(&sql)?;
         let count: i64 = stmt.query_row(fb.params_refs().as_slice(), |row| row.get(0))?;
