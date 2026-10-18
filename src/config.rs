@@ -143,6 +143,10 @@ impl Default for SearchConfig {
     }
 }
 
+/// The largest `search.page_limit` the config accepts, and the most
+/// `suv settings` will set.
+pub const MAX_PAGE_LIMIT: usize = 10_000;
+
 const fn default_page_limit() -> usize {
     50
 }
@@ -782,10 +786,10 @@ fn validate_config(config: &Config) -> ConfigResult<()> {
             "search.page_limit must be at least 1".into(),
         ));
     }
-    if config.search.page_limit > 10_000 {
-        return Err(ConfigError::Path(
-            "search.page_limit exceeds maximum of 10000".into(),
-        ));
+    if config.search.page_limit > MAX_PAGE_LIMIT {
+        return Err(ConfigError::Path(format!(
+            "search.page_limit exceeds maximum of {MAX_PAGE_LIMIT}"
+        )));
     }
     if config.search.length_threshold == 0 || config.search.length_threshold > 500 {
         return Err(ConfigError::Path(

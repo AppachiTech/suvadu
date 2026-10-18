@@ -1,4 +1,4 @@
-use crate::config::{save_config, Config, CustomAgent};
+use crate::config::{save_config, Config, CustomAgent, MAX_PAGE_LIMIT};
 use crate::theme::theme;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -636,7 +636,7 @@ impl AppState {
             KeyCode::Enter => {
                 if (self.current_tab, self.selected_item) == (SettingsTab::Search, 0) {
                     if let Ok(n) = self.input_buffer.parse::<usize>() {
-                        self.config.search.page_limit = n.clamp(10, 5000);
+                        self.config.search.page_limit = n.clamp(10, MAX_PAGE_LIMIT);
                         self.dirty = true;
                         self.save_status = Some(format!(
                             "Page limit set to {}",
@@ -1118,7 +1118,7 @@ fn render_content_panel(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) 
 
 const fn get_setting_description(tab: usize, item: usize) -> &'static str {
     match (tab, item) {
-        (0, 0) => "Number of results to show per page in search (10-5000)",
+        (0, 0) => "Number of results to show per page in search (10-10000)",
         (0, 1) => "Open recall with identical commands grouped into one row, with when each last ran and how often. Off: list every run. Ctrl+U switches either way",
         (0, 2) => "Filter search results by the current session's tag",
         (0, 3) => "Boost results from the current directory higher in search (toggle with ^S)",
@@ -2270,12 +2270,20 @@ mod tests {
         app.handle_input(KeyEvent::from(KeyCode::Enter));
         assert_eq!(app.config.search.page_limit, 10); // Clamped to min
 
-        // Enter edit mode again and type a value above max (5000)
+        // Anything config validation accepts is kept as typed...
         app.handle_input(KeyEvent::from(KeyCode::Enter));
         app.input_buffer.clear();
         app.input_buffer.push_str("9999");
         app.handle_input(KeyEvent::from(KeyCode::Enter));
-        assert_eq!(app.config.search.page_limit, 5000); // Clamped to max
+        assert_eq!(app.config.search.page_limit, 9999);
+
+        // ...and a value above the maximum (10000) is clamped to it.
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        app.input_buffer.clear();
+        app.input_buffer.push_str("20000");
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.config.search.page_limit, 10_000);
+        assert!(get_setting_description(0, 0).contains("(10-10000)"));
     }
 
     #[test]
