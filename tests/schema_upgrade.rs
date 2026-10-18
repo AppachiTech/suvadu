@@ -23,6 +23,9 @@ use suvadu::ai_sessions::CapturePolicy;
 use suvadu::db;
 use suvadu::repository::Repository;
 
+/// The schema version an upgrade must end at.
+const CURRENT_SCHEMA: i64 = 10;
+
 /// `entries`/`sessions`/`tags`/`notes`/`bookmarks` exactly as migration v1
 /// created them: the three late columns on `entries` arrive by `ALTER TABLE`,
 /// so a real released database has them last, in this order.
@@ -285,7 +288,7 @@ fn v5_database_from_v0_3_7_upgrades_with_every_record_intact() {
     }
 
     let conn = db::init_db(&path).unwrap();
-    assert_eq!(schema_version(&conn), 9);
+    assert_eq!(schema_version(&conn), CURRENT_SCHEMA);
     assert_seed_data_intact(&conn);
     assert_current_schema_present(&conn);
     assert_fts_covers_all_entries(&conn);
@@ -308,7 +311,7 @@ fn v7_database_from_v0_4_0_upgrades_without_reindexing_twice() {
     }
 
     let conn = db::init_db(&path).unwrap();
-    assert_eq!(schema_version(&conn), 9);
+    assert_eq!(schema_version(&conn), CURRENT_SCHEMA);
     assert_seed_data_intact(&conn);
     assert_current_schema_present(&conn);
     // v7 already had the index: the upgrade must not backfill it a second time.
@@ -362,7 +365,7 @@ fn an_unversioned_pre_release_database_upgrades_and_keeps_its_history() {
     drop(conn);
 
     let conn = db::init_db(&path).unwrap();
-    assert_eq!(schema_version(&conn), 9);
+    assert_eq!(schema_version(&conn), CURRENT_SCHEMA);
     assert_eq!(scalar_i64(&conn, "SELECT COUNT(*) FROM entries"), 1);
     assert!(table_exists(&conn, "aliases"));
     assert_current_schema_present(&conn);
@@ -404,9 +407,68 @@ fn upgrading_twice_changes_nothing() {
     drop(conn);
 
     let conn = db::init_db(&path).unwrap();
-    assert_eq!(schema_version(&conn), 9);
+    assert_eq!(schema_version(&conn), CURRENT_SCHEMA);
     assert_eq!(scalar_i64(&conn, "SELECT COUNT(*) FROM entries_fts"), first);
     assert_seed_data_intact(&conn);
+}
+
+/// v0.4.0's update trigger re-indexed a row on any change to it; after the
+/// upgrade only a change to the command does.
+#[test]
+fn an_upgraded_index_follows_command_edits_and_ignores_context_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = released_database(dir.path(), 7);
+    let conn = db::init_db(&path).unwrap();
+
+    let trigger: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='entries_fts_au'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        trigger.contains("AFTER UPDATE OF id, command ON entries"),
+        "{trigger}"
+    );
+
+    let blocks = |conn: &Connection| -> Vec<Vec<u8>> {
+        conn.prepare("SELECT block FROM entries_fts_data ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let before = blocks(&conn);
+    conn.execute(
+        "UPDATE entries SET context = '{\"agent\":\"codex\"}' WHERE id = 2",
+        [],
+    )
+    .unwrap();
+    assert_eq!(blocks(&conn), before, "a context edit re-indexed the row");
+
+    conn.execute(
+        "UPDATE entries SET command = 'git commit -m ''recent history''' WHERE id = 1",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT COUNT(*) FROM entries_fts WHERE command LIKE '%recent history%'"
+        ),
+        1
+    );
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT COUNT(*) FROM entries_fts WHERE command LIKE '%ancient history%'"
+        ),
+        0
+    );
+    conn.execute_batch("INSERT INTO entries_fts(entries_fts, rank) VALUES('integrity-check', 1);")
+        .unwrap();
 }
 
 /// Several shells starting at once after an upgrade all open the old
@@ -487,7 +549,7 @@ fn race_shells_to_upgrade() {
     );
 
     let conn = Connection::open(&path).unwrap();
-    assert_eq!(schema_version(&conn), 9);
+    assert_eq!(schema_version(&conn), CURRENT_SCHEMA);
     let shells = i64::try_from(SHELLS).unwrap();
     assert_eq!(
         scalar_i64(&conn, "SELECT COUNT(*) FROM entries"),

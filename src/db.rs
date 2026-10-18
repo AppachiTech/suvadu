@@ -17,7 +17,7 @@ pub enum DbError {
 pub type DbResult<T> = Result<T, DbError>;
 
 /// Current schema version. Increment when adding new migrations.
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 /// Get the path to the suvadu database file
 pub fn get_db_path() -> DbResult<PathBuf> {
@@ -413,6 +413,7 @@ fn run_migrations(conn: &mut Connection) -> DbResult<()> {
         (7, migrate_v7),
         (8, migrate_v8),
         (9, migrate_v9),
+        (10, migrate_v10),
     ];
 
     loop {
@@ -635,6 +636,24 @@ fn migrate_v7(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Migration v10: re-index a row only when its indexed text can change.
+///
+/// v7's update trigger fired on every `UPDATE` of `entries`, so attaching
+/// agent context to a command (or any other edit that leaves the command
+/// alone) deleted the row from `entries_fts` and inserted it again. Firing
+/// on `id` and `command` only — the two columns the index reads — keeps it
+/// exactly in sync for a fraction of the writes.
+fn migrate_v10(conn: &Connection) -> DbResult<()> {
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS entries_fts_au;
+         CREATE TRIGGER entries_fts_au AFTER UPDATE OF id, command ON entries BEGIN
+            INSERT INTO entries_fts(entries_fts, rowid, command) VALUES ('delete', old.id, old.command);
+            INSERT INTO entries_fts(rowid, command) VALUES (new.id, new.command);
+         END;",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -709,6 +728,8 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE schema_version (version INTEGER NOT NULL);
              INSERT INTO schema_version VALUES (8);
+             -- Every v8 database has entries; v10 re-creates a trigger on it.
+             CREATE TABLE entries (id INTEGER PRIMARY KEY, command TEXT NOT NULL);
              CREATE TABLE ai_summaries (
                  id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
                  source_revision TEXT NOT NULL, text TEXT NOT NULL,
@@ -720,7 +741,7 @@ mod tests {
         drop(conn);
 
         let conn = init_db(&db_path).unwrap();
-        assert_eq!(get_schema_version(&conn).unwrap(), 9);
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
         for column in [
             "source_event_count",
             "source_command_count",
@@ -904,6 +925,68 @@ mod tests {
             )
             .unwrap();
         assert_eq!(hits, 1);
+    }
+
+    /// Every block FTS5 has written for `entries_fts`, in order. Any write to
+    /// the index — even a delete and re-insert of identical text — changes it.
+    fn fts_blocks(conn: &Connection) -> Vec<(i64, Vec<u8>)> {
+        conn.prepare("SELECT id, block FROM entries_fts_data ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn fts_hits(conn: &Connection, pattern: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM entries e WHERE e.id IN \
+             (SELECT rowid FROM entries_fts WHERE command LIKE ?1)",
+            params![pattern],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_only_a_command_change_rewrites_the_search_index() {
+        let temp_dir = TempDir::new().unwrap();
+        let conn = init_db(&temp_dir.path().join("test.db")).unwrap();
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'host', 1000, NULL)", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO entries VALUES (1, 's1', 'git status', '/tmp', 0, 1000, 1100, 100, NULL, NULL, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+
+        // Attaching agent context (and other non-command edits) must not
+        // touch the index at all.
+        let before = fts_blocks(&conn);
+        conn.execute(
+            "UPDATE entries SET context = '{\"agent\":\"x\"}', exit_code = 1, cwd = '/srv' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            fts_blocks(&conn),
+            before,
+            "a non-command update re-indexed the row"
+        );
+
+        // Changing the command re-indexes it: old text gone, new text found.
+        conn.execute(
+            "UPDATE entries SET command = 'cargo build' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        assert_ne!(fts_blocks(&conn), before);
+        assert_eq!(fts_hits(&conn, "%status%"), 0);
+        assert_eq!(fts_hits(&conn, "%build%"), 1);
+        conn.execute_batch(
+            "INSERT INTO entries_fts(entries_fts, rank) VALUES('integrity-check', 1);",
+        )
+        .unwrap();
     }
 
     #[test]
