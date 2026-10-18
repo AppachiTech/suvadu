@@ -853,29 +853,132 @@ pub fn config_file_test_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Serialize `config` for writing, keeping any key the running build does
-/// not know about that is already in `existing`.
+/// Sections of `Config` that are maps keyed by the user's own data (a path,
+/// an agent name) rather than by field names. An entry missing from the
+/// config being saved was deleted, so it is removed from the file too.
+const CONFIG_MAP_SECTIONS: &[&str] = &["auto_tags", "agents"];
+
+/// Serialize `config` for writing by editing `existing` in place.
 ///
-/// `suv settings` edits one field at a time but re-serializes the whole
-/// `Config`, so without this a save would silently drop anything the struct
-/// has no field for — a hand-added comment-free key, or a key belonging to a
-/// different suvadu version. Known keys are always taken from `config`
-/// (including removals: an emptied list is written as empty, never merged
-/// with the old entries), so this only ever *adds back* what would otherwise
-/// be lost.
+/// `suv settings` edits one field at a time but saves the whole `Config`.
+/// Re-serializing from scratch would drop every comment and every key the
+/// struct has no field for (a hand-added key, or one from a different
+/// suvadu version), so the existing document is edited with `toml_edit`
+/// instead:
+/// - every key `config` serializes is set to its new value, keeping the
+///   comments and formatting around it (a value that has not changed is
+///   left exactly as written);
+/// - an entry of a map section ([`CONFIG_MAP_SECTIONS`]) that `config` no
+///   longer has is removed, so a deleted auto-tag or agent stays deleted;
+/// - anything else in the file — unknown keys, comments — is kept.
+///
+/// Lists are known values like any other: an emptied list is written as
+/// empty, never merged with the old entries.
 fn render_config_toml(config: &Config, existing: Option<&str>) -> ConfigResult<String> {
-    let rendered = toml::Value::try_from(config)?;
+    let rendered = toml::to_string_pretty(config)?;
     let Some(existing) = existing else {
-        return Ok(toml::to_string_pretty(&rendered)?);
+        return Ok(rendered);
     };
     // An unparseable existing file is replaced rather than merged: there is
     // nothing trustworthy to preserve, and refusing to save would strand the
     // user in the settings UI.
-    let Ok(mut merged) = toml::from_str::<toml::Value>(existing) else {
-        return Ok(toml::to_string_pretty(&rendered)?);
+    let (Ok(mut doc), Ok(new)) = (
+        existing.parse::<toml_edit::DocumentMut>(),
+        rendered.parse::<toml_edit::DocumentMut>(),
+    ) else {
+        return Ok(rendered);
     };
-    merge_toml_value(&mut merged, rendered);
-    Ok(toml::to_string_pretty(&merged)?)
+    let new = new.into_table();
+    for section in CONFIG_MAP_SECTIONS {
+        let Some(old) = doc
+            .get_mut(section)
+            .and_then(toml_edit::Item::as_table_like_mut)
+        else {
+            continue;
+        };
+        let keep = new.get(section).and_then(toml_edit::Item::as_table_like);
+        let removed: Vec<String> = old
+            .iter()
+            .map(|(key, _)| key.to_string())
+            .filter(|key| !keep.is_some_and(|keep| keep.contains_key(key)))
+            .collect();
+        for key in removed {
+            old.remove(&key);
+        }
+    }
+    merge_edit_table(doc.as_table_mut(), new);
+    Ok(doc.to_string())
+}
+
+/// Set every key of `new` in `target`, recursing into tables that both have
+/// so that keys `new` does not mention (and their comments) are kept.
+fn merge_edit_table(target: &mut dyn toml_edit::TableLike, new: toml_edit::Table) {
+    for (key, item) in new {
+        match target.get_mut(&key) {
+            Some(slot) => merge_edit_item(slot, item),
+            None => {
+                target.insert(&key, without_positions(item));
+            }
+        }
+    }
+}
+
+fn merge_edit_item(slot: &mut toml_edit::Item, new: toml_edit::Item) {
+    let new = if slot.is_table_like() {
+        match new.into_table() {
+            Ok(table) => {
+                if let Some(target) = slot.as_table_like_mut() {
+                    merge_edit_table(target, table);
+                }
+                return;
+            }
+            Err(other) => other,
+        }
+    } else {
+        new
+    };
+    if let Some(old) = slot.as_value_mut() {
+        // A value stays a value (an inline table or array the user wrote
+        // inline stays inline), keeping its trailing comment.
+        if let Ok(mut value) = new.into_value() {
+            if !same_toml_value(old, &value) {
+                *value.decor_mut() = old.decor().clone();
+                *old = value;
+            }
+        }
+    } else {
+        *slot = without_positions(new);
+    }
+}
+
+/// Whether two values are equal as data, ignoring formatting and comments.
+fn same_toml_value(a: &toml_edit::Value, b: &toml_edit::Value) -> bool {
+    let parse = |v: &toml_edit::Value| {
+        toml::from_str::<toml::Table>(&format!("v = {}", v.clone().decorated("", ""))).ok()
+    };
+    matches!((parse(a), parse(b)), (Some(a), Some(b)) if a == b)
+}
+
+/// A table taken from the freshly rendered document carries that
+/// document's positions, which mean nothing in the one being edited; clear
+/// them so new tables are placed after the existing ones.
+fn without_positions(mut item: toml_edit::Item) -> toml_edit::Item {
+    fn clear(table: &mut toml_edit::Table) {
+        table.set_position(None);
+        for (_, child) in table.iter_mut() {
+            if let Some(child) = child.as_table_mut() {
+                clear(child);
+            } else if let Some(array) = child.as_array_of_tables_mut() {
+                array.iter_mut().for_each(clear);
+            }
+        }
+    }
+    if let Some(table) = item.as_table_mut() {
+        clear(table);
+    } else if let Some(array) = item.as_array_of_tables_mut() {
+        array.iter_mut().for_each(clear);
+    }
+    item
 }
 
 /// Save configuration to file atomically (temp file + rename).
@@ -1015,6 +1118,111 @@ unknown_mcp_key = 7
             let value: toml::Value =
                 toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
             assert_eq!(value["future_option"].as_str(), Some("keep me"));
+        });
+    }
+
+    const COMMENTED_CONFIG: &str = r#"# My suvadu config — hand-maintained.
+enabled = true
+future_option = "keep me" # not known to this build
+exclusions = [
+    "^vault ", # never record vault logins
+    "SECRETFILE",
+]
+
+# Search tuning.
+[search]
+page_limit = 123 # big screens
+match_mode = "fuzzy"
+
+[auto_tags]
+"/work/a" = "alpha"
+"/work/b" = "beta" # the second project
+
+[agents.first]
+env_var = "FIRST_AGENT"
+executor_type = "agent"
+
+[agents.second]
+env_var = "SECOND_AGENT"
+executor_type = "ide"
+unknown_agent_key = 1
+"#;
+
+    #[test]
+    fn save_drops_a_removed_auto_tag_and_agent() {
+        with_config_file(COMMENTED_CONFIG, |_| {
+            let mut config = load_config().unwrap();
+            config.auto_tags.remove("/work/a");
+            config.agents.remove("first");
+            save_config(&config).unwrap();
+
+            let reloaded = load_config().unwrap();
+            assert!(
+                !reloaded.auto_tags.contains_key("/work/a"),
+                "removed tag came back"
+            );
+            assert!(
+                !reloaded.agents.contains_key("first"),
+                "removed agent came back"
+            );
+            assert_eq!(
+                reloaded.auto_tags.get("/work/b").map(String::as_str),
+                Some("beta")
+            );
+            assert_eq!(reloaded.agents["second"].env_var, "SECOND_AGENT");
+        });
+    }
+
+    #[test]
+    fn save_keeps_comments_and_unknown_keys_while_changing_values() {
+        with_config_file(COMMENTED_CONFIG, |path| {
+            let mut config = load_config().unwrap();
+            config.search.page_limit = 200;
+            config.auto_tags.insert("/work/c".into(), "gamma".into());
+            config.agents.insert(
+                "third".into(),
+                CustomAgent {
+                    env_var: "THIRD_AGENT".into(),
+                    executor_type: "ci".into(),
+                },
+            );
+            save_config(&config).unwrap();
+
+            let saved = std::fs::read_to_string(path).unwrap();
+            for comment in [
+                "# My suvadu config — hand-maintained.",
+                "# not known to this build",
+                "# Search tuning.",
+                "# big screens",
+                "# never record vault logins",
+                "# the second project",
+            ] {
+                assert!(saved.contains(comment), "lost {comment:?}:\n{saved}");
+            }
+            assert!(saved.contains("page_limit = 200 # big screens"), "{saved}");
+            let value: toml::Value = toml::from_str(&saved).unwrap();
+            assert_eq!(value["future_option"].as_str(), Some("keep me"));
+            assert_eq!(
+                value["agents"]["second"]["unknown_agent_key"].as_integer(),
+                Some(1)
+            );
+
+            let reloaded = load_config().unwrap();
+            assert_eq!(reloaded.search.page_limit, 200);
+            assert_eq!(reloaded.auto_tags.len(), 3);
+            assert_eq!(reloaded.agents["third"].executor_type, "ci");
+            assert_eq!(reloaded.agents.len(), 3);
+            assert_eq!(reloaded.exclusions, vec!["^vault ", "SECRETFILE"]);
+        });
+    }
+
+    #[test]
+    fn saving_twice_changes_nothing_the_second_time() {
+        with_config_file(COMMENTED_CONFIG, |path| {
+            save_config(&load_config().unwrap()).unwrap();
+            let first = std::fs::read_to_string(path).unwrap();
+            save_config(&load_config().unwrap()).unwrap();
+            assert_eq!(std::fs::read_to_string(path).unwrap(), first);
         });
     }
 
