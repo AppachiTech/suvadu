@@ -83,7 +83,7 @@ governs it.
 
 | Category | Holds | Goes away when |
 |---|---|---|
-| Commands | command text, directory, exit code, start/end times, duration, executor type and name, an optional tag, and a `context` JSON blob; plus their notes, bookmarks, aliases, tags and the trigram search index | you run `suv delete <pattern>` |
+| Commands | command text, directory, exit code, start/end times, duration, executor type and name, an optional tag, and a `context` JSON blob; plus their notes, bookmarks, aliases, tags and the two trigram search indexes (one over the command as typed, one with its separators removed) | you run `suv delete <pattern>` |
 | Sessions | shell sessions (id, **machine hostname**, creation time, tag), and agent sessions with their captured transcript events and the adapter checkpoints that record which transcript files were read and how far | an agent session is removed with `suv agent delete-session <id>`; a shell session row stays behind after its commands are deleted |
 | Summaries | session summaries written over MCP, with their cited evidence IDs, the session revision they were written from, and the caller-declared agent and model | their agent session is deleted — editing or deleting commands only marks a summary *stale*, it does not remove it |
 | Skills | shared skill documents | you run `suv skills remove`; a sync rewrites agent-side copies, not the stored row |

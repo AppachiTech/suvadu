@@ -17,7 +17,7 @@ pub enum DbError {
 pub type DbResult<T> = Result<T, DbError>;
 
 /// Current schema version. Increment when adding new migrations.
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 /// Get the path to the suvadu database file
 pub fn get_db_path() -> DbResult<PathBuf> {
@@ -414,6 +414,7 @@ fn run_migrations(conn: &mut Connection) -> DbResult<()> {
         (8, migrate_v8),
         (9, migrate_v9),
         (10, migrate_v10),
+        (11, migrate_v11),
     ];
 
     loop {
@@ -636,33 +637,46 @@ fn migrate_v7(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
-/// Whether `entries_fts` holds exactly what `entries` does.
+/// The full-text indexes over `entries.command`: the plain one (v7) and the
+/// separator-insensitive one (v11). Both are external-content FTS5 tables,
+/// checked and rebuilt the same way.
+const SEARCH_INDEXES: [&str; 2] = ["entries_fts", "entries_norm_fts"];
+
+/// Whether every search index holds exactly what `entries` does.
 ///
-/// Uses FTS5's thorough `integrity-check` (`rank = 1`), which compares the
-/// index against its content table; the plain check passes even when every
-/// row is indexed twice, as two shells racing the old v7 backfill could
-/// leave it. The check reads only — it changes nothing — so `suv doctor`
-/// can run it. A mismatch is `Ok(false)`; any other failure is an error.
+/// Uses FTS5's thorough `integrity-check` (`rank = 1`), which compares an
+/// index against its content; the plain check passes even when every row is
+/// indexed twice, as two shells racing the old v7 backfill could leave it.
+/// The check reads only — it changes nothing — so `suv doctor` can run it.
+/// A mismatch in either index is `Ok(false)`; any other failure is an error.
 pub fn search_index_is_consistent(conn: &Connection) -> DbResult<bool> {
-    match conn.execute(
-        "INSERT INTO entries_fts(entries_fts, rank) VALUES('integrity-check', 1)",
-        [],
-    ) {
-        Ok(_) => Ok(true),
-        Err(rusqlite::Error::SqliteFailure(e, _))
-            if e.code == rusqlite::ErrorCode::DatabaseCorrupt =>
-        {
-            Ok(false)
+    for index in SEARCH_INDEXES {
+        match conn.execute(
+            &format!("INSERT INTO {index}({index}, rank) VALUES('integrity-check', 1)"),
+            [],
+        ) {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::DatabaseCorrupt =>
+            {
+                return Ok(false);
+            }
+            Err(e) => return Err(e.into()),
         }
-        Err(e) => Err(e.into()),
     }
+    Ok(true)
 }
 
-/// Rebuild `entries_fts` from `entries`. Search results never depend on
-/// the old index contents, so this is always safe; it takes about a second
-/// per 100,000 entries and holds the write lock meanwhile.
+/// Rebuild every search index from `entries`. Search results never depend
+/// on the old index contents, so this is always safe; it holds the write
+/// lock meanwhile, about one and a half seconds per 100,000 entries.
 pub fn rebuild_search_index(conn: &Connection) -> DbResult<()> {
-    conn.execute("INSERT INTO entries_fts(entries_fts) VALUES('rebuild')", [])?;
+    for index in SEARCH_INDEXES {
+        conn.execute(
+            &format!("INSERT INTO {index}({index}) VALUES('rebuild')"),
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -681,6 +695,65 @@ fn migrate_v10(conn: &Connection) -> DbResult<()> {
             INSERT INTO entries_fts(rowid, command) VALUES (new.id, new.command);
          END;",
     )?;
+    Ok(())
+}
+
+/// `expr` (an SQL text expression) in the separator-insensitive form the
+/// `entries_norm_fts` index holds: every space, tab, newline, `-`, `_`, `.`,
+/// `/` and `:` removed, then ASCII letters lower-cased.
+///
+/// Plain `replace()` and `lower()` rather than a registered function, so the
+/// view, its triggers and the index stay usable from the `sqlite3` shell or a
+/// restored backup, where no Suvadu function exists. `lower()` folds ASCII
+/// only.
+///
+/// This text is part of schema v11: the triggers and the view store it. A
+/// change to it, or to the separator list, needs a migration that recreates
+/// them and rebuilds the index.
+pub fn normalized_sql(expr: &str) -> String {
+    format!(
+        "lower(replace(replace(replace(replace(replace(replace(replace(replace({expr}, \
+         ' ', ''), char(9), ''), char(10), ''), '-', ''), '_', ''), '.', ''), '/', ''), ':', ''))"
+    )
+}
+
+/// Migration v11: a second trigram index, over each command with its
+/// separators removed (see [`normalized_sql`]).
+///
+/// It answers recall's separator-insensitive fallback — `hiveagent` finding
+/// `hive-agent` — through the index, the way `entries_fts` answers ordinary
+/// substring search. `entries_norm_v` computes the normalized text and is the
+/// index's external content, so nothing is stored twice; the triggers mirror
+/// `entries_fts`'s (with v10's narrower update trigger), handing FTS5 the
+/// normalized old and new text. `rebuild` indexes existing history and, like
+/// v7's, cannot index a row twice if another process already ran it.
+fn migrate_v11(conn: &Connection) -> DbResult<()> {
+    let new = normalized_sql("new.command");
+    let old = normalized_sql("old.command");
+    conn.execute_batch(&format!(
+        "CREATE VIEW IF NOT EXISTS entries_norm_v(id, command_norm) AS
+            SELECT id, {command} FROM entries;
+         CREATE VIRTUAL TABLE IF NOT EXISTS entries_norm_fts USING fts5(
+            command_norm,
+            content='entries_norm_v',
+            content_rowid='id',
+            tokenize='trigram'
+         );
+         CREATE TRIGGER IF NOT EXISTS entries_norm_fts_ai AFTER INSERT ON entries BEGIN
+            INSERT INTO entries_norm_fts(rowid, command_norm) VALUES (new.id, {new});
+         END;
+         CREATE TRIGGER IF NOT EXISTS entries_norm_fts_ad AFTER DELETE ON entries BEGIN
+            INSERT INTO entries_norm_fts(entries_norm_fts, rowid, command_norm)
+                VALUES ('delete', old.id, {old});
+         END;
+         CREATE TRIGGER IF NOT EXISTS entries_norm_fts_au AFTER UPDATE OF id, command ON entries BEGIN
+            INSERT INTO entries_norm_fts(entries_norm_fts, rowid, command_norm)
+                VALUES ('delete', old.id, {old});
+            INSERT INTO entries_norm_fts(rowid, command_norm) VALUES (new.id, {new});
+         END;
+         INSERT INTO entries_norm_fts(entries_norm_fts) VALUES('rebuild');",
+        command = normalized_sql("command"),
+    ))?;
     Ok(())
 }
 
@@ -1046,6 +1119,212 @@ mod tests {
             "INSERT INTO entries_fts(entries_fts, rank) VALUES('integrity-check', 1);",
         )
         .unwrap();
+    }
+
+    fn insert_entry(conn: &Connection, id: i64, command: &str) {
+        conn.execute(
+            "INSERT INTO entries VALUES (?1, 's1', ?2, '/tmp', 0, 1000, 1100, 100, NULL, NULL, NULL, NULL)",
+            params![id, command],
+        )
+        .unwrap();
+    }
+
+    /// Entries whose separator-insensitive form matches `pattern` (a
+    /// two-argument LIKE, as search asks it).
+    fn norm_hits(conn: &Connection, pattern: &str) -> Vec<i64> {
+        conn.prepare(
+            "SELECT e.id FROM entries e WHERE e.id IN \
+             (SELECT rowid FROM entries_norm_fts WHERE command_norm LIKE ?1) ORDER BY e.id",
+        )
+        .unwrap()
+        .query_map(params![pattern], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+    }
+
+    fn norm_index_is_intact(conn: &Connection) -> bool {
+        conn.execute_batch(
+            "INSERT INTO entries_norm_fts(entries_norm_fts, rank) VALUES('integrity-check', 1);",
+        )
+        .is_ok()
+    }
+
+    #[test]
+    fn test_the_separator_index_expression_drops_separators_and_folds_ascii() {
+        let conn = Connection::open_in_memory().unwrap();
+        let sql = format!("SELECT {}", normalized_sql("?1"));
+        for (sample, expected) in [
+            ("hive-agent", "hiveagent"),
+            ("Hive_Agent.v2/run:now", "hiveagentv2runnow"),
+            (
+                "kubectl  get\tpods\n-n kube-system",
+                "kubectlgetpodsnkubesystem",
+            ),
+            ("C:\\Temp\\x", "c\\temp\\x"),
+            ("50% done_", "50%done"),
+            // lower() folds ASCII only.
+            ("ÉCHO-Émile", "ÉchoÉmile"),
+            ("line\r\nbreak", "line\rbreak"),
+            ("--._/: \t\n", ""),
+        ] {
+            let from_sql: String = conn
+                .query_row(&sql, params![sample], |row| row.get(0))
+                .unwrap();
+            assert_eq!(from_sql, expected, "{sample:?}");
+        }
+    }
+
+    #[test]
+    fn test_v11_indexes_the_history_recorded_before_it() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let conn = init_db(&db_path).unwrap();
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'host', 1000, NULL)", [])
+            .unwrap();
+        // Back to a v10 database: none of v11's objects, and rows written
+        // while they did not exist.
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS entries_norm_fts_ai;
+             DROP TRIGGER IF EXISTS entries_norm_fts_ad;
+             DROP TRIGGER IF EXISTS entries_norm_fts_au;
+             DROP TABLE IF EXISTS entries_norm_fts;
+             DROP VIEW IF EXISTS entries_norm_v;
+             UPDATE schema_version SET version = 10;",
+        )
+        .unwrap();
+        insert_entry(&conn, 1, "ssh hive-agent.internal");
+        insert_entry(&conn, 2, "git status");
+        drop(conn);
+
+        let conn = init_db(&db_path).unwrap();
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_eq!(norm_hits(&conn, "%hiveagentinternal%"), vec![1]);
+        assert_eq!(norm_hits(&conn, "%gitstatus%"), vec![2]);
+        assert!(norm_index_is_intact(&conn));
+
+        // Running the migration again (another shell got there first) must
+        // not index anything twice.
+        migrate_v11(&conn).unwrap();
+        assert!(norm_index_is_intact(&conn));
+        assert_eq!(norm_hits(&conn, "%hiveagent%"), vec![1]);
+    }
+
+    #[test]
+    fn test_the_separator_index_follows_inserts_updates_and_deletes() {
+        let temp_dir = TempDir::new().unwrap();
+        let conn = init_db(&temp_dir.path().join("test.db")).unwrap();
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'host', 1000, NULL)", [])
+            .unwrap();
+        insert_entry(&conn, 1, "hive-agent start");
+        insert_entry(&conn, 2, "hive_agent stop");
+        assert_eq!(norm_hits(&conn, "%hiveagent%"), vec![1, 2]);
+
+        // A non-command edit must not touch the index at all.
+        let blocks = |conn: &Connection| -> Vec<(i64, Vec<u8>)> {
+            conn.prepare("SELECT id, block FROM entries_norm_fts_data ORDER BY id")
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let before = blocks(&conn);
+        conn.execute(
+            "UPDATE entries SET cwd = '/srv', exit_code = 1 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        assert_eq!(blocks(&conn), before, "a non-command update re-indexed");
+
+        conn.execute(
+            "UPDATE entries SET command = 'cargo build' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        assert_eq!(norm_hits(&conn, "%hiveagent%"), vec![2]);
+        assert_eq!(norm_hits(&conn, "%cargobuild%"), vec![1]);
+
+        conn.execute("DELETE FROM entries WHERE id = 2", [])
+            .unwrap();
+        assert!(norm_hits(&conn, "%hiveagent%").is_empty());
+        assert!(norm_index_is_intact(&conn));
+    }
+
+    #[test]
+    fn test_the_consistency_check_covers_the_separator_index() {
+        let temp_dir = TempDir::new().unwrap();
+        let conn = init_db(&temp_dir.path().join("test.db")).unwrap();
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'host', 1000, NULL)", [])
+            .unwrap();
+        insert_entry(&conn, 1, "hive-agent start");
+        assert!(search_index_is_consistent(&conn).unwrap());
+
+        // Only the separator index drifts; the check must still notice.
+        conn.execute_batch(
+            "INSERT INTO entries_norm_fts(rowid, command_norm) SELECT id, command_norm FROM entries_norm_v;",
+        )
+        .unwrap();
+        assert!(!search_index_is_consistent(&conn).unwrap());
+
+        rebuild_search_index(&conn).unwrap();
+        assert!(search_index_is_consistent(&conn).unwrap());
+        assert_eq!(norm_hits(&conn, "%hiveagent%"), vec![1]);
+    }
+
+    /// How long v11 holds the write lock on a large history, and what its
+    /// index costs on disk. Prints rather than asserts: both depend on the
+    /// machine and the corpus. Run with
+    /// `cargo test --release --bin suv v11_migration_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "builds a 100k-entry database; run explicitly with --ignored"]
+    fn v11_migration_cost_on_a_large_history() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let mut conn = init_db(&db_path).unwrap();
+        conn.execute_batch(
+            "DROP TRIGGER entries_norm_fts_ai; DROP TRIGGER entries_norm_fts_ad;
+             DROP TRIGGER entries_norm_fts_au; DROP TABLE entries_norm_fts;
+             DROP VIEW entries_norm_v; UPDATE schema_version SET version = 10;
+             INSERT INTO sessions VALUES ('s1', 'host', 1000, NULL);",
+        )
+        .unwrap();
+        let shapes = [
+            "cargo test --workspace --package suvadu-core case_",
+            "kubectl get pods -n kube-system -l app=api-gateway-",
+            "git commit -m 'fix: handle the hive-agent reconnect path' #",
+            "docker compose -f deploy/docker-compose.prod.yml up -d svc_",
+            "ssh deploy@build-runner-",
+            "rg --hidden -g '!target' 'normalize_separators' src/",
+        ];
+        conn.execute_batch("BEGIN").unwrap();
+        for i in 0..100_000_i64 {
+            let shape = shapes[usize::try_from(i).unwrap() % shapes.len()];
+            insert_entry(&conn, i + 1, &format!("{shape}{i}"));
+        }
+        conn.execute_batch("COMMIT").unwrap();
+        let bytes = |conn: &Connection| -> i64 {
+            conn.query_row(
+                "SELECT page_count * page_size FROM pragma_page_count, pragma_page_size",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let before = bytes(&conn);
+        let start = std::time::Instant::now();
+        run_migrations(&mut conn).unwrap();
+        let migrated = start.elapsed();
+        let after = bytes(&conn);
+        let start = std::time::Instant::now();
+        rebuild_search_index(&conn).unwrap();
+        let rebuilt = start.elapsed();
+        println!(
+            "v11 at 100k entries: migration {migrated:?}, full rebuild {rebuilt:?}, \
+             database {} KiB -> {} KiB",
+            before / 1024,
+            after / 1024
+        );
     }
 
     #[test]

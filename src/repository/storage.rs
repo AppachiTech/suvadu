@@ -52,9 +52,11 @@ fn category_of(table: &str) -> &'static str {
         "sessions" | "ai_sessions" | "ai_events" | "ai_sources" => SESSIONS,
         "ai_summaries" => SUMMARIES,
         "skills" => SKILLS,
-        // The FTS5 index and its shadow tables are the cost of searching
+        // The FTS5 indexes and their shadow tables are the cost of searching
         // commands, so they are charged to commands.
-        other if other.starts_with("entries_fts") => COMMANDS,
+        other if other.starts_with("entries_fts") || other.starts_with("entries_norm_fts") => {
+            COMMANDS
+        }
         _ => OTHER,
     }
 }
@@ -243,6 +245,19 @@ mod tests {
             .iter()
             .find(|c| c.name == name)
             .unwrap_or_else(|| panic!("missing category {name}"))
+    }
+
+    #[test]
+    fn both_search_indexes_are_charged_to_commands() {
+        for table in [
+            "entries_fts",
+            "entries_fts_data",
+            "entries_norm_fts",
+            "entries_norm_fts_data",
+            "entries_norm_fts_idx",
+        ] {
+            assert_eq!(category_of(table), COMMANDS, "{table}");
+        }
     }
 
     #[test]

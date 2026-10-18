@@ -24,7 +24,7 @@ use suvadu::db;
 use suvadu::repository::Repository;
 
 /// The schema version an upgrade must end at.
-const CURRENT_SCHEMA: i64 = 10;
+const CURRENT_SCHEMA: i64 = 11;
 
 /// `entries`/`sessions`/`tags`/`notes`/`bookmarks` exactly as migration v1
 /// created them: the three late columns on `entries` arrive by `ALTER TABLE`,
@@ -222,6 +222,21 @@ fn assert_fts_covers_all_entries(conn: &Connection) {
         "SELECT COUNT(*) FROM entries_fts WHERE command LIKE '%ancient history%'",
     );
     assert_eq!(hits, 1, "a pre-upgrade command must be searchable");
+
+    // The separator-insensitive index (v11) covers the same history.
+    conn.execute_batch(
+        "INSERT INTO entries_norm_fts(entries_norm_fts, rank) VALUES('integrity-check', 1);",
+    )
+    .expect("separator index must match the entries it indexes after upgrade");
+    let loose_hits = scalar_i64(
+        conn,
+        "SELECT COUNT(*) FROM entries e WHERE e.id IN \
+         (SELECT rowid FROM entries_norm_fts WHERE command_norm LIKE '%ancienthistory%')",
+    );
+    assert_eq!(
+        loose_hits, 1,
+        "a pre-upgrade command must be searchable without separators"
+    );
 }
 
 /// Tables and columns the current code assumes exist.
@@ -229,6 +244,7 @@ fn assert_current_schema_present(conn: &Connection) {
     for table in [
         "skills",
         "entries_fts",
+        "entries_norm_fts",
         "ai_sessions",
         "ai_events",
         "ai_sources",
