@@ -197,7 +197,7 @@ pub fn apply_all(
 }
 
 /// Apply one [`TerminalStep`] to stderr.
-fn apply_step(step: TerminalStep) -> std::io::Result<()> {
+pub fn apply_step(step: TerminalStep) -> std::io::Result<()> {
     use crossterm::{cursor, event, terminal};
     match step {
         TerminalStep::EnableRawMode => terminal::enable_raw_mode(),

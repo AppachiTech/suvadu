@@ -82,13 +82,68 @@ fn suspend_for_editor<T>(
     terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
     f: impl FnOnce() -> Result<T, Box<dyn std::error::Error>>,
 ) -> Result<T, Box<dyn std::error::Error>> {
-    crossterm::terminal::disable_raw_mode()?;
-    crossterm::execute!(io::stderr(), crossterm::terminal::LeaveAlternateScreen)?;
+    for step in editor_suspend_steps() {
+        crate::util::apply_step(step)?;
+    }
     let result = f();
-    crossterm::execute!(io::stderr(), crossterm::terminal::EnterAlternateScreen)?;
-    crossterm::terminal::enable_raw_mode()?;
+    crate::util::apply_all(&editor_resume_steps(), crate::util::apply_step)?;
     *terminal = Terminal::new(CrosstermBackend::new(io::stderr()))?;
     result
+}
+
+/// What handing the terminal to `$EDITOR` undoes: everything the app set
+/// up, bracketed paste included — an editor left with it on receives the
+/// paste markers as text around whatever is pasted into it.
+fn editor_suspend_steps() -> Vec<crate::util::TerminalStep> {
+    crate::util::teardown_steps(crate::util::RecallSurface::FullScreen)
+}
+
+/// What taking the terminal back from `$EDITOR` redoes.
+fn editor_resume_steps() -> Vec<crate::util::TerminalStep> {
+    crate::util::setup_steps(crate::util::RecallSurface::FullScreen)
+}
+
+/// Pasted text as one line, for a single-line field: a leading or trailing
+/// line break is dropped, the rest and tabs become spaces, and any other
+/// control character is removed.
+fn paste_as_line(text: &str) -> String {
+    text.trim_matches(['\n', '\r'])
+        .chars()
+        .filter_map(|c| match c {
+            '\n' | '\r' | '\t' => Some(' '),
+            c if c.is_control() => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
+/// Append as much of `text` to `field` as fits in [`MAX_FIELD_LEN`] bytes.
+fn push_capped(field: &mut String, text: &str) {
+    for c in text.chars() {
+        if field.len() + c.len_utf8() > MAX_FIELD_LEN {
+            break;
+        }
+        field.push(c);
+    }
+}
+
+/// A bracketed paste goes into the text field that has focus — the search
+/// box, or the form's focused field — and is never read as keys, so it can
+/// neither answer a prompt nor submit a form.
+fn handle_paste(app: &mut SkillsApp, text: &str) {
+    let line = paste_as_line(text);
+    match &mut app.mode {
+        Mode::Form(form) => {
+            if let Some(field) = form.focused_text_mut() {
+                push_capped(field, &line);
+            }
+        }
+        Mode::Browse => {
+            push_capped(&mut app.query, &line);
+            app.refresh_filter();
+        }
+        Mode::ConfirmDelete { .. } | Mode::Review => {}
+    }
 }
 
 pub fn parse_triggers(input: &str) -> Vec<String> {
@@ -353,12 +408,14 @@ pub fn run(repo: &Repository) -> Result<(), Box<dyn std::error::Error>> {
         if !event::poll(std::time::Duration::from_mins(1))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
-            continue;
+        let key = match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => key,
+            Event::Paste(text) => {
+                handle_paste(&mut app, &text);
+                continue;
+            }
+            _ => continue,
         };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
 
         let mut edit = |initial: &str| suspend_for_editor(&mut terminal, || edit_body(initial));
         if handle_key(&mut app, key, repo, &mut edit)? {
@@ -1117,6 +1174,98 @@ mod tests {
             status: SKILL_STATUS_ACTIVE.to_string(),
         })
         .unwrap();
+    }
+
+    #[test]
+    fn a_paste_in_browse_goes_into_the_search_box() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        library_with(&repo, "release");
+        library_with(&repo, "deploy");
+        let mut app = SkillsApp::load(&repo).unwrap();
+        handle_paste(&mut app, "rel\n");
+        assert_eq!(app.query, "rel");
+        assert_eq!(app.filtered.len(), 1, "the filter follows the paste");
+
+        // Capped like a typed query, and kept to one line.
+        handle_paste(&mut app, &"x".repeat(5 * MAX_FIELD_LEN));
+        assert_eq!(app.query.len(), MAX_FIELD_LEN);
+        assert!(!app.query.contains('\n'));
+    }
+
+    #[test]
+    fn a_paste_in_the_form_goes_into_the_focused_field_within_its_cap() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = SkillsApp::load(&repo).unwrap();
+        app.mode = Mode::Form(FormState::new_add());
+        handle_paste(&mut app, "my-skill");
+        let Mode::Form(form) = &mut app.mode else {
+            panic!("still in the form")
+        };
+        assert_eq!(form.name, "my-skill");
+        assert_eq!(form.focus, FormField::Name, "a paste never moves focus");
+
+        form.focus = FormField::Description;
+        handle_paste(&mut app, "line one\r\nline two\tend");
+        let Mode::Form(form) = &mut app.mode else {
+            panic!("still in the form")
+        };
+        assert_eq!(form.description, "line one  line two end");
+
+        form.focus = FormField::Triggers;
+        form.triggers = "a".repeat(MAX_FIELD_LEN - 2);
+        handle_paste(&mut app, "éé");
+        let Mode::Form(form) = &mut app.mode else {
+            panic!("still in the form")
+        };
+        assert_eq!(form.triggers.len(), MAX_FIELD_LEN, "{}", form.triggers);
+        assert!(form.triggers.ends_with('é'));
+
+        form.focus = FormField::Scope;
+        let before = (
+            form.name.clone(),
+            form.description.clone(),
+            form.triggers.clone(),
+        );
+        handle_paste(&mut app, "zzz");
+        let Mode::Form(form) = &app.mode else {
+            panic!("still in the form")
+        };
+        assert_eq!(
+            (
+                form.name.clone(),
+                form.description.clone(),
+                form.triggers.clone()
+            ),
+            before,
+            "the scope toggle takes no text"
+        );
+    }
+
+    #[test]
+    fn a_paste_never_answers_the_delete_prompt() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        library_with(&repo, "release");
+        let mut app = SkillsApp::load(&repo).unwrap();
+        app.mode = Mode::ConfirmDelete {
+            name: "release".to_string(),
+            scope: SKILL_SCOPE_GLOBAL.to_string(),
+        };
+        handle_paste(&mut app, "y");
+        assert!(matches!(app.mode, Mode::ConfirmDelete { .. }));
+        assert_eq!(repo.list_skills(None, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_editor_gets_a_terminal_without_bracketed_paste_and_skills_gets_it_back() {
+        use crate::util::TerminalStep;
+        let suspend = editor_suspend_steps();
+        let resume = editor_resume_steps();
+        assert!(suspend.contains(&TerminalStep::DisableBracketedPaste));
+        assert!(suspend.contains(&TerminalStep::DisableRawMode));
+        assert!(suspend.contains(&TerminalStep::LeaveAlternateScreen));
+        assert!(resume.contains(&TerminalStep::EnableBracketedPaste));
+        assert!(resume.contains(&TerminalStep::EnableRawMode));
+        assert!(resume.contains(&TerminalStep::EnterAlternateScreen));
     }
 
     #[test]
