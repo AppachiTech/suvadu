@@ -296,15 +296,23 @@ impl Repository {
             .with_exit_code(filter.exit_code)
             .with_executor(filter.executor)
             .with_cwd(filter.cwd)
-            .with_excluded_dirs(filter.exclude_dirs);
+            .with_excluded_dirs(filter.exclude_dirs)
+            .with_agents_only(filter.agents_only);
 
         // SQLite has no bare OFFSET, so an offset without a limit still
         // needs a `LIMIT -1` (unbounded) in front of it.
         let paged = filter.limit.is_some() || filter.offset > 0;
         let limit_clause = if paged { " LIMIT ? OFFSET ?" } else { "" };
+        // The newest rows are read newest first, so the limit keeps them,
+        // and put back in order below.
+        let order = if filter.newest {
+            "e.started_at DESC, e.id DESC"
+        } else {
+            "e.started_at ASC"
+        };
 
         let sql = format!(
-            "SELECT {ENTRY_COLUMNS} {ENTRY_JOINS}{} ORDER BY e.started_at ASC{limit_clause}",
+            "SELECT {ENTRY_COLUMNS} {ENTRY_JOINS}{} ORDER BY {order}{limit_clause}",
             fb.build_where()
         );
 
@@ -319,9 +327,12 @@ impl Repository {
         }
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let entries = stmt
+        let mut entries = stmt
             .query_map(params.as_slice(), |row| entry_from_row(row, 10))?
             .collect::<Result<Vec<_>, _>>()?;
+        if filter.newest {
+            entries.reverse();
+        }
 
         Ok(entries)
     }

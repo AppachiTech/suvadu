@@ -213,6 +213,12 @@ pub struct ReplayFilter<'a> {
     /// Directories (and their subtrees) to exclude from results, i.e.
     /// `mcp.exclude_dirs`. Empty for every non-MCP caller.
     pub exclude_dirs: &'a [String],
+    /// Only rows [`crate::models::Entry::is_agent`] accepts, filtered in SQL
+    /// so a `limit` counts agent rows only.
+    pub agents_only: bool,
+    /// With a `limit`, keep the newest rows rather than the oldest. The
+    /// result is still oldest first.
+    pub newest: bool,
 }
 
 /// Escape SQL LIKE wildcards (`%`, `_`) and the escape character (`\`) in user input.
@@ -505,9 +511,27 @@ impl FilterBuilder {
         self
     }
 
-    /// Restrict to commands an AI agent ran. Hardcoded SQL, no parameters.
+    /// Restrict to commands an AI agent ran (`executor_type = 'agent'`).
+    /// Narrower than [`Self::with_agents_only`], which also keeps bot, CI,
+    /// IDE and programmatic rows. Hardcoded SQL, no parameters.
     pub fn with_agent_commands_only(mut self) -> Self {
         self.clauses.push("e.executor_type = 'agent'".into());
+        self
+    }
+
+    /// Restrict to rows [`crate::models::Entry::is_agent`] accepts. The
+    /// values are hardcoded constants
+    /// ([`crate::models::ExecutorKind::AGENT_DB_VALUES`]), so they are safe
+    /// to inline into SQL and add no bound parameters.
+    pub fn with_agents_only(mut self, only: bool) -> Self {
+        if only {
+            let list = crate::models::ExecutorKind::AGENT_DB_VALUES
+                .iter()
+                .map(|v| format!("'{v}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.clauses.push(format!("e.executor_type IN ({list})"));
+        }
         self
     }
 

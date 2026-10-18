@@ -185,6 +185,11 @@ impl ExecutorKind {
     /// default, since they are rarely the commands a person wants to re-run.
     pub const NON_INTERACTIVE_DB_VALUES: [&'static str; 4] = ["agent", "bot", "ci", "programmatic"];
 
+    /// `executor_type` string values [`Entry::is_agent`] accepts: every
+    /// recognised type except `human`. NULL and unrecognised values read as
+    /// `Unknown`, which counts as human.
+    pub const AGENT_DB_VALUES: [&'static str; 5] = ["agent", "bot", "ide", "ci", "programmatic"];
+
     /// Returns `true` for commands a person drives interactively — a real
     /// terminal or an IDE-integrated terminal (VS Code, Cursor, …) — plus
     /// unknown/legacy entries. Returns `false` for agent/bot/ci/programmatic.

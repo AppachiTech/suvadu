@@ -82,35 +82,32 @@ pub fn load_entries(
     executor: Option<&str>,
     cwd: Option<&str>,
 ) -> Vec<Entry> {
-    // When no executor filter is set, we need ALL entries to filter by
-    // is_agent() in memory. Don't apply a SQL LIMIT before the filter,
-    // otherwise the limit hits non-agent entries and cuts off recent ones.
-    let sql_limit = if executor.is_some() {
-        Some(MAX_AGENT_ENTRIES)
-    } else {
-        None
-    };
+    load_entries_capped(repo, after_ms, executor, cwd, MAX_AGENT_ENTRIES)
+}
 
-    let all = repo
-        .get_replay_entries(
-            None,
-            &crate::repository::ReplayFilter {
-                after: after_ms,
-                executor,
-                cwd,
-                limit: sql_limit,
-                ..Default::default()
-            },
-        )
-        .unwrap_or_default();
-
-    let mut entries: Vec<Entry> = if executor.is_some() {
-        all
-    } else {
-        all.into_iter().filter(Entry::is_agent).collect()
-    };
-    entries.truncate(MAX_AGENT_ENTRIES);
-    entries
+/// The newest `cap` matching agent commands, oldest first. Without an
+/// executor filter only agent rows are read, so human history never uses up
+/// the cap and is never loaded at all.
+fn load_entries_capped(
+    repo: &Repository,
+    after_ms: Option<i64>,
+    executor: Option<&str>,
+    cwd: Option<&str>,
+    cap: usize,
+) -> Vec<Entry> {
+    repo.get_replay_entries(
+        None,
+        &crate::repository::ReplayFilter {
+            after: after_ms,
+            executor,
+            cwd,
+            limit: Some(cap),
+            agents_only: executor.is_none(),
+            newest: true,
+            ..Default::default()
+        },
+    )
+    .unwrap_or_default()
 }
 
 pub fn compute_agent_counts(entries: &[Entry]) -> Vec<(String, usize)> {
@@ -167,6 +164,111 @@ mod tests {
             executor_type: executor_type.map(String::from),
             executor: executor.map(String::from),
         }
+    }
+
+    /// Record `command` at `started_at` as run by `executor` (or by a human
+    /// when `None`).
+    fn record(repo: &Repository, command: &str, started_at: i64, executor: Option<&str>) {
+        let mut entry = Entry::new(
+            "s1".into(),
+            command.into(),
+            "/tmp".into(),
+            Some(0),
+            started_at,
+            started_at + 10,
+        );
+        entry.executor_type = Some(if executor.is_some() { "agent" } else { "human" }.into());
+        entry.executor = executor.map(String::from);
+        repo.insert_entry(&entry).unwrap();
+    }
+
+    fn test_repo_with_session() -> (tempfile::TempDir, Repository) {
+        let (dir, repo) = crate::test_utils::test_repo();
+        repo.insert_session(&crate::models::Session {
+            id: "s1".to_string(),
+            hostname: "host".to_string(),
+            created_at: 0,
+            tag_id: None,
+        })
+        .unwrap();
+        (dir, repo)
+    }
+
+    fn commands(entries: &[Entry]) -> Vec<&str> {
+        entries.iter().map(|e| e.command.as_str()).collect()
+    }
+
+    #[test]
+    fn past_the_cap_the_newest_agent_commands_are_kept_oldest_first() {
+        let (_dir, repo) = test_repo_with_session();
+        // Agent commands a1..a5, with human commands interleaved — and the
+        // newest rows of all human, which must not use up the cap.
+        for i in 1..=5 {
+            record(&repo, &format!("a{i}"), i * 1_000, Some("claude"));
+            record(&repo, &format!("h{i}"), i * 1_000 + 500, None);
+        }
+        for i in 6..=9 {
+            record(&repo, &format!("h{i}"), i * 1_000, None);
+        }
+
+        let entries = load_entries_capped(&repo, None, None, None, 3);
+        assert_eq!(commands(&entries), ["a3", "a4", "a5"]);
+
+        let entries = load_entries_capped(&repo, None, Some("claude"), None, 3);
+        assert_eq!(commands(&entries), ["a3", "a4", "a5"]);
+
+        // Under the cap, everything in order.
+        let entries = load_entries_capped(&repo, None, None, None, 100);
+        assert_eq!(commands(&entries), ["a1", "a2", "a3", "a4", "a5"]);
+    }
+
+    #[test]
+    fn the_agent_filter_matches_entry_is_agent() {
+        let (_dir, repo) = test_repo_with_session();
+        let kinds = [
+            "human",
+            "agent",
+            "bot",
+            "ide",
+            "ci",
+            "programmatic",
+            "unknown",
+            "something-new",
+        ];
+        for (i, kind) in kinds.iter().enumerate() {
+            let mut entry = Entry::new(
+                "s1".into(),
+                (*kind).into(),
+                "/tmp".into(),
+                Some(0),
+                i64::try_from(i).unwrap() * 1_000,
+                i64::try_from(i).unwrap() * 1_000 + 10,
+            );
+            entry.executor_type = Some((*kind).into());
+            repo.insert_entry(&entry).unwrap();
+        }
+        let mut untyped = Entry::new(
+            "s1".into(),
+            "none".into(),
+            "/tmp".into(),
+            Some(0),
+            9_000,
+            9_010,
+        );
+        untyped.executor_type = None;
+        repo.insert_entry(&untyped).unwrap();
+
+        let loaded = load_entries_capped(&repo, None, None, None, 100);
+        let all = repo
+            .get_replay_entries(None, &crate::repository::ReplayFilter::default())
+            .unwrap();
+        let expected: Vec<&str> = all
+            .iter()
+            .filter(|e| e.is_agent())
+            .map(|e| e.command.as_str())
+            .collect();
+        assert_eq!(commands(&loaded), expected);
+        assert_eq!(expected, ["agent", "bot", "ide", "ci", "programmatic"]);
     }
 
     #[test]
