@@ -3080,3 +3080,154 @@ fn a_groups_position_is_where_grouped_paging_really_finds_it() {
         );
     }
 }
+
+// ── Substring search and the trigram index ──────────────────────────────────
+
+/// `EXPLAIN QUERY PLAN` detail lines for an entry query filtered by `fb`.
+fn query_plan(repo: &Repository, fb: &FilterBuilder) -> Vec<String> {
+    let sql = format!(
+        "EXPLAIN QUERY PLAN SELECT e.id {ENTRY_JOINS}{}",
+        fb.build_where()
+    );
+    let mut stmt = repo.conn.prepare(&sql).unwrap();
+    stmt.query_map(fb.params_refs().as_slice(), |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+/// The plan reaches `entries_fts` through its LIKE index (`INDEX 0:L0`), not
+/// by scanning every row of it (`INDEX 0:`).
+fn assert_uses_trigram_index(plan: &[String], what: &str) {
+    assert!(
+        plan.iter()
+            .any(|d| d.contains("entries_fts") && d.contains("INDEX 0:L0")),
+        "{what}: expected the trigram LIKE index, got {plan:#?}"
+    );
+}
+
+#[test]
+fn a_substring_search_seeks_the_trigram_index_instead_of_scanning_it() {
+    let (_d, repo) = setup_test_db();
+    for token in ["hive-agent", "rare_old", "50%", r"C:\temp"] {
+        let literal = FilterBuilder::new().with_query(Some(token), false);
+        assert_uses_trigram_index(&query_plan(&repo, &literal), &format!("literal {token:?}"));
+
+        let tokens = vec![token.to_string()];
+        let terms = FilterBuilder::new().with_query_tokens(&tokens, SearchField::Command);
+        assert_uses_trigram_index(&query_plan(&repo, &terms), &format!("terms {token:?}"));
+    }
+}
+
+/// Commands whose only difference from a neighbour is a character LIKE would
+/// treat as a wildcard if it were not escaped.
+const WILDCARD_CORPUS: &[&str] = &[
+    "echo 50% done",
+    "echo 50x done",
+    "echo 500 done",
+    "cargo test rare_old",
+    "cargo test rarexold",
+    "cargo test RARE_OLD",
+    r"dir C:\temp\logs",
+    "dir C:/temp/logs",
+    r"dir C:\\temp",
+    r"printf 'a\_b'",
+    "printf 'a_b'",
+    "echo écho",
+    "echo ÉCHO",
+    "Git Status",
+];
+
+fn repo_with_commands(commands: &[&str]) -> (tempfile::TempDir, Repository) {
+    let (dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 1000);
+    repo.insert_session(&session).unwrap();
+    for (i, cmd) in commands.iter().enumerate() {
+        let stamp = 1000 + i64::try_from(i).unwrap();
+        repo.insert_entry(&crate::models::Entry::new(
+            session.id.clone(),
+            (*cmd).to_string(),
+            "/tmp".into(),
+            Some(0),
+            stamp,
+            stamp,
+        ))
+        .unwrap();
+    }
+    (dir, repo)
+}
+
+fn sorted_commands(entries: Vec<crate::models::Entry>) -> Vec<String> {
+    let mut commands: Vec<String> = entries.into_iter().map(|e| e.command).collect();
+    commands.sort();
+    commands
+}
+
+/// What a plain ASCII-case-insensitive substring test accepts.
+fn ascii_substring_matches(commands: &[&str], needle: &str) -> Vec<String> {
+    let needle = needle.to_ascii_lowercase();
+    let mut out: Vec<String> = commands
+        .iter()
+        .filter(|c| c.to_ascii_lowercase().contains(&needle))
+        .map(|c| (*c).to_string())
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn substring_search_treats_like_wildcards_and_backslashes_literally() {
+    let (_d, repo) = repo_with_commands(WILDCARD_CORPUS);
+    for needle in [
+        "50%", "%", "_", r"\", r"\\", "e_o", "rare_old", "rare_", r"a\_b", r"C:\temp", "50% d",
+        "git", "GIT st", "ab", "x",
+    ] {
+        let expected = ascii_substring_matches(WILDCARD_CORPUS, needle);
+
+        let literal = repo
+            .get_entries_filtered(
+                100,
+                0,
+                &QueryFilter {
+                    query: Some(needle),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(sorted_commands(literal), expected, "literal {needle:?}");
+
+        let tokens = vec![needle.to_string()];
+        let filter = QueryFilter {
+            query_tokens: &tokens,
+            ..Default::default()
+        };
+        let terms = repo.get_entries_filtered(100, 0, &filter).unwrap();
+        assert_eq!(sorted_commands(terms), expected, "terms {needle:?}");
+        assert_eq!(
+            repo.count_filtered(&filter).unwrap(),
+            i64::try_from(expected.len()).unwrap(),
+            "count {needle:?}"
+        );
+    }
+}
+
+#[test]
+fn literal_substring_search_still_folds_only_ascii_case() {
+    let (_d, repo) = repo_with_commands(WILDCARD_CORPUS);
+    let found = |needle: &str| {
+        sorted_commands(
+            repo.get_entries_filtered(
+                100,
+                0,
+                &QueryFilter {
+                    query: Some(needle),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        )
+    };
+    assert_eq!(found("ÉCHO"), vec!["echo ÉCHO".to_string()]);
+    assert_eq!(found("écho"), vec!["echo écho".to_string()]);
+    assert_eq!(found("git status"), vec!["Git Status".to_string()]);
+}

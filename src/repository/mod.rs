@@ -291,22 +291,19 @@ impl FilterBuilder {
         let Some(q) = query else {
             return self;
         };
-        let escaped = escape_like(q);
-
-        // An anchored prefix search (`text%`) can already use idx_entries_command;
-        // only the leading-wildcard substring case below needs the FTS index.
+        // A substring search on `command` goes through the trigram index;
+        // see `push_command_contains`.
         if field == SearchField::Command && !prefix_match {
-            // `entries_fts` is a trigram-tokenized FTS5 index over `command`
-            // (see db::migrate_v7), kept in sync via triggers. A LIKE against
-            // it uses that index instead of scanning every row's command —
-            // its substring/case-insensitive-ASCII semantics match a plain
-            // `command LIKE '%x%'` exactly (see the tests below).
-            self.clauses.push(
-                "e.id IN (SELECT rowid FROM entries_fts WHERE command LIKE ? ESCAPE '\\')".into(),
-            );
-            self.params.push(Box::new(format!("%{escaped}%")));
+            self.push_command_contains(q);
             return self;
         }
+
+        // An anchored prefix (`text%`) on `idx_entries_command` still scans
+        // that whole index rather than seeking into it: LIKE folds ASCII
+        // case, and the index is in binary order, so `Git…` and `git…` do not
+        // sit in one range. Scanning the narrow covering index is still
+        // cheaper than scanning the table.
+        let escaped = escape_like(q);
 
         let column = match field {
             SearchField::Cwd => "e.cwd",
@@ -326,10 +323,9 @@ impl FilterBuilder {
     /// AND together one substring clause per token.
     ///
     /// `SQLite`'s LIKE only folds case for ASCII, so a token containing
-    /// non-ASCII characters is deliberately left out of the SQL and matched
-    /// in memory instead; excluding it here could drop a row that differs
-    /// only by the case of a non-ASCII letter. Dropping a token only widens
-    /// the candidate set, which the in-memory scorer then narrows.
+    /// non-ASCII characters is matched with `suvadu_contains_ci` instead,
+    /// which folds Unicode case; LIKE could drop a row that differs only by
+    /// the case of a non-ASCII letter.
     pub fn with_query_tokens(mut self, tokens: &[String], field: SearchField) -> Self {
         for token in tokens.iter().filter(|t| !t.is_empty()) {
             let column = match field {
@@ -349,19 +345,42 @@ impl FilterBuilder {
                 continue;
             }
 
-            let escaped = escape_like(token);
             if field == SearchField::Command {
                 // Same trigram-index route as with_query_field.
-                self.clauses.push(
-                    "e.id IN (SELECT rowid FROM entries_fts WHERE command LIKE ? ESCAPE '\\')"
-                        .into(),
-                );
+                self.push_command_contains(token);
             } else {
                 self.clauses.push(format!("{column} LIKE ? ESCAPE '\\'"));
+                self.params
+                    .push(Box::new(format!("%{}%", escape_like(token))));
             }
-            self.params.push(Box::new(format!("%{escaped}%")));
         }
         self
+    }
+
+    /// Require `e.command` to contain `needle`, ASCII case-insensitively —
+    /// the same rule as `e.command LIKE '%needle%' ESCAPE '\'` with `needle`
+    /// escaped — answered through the `entries_fts` trigram index.
+    ///
+    /// `SQLite` only offers a LIKE to FTS5 in its two-argument form. Add an
+    /// `ESCAPE` clause and FTS5 never sees the constraint, so it walks every
+    /// row of the index and `SQLite` tests each one (`INDEX 0:` in the query
+    /// plan instead of `INDEX 0:L0`). The index lookup is therefore always
+    /// the unescaped `LIKE '%needle%'`. Without an `ESCAPE` clause a
+    /// backslash is an ordinary character, so only `%` and `_` can change the
+    /// meaning: when `needle` holds one, the lookup admits a superset and an
+    /// escaped LIKE on the column keeps only the literal matches.
+    ///
+    /// A needle shorter than three characters has no trigram to look up, so
+    /// FTS5 falls back to testing every row — slower, but still exact.
+    fn push_command_contains(&mut self, needle: &str) {
+        self.clauses
+            .push("e.id IN (SELECT rowid FROM entries_fts WHERE command LIKE ?)".into());
+        self.params.push(Box::new(format!("%{needle}%")));
+        if needle.contains(['%', '_']) {
+            self.clauses.push("e.command LIKE ? ESCAPE '\\'".into());
+            self.params
+                .push(Box::new(format!("%{}%", escape_like(needle))));
+        }
     }
 
     /// Require `field` to contain `needle` as a case-insensitive subsequence
@@ -808,11 +827,11 @@ mod filter_builder_tests {
     #[test]
     fn with_query_contains_mode() {
         // Non-prefix Command search routes through the entries_fts trigram
-        // index (see with_query_field) instead of a plain column LIKE.
+        // index (see push_command_contains) instead of a plain column LIKE.
         let fb = FilterBuilder::new().with_query(Some("git"), false);
         assert_eq!(
             fb.build_where(),
-            " WHERE e.id IN (SELECT rowid FROM entries_fts WHERE command LIKE ? ESCAPE '\\')"
+            " WHERE e.id IN (SELECT rowid FROM entries_fts WHERE command LIKE ?)"
         );
         assert_eq!(fb.params_refs().len(), 1);
     }

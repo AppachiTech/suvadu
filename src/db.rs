@@ -572,9 +572,12 @@ fn migrate_v6(conn: &Connection) -> DbResult<()> {
 /// A plain `command LIKE '%text%'` scan can't use `idx_entries_command`
 /// (the leading wildcard defeats a B-tree index), so it's a full table
 /// scan on every keystroke of interactive search. The trigram tokenizer
-/// lets `LIKE` against `entries_fts` use its index instead, while
-/// preserving the exact same substring/case-insensitive semantics as the
-/// column scan it replaces (verified in `repository::mod::tests`).
+/// lets a two-argument `LIKE` against `entries_fts` look its trigrams up in
+/// the index instead, with the same ASCII-case-insensitive substring
+/// semantics as the column scan it replaces. A `LIKE … ESCAPE` is never
+/// offered to FTS5 and scans the whole index, so callers must not add one;
+/// see `FilterBuilder::push_command_contains`, which also covers `%` and `_`
+/// in the search text.
 ///
 /// `entries_fts` is an "external content" table — it stores only the
 /// trigram index, not a second copy of `command` — kept in sync with
