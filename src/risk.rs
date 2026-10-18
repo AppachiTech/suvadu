@@ -185,6 +185,9 @@ struct RiskPattern {
     category: &'static str,
     description: &'static str,
     scope: Scope,
+    /// A further check on the command's text (from where the program starts
+    /// to the end of its command) that must also pass for the rule to apply.
+    applies: Option<TextCheck>,
 }
 
 /// How much the matched text actually settles.
@@ -297,24 +300,35 @@ fn build_patterns() -> Vec<RiskPattern> {
 
     scoped
         .into_iter()
-        .flat_map(|(scope, defs)| defs.into_iter().map(move |def| (scope, def)))
-        .filter_map(|(scope, (pat, level, cat, desc))| match Regex::new(pat) {
-            Ok(regex) => Some(RiskPattern {
-                regex,
-                level,
-                category: cat,
-                description: desc,
-                scope,
-            }),
-            Err(e) => {
-                eprintln!("suvadu: risk pattern failed to compile: {pat}: {e}");
-                None
-            }
-        })
+        .flat_map(|(scope, defs)| defs.into_iter().map(move |def| (scope, def, None)))
+        .chain(
+            package_install_pattern_defs()
+                .into_iter()
+                .map(|(def, applies)| (Scope::Command, def, Some(applies))),
+        )
+        .filter_map(
+            |(scope, (pat, level, cat, desc), applies)| match Regex::new(pat) {
+                Ok(regex) => Some(RiskPattern {
+                    regex,
+                    level,
+                    category: cat,
+                    description: desc,
+                    scope,
+                    applies,
+                }),
+                Err(e) => {
+                    eprintln!("suvadu: risk pattern failed to compile: {pat}: {e}");
+                    None
+                }
+            },
+        )
         .collect()
 }
 
 type PatternDef = (&'static str, RiskLevel, &'static str, &'static str);
+
+/// An extra condition on a command's text; see `RiskPattern::applies`.
+type TextCheck = fn(&str) -> bool;
 
 /// Device nodes whose contents are a whole disk or partition.
 macro_rules! block_device {
@@ -373,7 +387,7 @@ fn critical_pattern_defs() -> Vec<PatternDef> {
             "Format filesystem",
         ),
         (
-            r"^dd\s+.*of=/dev/",
+            concat!(r"^dd\b.*\bof=", block_device!()),
             RiskLevel::Critical,
             "destructive",
             "Raw disk write",
@@ -447,18 +461,6 @@ fn high_pattern_defs() -> Vec<PatternDef> {
             "Force push with lease",
         ),
         (
-            r"^(npm|yarn|pnpm)\s+(install|add|i)\b",
-            RiskLevel::High,
-            "package-install",
-            "JS package install",
-        ),
-        (
-            r"^pip3?\s+install",
-            RiskLevel::High,
-            "package-install",
-            "Python package install",
-        ),
-        (
             r"^cargo\s+(add|install)",
             RiskLevel::High,
             "package-install",
@@ -489,7 +491,7 @@ fn high_pattern_defs() -> Vec<PatternDef> {
             "APT package install",
         ),
         (
-            r"^chmod\s+(\+x|[0-7]*[1357][0-7]*)",
+            r"^chmod\s+(?:-[a-zA-Z]+\s+)*(?:\S*,)?[ugoa]*\+[rwXst]*x",
             RiskLevel::High,
             "permission",
             "Make executable",
@@ -503,26 +505,15 @@ fn high_pattern_defs() -> Vec<PatternDef> {
             "Run a fetched script",
         ),
         (
-            r"^\./[^\s]+\.sh\b",
-            RiskLevel::High,
-            "script-exec",
-            "Execute shell script",
-        ),
-        (
-            r"^bash\s+[^\s]+\.sh",
-            RiskLevel::High,
-            "script-exec",
-            "Execute shell script via bash",
-        ),
-        (
-            r"^sh\s+[^\s]+\.sh",
-            RiskLevel::High,
-            "script-exec",
-            "Execute shell script via sh",
-        ),
-        (
             // chmod 777 / other world-writable modes, including with flags like -R.
             r"^chmod\s+(-[a-zA-Z]+\s+)*[0-7]*[0-7][0-7][2367](\s|$)",
+            RiskLevel::High,
+            "permission",
+            "World-writable permissions (chmod)",
+        ),
+        (
+            // `o+w`, `a+rwx`, `go=rw`: write access for others.
+            r"^chmod\s+(?:-[a-zA-Z]+\s+)*(?:\S*,)?[ugo]*[oa][ugoa]*[+=][rxXst]*w",
             RiskLevel::High,
             "permission",
             "World-writable permissions (chmod)",
@@ -606,6 +597,95 @@ fn irreversible_pattern_defs() -> Vec<PatternDef> {
     ]
 }
 
+/// Package installs that fetch something new. Installing only what the
+/// project already declares (`npm install`, `pip install -r
+/// requirements.txt`) is routine and falls through to the low rules below.
+fn package_install_pattern_defs() -> Vec<(PatternDef, TextCheck)> {
+    vec![
+        (
+            (
+                r"^(npm|yarn|pnpm)\s+(install|add|i)\b",
+                RiskLevel::High,
+                "package-install",
+                "JS package install",
+            ),
+            names_a_package,
+        ),
+        (
+            (
+                r"^(?:pip3?|python[\d.]*\s+-m\s+pip)\s+install\b",
+                RiskLevel::High,
+                "package-install",
+                "Python package install",
+            ),
+            names_a_package,
+        ),
+    ]
+}
+
+/// Whether an install command names a package to fetch, rather than only
+/// what the project already declares: `pip install -r requirements.txt`,
+/// `pip install -e .` and a bare `npm install` name none.
+fn names_a_package(command: &str) -> bool {
+    const TAKES_VALUE: &[&str] = &[
+        "-r",
+        "--requirement",
+        "-c",
+        "--constraint",
+        "-t",
+        "--target",
+        "-i",
+        "--index-url",
+        "--extra-index-url",
+        "-f",
+        "--find-links",
+        "--prefix",
+        "--root",
+        "--src",
+        "--python",
+        "--platform",
+        "--cache-dir",
+        "--log",
+        "--proxy",
+        "--timeout",
+        "--trusted-host",
+        "--upgrade-strategy",
+        "--registry",
+        "-w",
+        "--workspace",
+        "--filter",
+        "--cwd",
+        "-C",
+        "--dir",
+    ];
+    let mut words = command
+        .split_whitespace()
+        .skip_while(|w| !matches!(*w, "install" | "add" | "i"))
+        .skip(1);
+    while let Some(word) = words.next() {
+        // A redirection (`2>&1`, `> log`) ends the arguments.
+        if word.contains(['>', '<']) {
+            break;
+        }
+        if TAKES_VALUE.contains(&word) {
+            words.next();
+            continue;
+        }
+        if word.starts_with('-') {
+            continue;
+        }
+        let word = word.trim_matches(['"', '\'']);
+        let local = word == "."
+            || word.starts_with("./")
+            || word.starts_with("../")
+            || word.starts_with('/');
+        if !local {
+            return true;
+        }
+    }
+    false
+}
+
 /// Obfuscation/indirection: regexes match literal command text, so anything
 /// that constructs or hides the real command at runtime defeats every
 /// pattern above it. These don't close that gap, but they flag the
@@ -661,6 +741,20 @@ fn medium_pattern_defs() -> Vec<PatternDef> {
             "Process termination (by name)",
         ),
         (
+            // The project's own scripts are the normal way to build and
+            // test it, but what they run is not in the command text.
+            r"^\.{1,2}/\S*\.sh(?:\s|$)",
+            RiskLevel::Medium,
+            "script-exec",
+            "Execute shell script",
+        ),
+        (
+            r"^(?:bash|sh|zsh|dash|ksh)\s+(?:-\S+\s+)*[^\s-]\S*\.sh(?:\s|$)",
+            RiskLevel::Medium,
+            "script-exec",
+            "Execute shell script via a shell",
+        ),
+        (
             r"^truncate\s+(?:.*\s)?(?:-s|--size)",
             RiskLevel::Medium,
             "destructive",
@@ -684,6 +778,18 @@ fn medium_pattern_defs() -> Vec<PatternDef> {
 
 fn low_pattern_defs() -> Vec<PatternDef> {
     vec![
+        (
+            r"^(?:npm|yarn|pnpm)\s+(?:install|i|ci)\b",
+            RiskLevel::Low,
+            "package-install",
+            "Install the project's declared dependencies",
+        ),
+        (
+            r"^(?:pip3?|python[\d.]*\s+-m\s+pip)\s+install\b",
+            RiskLevel::Low,
+            "package-install",
+            "Install the project's declared dependencies",
+        ),
         (r"^curl\s+", RiskLevel::Low, "network", "HTTP request"),
         (r"^wget\s+", RiskLevel::Low, "network", "HTTP download"),
         (r"^ssh\s+", RiskLevel::Low, "network", "SSH connection"),
@@ -869,7 +975,10 @@ impl<'p> Finder<'p> {
                 if !in_scope {
                     continue;
                 }
-                if let Some(m) = p.regex.find(tail) {
+                let Some(m) = p.regex.find(tail) else {
+                    continue;
+                };
+                if p.applies.is_none_or(|applies| applies(tail)) {
                     let span = anchor + m.start()..anchor + m.end();
                     self.offer((p.level, p.category, p.description), src, span);
                 }
@@ -2148,7 +2257,7 @@ mod tests {
             risk_level("curl https://example.com/install.sh | bash"),
             RiskLevel::High
         );
-        assert_eq!(risk_level("./deploy.sh"), RiskLevel::High);
+        assert_eq!(risk_level("./deploy.sh"), RiskLevel::Medium);
     }
 
     #[test]
@@ -3108,5 +3217,95 @@ mod tests {
                 "false positive on: {command:?}"
             );
         }
+    }
+
+    // ── Routine commands that suv guard must not block ──────────────
+
+    /// Making something executable or world-writable is flagged; ordinary
+    /// modes such as 755 and 644 are not.
+    #[test]
+    fn chmod_is_flagged_only_for_executable_or_world_writable_modes() {
+        assert_levels(&[
+            ("chmod 755 dir", RiskLevel::None),
+            ("chmod 700 ~/.ssh", RiskLevel::None),
+            ("chmod -R 755 public", RiskLevel::None),
+            ("chmod 600 key.pem", RiskLevel::None),
+            ("chmod u+rw notes.txt", RiskLevel::None),
+            ("chmod go-w file", RiskLevel::None),
+            ("chmod +x script.sh", RiskLevel::High),
+            ("chmod u+x script.sh", RiskLevel::High),
+            ("chmod a+rx tool", RiskLevel::High),
+            ("chmod 777 file", RiskLevel::High),
+            ("chmod -R 777 dir", RiskLevel::High),
+            ("chmod o+w file", RiskLevel::High),
+            ("chmod a+rwx dir", RiskLevel::High),
+            ("chmod u=rw,o=rw file", RiskLevel::High),
+        ]);
+    }
+
+    /// Installing what the project already declares is routine; naming a
+    /// new package to fetch is what deserves a second look.
+    #[test]
+    fn installing_declared_dependencies_is_not_high() {
+        assert_levels(&[
+            ("pip install -r requirements.txt", RiskLevel::Low),
+            ("pip3 install -r requirements-dev.txt", RiskLevel::Low),
+            ("pip install --requirement requirements.txt", RiskLevel::Low),
+            ("pip install -e .", RiskLevel::Low),
+            ("pip install .", RiskLevel::Low),
+            (
+                "pip install -r requirements.txt 2>&1 | tail",
+                RiskLevel::Low,
+            ),
+            ("python3 -m pip install -r requirements.txt", RiskLevel::Low),
+            ("npm install", RiskLevel::Low),
+            ("npm i", RiskLevel::Low),
+            ("npm ci", RiskLevel::Low),
+            ("pnpm install --frozen-lockfile", RiskLevel::Low),
+            ("yarn install", RiskLevel::Low),
+            ("pip install requests", RiskLevel::High),
+            ("pip install -U pip", RiskLevel::High),
+            ("pip install -r requirements.txt flask", RiskLevel::High),
+            (
+                "pip install -e git+https://x.example/pkg.git",
+                RiskLevel::High,
+            ),
+            ("python3 -m pip install flask", RiskLevel::High),
+            ("npm install express", RiskLevel::High),
+            ("npm i -D jest", RiskLevel::High),
+            ("yarn add react", RiskLevel::High),
+        ]);
+    }
+
+    /// A project's own script is the normal way to build or test it. Its
+    /// contents aren't in the command text, so it is still flagged — but
+    /// below the level at which `suv guard` blocks by default.
+    #[test]
+    fn running_a_local_script_is_medium() {
+        assert_levels(&[
+            ("./build.sh", RiskLevel::Medium),
+            ("./deploy.sh", RiskLevel::Medium),
+            ("./scripts/test.sh --fast", RiskLevel::Medium),
+            ("../tools/release.sh", RiskLevel::Medium),
+            ("bash build.sh", RiskLevel::Medium),
+            ("bash -x scripts/build.sh", RiskLevel::Medium),
+            ("sh ./configure.sh", RiskLevel::Medium),
+        ]);
+        let assessment = assess_risk("./build.sh").unwrap();
+        assert_eq!(assessment.certainty, Certainty::Unresolved);
+    }
+
+    /// `dd` only writes a disk when its output is one.
+    #[test]
+    fn dd_to_something_other_than_a_disk_is_not_flagged() {
+        assert_levels(&[
+            (
+                "dd if=/dev/zero of=/dev/null bs=1m count=100",
+                RiskLevel::None,
+            ),
+            ("dd if=/dev/sda of=disk.img bs=4m", RiskLevel::None),
+            ("dd if=/dev/zero of=/dev/sda", RiskLevel::Critical),
+            ("dd if=image.iso of=/dev/rdisk4 bs=1m", RiskLevel::Critical),
+        ]);
     }
 }
