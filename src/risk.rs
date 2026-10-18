@@ -288,6 +288,7 @@ fn build_patterns() -> Vec<RiskPattern> {
         (Scope::Command, critical_pattern_defs()),
         (Scope::Anywhere, anywhere_pattern_defs()),
         (Scope::Command, high_pattern_defs()),
+        (Scope::Command, irreversible_pattern_defs()),
         (Scope::Command, obfuscation_pattern_defs()),
         (Scope::Substitution, substitution_pattern_defs()),
         (Scope::Command, medium_pattern_defs()),
@@ -314,6 +315,13 @@ fn build_patterns() -> Vec<RiskPattern> {
 }
 
 type PatternDef = (&'static str, RiskLevel, &'static str, &'static str);
+
+/// Device nodes whose contents are a whole disk or partition.
+macro_rules! block_device {
+    () => {
+        r"/dev/(?:sd[a-z]|hd[a-z]|vd[a-z]|xvd[a-z]|nvme\d|mmcblk\d|r?disk\d|disk/|md\d|dm-\d|mapper/|loop\d)"
+    };
+}
 
 /// A pattern for `git <subcommand…>` that also allows git's global options
 /// before the subcommand: `git -C repo push`, `git --no-pager reset`.
@@ -370,18 +378,62 @@ fn critical_pattern_defs() -> Vec<PatternDef> {
             "destructive",
             "Raw disk write",
         ),
+        (
+            concat!(r"^tee\s+(?:.*\s)?", block_device!()),
+            RiskLevel::Critical,
+            "destructive",
+            "Write to block device",
+        ),
+        (
+            r"(?i)^diskutil\s+(?:quiet\s+)?(?:erasedisk|erasevolume|zerodisk|randomdisk|secureerase|partitiondisk|reformat)\b",
+            RiskLevel::Critical,
+            "destructive",
+            "Erase disk",
+        ),
+        (
+            r"^(?:terraform|tofu|terragrunt)\s+(?:-\S+\s+)*(?:destroy\b|apply\b(?:.*\s)?-destroy\b)",
+            RiskLevel::Critical,
+            "destructive",
+            "Destroy infrastructure",
+        ),
+        (
+            // `-x`/`-X` adds ignored files — `.env`, local databases, build
+            // caches — to what a forced clean deletes.
+            git!(
+                r"clean\b(?:.*\s)?(?:-[a-zA-Z]*(?:f[a-zA-Z]*[xX]|[xX][a-zA-Z]*f)|(?:-[a-zA-Z]*f[a-zA-Z]*|--force)\s(?:.*\s)?-[a-zA-Z]*[xX]|-[a-zA-Z]*[xX][a-zA-Z]*\s(?:.*\s)?(?:-[a-zA-Z]*f|--force))"
+            ),
+            RiskLevel::Critical,
+            "destructive",
+            "Delete untracked and ignored files (git clean -x)",
+        ),
     ]
 }
 
 /// Text that does harm wherever it sits in a command — typically SQL handed
 /// to a database client, as in `psql -c "drop table users"`.
 fn anywhere_pattern_defs() -> Vec<PatternDef> {
-    vec![(
-        r"(?i)drop\s+(table|database|schema)",
-        RiskLevel::Critical,
-        "destructive",
-        "SQL drop statement",
-    )]
+    vec![
+        (
+            r"(?i)drop\s+(table|database|schema)",
+            RiskLevel::Critical,
+            "destructive",
+            "SQL drop statement",
+        ),
+        (
+            r#"(?i)\btruncate\s+(?:table\s+\S|[a-z_][\w."`]*\s*(?:;|["']|$))"#,
+            RiskLevel::Critical,
+            "destructive",
+            "SQL truncate statement",
+        ),
+        (
+            // No WHERE clause: the table name is followed by the end of the
+            // statement.
+            r#"(?i)\bdelete\s+from\s+[\w."`]+\s*(?:;|["']|$)"#,
+            RiskLevel::Critical,
+            "destructive",
+            "SQL delete without WHERE",
+        ),
+    ]
 }
 
 fn high_pattern_defs() -> Vec<PatternDef> {
@@ -468,14 +520,6 @@ fn high_pattern_defs() -> Vec<PatternDef> {
             "script-exec",
             "Execute shell script via sh",
         ),
-        // Irreversible operations an agent might run that previously slipped
-        // through as "safe".
-        (
-            git!(r"clean\s+(-[a-zA-Z]*f|--force)"),
-            RiskLevel::High,
-            "git",
-            "Delete untracked files (git clean)",
-        ),
         (
             // chmod 777 / other world-writable modes, including with flags like -R.
             r"^chmod\s+(-[a-zA-Z]+\s+)*[0-7]*[0-7][0-7][2367](\s|$)",
@@ -488,6 +532,76 @@ fn high_pattern_defs() -> Vec<PatternDef> {
             RiskLevel::High,
             "permission",
             "Recursive ownership change (chown -R)",
+        ),
+    ]
+}
+
+/// Irreversible operations an agent might run that previously slipped
+/// through as "safe".
+fn irreversible_pattern_defs() -> Vec<PatternDef> {
+    vec![
+        (
+            git!(r"clean\b(?:.*\s)?(?:-[a-zA-Z]*f[a-zA-Z]*|--force)(?:\s|$)"),
+            RiskLevel::High,
+            "git",
+            "Delete untracked files (git clean)",
+        ),
+        (
+            git!(r"checkout\s+(?:(?:-f|--force)\s+)?(?:--\s+)?(?:\.|:/|\*)(?:\s|$)"),
+            RiskLevel::High,
+            "git",
+            "Discard uncommitted changes",
+        ),
+        (
+            git!(r"checkout\b(?:.*\s)?(?:-f|--force)(?:\s|$)"),
+            RiskLevel::High,
+            "git",
+            "Force checkout (discards uncommitted changes)",
+        ),
+        (
+            // `--staged` alone only unstages, so it is not in the list.
+            git!(
+                r"restore\s+(?:(?:-W|--worktree|-q|--quiet|--ignore-unmerged|--overlay|--no-overlay|--source=\S+|-s\s*\S+)\s+)*(?:--\s+)?(?:\.|:/|\*)(?:\s|$)"
+            ),
+            RiskLevel::High,
+            "git",
+            "Discard uncommitted changes",
+        ),
+        (
+            r"^(?:kubectl|oc)\s+(?:(?:-n|--namespace|--context|--cluster|--kubeconfig|--user|-s|--server)\s+\S+\s+|--?[\w-]+(?:=\S+)?\s+)*delete\b",
+            RiskLevel::High,
+            "destructive",
+            "Delete Kubernetes resources",
+        ),
+        (
+            r"^find\b.*\s-delete(?:\s|$)",
+            RiskLevel::High,
+            "destructive",
+            "Delete files matched by find",
+        ),
+        (
+            r"^find\b.*\s-(?:exec|execdir|ok|okdir)\s+(?:\S*/)?(?:rm|unlink|shred)\b",
+            RiskLevel::High,
+            "destructive",
+            "Delete files matched by find",
+        ),
+        (
+            r"^shred\s",
+            RiskLevel::High,
+            "destructive",
+            "Overwrite and destroy file contents (shred)",
+        ),
+        (
+            r"^crontab\s+(?:.*\s)?-[a-zA-Z]*r[a-zA-Z]*(?:\s|$)",
+            RiskLevel::High,
+            "destructive",
+            "Remove all cron jobs",
+        ),
+        (
+            r"^docker\s+(?:system|volume)\s+prune\b",
+            RiskLevel::High,
+            "container",
+            "Delete unused Docker data (prune)",
         ),
     ]
 }
@@ -529,7 +643,7 @@ fn medium_pattern_defs() -> Vec<PatternDef> {
             "Privilege escalation",
         ),
         (
-            r"^docker\s+(rm|kill|stop|prune)",
+            r"^docker\s+(?:(?:image|container|network|builder|buildx)\s+)?(rm|kill|stop|prune)",
             RiskLevel::Medium,
             "container",
             "Docker container modification",
@@ -546,13 +660,13 @@ fn medium_pattern_defs() -> Vec<PatternDef> {
             "process",
             "Process termination (by name)",
         ),
-        (git!(r"reset\s"), RiskLevel::Medium, "git", "Git reset"),
         (
-            git!(r"checkout\s+--\s+\."),
+            r"^truncate\s+(?:.*\s)?(?:-s|--size)",
             RiskLevel::Medium,
-            "git",
-            "Discard file changes",
+            "destructive",
+            "Truncate file",
         ),
+        (git!(r"reset\s"), RiskLevel::Medium, "git", "Git reset"),
         (
             git!(r"stash\s+(?:drop|clear)\b"),
             RiskLevel::Medium,
@@ -581,10 +695,7 @@ fn low_pattern_defs() -> Vec<PatternDef> {
 
 /// Device nodes whose contents are a whole disk or partition.
 static BLOCK_DEVICE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"^/dev/(?:sd[a-z]|hd[a-z]|vd[a-z]|xvd[a-z]|nvme\d|mmcblk\d|r?disk\d|disk/|md\d|dm-\d|mapper/|loop\d)",
-    )
-    .expect("block device pattern compiles")
+    Regex::new(concat!("^", block_device!())).expect("block device pattern compiles")
 });
 
 /// Assess the risk level of a single command
@@ -820,11 +931,30 @@ impl<'p> Finder<'p> {
                 }
                 RedirectKind::Input | RedirectKind::HereDoc | RedirectKind::HereString => false,
             };
-            if writes && BLOCK_DEVICE.is_match(&target) {
+            if !writes {
+                continue;
+            }
+            let span = redirect.start..redirect.target.end;
+            if BLOCK_DEVICE.is_match(&target) {
                 self.offer(
                     (RiskLevel::Critical, "destructive", "Write to block device"),
                     src,
-                    redirect.start..redirect.target.end,
+                    span,
+                );
+            } else if redirect.kind == RedirectKind::Write
+                && command.only_truncates()
+                && !target.starts_with("/dev/")
+            {
+                // Medium at most: `>` is everywhere, and emptying a file is
+                // the point of this form, not an accident of it.
+                self.offer(
+                    (
+                        RiskLevel::Medium,
+                        "destructive",
+                        "Truncate file (empty redirection)",
+                    ),
+                    src,
+                    span,
                 );
             }
         }
@@ -945,6 +1075,19 @@ impl<'s> SimpleCommand<'s> {
             }
         }
         anchors
+    }
+
+    /// `> file`, `: > file`, `cat /dev/null > file`: a command whose only
+    /// effect is to empty the file it redirects into.
+    fn only_truncates(&self) -> bool {
+        if self.words.is_empty() {
+            return true;
+        }
+        match self.name() {
+            ":" | "true" => true,
+            "cat" => self.args() == ["/dev/null"],
+            _ => false,
+        }
     }
 
     /// Whether this command, as the end of a pipe, runs its stdin as code.
@@ -2867,5 +3010,103 @@ mod tests {
             ("wipefs -a /dev/sdb", RiskLevel::Critical),
             ("newfs_apfs /dev/disk3s1", RiskLevel::Critical),
         ]);
+    }
+
+    // ── Destructive commands with a rule of their own ───────────────
+
+    #[test]
+    fn destructive_commands_without_a_rule_are_now_flagged() {
+        assert_levels(&[
+            // Infrastructure.
+            ("kubectl delete pod web-1", RiskLevel::High),
+            ("kubectl -n prod delete deployment api", RiskLevel::High),
+            ("kubectl --context prod delete ns staging", RiskLevel::High),
+            ("terraform destroy", RiskLevel::Critical),
+            ("terraform destroy -auto-approve", RiskLevel::Critical),
+            ("terraform -chdir=infra destroy", RiskLevel::Critical),
+            ("terraform apply -destroy", RiskLevel::Critical),
+            ("tofu destroy", RiskLevel::Critical),
+            // Bulk deletes through find.
+            ("find . -name '*.log' -delete", RiskLevel::High),
+            ("find /tmp -type f -exec rm {} \\;", RiskLevel::High),
+            (
+                "find . -name node_modules -execdir rm -r {} +",
+                RiskLevel::Critical,
+            ),
+            ("find . -exec rm -rf {} +", RiskLevel::Critical),
+            // Emptying or destroying file contents.
+            (": > app.log", RiskLevel::Medium),
+            ("> app.log", RiskLevel::Medium),
+            ("true > app.log", RiskLevel::Medium),
+            ("cat /dev/null > app.log", RiskLevel::Medium),
+            ("truncate -s 0 app.log", RiskLevel::Medium),
+            ("shred -u secrets.txt", RiskLevel::High),
+            ("dd if=/dev/zero of=/dev/nvme0n1", RiskLevel::Critical),
+            ("cat image.iso > /dev/disk4", RiskLevel::Critical),
+            ("tee /dev/sdb < image.iso", RiskLevel::Critical),
+            // Docker data.
+            ("docker system prune -af", RiskLevel::High),
+            ("docker volume prune -f", RiskLevel::High),
+            ("docker image prune", RiskLevel::Medium),
+            // Uncommitted work.
+            ("git checkout .", RiskLevel::High),
+            ("git checkout -- .", RiskLevel::High),
+            ("git checkout -f main", RiskLevel::High),
+            ("git restore .", RiskLevel::High),
+            ("git restore --worktree .", RiskLevel::High),
+            ("git clean -fdx", RiskLevel::Critical),
+            ("git clean -xdf", RiskLevel::Critical),
+            ("git clean -d -f -x", RiskLevel::Critical),
+            ("git clean -fX", RiskLevel::Critical),
+            ("git clean -d -f", RiskLevel::High),
+            ("git clean --force -d", RiskLevel::High),
+            // SQL that empties a table.
+            ("psql -c 'TRUNCATE TABLE users'", RiskLevel::Critical),
+            ("psql -c 'truncate users;'", RiskLevel::Critical),
+            ("mysql -e 'DELETE FROM users'", RiskLevel::Critical),
+            ("sqlite3 app.db 'delete from users;'", RiskLevel::Critical),
+            // System state.
+            ("crontab -r", RiskLevel::High),
+            ("crontab -u deploy -r", RiskLevel::High),
+            ("diskutil eraseDisk APFS Blank disk2", RiskLevel::Critical),
+            (
+                "diskutil eraseVolume APFS Blank disk2s1",
+                RiskLevel::Critical,
+            ),
+            ("diskutil zeroDisk disk2", RiskLevel::Critical),
+        ]);
+    }
+
+    /// The same programs doing something harmless stay unflagged.
+    #[test]
+    fn harmless_uses_of_the_same_programs_are_not_flagged() {
+        for command in [
+            "kubectl get pods",
+            "kubectl describe pod web-1",
+            "terraform plan",
+            "terraform apply",
+            "find . -name '*.rs'",
+            "find . -name '*.rs' -exec wc -l {} +",
+            "crontab -l",
+            "crontab -e",
+            "git restore --staged .",
+            "git checkout main",
+            "git checkout -b feature",
+            "git clean -n",
+            "git clean -nx",
+            "psql -c 'DELETE FROM users WHERE id = 1'",
+            "diskutil list",
+            "docker ps",
+            "echo hi > out.txt",
+            "exec > build.log 2>&1",
+            "sort data.txt > sorted.txt",
+            "truncate --help",
+        ] {
+            assert_eq!(
+                risk_level(command),
+                RiskLevel::None,
+                "false positive on: {command:?}"
+            );
+        }
     }
 }
