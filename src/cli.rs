@@ -542,10 +542,11 @@ pub enum Commands {
 
     /// Bulk delete commands matching a pattern
     #[command(
-        after_help = "Examples:\n  suv delete \"rm -rf\"          # Delete by substring\n  suv delete \"^git\" --regex    # Delete using regex\n  suv delete \"\" --before 2024-01-01 # Delete all before date"
+        after_help = "Examples:\n  suv delete \"rm -rf\"                      # Delete by substring\n  suv delete \"^git\" --regex                # Delete using regex\n  suv delete \"docker\" --before 2024-01-01  # Only matches older than a date"
     )]
     Delete {
-        /// Pattern to match (substring by default)
+        /// Pattern to match (substring by default). It cannot be empty
+        #[arg(value_parser = non_blank_pattern)]
         pattern: String,
 
         /// Treat pattern as a Regular Expression
@@ -1133,6 +1134,17 @@ pub enum SkillsCommands {
     },
 }
 
+/// `suv delete`'s pattern, refused when blank: an empty substring matches
+/// every entry, so it would delete the whole history (or, with `--before`,
+/// all of it up to that date) rather than the commands meant.
+fn non_blank_pattern(pattern: &str) -> Result<String, String> {
+    if pattern.trim().is_empty() {
+        Err("an empty pattern would match every entry; give the text to delete".into())
+    } else {
+        Ok(pattern.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1499,5 +1511,57 @@ mod tests {
             }
             _ => panic!("Expected HookOpencodePrompt"),
         }
+    }
+
+    /// Split one example line the way a shell would for these simple
+    /// examples: whitespace separates words, double quotes group them, and
+    /// a `#` outside quotes starts a comment.
+    fn example_words(line: &str) -> Vec<String> {
+        let mut words = Vec::new();
+        let mut word: Option<String> = None;
+        let mut quoted = false;
+        for c in line.chars() {
+            match c {
+                '"' => {
+                    quoted = !quoted;
+                    word.get_or_insert_with(String::new);
+                }
+                '#' if !quoted => break,
+                c if c.is_whitespace() && !quoted => words.extend(word.take()),
+                c => word.get_or_insert_with(String::new).push(c),
+            }
+        }
+        words.extend(word);
+        words
+    }
+
+    #[test]
+    fn every_delete_help_example_is_a_command_that_runs() {
+        use clap::CommandFactory;
+        let help = Cli::command()
+            .find_subcommand("delete")
+            .and_then(|c| c.get_after_help().map(ToString::to_string))
+            .expect("suv delete has examples");
+        let examples: Vec<Vec<String>> = help
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("suv delete"))
+            .map(example_words)
+            .collect();
+        assert!(examples.len() >= 3, "{help}");
+        for words in &examples {
+            assert!(Cli::try_parse_from(words).is_ok(), "{words:?}");
+        }
+    }
+
+    #[test]
+    fn delete_refuses_a_blank_pattern_when_parsing() {
+        for pattern in ["", "   "] {
+            assert!(
+                Cli::try_parse_from(["suv", "delete", pattern, "--before", "2024-01-01"]).is_err(),
+                "{pattern:?}"
+            );
+        }
+        assert!(Cli::try_parse_from(["suv", "delete", "docker"]).is_ok());
     }
 }

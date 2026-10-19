@@ -1325,8 +1325,8 @@ static FEATURES: &[Feature] = &[
                 "Preview a regular expression",
             ),
             ex(
-                "suv delete \"\" --before <YYYY-MM-DD> --dry-run",
-                "Preview everything older than a date",
+                "suv delete \"<TEXT>\" --before <YYYY-MM-DD> --dry-run",
+                "Preview the matches older than a date",
             ),
         ],
         ..BASE
