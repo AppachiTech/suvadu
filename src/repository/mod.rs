@@ -250,6 +250,14 @@ fn escape_like(s: &str) -> String {
         .replace('_', "\\_")
 }
 
+/// `dir` without its trailing `/`, and the half-open byte range of the
+/// paths beneath it: `[dir/, dir0)`. `0` is the byte after `/`, so a path
+/// is in the range exactly when it starts with `dir/`.
+fn subtree_bounds(dir: &str) -> (String, String, String) {
+    let root = dir.trim_end_matches('/');
+    (root.to_string(), format!("{root}/"), format!("{root}0"))
+}
+
 /// Expand a leading `~` to `$HOME`, matching how `mcp.exclude_dirs` entries
 /// like `"~/.ssh"` are meant to be written in `config.toml` — recorded
 /// `cwd` values are always absolute, so this must run before comparing.
@@ -498,8 +506,8 @@ impl FilterBuilder {
     }
 
     /// Filter by directory, optionally including its subtree. With `prefix`,
-    /// matches the directory itself plus any path under `dir/` — the anchored
-    /// `LIKE 'dir/%'` keeps it index-usable. Without `prefix`, exact match.
+    /// matches the directory itself plus any path under `dir/` (see
+    /// [`Self::with_cwd_subtree`]). Without `prefix`, exact match.
     pub fn with_cwd_mode(self, cwd: Option<&str>, prefix: bool) -> Self {
         match (cwd, prefix) {
             (Some(dir), true) => self.with_cwd_subtree(dir),
@@ -507,22 +515,35 @@ impl FilterBuilder {
         }
     }
 
-    /// Match `dir` and everything beneath it (`dir` or `dir/...`).
+    /// Match `dir` and everything beneath it (`dir` or `dir/...`), comparing
+    /// paths exactly, case included: on a case-sensitive file system
+    /// `/a/Proj` is another directory than `/a/proj`.
+    ///
+    /// "Starts with `dir/`" is the byte range from `dir/` up to, not
+    /// including, `dir0` — `0` is the byte after `/`, and `cwd` compares
+    /// bytewise — so the test is exact for any path, whatever `%`, `_`, `*`
+    /// or `[` it holds, and it seeks `idx_entries_cwd_started` rather than
+    /// scanning it. (A `LIKE 'dir/%'` folds ASCII case and cannot.)
     pub fn with_cwd_subtree(mut self, dir: &str) -> Self {
-        let trimmed = dir.trim_end_matches('/');
+        let (root, start, end) = subtree_bounds(dir);
         self.clauses
-            .push("(e.cwd = ? OR e.cwd LIKE ? ESCAPE '\\')".into());
-        self.params.push(Box::new(trimmed.to_string()));
-        self.params
-            .push(Box::new(format!("{}/%", escape_like(trimmed))));
+            .push("(e.cwd = ? OR (e.cwd >= ? AND e.cwd < ?))".into());
+        self.params.push(Box::new(root));
+        self.params.push(Box::new(start));
+        self.params.push(Box::new(end));
         self
     }
 
     /// Exclude `dir` and everything beneath it (`dir` or `dir/...`) from
-    /// results — the negation of `with_cwd_subtree`, one clause per
-    /// directory, all `AND`ed together with the rest of the query. Powers
-    /// `mcp.exclude_dirs`: directories an MCP-connected agent must never
-    /// see entries from, regardless of which tool/resource is asking.
+    /// results, one clause per directory, all `AND`ed together with the rest
+    /// of the query. Powers `mcp.exclude_dirs`: directories an MCP-connected
+    /// agent must never see entries from, regardless of which tool/resource
+    /// is asking.
+    ///
+    /// Unlike [`Self::with_cwd_subtree`], this folds ASCII case — the
+    /// directory itself by `NOCASE`, its subtree by `LIKE` — so it errs
+    /// towards hiding: on macOS's default file system `/a/Proj` and
+    /// `/a/proj` are one directory, and a shell records the path as typed.
     pub fn with_excluded_dirs(mut self, dirs: &[String]) -> Self {
         for dir in dirs {
             let expanded = expand_tilde(dir);
@@ -531,7 +552,7 @@ impl FilterBuilder {
                 continue;
             }
             self.clauses
-                .push("NOT (e.cwd = ? OR e.cwd LIKE ? ESCAPE '\\')".into());
+                .push("NOT (e.cwd = ? COLLATE NOCASE OR e.cwd LIKE ? ESCAPE '\\')".into());
             self.params.push(Box::new(trimmed.to_string()));
             self.params
                 .push(Box::new(format!("{}/%", escape_like(trimmed))));
@@ -1001,9 +1022,17 @@ mod filter_builder_tests {
         let fb = FilterBuilder::new().with_cwd_subtree("/home/u/proj");
         assert_eq!(
             fb.build_where(),
-            " WHERE (e.cwd = ? OR e.cwd LIKE ? ESCAPE '\\')"
+            " WHERE (e.cwd = ? OR (e.cwd >= ? AND e.cwd < ?))"
         );
-        assert_eq!(fb.params_refs().len(), 2);
+        assert_eq!(fb.params_refs().len(), 3);
+        assert_eq!(
+            super::subtree_bounds("/home/u/proj/"),
+            (
+                "/home/u/proj".to_string(),
+                "/home/u/proj/".to_string(),
+                "/home/u/proj0".to_string()
+            )
+        );
     }
 
     #[test]
@@ -1013,7 +1042,7 @@ mod filter_builder_tests {
         assert_eq!(exact.build_where(), " WHERE e.cwd = ?");
         // prefix=true → subtree
         let sub = FilterBuilder::new().with_cwd_mode(Some("/p"), true);
-        assert!(sub.build_where().contains("LIKE ? ESCAPE"));
+        assert!(sub.build_where().contains("e.cwd >= ? AND e.cwd < ?"));
         // None → no clause regardless of prefix
         let none = FilterBuilder::new().with_cwd_mode(None, true);
         assert_eq!(none.build_where(), " WHERE 1=1");

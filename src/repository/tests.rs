@@ -3443,3 +3443,161 @@ fn no_separator_insensitive_terms_narrow_nothing() {
     let fb = FilterBuilder::new().with_separator_insensitive_terms(&blank, SearchField::Command);
     assert_eq!(fb.build_where(), FilterBuilder::new().build_where());
 }
+
+// ── Directory subtrees ──────────────────────────────────────────────────────
+
+/// One command per directory, each named after its directory.
+fn repo_with_dirs(dirs: &[&str]) -> (tempfile::TempDir, Repository) {
+    let (dir, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 1000);
+    repo.insert_session(&session).unwrap();
+    for (i, cwd) in dirs.iter().enumerate() {
+        let stamp = 1000 + i64::try_from(i).unwrap();
+        repo.insert_entry(&crate::models::Entry::new(
+            session.id.clone(),
+            format!("in {cwd}"),
+            (*cwd).to_string(),
+            Some(0),
+            stamp,
+            stamp,
+        ))
+        .unwrap();
+    }
+    (dir, repo)
+}
+
+fn cwds_in_subtree(repo: &Repository, root: &str) -> Vec<String> {
+    let filter = QueryFilter {
+        cwd: Some(root),
+        cwd_prefix: true,
+        ..Default::default()
+    };
+    let mut cwds: Vec<String> = repo
+        .get_entries_filtered(100, 0, &filter)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.cwd)
+        .collect();
+    cwds.sort();
+    cwds
+}
+
+/// Directories whose names differ from a neighbour's only by case, by a
+/// character LIKE or GLOB would read as a pattern, or by what follows the
+/// root's last character.
+const SUBTREE_CORPUS: &[&str] = &[
+    "/a/proj",
+    "/a/proj/x",
+    "/a/proj/x/y",
+    "/a/Proj",
+    "/a/Proj/x",
+    "/a/PROJ/x",
+    "/a/proj-old",
+    "/a/projx/y",
+    "/a/proj0",
+    "/a/proj.d/x",
+    "/a/100%",
+    "/a/100%/x",
+    "/a/100x/x",
+    "/a/my_dir/x",
+    "/a/myxdir/x",
+    "/a/[ab]/x",
+    "/a/a/x",
+    "/a/st*r/x",
+    "/a/star/x",
+    "/a/q?/x",
+    "/a/qq/x",
+    r"/a/back\slash/x",
+    "/a/ü/x",
+    "/a/Ü/x",
+];
+
+/// What a plain, case-sensitive "is `cwd` `root` or under it" test accepts.
+fn expected_subtree(root: &str) -> Vec<String> {
+    let root = root.trim_end_matches('/');
+    let mut out: Vec<String> = SUBTREE_CORPUS
+        .iter()
+        .filter(|c| **c == root || c.starts_with(&format!("{root}/")))
+        .map(|c| (*c).to_string())
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn a_directory_subtree_matches_case_sensitively_and_literally() {
+    let (_d, repo) = repo_with_dirs(SUBTREE_CORPUS);
+    for root in [
+        "/a/proj",
+        "/a/proj/",
+        "/a/Proj",
+        "/a/PROJ",
+        "/a/100%",
+        "/a/my_dir",
+        "/a/[ab]",
+        "/a/st*r",
+        "/a/q?",
+        r"/a/back\slash",
+        "/a/ü",
+        "/a/Ü",
+        "/",
+    ] {
+        assert_eq!(
+            cwds_in_subtree(&repo, root),
+            expected_subtree(root),
+            "{root:?}"
+        );
+    }
+    // The case-sensitive answer, spelled out once.
+    assert_eq!(
+        cwds_in_subtree(&repo, "/a/proj"),
+        ["/a/proj", "/a/proj/x", "/a/proj/x/y"]
+    );
+}
+
+#[test]
+fn a_directory_subtree_seeks_the_cwd_index() {
+    let (_d, repo) = setup_test_db();
+    let plan = query_plan(&repo, &FilterBuilder::new().with_cwd_subtree("/a/proj"));
+    assert!(
+        plan.iter()
+            .any(|d| d.starts_with("SEARCH e USING") && d.contains("cwd")),
+        "expected a seek on a cwd index, got {plan:#?}"
+    );
+    assert!(
+        !plan.iter().any(|d| d.starts_with("SCAN e")),
+        "expected no scan of entries, got {plan:#?}"
+    );
+}
+
+#[test]
+fn an_excluded_directory_hides_its_subtree_in_any_case() {
+    // The exclusion keeps hiding a directory however its path is spelled
+    // (macOS's default file system treats `/a/Proj` and `/a/proj` as one
+    // directory, and a shell records the path as it was typed), and never
+    // reads `%` or `_` as a wildcard.
+    let (_d, repo) = repo_with_dirs(SUBTREE_CORPUS);
+    let excluded = vec!["/a/proj".to_string(), "/a/my_dir".to_string()];
+    let filter = QueryFilter {
+        exclude_dirs: &excluded,
+        ..Default::default()
+    };
+    let mut kept: Vec<String> = repo
+        .get_entries_filtered(100, 0, &filter)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.cwd)
+        .collect();
+    kept.sort();
+    let mut expected: Vec<String> = SUBTREE_CORPUS
+        .iter()
+        .filter(|c| {
+            let lower = c.to_ascii_lowercase();
+            !(lower == "/a/proj" || lower.starts_with("/a/proj/") || c.starts_with("/a/my_dir/"))
+        })
+        .map(|c| (*c).to_string())
+        .collect();
+    expected.sort();
+    assert_eq!(kept, expected);
+    assert!(kept.contains(&"/a/myxdir/x".to_string()));
+}
