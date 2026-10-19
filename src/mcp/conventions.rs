@@ -75,6 +75,12 @@ pub const NO_FAILURE_OUTPUT_NOTE: &str = "no output is recorded for these failur
      [capture] failure_output on, and only for commands an agent hook or suv wrap recorded — \
      never for commands typed in a shell";
 
+/// Said by a response that shows what fixed a command before.
+pub const FIX_NOTE: &str = "a \"fixed before\" line is inferred, not observed: after earlier \
+     failures of exactly that command, it is what passed next in the same session and \
+     directory within 15 minutes — a similar command, or the same one rerun after a setup \
+     step such as an install — counted over the newest 50 failures";
+
 /// Lines of recorded output a concise row shows.
 pub const OUTPUT_PREVIEW_LINES: usize = 3;
 

@@ -190,7 +190,7 @@ pub const TOOLS: &[ToolEntry] = &[
     },
     ToolEntry {
         name: "what_failed",
-        summary: "Recent command failures grouped by the prompt or session that triggered them.",
+        summary: "Recent command failures grouped by prompt, with recorded output and earlier fixes where known.",
         write_opt_in: None,
     },
     ToolEntry {
@@ -215,7 +215,7 @@ pub const TOOLS: &[ToolEntry] = &[
     },
     ToolEntry {
         name: "learn_from_failures",
-        summary: "Commands in a project that fail often, with recorded failure rates — not causes.",
+        summary: "Commands in a project that fail often: failure rates, the latest recorded output, and what fixed them before.",
         write_opt_in: None,
     },
     ToolEntry {

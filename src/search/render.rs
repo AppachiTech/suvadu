@@ -1023,11 +1023,49 @@ impl SearchApp {
             }
         }
 
+        self.append_fix_lines(&mut lines, entry);
         self.append_output_lines(&mut lines, entry, label_style);
         self.append_risk_line(&mut lines, entry, label_style);
         self.append_bookmark_note_lines(&mut lines, entry, value_style);
 
         lines
+    }
+
+    /// What fixed earlier failures of this command, most often first, as
+    /// [`crate::fixes`] pairs them: up to three.
+    fn append_fix_lines(&self, lines: &mut Vec<Line<'static>>, entry: &crate::models::Entry) {
+        let Some(fixes) = self
+            .detail_extras_for(entry)
+            .and_then(|extras| extras.fixes.as_ref())
+        else {
+            return;
+        };
+        let t = theme();
+        lines.push(Line::from(""));
+        for (i, fix) in fixes.fixes.iter().take(3).enumerate() {
+            let lead = if i == 0 {
+                "Last time this failed, "
+            } else {
+                "  or "
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{lead}{} ", fix.describe()),
+                    Style::default().fg(t.success),
+                ),
+                Span::styled(
+                    format!("({}×)", fix.count),
+                    Style::default().fg(t.text_muted),
+                ),
+            ]));
+        }
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  inferred from what passed next after its last {} failures",
+                fixes.failures
+            ),
+            Style::default().fg(t.text_muted),
+        )));
     }
 
     /// The end of what a failed command printed, when it was recorded
@@ -3027,6 +3065,86 @@ mod tests {
         let mut other = entry;
         other.id = Some(999);
         assert!(!lines_text(&app.build_detail_lines(&other)).contains("error: one"));
+    }
+
+    /// A search app showing the failed run of `runs` at `selected`, all
+    /// recorded in one session and directory, the detail pane open.
+    fn app_with_history(
+        runs: &[(&str, i32)],
+        selected: usize,
+    ) -> (
+        tempfile::TempDir,
+        crate::repository::Repository,
+        super::SearchApp,
+    ) {
+        use std::collections::HashSet;
+        let (dir, repo) = crate::test_utils::test_repo();
+        let session = crate::models::Session::new("host".to_string(), 1_700_000_000_000);
+        repo.insert_session(&session).unwrap();
+        let mut entries = Vec::new();
+        for (i, (command, exit)) in (0_i64..).zip(runs) {
+            let mut entry = Entry::new(
+                session.id.clone(),
+                (*command).to_string(),
+                "/work/proj".to_string(),
+                Some(*exit),
+                1_700_000_000_000 + i * 2_000,
+                1_700_000_001_000 + i * 2_000,
+            );
+            entry.id = Some(repo.insert_entry(&entry).unwrap());
+            entries.push(entry);
+        }
+        let shown = entries.remove(selected);
+        let mut config =
+            make_default_search_config(vec![shown], HashSet::new(), HashSet::new(), false);
+        config.view.detail_pane_open = true;
+        (dir, repo, super::SearchApp::new(config))
+    }
+
+    fn detail_text(app: &mut super::SearchApp, repo: &crate::repository::Repository) -> String {
+        app.refresh_detail_extras(repo);
+        let entry = app.get_selected_entry().unwrap().clone();
+        lines_text(&app.build_detail_lines(&entry))
+    }
+
+    #[test]
+    fn the_detail_pane_says_what_fixed_a_failure_last_time() {
+        let runs = [
+            ("npm test", 1),
+            ("npm install", 0),
+            ("npm test", 0),
+            ("npm test", 1),
+            ("npm install", 0),
+            ("npm test", 0),
+            ("npm test", 1),
+        ];
+        let (_dir, repo, mut app) = app_with_history(&runs, 6);
+        let text = detail_text(&mut app, &repo);
+        assert!(
+            text.contains(
+                "Last time this failed, you fixed it with: npm install, then reran it (2×)"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_detail_pane_shows_a_corrected_typo_as_the_fix() {
+        let (_dir, repo, mut app) = app_with_history(&[("gti status", 127), ("git status", 0)], 0);
+        let text = detail_text(&mut app, &repo);
+        assert!(
+            text.contains("Last time this failed, you fixed it with: git status (1×)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_detail_pane_says_nothing_about_fixes_when_none_is_known() {
+        let (_dir, repo, mut app) = app_with_history(&[("cargo test", 101), ("docker ps", 0)], 0);
+        assert!(!detail_text(&mut app, &repo).contains("Last time"));
+        // Nor for a command that succeeded.
+        let (_dir, repo, mut app) = app_with_history(&[("gti status", 127), ("git status", 0)], 1);
+        assert!(!detail_text(&mut app, &repo).contains("Last time"));
     }
 
     #[test]

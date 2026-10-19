@@ -462,6 +462,33 @@ Max, 128 GB RAM, macOS 27.2, rustc 1.96.0**, release profile, one run each.
   `VACUUM`).
 - The judged harness was re-run as the baseline above.
 
+### Failure output and fix pairing (schema v14), 19 October 2026
+
+Measured on **Apple M4 Max, 128 GB RAM, macOS 27.2, rustc 1.96.0**, release
+profile, one run each. The search baseline above was not re-run: neither
+change touches how recall searches or ranks.
+
+- **Pairing a failure with what fixed it** — what recall's detail pane
+  reads when the selection moves to a failed command, and what
+  `what_failed` and `learn_from_failures` read once per distinct command on
+  a page — took 631–692 µs per lookup
+  (`cargo test --release --bin suv fix_pairing_cost -- --ignored
+  --nocapture`): 100,000 runs of ten commands across 200 sessions, one in
+  seven failing, each lookup pairing the newest 50 failures of one command
+  (one seek for the failures, one per failure for the next 20 runs in its
+  session). Recall reads it once per selected command, never per frame or
+  per keystroke.
+- **Keeping a failure's output** — cutting a 640 KB build log to its last
+  64 KB, stripping its colour codes and redacting it, then cutting the
+  4 KB tail — took 697 µs (`cargo test --release --bin suv
+  failure_output_cost -- --ignored --nocapture`, 50 runs). It runs only for
+  a failed command, only with `[capture] failure_output` on, and only on the
+  agent-hook, `suv add --output-stdin` and `suv wrap` paths; a shell hook's
+  recording does no extra work.
+- **Upgrading** to schema v14 creates one empty table: 0.17 ms on
+  `v14_migration_cost_on_a_large_history`'s 100,000-command corpus
+  (`src/db.rs`).
+
 ## Known gaps
 
 - **Ranking quality is not measured.** The judged set records which command

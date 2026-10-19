@@ -4,6 +4,7 @@ mod api;
 mod bookmarks;
 mod capture;
 mod entries;
+mod followups;
 mod notes;
 mod output;
 mod ranking;
@@ -13,6 +14,7 @@ mod storage;
 mod tags;
 
 pub use capture::{CaptureRecordStats, PLACEHOLDER_IMPORT_HOSTNAME, RESTORED_AT_KEY};
+pub use followups::Run;
 pub use ranking::Followers;
 
 // Re-exported for use as a mockable trait boundary in tests and downstream consumers.

@@ -9,6 +9,7 @@ mod commands;
 mod config;
 mod db;
 mod failure_output;
+mod fixes;
 mod frecency;
 mod home;
 mod hooks;

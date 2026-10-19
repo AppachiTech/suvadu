@@ -455,6 +455,35 @@ exits. The output goes with its command on `suv delete`, travels in JSON and
 JSONL exports, and `suv gc --failure-output` deletes all of it while keeping
 the commands.
 
+### "Last time this failed, you fixed it with …"
+
+For a failed command, recall's detail pane says what fixed it before —
+`Last time this failed, you fixed it with: git status (3×)` — and the MCP
+`what_failed` and `learn_from_failures` tools add a `fixed before
+(inferred)` line. Nothing new is recorded for it: it is worked out from your
+history when asked, from the newest 50 failures of exactly that command
+(exit status other than 0 and Ctrl+C's 130). After each one, Suvadu looks at
+the next 20 commands of the same session, started within 15 minutes, in the
+same directory, skipping other failures:
+
+- a successful command **similar** to the failed one is its fix — the same
+  program with the same first non-flag argument (`cargo build` →
+  `cargo build --release`), or a small edit of the line (`gti status` →
+  `git status`, at most one change per eight characters);
+- if that is the failed command again, unchanged, then a **setup step**
+  that passed before it — the same program (`npm install` before
+  `npm test`) or a package install — is the fix (`you fixed it with: npm
+  install, then reran it`); with no setup step it *passed when you reran it
+  unchanged*;
+- looking around in between (`cd`, `ls`, `cat`, `git status`/`diff`/`log`/
+  `show`, an editor) is skipped, and any other successful command ends the
+  search without a fix.
+
+Fixes are counted across those failures and the most common is shown. It is
+an inference from what ran next, never an observed cause. Each lookup takes
+under a millisecond on a 100,000-command history (BENCHMARKS.md), and recall
+makes it once per selected failed command.
+
 ### What is never captured
 
 - **Command output and file contents.** Suvadu records that a command ran,

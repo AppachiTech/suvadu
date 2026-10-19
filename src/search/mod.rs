@@ -245,14 +245,16 @@ pub struct SearchApp {
     leave_label: &'static str,
 }
 
-/// The detail pane's extras for one command: its recorded failure output.
-/// Rendering runs every frame and never touches the database, so these are
-/// read when the selection changes, for the selected command only.
+/// The detail pane's extras for one command: its recorded failure output
+/// and what fixed earlier failures of it. Rendering runs every frame and
+/// never touches the database, so these are read when the selection
+/// changes, for the selected command only.
 #[derive(Default)]
 struct DetailExtras {
     /// The command these were read for.
     entry_id: Option<i64>,
     output: Option<crate::models::FailureOutput>,
+    fixes: Option<crate::fixes::Fixes>,
 }
 
 /// The detail pane's focus and scroll. Shift+Tab focuses it; while focused

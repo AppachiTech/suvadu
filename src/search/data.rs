@@ -45,17 +45,20 @@ impl SearchApp {
     }
 
     /// Read what the detail pane shows for the selected command beyond its
-    /// row — its recorded failure output — when the pane is open and the
-    /// selection has moved to another command since the last read. One
-    /// primary-key lookup, only for a failed command. A read that fails
-    /// shows nothing rather than interrupting recall.
+    /// row — its recorded failure output, and what fixed earlier failures
+    /// of the same command ([`crate::fixes`]) — when the pane is open and
+    /// the selection has moved to another command since the last read.
+    /// Only a failed command costs anything: a primary-key lookup and the
+    /// fix pairing, under a millisecond on a 100,000-command history (see
+    /// BENCHMARKS.md). A read that fails shows nothing rather than
+    /// interrupting recall.
     pub(super) fn refresh_detail_extras(&mut self, repo: &crate::repository::Repository) {
         if !self.view.detail_pane_open {
             return;
         }
-        let Some((id, failed)) = self
+        let Some((id, exit_code, command)) = self
             .get_selected_entry()
-            .map(|e| (e.id, e.exit_code.is_some_and(|code| code != 0)))
+            .map(|e| (e.id, e.exit_code, e.command.clone()))
         else {
             return;
         };
@@ -63,11 +66,16 @@ impl SearchApp {
             return;
         }
         let output = id
-            .filter(|_| failed)
+            .filter(|_| exit_code.is_some_and(|code| code != 0))
             .and_then(|id| repo.failure_output(id).ok().flatten());
+        let fixes = crate::failure_output::is_failure(exit_code)
+            .then(|| crate::fixes::fixes_for(repo, &command, &[]).ok())
+            .flatten()
+            .filter(|fixes| !fixes.fixes.is_empty());
         self.detail_extras = super::DetailExtras {
             entry_id: id,
             output,
+            fixes,
         };
     }
 

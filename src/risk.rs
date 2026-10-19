@@ -2048,6 +2048,31 @@ const fn has_shell_chaining(cmd: &str) -> bool {
     false
 }
 
+/// The program a command line runs and the arguments it receives, quotes
+/// removed: the first simple command's, looking past wrappers (`sudo`,
+/// `env`, `time`, `VAR=x` …) the way the risk rules do, and past a leading
+/// `cd`/`pushd`/`popd` when something else runs after it (`cd app && npm
+/// test` runs `npm`). The program is its bare name (`/usr/bin/make` is
+/// `make`). `None` when nothing runs (an empty line, assignments alone).
+pub fn program_words(command: &str) -> Option<Vec<String>> {
+    const MOVES: &[&str] = &["cd", "pushd", "popd"];
+    let split = split_commands(command);
+    let mut first = None;
+    for segment in &split.segments {
+        let simple = SimpleCommand::new(command, segment);
+        let Some(program) = simple.program else {
+            continue;
+        };
+        let mut words = vec![simple.name().to_string()];
+        words.extend(simple.words[program + 1..].iter().cloned());
+        if !MOVES.contains(&simple.name()) {
+            return Some(words);
+        }
+        first.get_or_insert(words);
+    }
+    first
+}
+
 /// Get the risk level for a command (convenience wrapper)
 pub fn risk_level(command: &str) -> RiskLevel {
     assess_risk(command).map_or(RiskLevel::None, |a| a.level)
@@ -2845,6 +2870,28 @@ mod tests {
             ("alias x=y && git push --force", RiskLevel::Critical),
             ("# cleanup\nrm -rf /tmp/x", RiskLevel::Critical),
         ]);
+    }
+
+    #[test]
+    fn the_program_a_line_runs_is_found_behind_wrappers_and_directory_changes() {
+        let words = |cmd: &str| program_words(cmd).unwrap_or_default();
+        assert_eq!(words("git status"), ["git", "status"]);
+        assert_eq!(
+            words("sudo -u root apt-get install jq"),
+            ["apt-get", "install", "jq"]
+        );
+        assert_eq!(words("env FOO=1 npm test"), ["npm", "test"]);
+        assert_eq!(
+            words("RUST_LOG=debug cargo run --release"),
+            ["cargo", "run", "--release"]
+        );
+        assert_eq!(words("/usr/bin/make -j8"), ["make", "-j8"]);
+        assert_eq!(words("time cargo build"), ["cargo", "build"]);
+        assert_eq!(words("cd app && npm 'test'"), ["npm", "test"]);
+        assert_eq!(words("cd app"), ["cd", "app"]);
+        assert_eq!(words("pytest -x | tee log"), ["pytest", "-x"]);
+        assert!(program_words("").is_none());
+        assert!(program_words("FOO=1").is_none());
     }
 
     /// `sudo`, `env`, assignments and similar prefixes run the command that

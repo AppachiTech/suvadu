@@ -248,7 +248,7 @@ fn what_changed_def() -> Value {
 fn what_failed_def() -> Value {
     json!({
         "name": "what_failed",
-        "description": "Recently recorded commands that exited non-zero, grouped by the prompt they ran under where one was recorded. Tells you what was attempted and failed, and why where suvadu kept the end of the command's output (opt-in [capture] failure_output, for commands an agent hook or suv wrap recorded); without that output it can say what failed but not why.",
+        "description": "Recently recorded commands that exited non-zero, grouped by the prompt they ran under where one was recorded. Tells you what was attempted and failed, and why where suvadu kept the end of the command's output (opt-in [capture] failure_output, for commands an agent hook or suv wrap recorded); without that output it can say what failed but not why. A command that failed before and was then fixed also shows what fixed it most often, inferred from what passed next in the same session and directory.",
         "inputSchema": {
             "type": "object",
             "properties": with_paging(json!({
@@ -324,7 +324,7 @@ fn replay_agent_session_def() -> Value {
 fn learn_from_failures_def() -> Value {
     json!({
         "name": "learn_from_failures",
-        "description": "Commands in a project that fail often, with their recorded failure rates and whether agents fail them more than humans. Call it before starting work to avoid repeating a known-bad approach. It reports rates, not diagnoses. Where suvadu kept the end of a failed run's output (opt-in [capture] failure_output, agent-hook and suv wrap commands only), the latest is shown: what the command printed, not a confirmed cause.",
+        "description": "Commands in a project that fail often, with their recorded failure rates and whether agents fail them more than humans. Call it before starting work to avoid repeating a known-bad approach. It reports rates, not diagnoses. Where suvadu kept the end of a failed run's output (opt-in [capture] failure_output, agent-hook and suv wrap commands only), the latest is shown: what the command printed, not a confirmed cause. Each command also shows what most often passed right after its earlier failures in the same session and directory — a corrected command, or an install before a rerun — as an inferred fix, not an observed one.",
         "inputSchema": {
             "type": "object",
             "properties": with_paging(json!({
@@ -632,6 +632,37 @@ fn output_note(
     } else {
         Some(conv::OUTPUT_NOTE.to_string())
     }
+}
+
+/// What fixed earlier failures of each distinct command among `commands`,
+/// for those where something did. See [`crate::fixes`].
+fn fixes_of<'a>(
+    repo: &Repository,
+    commands: impl IntoIterator<Item = &'a str>,
+    mcp: &crate::config::McpConfig,
+) -> Result<std::collections::HashMap<String, crate::fixes::Fixes>, String> {
+    let mut out = std::collections::HashMap::new();
+    for command in commands {
+        if out.contains_key(command) {
+            continue;
+        }
+        let fixes = crate::fixes::fixes_for(repo, command, &mcp.exclude_dirs)
+            .map_err(|e| format!("query failed: {e}"))?;
+        out.insert(command.to_string(), fixes);
+    }
+    out.retain(|_, fixes| !fixes.fixes.is_empty());
+    Ok(out)
+}
+
+/// The "fixed before" line for a command's most common fix.
+fn fix_line(indent: &str, fixes: &crate::fixes::Fixes) -> Option<String> {
+    let fix = fixes.fixes.first()?;
+    Some(format!(
+        "{indent}fixed before (inferred): {} — {} of {} recorded failures",
+        conv::clip(&fix.describe(), conv::ROW_MAX_CHARS),
+        fix.count,
+        fixes.failures
+    ))
 }
 
 /// Fetch one page plus a lookahead row, and report whether more exist.
@@ -1482,7 +1513,28 @@ fn handle_what_failed(
     let detail = detail(args);
     let per_group = if detail { limit } else { 5 };
     let outputs = failure_outputs(repo, &failures.iter().collect::<Vec<_>>())?;
+    let fixes = fixes_of(repo, failures.iter().map(|e| e.command.as_str()), mcp)?;
     Ok(fit_page(&failures, offset, next, |page| {
+        // Each command's fix is said once, under its first row on the page.
+        let first_rows: std::collections::HashSet<Option<i64>> = {
+            let mut seen = std::collections::HashSet::new();
+            page.iter()
+                .filter(|e| seen.insert(e.command.as_str()))
+                .map(|e| e.id)
+                .collect()
+        };
+        let with_fix = |row: String, cmd: &crate::models::Entry, indent: &str| -> String {
+            match fixes.get(&cmd.command) {
+                Some(found) if first_rows.contains(&cmd.id) => {
+                    let line = fix_line(indent, found).unwrap_or_default();
+                    format!("{row}\n{line}")
+                }
+                _ => row,
+            }
+        };
+        let any_fix = page
+            .iter()
+            .any(|e| first_rows.contains(&e.id) && fixes.contains_key(&e.command));
         // Group failures by prompt (if available)
         let mut by_prompt: std::collections::HashMap<&str, Vec<&crate::models::Entry>> =
             std::collections::HashMap::new();
@@ -1504,7 +1556,11 @@ fn handle_what_failed(
                 matched,
                 conv::window_hours(hours),
             ),
-            conv::Provenance::Observed,
+            if any_fix {
+                conv::Provenance::ObservedAndInferred
+            } else {
+                conv::Provenance::Observed
+            },
         );
 
         if !by_prompt.is_empty() {
@@ -1518,13 +1574,14 @@ fn handle_what_failed(
                     cmds.len()
                 ));
                 write_rows(&mut response, cmds, per_group, |cmd| {
-                    with_output(
+                    let row = with_output(
                         format!("    {}", command_row(cmd, detail)),
                         cmd.id,
                         &outputs,
                         "      ",
                         detail,
-                    )
+                    );
+                    with_fix(row, cmd, "      ")
                 });
             }
             response.blank();
@@ -1533,18 +1590,22 @@ fn handle_what_failed(
         if !no_prompt_failures.is_empty() {
             response.line("FAILURES WITH NO PROMPT RECORDED:");
             write_rows(&mut response, &no_prompt_failures, per_group, |cmd| {
-                with_output(
+                let row = with_output(
                     format!("  {}", command_row(cmd, detail)),
                     cmd.id,
                     &outputs,
                     "    ",
                     detail,
-                )
+                );
+                with_fix(row, cmd, "    ")
             });
         }
 
         if let Some(note) = output_note(&page.iter().collect::<Vec<_>>(), &outputs) {
             response = response.note(note);
+        }
+        if any_fix {
+            response = response.note(conv::FIX_NOTE);
         }
         if !detail {
             response = response.note(conv::DETAIL_HINT);
@@ -2216,6 +2277,7 @@ fn handle_learn_from_failures(
     let outputs = repo
         .failure_outputs(&latest)
         .map_err(|e| format!("query failed: {e}"))?;
+    let fixes = fixes_of(repo, page.iter().map(|(cmd, _)| *cmd), mcp)?;
     Ok(fit_page(&page, offset, next, |page| {
         let mut response = conv::Response::new(
             format!(
@@ -2242,11 +2304,17 @@ fn handle_learn_from_failures(
                     conv::rate(human_fails, human_total),
                 ));
             }
+            if let Some(line) = fixes.get(*cmd).and_then(|found| fix_line("    ", found)) {
+                response.line(line);
+            }
             if let Some(output) = s.last_fail_id.and_then(|id| outputs.get(&id)) {
                 for line in conv::output_lines(output, "    latest failure ", false) {
                     response.line(line);
                 }
             }
+        }
+        if page.iter().any(|(cmd, _)| fixes.contains_key(*cmd)) {
+            response = response.note(conv::FIX_NOTE);
         }
         let shown_with_output = page
             .iter()
@@ -2263,8 +2331,7 @@ fn handle_learn_from_failures(
             ))
             .note(
                 "these are failure rates, not explanations: suvadu recorded that the command \
-                 exited non-zero and nothing about why. Whether a later run fixed anything is not \
-                 something suvadu observed either",
+                 exited non-zero, and what it printed only where failure-output capture kept it",
             )
     }))
 }
@@ -3418,6 +3485,115 @@ mod tests {
         assert!(text.contains("| error: could not compile `app`"), "{text}");
         assert!(!text.contains("old failure"), "only the latest: {text}");
         assert!(text.contains(conv::OUTPUT_NOTE), "{text}");
+    }
+
+    /// `runs` recorded one after another in session `s-fix` in `/project`,
+    /// ending `minutes` ago, a few seconds apart.
+    fn seed_runs(repo: &Repository, runs: &[(&str, i32)], minutes: i64) {
+        let now = chrono::Utc::now().timestamp_millis();
+        if repo.get_session("s-fix").unwrap().is_none() {
+            repo.insert_session(&crate::models::Session {
+                id: "s-fix".to_string(),
+                hostname: "test".to_string(),
+                created_at: now - 86_400_000,
+                tag_id: None,
+            })
+            .unwrap();
+        }
+        let start = now - minutes * 60_000 - i64::try_from(runs.len()).unwrap() * 5_000;
+        for (i, (command, exit)) in (0_i64..).zip(runs) {
+            let at = start + i * 5_000;
+            let mut entry = crate::models::Entry::new(
+                "s-fix".to_string(),
+                (*command).to_string(),
+                "/project".to_string(),
+                Some(*exit),
+                at,
+                at + 1_000,
+            );
+            entry.executor_type = Some("agent".to_string());
+            entry.executor = Some("claude-code".to_string());
+            repo.insert_entry(&entry).unwrap();
+        }
+    }
+
+    #[test]
+    fn what_failed_shows_what_fixed_the_command_before() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_runs(
+            &repo,
+            &[("npm test", 1), ("npm install", 0), ("npm test", 0)],
+            120,
+        );
+        seed_runs(
+            &repo,
+            &[("npm test", 1), ("npm install", 0), ("npm test", 0)],
+            60,
+        );
+        seed_runs(&repo, &[("npm test", 1)], 1);
+        let text = call_tool(&repo, "what_failed", &json!({}), &default_mcp()).unwrap();
+        assert!(
+            text.contains(
+                "fixed before (inferred): you fixed it with: npm install, then reran it — 2 of 3 recorded failures"
+            ),
+            "{text}"
+        );
+        assert_eq!(
+            text.matches("fixed before (inferred)").count(),
+            1,
+            "once per command on a page: {text}"
+        );
+        let trailer = conv::parse_trailer(&text).unwrap();
+        assert_eq!(trailer["provenance"], "observed+inferred", "{text}");
+        assert!(text.contains(conv::FIX_NOTE), "{text}");
+    }
+
+    #[test]
+    fn what_failed_stays_observed_when_nothing_was_fixed_before() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_runs(&repo, &[("npm test", 1), ("docker ps", 0)], 1);
+        let text = call_tool(&repo, "what_failed", &json!({}), &default_mcp()).unwrap();
+        assert!(!text.contains("fixed before"), "{text}");
+        assert_eq!(
+            conv::parse_trailer(&text).unwrap()["provenance"],
+            "observed"
+        );
+    }
+
+    #[test]
+    fn learn_from_failures_shows_what_fixed_each_command_before() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_runs(&repo, &[("gti status", 127), ("git status", 0)], 30);
+        seed_runs(&repo, &[("gti status", 127), ("git status", 0)], 20);
+        seed_runs(&repo, &[("gti status", 127), ("git status", 0)], 10);
+        let text = call_tool(&repo, "learn_from_failures", &json!({}), &default_mcp()).unwrap();
+        assert!(
+            text.contains(
+                "fixed before (inferred): you fixed it with: git status — 3 of 3 recorded failures"
+            ),
+            "{text}"
+        );
+        assert!(text.contains(conv::FIX_NOTE), "{text}");
+        for forbidden in ["root cause", "because", "caused by", "the fix was"] {
+            assert!(
+                !text.to_lowercase().contains(forbidden),
+                "{forbidden}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixes_respect_excluded_directories() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_runs(&repo, &[("gti status", 127), ("git status", 0)], 30);
+        let mcp = crate::config::McpConfig {
+            exclude_dirs: vec!["/project".to_string()],
+            ..default_mcp()
+        };
+        for tool in ["what_failed", "learn_from_failures"] {
+            let text = call_tool(&repo, tool, &json!({}), &mcp).unwrap();
+            assert!(!text.contains("git status"), "{tool}: {text}");
+        }
     }
 
     #[test]
