@@ -7,6 +7,7 @@ pub use scope::{RecallContext, RecallScope};
 pub mod highlight;
 mod input;
 mod render;
+mod smart;
 mod worker;
 
 #[cfg(test)]
@@ -212,6 +213,9 @@ pub struct SearchApp {
     // never rank. Pages past its end are read from the database instead —
     // see `SearchApp::RANK_WINDOW`.
     ranked_window: Vec<Entry>,
+    /// What Smart rank has read about commands so far this session; see
+    /// [`smart::SmartRank`]. Replaced when the history itself changes.
+    smart: std::sync::Arc<smart::SmartRank>,
     /// The results on screen came from the `terms` fallback that ignores
     /// separators, because the query as typed matched nothing. Later pages
     /// ask the same question as the reload that produced them, and the UI
@@ -319,6 +323,7 @@ impl SearchApp {
             bookmarked_commands: cfg.bookmarked_commands,
 
             ranked_window: Vec::new(),
+            smart: std::sync::Arc::new(smart::SmartRank::new()),
             loosened: false,
 
             status_message: None,
@@ -540,6 +545,8 @@ impl SearchApp {
             },
             SearchAction::Delete(id) => match repo.delete_entry(id) {
                 Ok(()) => {
+                    // A deleted run no longer counts towards its command.
+                    self.smart = std::sync::Arc::new(smart::SmartRank::new());
                     self.reload_entries(repo)?;
                     self.status_message = Some(("Deleted!".into(), now()));
                 }

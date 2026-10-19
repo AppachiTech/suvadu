@@ -5523,6 +5523,7 @@ fn the_ranker_keeps_every_loose_match_and_ranks_strict_ones_first() {
         0,
         false,
         Some(&loose),
+        None,
     );
     let commands: Vec<&str> = ranked.iter().map(|e| e.command.as_str()).collect();
     assert_eq!(commands.len(), 3, "{commands:?}");
@@ -5837,4 +5838,209 @@ fn the_separator_fallback_folds_case_as_terms_does() {
         search_in_mode(&repo, MatchMode::Terms, "hiveοδοσ"),
         ["ssh hive-ΟΔΟΣ"]
     );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Smart rank: frecency, outcomes and sequences, below the match tier.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// One recorded run for [`smart_history`]: command, minutes ago, exit code,
+/// shell session.
+type Run<'a> = (&'a str, i64, i32, &'a str);
+
+/// A history of `runs`, timed relative to now.
+fn smart_history(runs: &[Run]) -> (tempfile::TempDir, crate::repository::Repository) {
+    let (dir, repo) = crate::test_utils::test_repo();
+    let mut sessions: Vec<&str> = runs.iter().map(|r| r.3).collect();
+    sessions.sort_unstable();
+    sessions.dedup();
+    for id in sessions {
+        repo.insert_session(&crate::models::Session {
+            id: id.into(),
+            hostname: "test".into(),
+            created_at: 0,
+            tag_id: None,
+        })
+        .unwrap();
+    }
+    let now = chrono::Utc::now().timestamp_millis();
+    // Insert oldest first, as a shell records them.
+    let mut ordered = runs.to_vec();
+    ordered.sort_by_key(|r| std::cmp::Reverse(r.1));
+    for (command, minutes_ago, exit, session) in ordered {
+        let mut entry = create_test_entry(command);
+        entry.session_id = session.into();
+        entry.started_at = now - minutes_ago * 60_000;
+        entry.ended_at = entry.started_at + 500;
+        entry.exit_code = Some(exit);
+        repo.insert_entry(&entry).unwrap();
+    }
+    (dir, repo)
+}
+
+/// How recall orders `query`: `smart` is `^S`, `unique` the Commands view,
+/// `session` the shell session recall was opened from.
+fn smart_search(
+    repo: &crate::repository::Repository,
+    query: &str,
+    smart: bool,
+    unique: bool,
+    session: Option<&str>,
+) -> Vec<String> {
+    let mut config = test_search_config(vec![], 0);
+    config.view.context_boost = smart;
+    config.view.unique_mode = unique;
+    let mut app = SearchApp::new(config);
+    app.recall.context.session_id = session.map(String::from);
+    app.query = query.into();
+    app.reload_entries(repo).unwrap();
+    app.entries.iter().map(|e| e.command.clone()).collect()
+}
+
+/// The distinct commands of `rows`, in the order they first appear.
+fn first_appearances(rows: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    rows.iter()
+        .filter(|c| seen.insert(c.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// `cargo build` run twenty times over the last two days, and `cargo bench`
+/// once, five minutes ago.
+fn habit_history() -> (tempfile::TempDir, crate::repository::Repository) {
+    let mut runs: Vec<Run> = (0..20)
+        .map(|i| ("cargo build", 24 * 60 + i * 60, 0, "old"))
+        .collect();
+    runs.push(("cargo bench", 5, 0, "old"));
+    smart_history(&runs)
+}
+
+#[test]
+fn smart_rank_puts_a_habit_above_a_single_newer_run() {
+    let (_d, repo) = habit_history();
+    for unique in [false, true] {
+        let rows = smart_search(&repo, "cargo b", true, unique, None);
+        assert_eq!(
+            first_appearances(&rows),
+            vec!["cargo build", "cargo bench"],
+            "unique={unique}"
+        );
+    }
+}
+
+#[test]
+fn recent_rank_ignores_how_often_a_command_ran() {
+    let (_d, repo) = habit_history();
+    // Recent keeps the order it always had: the match tier and score,
+    // then the newest run first.
+    let rows = smart_search(&repo, "cargo b", false, false, None);
+    assert_eq!(rows[0], "cargo bench");
+    assert_eq!(rows.len(), 21);
+}
+
+#[test]
+fn a_closer_textual_match_beats_any_amount_of_habit() {
+    let mut runs: Vec<Run> = (0..30)
+        .map(|i| ("sudo docker build .", i + 1, 0, "s"))
+        .collect();
+    runs.push(("docker build .", 3 * 24 * 60, 0, "s"));
+    let (_d, repo) = smart_history(&runs);
+    for unique in [false, true] {
+        let rows = smart_search(&repo, "docker build", true, unique, None);
+        assert_eq!(rows[0], "docker build .", "unique={unique}: {rows:?}");
+    }
+}
+
+#[test]
+fn a_command_that_usually_fails_ranks_below_one_that_works() {
+    // Equally often and equally recently; the failing one ran a minute
+    // later each time, so recency alone would put it first.
+    let mut runs: Vec<Run> = Vec::new();
+    for i in 0..5 {
+        runs.push(("npm run lint", 2 * i + 1, i32::from(i != 2), "s"));
+        runs.push(("npm run test", 2 * i + 2, 0, "s"));
+    }
+    let (_d, repo) = smart_history(&runs);
+    for unique in [false, true] {
+        let rows = smart_search(&repo, "npm run", true, unique, None);
+        assert_eq!(
+            first_appearances(&rows),
+            vec!["npm run test", "npm run lint"],
+            "unique={unique}"
+        );
+    }
+    // Recent does not judge outcomes.
+    assert_eq!(
+        smart_search(&repo, "npm run", false, false, None)[0],
+        "npm run lint"
+    );
+}
+
+#[test]
+fn one_failure_among_many_successes_is_not_held_against_a_command() {
+    let mut runs: Vec<Run> = Vec::new();
+    for i in 0..10 {
+        // The newest `make check` failed; the other nine passed.
+        runs.push(("make check", 2 * i + 1, i32::from(i == 0), "s"));
+        runs.push(("make build", 2 * i + 2, 0, "s"));
+    }
+    // A run stopped with Ctrl+C is not a failure either.
+    for i in 0..4 {
+        runs.push(("make serve", 30 + i, 130, "s"));
+    }
+    let (_d, repo) = smart_history(&runs);
+    let rows = smart_search(&repo, "make", true, true, None);
+    assert_eq!(rows, vec!["make check", "make build", "make serve"]);
+}
+
+#[test]
+fn smart_rank_orders_both_views_alike_and_the_same_every_time() {
+    let mut runs: Vec<Run> = Vec::new();
+    for i in 0..12 {
+        runs.push(("git status", 3 * i + 1, 0, "s"));
+    }
+    for i in 0..6 {
+        runs.push(("git log --oneline", 300 + 10 * i, 0, "s"));
+        runs.push(("git push", 7 * 24 * 60 + i, 1, "s"));
+    }
+    runs.push(("git stash", 2, 0, "s"));
+    runs.push(("git fetch", 40 * 24 * 60, 0, "s"));
+    let (_d, repo) = smart_history(&runs);
+
+    let executions = smart_search(&repo, "git", true, false, None);
+    let commands = smart_search(&repo, "git", true, true, None);
+    assert_eq!(first_appearances(&executions), commands);
+    assert_eq!(smart_search(&repo, "git", true, true, None), commands);
+    assert_eq!(
+        commands,
+        // `git push` has failed every time, which puts it below even a
+        // command last run a month ago.
+        vec![
+            "git status",
+            "git log --oneline",
+            "git stash",
+            "git fetch",
+            "git push"
+        ]
+    );
+}
+
+#[test]
+fn smart_rank_never_changes_what_matches_or_the_count() {
+    let (_d, repo) = habit_history();
+    for unique in [false, true] {
+        let count = |smart: bool| {
+            let mut config = test_search_config(vec![], 0);
+            config.view.context_boost = smart;
+            config.view.unique_mode = unique;
+            let mut app = SearchApp::new(config);
+            app.query = "cargo".into();
+            app.reload_entries(&repo).unwrap();
+            let mut rows: Vec<String> = app.entries.iter().map(|e| e.command.clone()).collect();
+            rows.sort();
+            (app.pagination.total_items, rows)
+        };
+        assert_eq!(count(true), count(false), "unique={unique}");
+    }
 }

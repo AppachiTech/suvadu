@@ -3831,3 +3831,114 @@ fn a_prefix_count_reads_only_the_case_folding_index() {
     };
     assert!(Repository::count_joins(&tagged.to_filter_builder()).contains("sessions s"));
 }
+
+// ── Smart-rank signals ─────────────────────────────────────────────────────
+
+/// Record `command` in `session` at `started_at`, exiting `exit`, run by
+/// `executor_type`.
+fn record(
+    repo: &Repository,
+    session: &str,
+    command: &str,
+    started_at: i64,
+    exit: Option<i32>,
+    executor_type: &str,
+) {
+    let mut entry = crate::models::Entry::new(
+        session.to_string(),
+        command.to_string(),
+        "/tmp".to_string(),
+        exit,
+        started_at,
+        started_at + 100,
+    );
+    entry.executor_type = Some(executor_type.to_string());
+    repo.insert_entry(&entry).unwrap();
+}
+
+fn sessions(repo: &Repository, ids: &[&str]) {
+    for id in ids {
+        repo.insert_session(&Session {
+            id: (*id).to_string(),
+            hostname: "h".into(),
+            created_at: 0,
+            tag_id: None,
+        })
+        .unwrap();
+    }
+}
+
+#[test]
+fn command_stats_sum_frecency_and_count_outcomes() {
+    let (_temp, repo) = setup_test_db();
+    sessions(&repo, &["s"]);
+    let now = 100 * 24 * 3_600_000_i64;
+    let hour = 3_600_000;
+    // 16 + 8 + 0.25, two known outcomes, one failure; 130 is not a failure.
+    record(&repo, "s", "make", now - 60_000, Some(0), "human");
+    record(&repo, "s", "make", now - 2 * hour, Some(2), "human");
+    record(&repo, "s", "make", now - 90 * 24 * hour, None, "human");
+    record(&repo, "s", "serve", now - 60_000, Some(130), "human");
+    record(&repo, "s", "other", now - 60_000, Some(1), "human");
+
+    let stats = repo
+        .command_stats(&["make", "serve", "missing"], now, true)
+        .unwrap();
+    assert_eq!(stats.len(), 2, "{stats:?}");
+    let make = stats["make"];
+    assert!((make.frecency - 24.25).abs() < 1e-9, "{make:?}");
+    assert_eq!((make.outcomes, make.failures), (2, 1));
+    assert_eq!((stats["serve"].outcomes, stats["serve"].failures), (1, 0));
+}
+
+#[test]
+fn command_stats_leave_out_hidden_agent_runs() {
+    let (_temp, repo) = setup_test_db();
+    sessions(&repo, &["s"]);
+    let now = 1_000_000_000;
+    record(&repo, "s", "cargo test", now - 1_000, Some(0), "human");
+    record(&repo, "s", "cargo test", now - 2_000, Some(1), "agent");
+
+    let hidden = repo.command_stats(&["cargo test"], now, false).unwrap();
+    assert_eq!(hidden["cargo test"].outcomes, 1);
+    let shown = repo.command_stats(&["cargo test"], now, true).unwrap();
+    assert_eq!(shown["cargo test"].outcomes, 2);
+    assert_eq!(shown["cargo test"].failures, 1);
+}
+
+#[test]
+fn command_stats_of_no_commands_is_empty() {
+    let (_temp, repo) = setup_test_db();
+    assert!(repo.command_stats(&[], 0, true).unwrap().is_empty());
+}
+
+/// Fail unless `sql` is answered without scanning `entries`.
+fn assert_seeks(repo: &Repository, sql: &str, params: &[&dyn rusqlite::ToSql]) {
+    let mut stmt = repo
+        .conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .unwrap();
+    let plan: Vec<String> = stmt
+        .query_map(params, |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(
+        !plan
+            .iter()
+            .any(|d| d.starts_with("SCAN e") || d.starts_with("SCAN n")),
+        "{sql}: {plan:#?}"
+    );
+}
+
+#[test]
+fn smart_rank_lookups_seek_indexes() {
+    let (_temp, repo) = setup_test_db();
+    for include_agents in [false, true] {
+        assert_seeks(
+            &repo,
+            &Repository::command_stats_sql(include_agents),
+            &[&0_i64, &"[\"a\"]"],
+        );
+    }
+}

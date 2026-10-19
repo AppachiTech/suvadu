@@ -231,12 +231,32 @@ and falls back explicitly; it never silently widens.
 
 **Ranking** — `terms` and `fuzzy` order matches by how well they match:
 whole-query prefix first, then a contiguous substring, then your words in
-query order, then in any order. Within a tier a fuzzy score decides, adjusted
-for command length, for having been typed by you rather than by an agent, and
-— in Smart rank (`^S`, `search.context_boost`) — for having run in *exactly*
-this directory. **Nothing is boosted for having been run often, or for having
-exited 0.** There is no frecency in interactive search. `literal`, `prefix`
-and an empty query are not re-ranked at all: those come back newest first.
+query order, then in any order. **That tier always comes first: nothing below
+lifts a command over a closer textual match.** Within a tier, one score
+decides. It is a fuzzy score, adjusted for command length and for having been
+typed by you rather than by an agent, and — in Smart rank (`^S`,
+`search.context_boost`, on by default) — multiplied by:
+
+- **this directory**: having run in *exactly* this directory
+  (`search.cwd_boost_percent`);
+- **frecency**: how often *and* how recently you have run that exact
+  command. Each run counts 16 in its first hour, 8 that day, 4 for three
+  days, 1 for a week, 0.5 for a month and 0.25 after that; the boost is the
+  fourth root of one plus the sum, so twenty runs a day or two ago (×3.0)
+  beat one run five minutes ago (×2.0) without burying it. It is the same
+  definition the MCP `suggest_next` tool ranks by;
+- **outcome**: a command that usually fails — more than half of at least
+  three runs with a known exit status — is scaled down, to a quarter when it
+  has never succeeded. One failure among many successes changes nothing, and
+  a run stopped with Ctrl+C (exit 130) is not a failure.
+
+Frecency and outcomes count every run of that exact text in your history, not
+only the matching ones; agent runs count only while agent commands are shown.
+Ties go to interactively typed commands, then to the newest (Executions) or
+the most-run (Commands). **Recent rank** (`^S` again) leaves those three
+boosts out: within a tier, the fuzzy score and the human boost alone, then the
+same ties. `literal`, `prefix` and an empty query are
+not re-ranked at all: those come back newest first.
 
 At most 5,000 matches are ordered. That caps the ranking work, not how much
 history was searched, and not how much of it you can reach: matching and

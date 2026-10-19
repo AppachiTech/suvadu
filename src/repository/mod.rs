@@ -5,6 +5,7 @@ mod bookmarks;
 mod capture;
 mod entries;
 mod notes;
+mod ranking;
 mod skills;
 mod stats;
 mod storage;

@@ -1135,7 +1135,7 @@ const fn get_setting_description(tab: usize, item: usize) -> &'static str {
         (0, 0) => "Number of results to show per page in search (10-10000)",
         (0, 1) => "Open recall with identical commands grouped into one row, with when each last ran and how often. Off: list every run. Ctrl+U switches either way",
         (0, 2) => "Filter search results by the current session's tag",
-        (0, 3) => "Boost results from the current directory higher in search (toggle with ^S)",
+        (0, 3) => "Smart rank: within a match tier, boost commands run in this directory and ones you run often and recently (frecency), and demote ones that usually fail. Off: Recent rank, without them (toggle with ^S)",
         (0, 4) => "Show the detail preview pane when opening search (toggle with Tab)",
         (0, 5) => "Vim-style modal navigation: j/k to move, / to search, q to quit",
         (0, 6) => "Commands longer than this (in characters) get a scoring penalty (10-500)",

@@ -41,13 +41,15 @@ An unavailable scope (no repository, no session) says so and falls back explicit
 Ranking is separate again, and never changes which entries match. For terms
 and fuzzy, matches are ordered by how well they match — whole-query prefix,
 then contiguous substring, then your words in order, then in any order —
-and within a tier by a fuzzy score adjusted for command length, for having
-been typed by you rather than an agent, and (in Smart rank) for having run
-in exactly this directory. Nothing is boosted for having been run often or
-for having exited 0. literal, prefix and an empty query are not re-ranked at
-all: those come back newest first.
-^S switches Smart rank (with the this-directory boost) and Recent (without
-it). Recall opens in Commands: identical command text grouped into one row,
+and within a tier by one score: a fuzzy score adjusted for command length
+and for having been typed by you rather than an agent, multiplied in Smart
+rank by boosts for having run in exactly this directory and for frecency
+(how often and how recently you ran that exact command), and by a penalty
+when it usually fails (more than half of at least 3 runs; Ctrl+C, exit 130,
+is not a failure). No boost lifts a match above a closer textual match.
+literal, prefix and an empty query are not re-ranked at all: those come back
+newest first.
+^S switches Smart rank (with those boosts) and Recent (without them). Recall opens in Commands: identical command text grouped into one row,
 with when it last ran and how often (set search.show_unique_by_default =
 false to start in Executions instead). ^U switches between Commands and
 Executions, every recorded run. At most 5000 matches are ranked, which bounds

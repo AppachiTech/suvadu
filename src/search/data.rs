@@ -154,6 +154,10 @@ impl SearchApp {
             length_threshold: self.view.length_threshold,
             human_boost_percent: self.view.human_boost_percent,
             cwd_boost_percent: self.view.cwd_boost_percent,
+            smart: self
+                .view
+                .context_boost
+                .then(|| std::sync::Arc::clone(&self.smart)),
             page_size: self.pagination.page_size.max(1),
             reselect: self.reselect.clone(),
             loosened: self.loosened,
@@ -181,6 +185,7 @@ impl SearchApp {
             cwd_boost_percent,
             false,
             None,
+            None,
         )
     }
 
@@ -194,6 +199,10 @@ impl SearchApp {
     /// accepted by [`super::matching::matches_loosely`] — the rule the
     /// database used to find them — and rank below every strict match, in
     /// the same tiers computed on the text with its separators removed.
+    ///
+    /// `smart` holds Smart rank's factor for each entry, in order
+    /// ([`super::smart::SmartRank::factors`]); `None` ranks as Recent does.
+    /// The order it produces is documented in [`super::smart`].
     ///
     /// Eligibility is decided *before* and independently of the ranking tier,
     /// and the relevance score never removes an entry — it only orders what
@@ -215,6 +224,7 @@ impl SearchApp {
         cwd_boost_percent: u32,
         allow_subsequence: bool,
         loose: Option<&[String]>,
+        smart: Option<&[f64]>,
     ) -> Vec<Entry> {
         use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
         use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
@@ -243,11 +253,11 @@ impl SearchApp {
         let loose_atoms: Vec<&str> = loose_atoms.iter().map(String::as_str).collect();
         let loose_query = loose_atoms.concat();
 
-        // (entry, match-quality tier, loose tier, boosted fuzzy score)
-        let mut scored: Vec<(Entry, u8, u8, u32)> = Vec::new();
+        // (entry, match-quality tier, loose tier, combined score)
+        let mut scored: Vec<(Entry, u8, u8, f64)> = Vec::new();
         let mut buf = Vec::new();
 
-        for entry in entries {
+        for (index, entry) in entries.into_iter().enumerate() {
             buf.clear();
             // One definition of "the text this field searches", shared with
             // the SQL side (see Entry::search_field_text) so the database and
@@ -321,10 +331,14 @@ impl SearchApp {
                 );
             }
 
+            // Smart rank's history signals multiply in. Recent rank's factor
+            // is 1, which leaves its order exactly as the integer score had it.
+            let factor = smart.and_then(|f| f.get(index)).copied().unwrap_or(1.0);
+            let combined = f64::from(final_score) * factor;
+
             // Match-quality tier (see `match_tier`): textual match quality
-            // dominates the cwd/recency boosts, which only break ties within
-            // a tier.
-            scored.push((entry, tier, loose_tier, final_score));
+            // dominates every boost, which only orders rows within a tier.
+            scored.push((entry, tier, loose_tier, combined));
         }
 
         scored.sort_by(|a, b| {
@@ -333,8 +347,8 @@ impl SearchApp {
             b.1.cmp(&a.1)
                 // Then, among those, the same tiers with separators ignored.
                 .then_with(|| b.2.cmp(&a.2))
-                // Secondary: boosted fuzzy score (descending)
-                .then_with(|| b.3.cmp(&a.3))
+                // Secondary: the combined score (descending)
+                .then_with(|| b.3.total_cmp(&a.3))
                 // Tiebreaker: interactively-typed entries (terminal/IDE) first,
                 // above agent/bot/ci/script commands.
                 .then_with(|| b.0.is_interactive().cmp(&a.0.is_interactive()))
@@ -521,6 +535,9 @@ pub(super) struct ReloadRequest {
     length_threshold: usize,
     human_boost_percent: u32,
     cwd_boost_percent: u32,
+    /// Smart rank's history signals, when Smart rank is on; `None` is
+    /// Recent rank.
+    smart: Option<std::sync::Arc<super::smart::SmartRank>>,
     page_size: usize,
     /// A command to keep selected across this reload — set by the view
     /// switches that show the same matches differently. Where it lands is
@@ -730,6 +747,13 @@ impl ReloadRequest {
             if cancelled() {
                 return Ok(None);
             }
+            let factors = match &self.smart {
+                Some(smart) => Some(smart.factors(repo, &candidates, self.show_agents)?),
+                None => None,
+            };
+            if cancelled() {
+                return Ok(None);
+            }
             // A window that came back short *is* the whole match set, so
             // the count is already known and the second query — the
             // expensive half of a fuzzy reload — is skipped. Only a full
@@ -749,6 +773,7 @@ impl ReloadRequest {
                 self.cwd_boost_percent,
                 plan.allow_subsequence,
                 (!plan.loose_tokens.is_empty()).then_some(plan.loose_tokens.as_slice()),
+                factors.as_deref(),
             );
             (total, ranked, counts)
         } else {
