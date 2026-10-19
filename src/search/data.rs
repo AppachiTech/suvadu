@@ -224,19 +224,21 @@ impl SearchApp {
         let mut matcher = Matcher::new(MatcherConfig::DEFAULT);
         let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
 
-        // Lower-cased, trimmed query for the match-quality tier (below). nucleo
+        // Case-folded, trimmed query for the match-quality tier (below), folded
+        // as the database folds a non-ASCII term so that no row it found is
+        // dropped here. nucleo
         // splits a multi-word query into independent atoms, so it ranks a
         // scattered match ("git ... add") the same as a contiguous one
         // ("git add"). We restore that phrase/word-order signal as the primary
         // sort key.
-        let query_lc = query.trim().to_lowercase();
+        let query_lc = crate::util::fold_case(query.trim());
         let atoms: Vec<&str> = query_lc.split_whitespace().collect();
         // The same signal for the separator-insensitive fallback, on the
         // query and the command with their separators removed.
         let loose_atoms: Vec<String> = loose
             .unwrap_or_default()
             .iter()
-            .map(|t| t.to_lowercase())
+            .map(|t| crate::util::fold_case(t))
             .collect();
         let loose_atoms: Vec<&str> = loose_atoms.iter().map(String::as_str).collect();
         let loose_query = loose_atoms.concat();
@@ -267,10 +269,10 @@ impl SearchApp {
             // well: its rows are what the database found with separators
             // ignored, and dropping them here would list fewer than it
             // counted.
-            let tier = match_tier(&field_value.to_lowercase(), &query_lc, &atoms);
+            let tier = match_tier(&crate::util::fold_case(field_value), &query_lc, &atoms);
             let loose_tier = match loose {
                 Some(terms) if super::matching::matches_loosely(field_value, terms) => match_tier(
-                    &super::matching::normalize_separators(field_value).to_lowercase(),
+                    &crate::util::fold_case(&super::matching::normalize_separators(field_value)),
                     &loose_query,
                     &loose_atoms,
                 )

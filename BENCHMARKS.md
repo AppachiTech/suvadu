@@ -300,6 +300,23 @@ one run each. The full baseline above was not re-run.
   `v12_migration_cost_on_a_large_history`'s corpus (`src/db.rs`); other
   shells wait up to 5 s.
 
+### Unicode case folding, 19 October 2026
+
+Measured before and after `terms` and `fuzzy` moved from lowercasing to
+case folding (`util::fold_case`), on **Apple M4 Max, 128 GB RAM, macOS
+27.2, rustc 1.96.0**, release profile, the judged harness at 100,000
+entries, two runs each. The full baseline above was not re-run.
+
+- **Non-ASCII queries got faster**, because `suvadu_contains_ci()` now
+  folds the query once per statement instead of once per row, and rejects
+  an ASCII command without folding it when the query folds to non-ASCII:
+  `unicode-command` 19.6–19.7 ms p50 before, 14.8–14.9 ms after;
+  `unicode-case-folded` 20.7–20.8 ms before, 15.0 ms after. They still
+  test every row, as before.
+- Folding alone, without those two changes, cost about 25% more than
+  lowercasing on 100,000 ASCII commands (6.8 ms against 5.4 ms in a
+  micro-benchmark), and the two cases ran at 22.5–25 ms p50.
+
 ## Known gaps
 
 - **Ranking quality is not measured.** The judged set records which command

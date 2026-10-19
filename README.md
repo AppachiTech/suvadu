@@ -192,10 +192,16 @@ controls, and changing one never changes what another does.
 | `fuzzy` | the query's letters must appear in order, gaps allowed (`gco` finds `git checkout`) |
 
 Words are ANDed, never ORed. There is no quoting syntax and punctuation is
-never stripped, so `git-push` is one word. Matching is case-insensitive;
-`terms` and `fuzzy` fold non-ASCII case too, while `literal` and `prefix` are
-answered by SQLite's `LIKE`, which folds ASCII only. **Every mode narrows in
-the database, so how old a match is never decides whether it is found.**
+never stripped, so `git-push` is one word. Matching is case-insensitive.
+`terms` and `fuzzy` fold Unicode case too: `ÉCHO` finds `écho`, `σ` finds
+`ΟΔΟΣ` and `straße` finds `STRASSE`. In `terms` that applies to a word with a
+non-ASCII letter in it; a word typed in plain ASCII is looked up in the
+search index, which folds ASCII case only, so `STRASSE` does not find
+`straße`. `fuzzy` folds every query. `literal` and `prefix` are answered by
+SQLite's `LIKE`, which folds ASCII only. There are no language-specific
+rules: Turkish `İ` folds to `i` plus a combining dot, and dotless `ı` stays
+its own letter. **Every mode narrows in the database, so how old a match is
+never decides whether it is found.**
 
 **Separators — the one fallback.** When a `terms` query matches *nothing* in
 the current scope and filters, it is asked again with separators ignored —

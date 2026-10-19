@@ -46,12 +46,106 @@ pub fn project_dirs() -> Option<&'static directories::ProjectDirs> {
     PROJECT_DIRS.as_ref()
 }
 
+// ── Case folding ───────────────────────────────────────
+
+/// Append `c`'s case fold to `out` and return how many characters that was.
+///
+/// The fold is Rust's Unicode lowercase of the letter on its own, plus the
+/// folds lowercasing does not make, from Unicode's `CaseFolding.txt`:
+///
+/// * final sigma `ς` is `σ`, so `ΟΔΟΣ`, `οδος` and `σ` agree;
+/// * `ß` and capital `ẞ` are `ss`, so `Straße` finds `STRASSE`;
+/// * the Latin ligatures `ﬀ ﬁ ﬂ ﬃ ﬄ ﬅ ﬆ` are their letters, the long `ſ` is
+///   `s`, and `ŉ` is `ʼn`;
+/// * the Greek symbol forms `ϐ ϑ ϕ ϖ ϰ ϱ ϵ` are `β θ φ π κ ρ ε`, and the
+///   combining iota subscript is `ι`.
+///
+/// These are the folds a command line plausibly holds. Other full folds that
+/// only decompose a precomposed letter (`ΐ`, `ǰ`, Armenian `և`, …) fall back
+/// to lowercasing, which leaves them as they are, so they still match
+/// themselves in either case.
+///
+/// No locale rules apply. Turkish `İ` folds to `i` followed by U+0307
+/// COMBINING DOT ABOVE, as Unicode's default folding has it, so `İstanbul`
+/// is found by `İstanbul` and `i̇stanbul` but not by `istanbul`; dotless `ı`
+/// is its own letter and matches neither `i` nor `I`.
+///
+/// A letter folds the same wherever it stands, unlike `str::to_lowercase`,
+/// which picks `ς` or `σ` by position: so a text's fold is its letters'
+/// folds, one after another, and the highlighter can credit each folded
+/// character to the letter it came from.
+pub fn push_folded(out: &mut String, c: char) -> usize {
+    let special: Option<&str> = match c {
+        '\u{df}' | '\u{1e9e}' => Some("ss"),
+        '\u{3c2}' => Some("\u{3c3}"),
+        '\u{17f}' => Some("s"),
+        '\u{149}' => Some("\u{2bc}n"),
+        '\u{fb00}' => Some("ff"),
+        '\u{fb01}' => Some("fi"),
+        '\u{fb02}' => Some("fl"),
+        '\u{fb03}' => Some("ffi"),
+        '\u{fb04}' => Some("ffl"),
+        '\u{fb05}' | '\u{fb06}' => Some("st"),
+        '\u{3d0}' => Some("\u{3b2}"),
+        '\u{3d1}' => Some("\u{3b8}"),
+        '\u{3d5}' => Some("\u{3c6}"),
+        '\u{3d6}' => Some("\u{3c0}"),
+        '\u{3f0}' => Some("\u{3ba}"),
+        '\u{3f1}' => Some("\u{3c1}"),
+        '\u{3f5}' => Some("\u{3b5}"),
+        '\u{345}' => Some("\u{3b9}"),
+        _ => None,
+    };
+    if let Some(folded) = special {
+        out.push_str(folded);
+        return folded.chars().count();
+    }
+    // On its own Σ lowercases to σ; only `str::to_lowercase` makes ς.
+    let lower = c.to_lowercase();
+    let count = lower.len();
+    out.extend(lower);
+    count
+}
+
+/// `text` case-folded (see [`push_folded`]): the form two texts are compared
+/// in when case must not matter beyond ASCII — `terms`' non-ASCII words
+/// (`suvadu_contains_ci`), `fuzzy` ([`is_subsequence_ci`]), recall's ranking
+/// and its highlighting.
+pub fn fold_case(text: &str) -> String {
+    // Most commands are ASCII, and every database row a non-ASCII term is
+    // tested against passes through here.
+    if text.is_ascii() {
+        return text.to_ascii_lowercase();
+    }
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        push_folded(&mut out, c);
+    }
+    out
+}
+
+/// Whether `haystack`, case-folded, contains `folded_needle`, which the
+/// caller has folded already ([`fold_case`]) — the `suvadu_contains_ci`
+/// rule, tested on every row a non-ASCII term is matched against.
+///
+/// An ASCII haystack folds to ASCII, so it cannot contain a needle that
+/// folds to anything else; most commands are ASCII, and this answers them
+/// without folding at all.
+pub fn contains_folded(haystack: &str, folded_needle: &str) -> bool {
+    if haystack.is_ascii() {
+        folded_needle.is_ascii() && haystack.to_ascii_lowercase().contains(folded_needle)
+    } else {
+        fold_case(haystack).contains(folded_needle)
+    }
+}
+
 // ── Subsequence matching ───────────────────────────────
 
 /// `true` when every character of `needle` occurs in `haystack` in order,
-/// gaps allowed, folding case with Rust's full Unicode lowercasing — the same
-/// folding `terms` gets from `suvadu_contains_ci`, so `ÉCHO` finds `écho` in
-/// either mode. An empty (or whitespace-only) needle matches everything.
+/// gaps allowed, comparing both case-folded ([`fold_case`]) — the same
+/// folding `terms` gets from `suvadu_contains_ci`, so `ÉCHO` finds `écho` and
+/// `straße` finds `STRASSE` in either mode. An empty (or whitespace-only)
+/// needle matches everything.
 ///
 /// This is the single definition of the `fuzzy` recall mode's rule. It lives
 /// here rather than in `search::matching` because the database needs it too:
@@ -63,9 +157,9 @@ pub fn is_subsequence_ci(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return true;
     }
-    let hay = haystack.to_lowercase();
+    let hay = fold_case(haystack);
     let mut chars = hay.chars();
-    needle.to_lowercase().chars().all(|c| chars.any(|h| h == c))
+    fold_case(needle).chars().all(|c| chars.any(|h| h == c))
 }
 
 // ── Separator-insensitive matching ─────────────────────
@@ -169,6 +263,78 @@ pub fn centered_rect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fold_case_folds_what_lowercasing_misses() {
+        for (text, folded) in [
+            // Final sigma is the same letter as σ; lowercasing keeps ς.
+            ("ΟΔΟΣ", "οδοσ"),
+            ("οδος", "οδοσ"),
+            ("ς", "σ"),
+            // ß and capital ẞ fold to "ss", as uppercase SS does.
+            ("Straße", "strasse"),
+            ("STRAẞE", "strasse"),
+            ("STRASSE", "strasse"),
+            // Ligatures and the long s.
+            ("\u{fb01}le", "file"),
+            ("\u{fb00}\u{fb03}\u{fb06}", "ffffist"),
+            ("\u{17f}", "s"),
+            // Greek symbol forms of ordinary letters.
+            (
+                "\u{3d0}\u{3d1}\u{3d5}\u{3d6}\u{3f0}\u{3f1}\u{3f5}",
+                "βθφπκρε",
+            ),
+            ("\u{212a}elvin", "kelvin"),
+            ("ÉCHO", "écho"),
+            // Turkish: no locale rules. İ folds to i + combining dot above,
+            // as Unicode's default folding has it; dotless ı stays itself.
+            ("İ", "i\u{307}"),
+            ("ı", "ı"),
+            ("I", "i"),
+            ("plain ascii 123", "plain ascii 123"),
+        ] {
+            assert_eq!(fold_case(text), folded, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn fold_case_is_the_same_letter_by_letter() {
+        // Folding has no context, so a text folds to its letters' folds —
+        // what lets the highlighter credit each folded letter to its source.
+        for text in ["ΟΔΟΣ οδος", "Straße STRAẞE", "İı\u{fb03}", "a\u{301}"] {
+            let mut joined = String::new();
+            let mut counts = 0;
+            for c in text.chars() {
+                counts += push_folded(&mut joined, c);
+            }
+            assert_eq!(joined, fold_case(text), "{text:?}");
+            assert_eq!(counts, joined.chars().count(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn contains_folded_answers_ascii_rows_without_folding_them() {
+        // A needle that folds to ASCII can still be in an ASCII row...
+        assert!(contains_folded("cd STRASSE", &fold_case("straße")));
+        assert!(contains_folded("cd Strasse", &fold_case("\u{17f}")));
+        // ...and one that does not, never.
+        assert!(!contains_folded("echo Istanbul", &fold_case("İstanbul")));
+        assert!(!contains_folded("echo odos", &fold_case("σ")));
+        // Non-ASCII rows are folded.
+        assert!(contains_folded("echo ΟΔΟΣ", &fold_case("ς")));
+        assert!(contains_folded("cd Straße", &fold_case("STRASSE")));
+        assert!(contains_folded("anything", ""));
+    }
+
+    #[test]
+    fn subsequences_fold_case_fully() {
+        assert!(is_subsequence_ci("echo ΟΔΟΣ", "σ"));
+        assert!(is_subsequence_ci("echo οδος", "ΟΣ"));
+        assert!(is_subsequence_ci("Straße", "strasse"));
+        assert!(is_subsequence_ci("STRASSE", "straße"));
+        assert!(is_subsequence_ci("Straße", "sss"));
+        assert!(!is_subsequence_ci("Strase", "straße"));
+    }
 
     #[test]
     fn normalize_separators_drops_each_separator_and_folds_ascii_case() {

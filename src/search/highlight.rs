@@ -24,14 +24,15 @@ use super::MatchMode;
 /// `mode` — by the same case rule the database used to find the row:
 ///
 /// * `terms` answers an ASCII word with `LIKE`, which folds ASCII case only,
-///   and a non-ASCII word with `suvadu_contains_ci`, which compares the full
-///   Unicode lowercase of both strings;
+///   and a non-ASCII word with `suvadu_contains_ci`, which compares both
+///   strings case-folded ([`crate::util::fold_case`]);
 /// * `literal` and `prefix` are `LIKE`, so ASCII case only;
-/// * `fuzzy` walks the full Unicode lowercase, as `is_subsequence_ci` does.
+/// * `fuzzy` walks the case-folded text, as `is_subsequence_ci` does.
 ///
-/// Unicode lowercasing can expand a character (`İ` becomes two) and depends
-/// on context (a final `Σ` becomes `ς`), so matches are found in the
-/// lowercased text and mapped back to the characters that produced them.
+/// Folding can expand a character (`ß` becomes `ss`, `İ` two characters),
+/// so matches are found in the folded text and mapped back to the
+/// characters that produced them: a match on either `s` of a `ß`'s `ss`
+/// marks the `ß`.
 pub(super) fn match_mask(command: &str, query: &str, mode: MatchMode) -> Vec<bool> {
     let chars: Vec<char> = command.chars().collect();
     let mut mask = vec![false; chars.len()];
@@ -62,10 +63,10 @@ pub(super) fn match_mask(command: &str, query: &str, mode: MatchMode) -> Vec<boo
             }
         }
         MatchMode::Fuzzy => {
-            let (lower, owner) = lowercase_with_owners(command);
-            let lower: Vec<char> = lower.chars().collect();
+            let (folded, owner) = folded_with_owners(command);
+            let lower: Vec<char> = folded.chars().collect();
             let mut from = 0;
-            for c in query.to_lowercase().chars() {
+            for c in crate::util::fold_case(query).chars() {
                 match lower[from..].iter().position(|&h| h == c) {
                     Some(offset) => {
                         mask[owner[from + offset]] = true;
@@ -83,8 +84,8 @@ pub(super) fn match_mask(command: &str, query: &str, mode: MatchMode) -> Vec<boo
 /// fallback matched it (see [`MatchMode::loose_plan`]).
 ///
 /// Each term is found in the command with its separators removed, by the
-/// rule the database used — ASCII case for an ASCII term, full Unicode
-/// lowercase for any other — and the match is marked on the original
+/// rule the database used — ASCII case for an ASCII term, case folding for
+/// any other — and the match is marked on the original
 /// characters from the first one it used to the last, so the `-` inside a
 /// `hive-agent` found by `hiveagent` is marked with the rest.
 pub(super) fn loose_match_mask(command: &str, query: &str) -> Vec<bool> {
@@ -159,24 +160,24 @@ fn mark_ascii_folded(chars: &[char], needle: &str, mask: &mut [bool]) {
     }
 }
 
-/// Mark every occurrence of `needle` in the full Unicode lowercase of
-/// `command`, crediting the original characters that produced it.
+/// Mark every occurrence of `needle` in the case fold of `command`,
+/// crediting the original characters that produced it.
 fn mark_unicode_folded(command: &str, needle: &str, mask: &mut [bool]) {
-    let (lower, owner) = lowercase_with_owners(command);
-    let needle = needle.to_lowercase();
+    let (folded, owner) = folded_with_owners(command);
+    let needle = crate::util::fold_case(needle);
     if needle.is_empty() {
         return;
     }
     // `owner` is indexed by character; find each match's character span.
     let char_at_byte: Vec<usize> = {
-        let mut map = vec![0; lower.len() + 1];
-        for (k, (byte, _)) in lower.char_indices().enumerate() {
+        let mut map = vec![0; folded.len() + 1];
+        for (k, (byte, _)) in folded.char_indices().enumerate() {
             map[byte] = k;
         }
-        map[lower.len()] = lower.chars().count();
+        map[folded.len()] = folded.chars().count();
         map
     };
-    for (byte, found) in lower.match_indices(&needle) {
+    for (byte, found) in folded.match_indices(&needle) {
         let (first, last) = (char_at_byte[byte], char_at_byte[byte + found.len()]);
         for &original in &owner[first..last] {
             mask[original] = true;
@@ -184,22 +185,18 @@ fn mark_unicode_folded(command: &str, needle: &str, mask: &mut [bool]) {
     }
 }
 
-/// `command.to_lowercase()`, and for each of its characters the index of
-/// the original character it came from. Context changes a character's
-/// lowercase (final sigma) but never how many characters it produces, so
-/// the per-character expansion lines up with the whole-string result.
-fn lowercase_with_owners(command: &str) -> (String, Vec<usize>) {
-    let lower = command.to_lowercase();
-    let mut owner = Vec::with_capacity(lower.len());
+/// `command` case-folded ([`crate::util::fold_case`]), and for each of its
+/// characters the index of the original character it came from. A letter
+/// folds the same wherever it stands, so folding letter by letter gives the
+/// whole text's fold.
+fn folded_with_owners(command: &str) -> (String, Vec<usize>) {
+    let mut folded = String::with_capacity(command.len());
+    let mut owner = Vec::with_capacity(command.len());
     for (i, c) in command.chars().enumerate() {
-        owner.extend(std::iter::repeat_n(i, c.to_lowercase().count()));
+        let produced = crate::util::push_folded(&mut folded, c);
+        owner.extend(std::iter::repeat_n(i, produced));
     }
-    debug_assert_eq!(owner.len(), lower.chars().count());
-    owner.resize(
-        lower.chars().count(),
-        command.chars().count().saturating_sub(1),
-    );
-    (lower, owner)
+    (folded, owner)
 }
 
 /// Syntax colours for a command, emphasis for matched characters, and
@@ -757,8 +754,8 @@ mod tests {
 
     #[test]
     fn highlighting_follows_each_modes_own_case_rule() {
-        // Non-ASCII terms fold with full Unicode lowercasing, as
-        // `suvadu_contains_ci` does — including expansions and context.
+        // Non-ASCII terms are case-folded, as `suvadu_contains_ci` does —
+        // including expansions.
         assert_eq!(marked("echo İ", "i\u{307}", MatchMode::Terms), ".....İ");
         assert_eq!(marked("echo ΟΣ", "ος", MatchMode::Terms), ".....ΟΣ");
         // ASCII terms, literal and prefix are answered by LIKE, which folds
@@ -766,9 +763,32 @@ mod tests {
         assert_eq!(marked("echo É é", "é", MatchMode::Literal), ".......é");
         assert_eq!(marked("echo \u{212a}", "k", MatchMode::Terms), "......");
         assert_eq!(marked("Echo x", "ECH", MatchMode::Prefix), "ECH...");
-        // fuzzy walks the whole-string Unicode lowercase, like
-        // `is_subsequence_ci`.
+        // fuzzy walks the case-folded text, like `is_subsequence_ci`.
         assert_eq!(marked("ÉCHO", "éh", MatchMode::Fuzzy), "É.H.");
+    }
+
+    #[test]
+    fn highlighting_folds_case_as_matching_does() {
+        // A final sigma is marked by any sigma.
+        assert_eq!(marked("echo ΟΔΟΣ", "σ", MatchMode::Terms), "........Σ");
+        assert_eq!(marked("echo οδος", "Σ", MatchMode::Terms), "........ς");
+        assert_eq!(marked("ΟΔΟΣ", "οσ", MatchMode::Fuzzy), "Ο..Σ");
+        // ß folds to two letters: a match on either marks the ß.
+        assert_eq!(
+            marked("echo straße", "aßE", MatchMode::Terms),
+            "........AßE"
+        );
+        assert_eq!(marked("cd straße", "ẞe", MatchMode::Terms), ".......ßE");
+        assert_eq!(
+            marked("cd straße", "\u{17f}e", MatchMode::Terms),
+            ".......ßE"
+        );
+        // And ss is marked by a ß.
+        assert_eq!(marked("cd strasse", "ß", MatchMode::Terms), ".......SS.");
+        assert_eq!(
+            marked("cd STRASSE", "straße", MatchMode::Terms),
+            "...STRASSE"
+        );
     }
 
     /// As `marked`, for the separator-insensitive fallback; `~` is a

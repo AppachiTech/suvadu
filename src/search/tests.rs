@@ -5658,3 +5658,73 @@ fn blank_filter_fields_clear_their_filters() {
     assert_eq!(app.filters.tag_id, None);
     assert_eq!(app.filters.exit_code, None);
 }
+
+// ── Unicode case folding, end to end ──
+
+const FOLDING_CORPUS: &[&str] = &[
+    "echo ΟΔΟΣ",
+    "echo οδός",
+    "cd Straße",
+    "cd STRASSE",
+    "cd strase",
+    "echo İstanbul",
+    "echo Istanbul",
+    "ssh hive-ΟΔΟΣ",
+];
+
+#[test]
+fn terms_and_fuzzy_find_a_final_sigma_by_any_sigma() {
+    let (_d, repo) = repo_with(FOLDING_CORPUS);
+    for query in ["σ", "Σ", "ς", "οδοσ", "ΟΔΟΣ"] {
+        for mode in [MatchMode::Terms, MatchMode::Fuzzy] {
+            let found = search_in_mode(&repo, mode, query);
+            assert!(
+                found.contains(&"echo ΟΔΟΣ".to_string()),
+                "{mode:?} {query:?}: {found:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_sharp_s_finds_its_double_s_spelling() {
+    let (_d, repo) = repo_with(FOLDING_CORPUS);
+    for query in ["straße", "STRAẞE", "Straße"] {
+        let mut found = search_in_mode(&repo, MatchMode::Terms, query);
+        found.sort();
+        assert_eq!(found, ["cd STRASSE", "cd Straße"], "{query:?}");
+    }
+    let mut found = search_in_mode(&repo, MatchMode::Fuzzy, "straße");
+    found.sort();
+    assert_eq!(found, ["cd STRASSE", "cd Straße"]);
+    // An ASCII term is answered by the trigram index, which folds ASCII
+    // case only, so `STRASSE` keeps to the spellings without ß.
+    assert_eq!(
+        search_in_mode(&repo, MatchMode::Terms, "STRASSE"),
+        ["cd STRASSE"]
+    );
+}
+
+#[test]
+fn a_dotted_capital_i_folds_without_turkish_rules() {
+    let (_d, repo) = repo_with(FOLDING_CORPUS);
+    assert_eq!(
+        search_in_mode(&repo, MatchMode::Terms, "İstanbul"),
+        ["echo İstanbul"]
+    );
+    assert_eq!(
+        search_in_mode(&repo, MatchMode::Terms, "i\u{307}stanbul"),
+        ["echo İstanbul"]
+    );
+    assert!(search_in_mode(&repo, MatchMode::Terms, "ıstanbul").is_empty());
+}
+
+#[test]
+fn the_separator_fallback_folds_case_as_terms_does() {
+    let (_d, repo) = repo_with(FOLDING_CORPUS);
+    // No command holds "hiveοδοσ" as typed, so this is the fallback.
+    assert_eq!(
+        search_in_mode(&repo, MatchMode::Terms, "hiveοδοσ"),
+        ["ssh hive-ΟΔΟΣ"]
+    );
+}

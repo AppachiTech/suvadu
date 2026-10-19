@@ -22,12 +22,17 @@
 //!   entries whose terms appear contiguously and in query order rank higher,
 //!   but a scattered match is still a match.
 //! * **Case:** matching is always case-insensitive for ASCII, and how far it
-//!   goes beyond that depends on the mode. `terms` and `fuzzy` fold case with
-//!   Rust's full Unicode lowercasing, so `ÉCHO` does find `écho` in both: a
-//!   non-ASCII term narrows through `suvadu_contains_ci()` rather than
-//!   `LIKE`, and `fuzzy` is decided by `suvadu_subseq_ci()`, which is
-//!   [`is_subsequence_ci`] itself. `literal` and `prefix` fold ASCII only,
-//!   because they are answered by `LIKE`.
+//!   goes beyond that depends on the mode. `terms` and `fuzzy` fold Unicode
+//!   case ([`crate::util::fold_case`]: lowercasing plus the folds it misses,
+//!   such as final `ς` to `σ` and `ß` to `ss`), so `ÉCHO` finds `écho`, `σ`
+//!   finds `ΟΔΟΣ` and `straße` finds `STRASSE` in both: a non-ASCII term
+//!   narrows through `suvadu_contains_ci()` rather than `LIKE`, and `fuzzy`
+//!   is decided by `suvadu_subseq_ci()`, which is [`is_subsequence_ci`]
+//!   itself. An all-ASCII `terms` word stays on `LIKE` and the trigram
+//!   index, which fold ASCII only — so `STRASSE` does not find `straße` —
+//!   and so do `literal` and `prefix`. No locale rules apply: Turkish `İ`
+//!   folds to `i` + U+0307 and dotless `ı` matches only itself. The
+//!   separator-insensitive fallback folds a non-ASCII term the same way.
 //!   [`MatchMode::matches`] below is the reference predicate used by tests
 //!   and, for `fuzzy`, the live rule. For `terms` it folds ASCII only, so it
 //!   is not the live filter there — that one folds more case than it does.
@@ -246,12 +251,14 @@ impl MatchMode {
 /// separators are removed — the separator-insensitive rule, as the in-memory
 /// ranker and the tests apply it.
 ///
-/// Case is folded with Rust's Unicode lowercasing, so this accepts every
-/// entry the database does (`LIKE` for an ASCII term, `suvadu_contains_ci`
-/// for any other) and never drops one it has already counted.
+/// Case is folded ([`crate::util::fold_case`]), so this accepts every entry
+/// the database does (`LIKE` for an ASCII term, `suvadu_contains_ci` for any
+/// other) and never drops one it has already counted.
 pub fn matches_loosely(haystack: &str, loose_tokens: &[String]) -> bool {
-    let hay = normalize_separators(haystack).to_lowercase();
-    loose_tokens.iter().all(|t| hay.contains(&t.to_lowercase()))
+    let hay = crate::util::fold_case(&normalize_separators(haystack));
+    loose_tokens
+        .iter()
+        .all(|t| hay.contains(&crate::util::fold_case(t)))
 }
 
 /// Separator-insensitive matching's normalization, shared with the

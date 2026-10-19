@@ -443,7 +443,8 @@ fn run_migrations(conn: &mut Connection) -> DbResult<()> {
 /// compiled once per query (not once per row). `SQLite` scalar-function callbacks
 /// run single-threaded, so `RefCell` is safe here.
 /// Registers `suvadu_contains_ci(haystack, needle)`: true when `needle`
-/// occurs in `haystack`, compared with Rust's Unicode lowercasing.
+/// occurs in `haystack`, both case-folded ([`crate::util::fold_case`]), so
+/// `σ` finds `ΟΔΟΣ` and `straße` finds `STRASSE`.
 ///
 /// This exists because `SQLite`'s LIKE folds case for ASCII only, so
 /// `command LIKE '%émile%'` never matches a command containing "Émile". It is
@@ -451,6 +452,11 @@ fn run_migrations(conn: &mut Connection) -> DbResult<()> {
 /// tokens keep using LIKE against the trigram index, which can use that index.
 fn register_contains_ci(conn: &Connection) -> DbResult<()> {
     use rusqlite::functions::FunctionFlags;
+    use std::cell::RefCell;
+
+    // The needle is the same on every row of a query: fold it once. Scalar
+    // functions run on one thread at a time, so a `RefCell` is enough.
+    let folded: RefCell<Option<(String, String)>> = RefCell::new(None);
 
     conn.create_scalar_function(
         "suvadu_contains_ci",
@@ -466,7 +472,12 @@ fn register_contains_ci(conn: &Connection) -> DbResult<()> {
                 .get_raw(1)
                 .as_str()
                 .map_err(|e| rusqlite::Error::UserFunctionError(e.into()))?;
-            Ok(haystack.to_lowercase().contains(&needle.to_lowercase()))
+            let mut folded = folded.borrow_mut();
+            if folded.as_ref().is_none_or(|(raw, _)| raw != needle) {
+                *folded = Some((needle.to_string(), crate::util::fold_case(needle)));
+            }
+            let needle = folded.as_ref().map_or("", |(_, f)| f.as_str());
+            Ok(crate::util::contains_folded(haystack, needle))
         },
     )?;
     Ok(())
@@ -1495,6 +1506,32 @@ mod tests {
             before / 1024,
             after / 1024
         );
+    }
+
+    #[test]
+    fn contains_ci_folds_case_rather_than_lowercasing() {
+        let temp_dir = TempDir::new().unwrap();
+        let conn = init_db(&temp_dir.path().join("test.db")).unwrap();
+        let contains = |haystack: &str, needle: &str| -> bool {
+            conn.query_row(
+                "SELECT suvadu_contains_ci(?1, ?2)",
+                params![haystack, needle],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        for needle in ["σ", "Σ", "ς", "οδοσ", "ΟΔΟΣ", "οδος"] {
+            assert!(contains("echo ΟΔΟΣ", needle), "{needle:?}");
+            assert!(contains("echo οδος", needle), "{needle:?}");
+        }
+        for needle in ["straße", "STRAẞE", "STRASSE", "strasse"] {
+            assert!(contains("cd Straße", needle), "{needle:?}");
+            assert!(contains("cd STRASSE", needle), "{needle:?}");
+        }
+        assert!(contains("echo İstanbul", "İstanbul"));
+        assert!(!contains("echo Istanbul", "İstanbul"));
+        assert!(!contains("echo Istanbul", "ıstanbul"));
+        assert!(!contains("echo ΟΔΟΣ", "οδοσσ"));
     }
 
     #[test]

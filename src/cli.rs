@@ -16,9 +16,10 @@ Matching modes (--match, or ^X in the UI) decide WHICH entries match:
 
 How a query is read, in every mode:
   - Words are ANDed, never ORed. A missing word means no match.
-  - Matching is case-insensitive. terms and fuzzy fold case for non-ASCII
-    letters too (ECHO finds echo's accented form); literal and prefix are
-    matched by SQLite's LIKE, which folds ASCII only.
+  - Matching is case-insensitive. fuzzy, and a terms word with a non-ASCII
+    letter in it, fold Unicode case too: an accented ECHO finds its lowercase
+    form, and a sharp s matches ss. literal, prefix and words typed in plain
+    ASCII fold ASCII only.
   - There is no quoting syntax: \" and ' are ordinary characters to find.
     Use --match literal for a phrase with spaces or punctuation.
   - Punctuation is never stripped. git-push is one word and matches only git-push.
