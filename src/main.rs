@@ -8,6 +8,7 @@ mod cli;
 mod commands;
 mod config;
 mod db;
+mod frecency;
 mod home;
 mod hooks;
 mod import_export;

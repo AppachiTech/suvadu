@@ -1504,23 +1504,14 @@ fn handle_suggest_next(
         .get_entries_filtered(FRECENCY_SAMPLE, 0, &qf)
         .map_err(|e| format!("query failed: {e}"))?;
 
-    // Score each unique command by frecency
-    // Score = sum(weight) where weight depends on recency tier
+    // Score each unique command by frecency: the sum over its runs of a
+    // weight that falls with age (see `crate::frecency`), the definition
+    // recall's Smart rank uses too.
     let mut scores: std::collections::HashMap<&str, (f64, usize, Option<i32>)> =
         std::collections::HashMap::new(); // cmd -> (score, count, last_exit)
 
     for entry in &entries {
-        #[allow(clippy::cast_precision_loss)]
-        let age_hours = (now - entry.started_at) as f64 / 3_600_000.0;
-        let weight = if age_hours < 1.0 {
-            16.0 // last hour
-        } else if age_hours < 24.0 {
-            8.0 // today
-        } else if age_hours < 72.0 {
-            4.0 // last 3 days
-        } else {
-            1.0 // older
-        };
+        let weight = crate::frecency::run_weight(now - entry.started_at);
 
         let (score, count, last_exit) = scores.entry(&entry.command).or_insert((0.0, 0, None));
         *score += weight;
@@ -3244,6 +3235,36 @@ mod tests {
         assert!(
             cargo_pos < ls_pos,
             "cargo test should rank above ls: {text}"
+        );
+    }
+
+    #[test]
+    fn suggest_next_scores_with_the_shared_frecency_weights() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        repo.insert_session(&crate::models::Session {
+            id: "s1".to_string(),
+            hostname: "test".to_string(),
+            created_at: 0,
+            tag_id: None,
+        })
+        .unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        // Two runs in the last hour and one two days ago: 16 + 16 + 4.
+        for age in [60_000, 120_000, 2 * 24 * 3_600_000] {
+            let entry = crate::models::Entry::new(
+                "s1".to_string(),
+                "make test".to_string(),
+                "/project".to_string(),
+                Some(0),
+                now - age,
+                now - age + 100,
+            );
+            repo.insert_entry(&entry).unwrap();
+        }
+        let text = call_tool(&repo, "suggest_next", &json!({}), &default_mcp()).unwrap();
+        assert!(
+            text.contains("make test | ran 3x | frecency score 36"),
+            "{text}"
         );
     }
 

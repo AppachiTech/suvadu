@@ -33,6 +33,7 @@
 
 pub mod ai_sessions;
 pub mod db;
+pub mod frecency;
 pub mod models;
 pub mod redact;
 pub mod repository;
