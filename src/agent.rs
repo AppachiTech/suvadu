@@ -1,5 +1,5 @@
 use crate::models::Entry;
-use crate::util::{dirs_home, format_duration_ms, shorten_path, truncate_str};
+use crate::util::{dirs_home, format_duration_ms, screen_outcome, shorten_path, truncate_str};
 use crate::{agent_ui, cli, repository, risk, util};
 
 pub fn handle_agent(cmd: cli::AgentCommands) -> Result<(), Box<dyn std::error::Error>> {
@@ -458,17 +458,6 @@ fn print_agent_report_json(
     Ok(())
 }
 
-/// A screen that failed after it started is the command's error, so `suv`
-/// exits non-zero like any other failure; leaving it normally is success.
-fn screen_outcome<T>(
-    result: std::io::Result<T>,
-    screen: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    result
-        .map(|_| ())
-        .map_err(|e| format!("{screen} stopped: {e}").into())
-}
-
 fn handle_agent_dashboard(
     after: &str,
     executor: Option<&str>,
@@ -525,7 +514,7 @@ fn handle_agent_prompts(
     );
     drop(guard);
 
-    screen_outcome(res, "Prompts")
+    screen_outcome(res, "Prompts").map(|_| ())
 }
 
 fn handle_agent_stats_tui(

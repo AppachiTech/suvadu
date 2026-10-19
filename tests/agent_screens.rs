@@ -1,8 +1,8 @@
-//! The agent screens' exit status: a screen that fails after it started
-//! exits non-zero, so Home's pause-on-failure and scripts can tell, while
-//! leaving one normally exits 0.
+//! The exit status of the agent screens and `suv aliases suggest`: a screen
+//! that fails after it started exits non-zero, so Home's pause-on-failure
+//! and scripts can tell, while leaving one normally exits 0.
 //!
-//! Each test runs `suv agent <screen>` on a pty with a private HOME.
+//! Each test runs the screen on a pty with a private HOME.
 
 #![cfg(unix)]
 // Driving a pty means openpty/ioctl; there is no safe wrapper for them in
@@ -225,4 +225,66 @@ fn leaving_an_agent_screen_normally_exits_zero() {
         let status = session.wait_exit();
         assert!(status.success(), "suv agent {screen} exited {status:?}");
     }
+}
+
+/// Record `command` `times` times in `home`'s history, as a shell would.
+fn record(home: &Path, command: &str, times: usize) {
+    for i in 0..times {
+        let started = (1_700_000_000_000_i64 + i64::try_from(i).unwrap() * 1000).to_string();
+        let output = Command::new(env!("CARGO_BIN_EXE_suv"))
+            .args([
+                "add",
+                "--session-id",
+                "s1",
+                "--command",
+                command,
+                "--cwd",
+                "/work",
+                "--exit-code",
+                "0",
+                "--started-at",
+                &started,
+                "--ended-at",
+                &started,
+            ])
+            .env_clear()
+            .env("HOME", home)
+            .env("XDG_DATA_HOME", home.join("data"))
+            .env("XDG_CONFIG_HOME", home.join("config"))
+            .env("PATH", "/usr/bin:/bin")
+            .env("SUVADU_NO_UPDATE_CHECK", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+}
+
+const SUGGEST: [&str; 4] = ["aliases", "suggest", "--min-count", "2"];
+
+#[test]
+fn alias_suggest_that_cannot_draw_exits_non_zero() {
+    let home = tempfile::tempdir().unwrap();
+    record(home.path(), "docker compose up --build", 3);
+    let mut session = Screen::start(home.path(), &SUGGEST);
+    session.wait_text("SUVADU ALIAS SUGGEST");
+    session.close_output();
+    session.send(b"\x1b[B");
+    let status = session.wait_exit();
+    assert!(!status.success(), "suv aliases suggest exited {status:?}");
+    assert!(
+        session.text().contains("Error: "),
+        "suv aliases suggest gave no reason:\n{}",
+        session.text()
+    );
+}
+
+#[test]
+fn leaving_alias_suggest_normally_exits_zero() {
+    let home = tempfile::tempdir().unwrap();
+    record(home.path(), "docker compose up --build", 3);
+    let mut session = Screen::start(home.path(), &SUGGEST);
+    session.wait_text("SUVADU ALIAS SUGGEST");
+    session.send(b"\x1b");
+    let status = session.wait_exit();
+    assert!(status.success(), "suv aliases suggest exited {status:?}");
 }

@@ -33,6 +33,15 @@ pub fn is_interrupt(key: &crossterm::event::KeyEvent) -> bool {
         && !key.modifiers.contains(KeyModifiers::SHIFT)
 }
 
+/// A screen that failed after it started is the command's error, so `suv`
+/// exits non-zero like any other failure; leaving it normally is success.
+pub fn screen_outcome<T>(
+    result: std::io::Result<T>,
+    screen: &str,
+) -> Result<T, Box<dyn std::error::Error>> {
+    result.map_err(|e| format!("{screen} stopped: {e}").into())
+}
+
 /// How a screen that another screen opened was left, so Ctrl+C in the
 /// inner one closes the outer one too instead of only going back a level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

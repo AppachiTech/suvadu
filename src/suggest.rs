@@ -1,4 +1,5 @@
 use crate::models::AliasSuggestion;
+use crate::util::screen_outcome;
 use crate::{repository, suggest_ui};
 
 /// Run the user's shell to get current alias definitions.
@@ -303,27 +304,21 @@ pub fn handle_suggest_aliases_tui(
     );
     drop(guard);
 
-    match res {
-        Ok(Some(selected)) => {
-            if selected.is_empty() {
-                println!("No aliases selected.");
-            } else {
-                println!();
-                for s in &selected {
-                    println!("alias {}='{}'", s.name, shell_quote(&s.command));
-                }
-                if crate::util::color_enabled() {
-                    println!("\n\x1b[2m  Add these to your ~/.zshrc or ~/.bashrc\x1b[0m\n");
-                } else {
-                    println!("\n  Add these to your ~/.zshrc or ~/.bashrc\n");
-                }
-            }
+    // `None`: the user quit without confirming.
+    let Some(selected) = screen_outcome(res, "alias suggest")? else {
+        return Ok(());
+    };
+    if selected.is_empty() {
+        println!("No aliases selected.");
+    } else {
+        println!();
+        for s in &selected {
+            println!("alias {}='{}'", s.name, shell_quote(&s.command));
         }
-        Ok(None) => {
-            // User quit without confirming
-        }
-        Err(e) => {
-            eprintln!("Error in suggest UI: {e}");
+        if crate::util::color_enabled() {
+            println!("\n\x1b[2m  Add these to your ~/.zshrc or ~/.bashrc\x1b[0m\n");
+        } else {
+            println!("\n  Add these to your ~/.zshrc or ~/.bashrc\n");
         }
     }
 
@@ -366,10 +361,7 @@ pub fn run_suggest_and_select(
     );
     drop(guard);
 
-    match res {
-        Ok(result) => Ok(result),
-        Err(e) => Err(e.into()),
-    }
+    screen_outcome(res, "alias suggest")
 }
 
 #[cfg(test)]
