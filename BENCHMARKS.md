@@ -9,7 +9,7 @@ Harness: [`tests/search_benchmark.rs`](tests/search_benchmark.rs).
 Judged queries: [`tests/fixtures/search-cases.json`](tests/fixtures/search-cases.json).
 
 The README quotes the 100,000-entry line of the latest baseline below — the
-219 µs p95 recording overhead and the 0.05–22 ms p95 query range — and
+203 µs p95 recording overhead and the 0.05–15 ms p95 query range — and
 nothing else. **This file is the only place a Suvadu performance number may
 originate.** If you re-run the baseline, update the README in the same
 commit; if you quote a figure anywhere else, quote it from here with its
@@ -51,6 +51,55 @@ cargo test --release --test search_benchmark -- --ignored --nocapture
 SUVADU_BENCH_SIZES=10000,100000,1000000 \
   cargo test --release --test search_benchmark -- --ignored --nocapture
 ```
+
+## Baseline, 19 October 2026
+
+Suvadu 0.5.0 plus the unreleased changes on `feature/0.5.1` (schema v12),
+release profile. **Apple M4 Max, 128 GB RAM, macOS 27.2, rustc 1.96.0.**
+Single machine, one run, load average about 4; treat these as an order of
+magnitude, not a specification.
+
+Every judged case returned exactly the eligible matches and found its planted
+command at both sizes. Against the 18 October baseline below, the two Unicode
+cases fall from about 21 ms to 15 ms p95 at 100k (the case-folding SQL
+function now folds the query once per statement and skips plain-ASCII
+commands when the query folds to non-ASCII); the rest are unchanged within
+noise. The database is larger (37 → 40 MB at 100k) because of the
+case-folding prefix index added in schema v12.
+
+### 10,000 entries — database 4 MB
+
+Recording overhead per command: p50 104µs, p95 225µs, p99 1.18ms.
+
+| case | eligible | returned | p50 | p95 |
+|---|---:|---:|---:|---:|
+| exact-old-command | 1 | 1 | 0.74ms | 0.76ms |
+| partial-phrase | 1 | 1 | 0.10ms | 0.11ms |
+| reordered-words | 1 | 1 | 0.13ms | 0.13ms |
+| short-query | 1 | 1 | 0.04ms | 0.05ms |
+| directory-specific | 1 | 1 | 0.37ms | 0.39ms |
+| failed-command | 1 | 1 | 0.10ms | 0.11ms |
+| multiline-command | 1 | 1 | 0.92ms | 0.96ms |
+| unicode-command | 1 | 1 | 1.2ms | 1.2ms |
+| unicode-case-folded | 1 | 1 | 1.2ms | 1.2ms |
+| agent-command | 1 | 1 | 0.86ms | 0.89ms |
+
+### 100,000 entries — database 40 MB
+
+Recording overhead per command: p50 105µs, p95 203µs, p99 1.35ms.
+
+| case | eligible | returned | p50 | p95 |
+|---|---:|---:|---:|---:|
+| exact-old-command | 1 | 1 | 7.5ms | 8.1ms |
+| partial-phrase | 1 | 1 | 0.12ms | 0.13ms |
+| reordered-words | 1 | 1 | 0.15ms | 0.17ms |
+| short-query | 1 | 1 | 0.05ms | 0.05ms |
+| directory-specific | 1 | 1 | 4.7ms | 5.0ms |
+| failed-command | 1 | 1 | 0.12ms | 0.13ms |
+| multiline-command | 1 | 1 | 10.1ms | 10.3ms |
+| unicode-command | 1 | 1 | 14.9ms | 15.0ms |
+| unicode-case-folded | 1 | 1 | 14.9ms | 15.2ms |
+| agent-command | 1 | 1 | 11.1ms | 11.2ms |
 
 ## Baseline, 18 October 2026
 
