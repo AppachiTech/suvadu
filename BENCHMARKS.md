@@ -9,7 +9,7 @@ Harness: [`tests/search_benchmark.rs`](tests/search_benchmark.rs).
 Judged queries: [`tests/fixtures/search-cases.json`](tests/fixtures/search-cases.json).
 
 The README quotes the 100,000-entry line of the latest baseline below — the
-203 µs p95 recording overhead and the 0.05–15 ms p95 query range — and
+207 µs p95 recording overhead and the 0.05–15 ms p95 query range — and
 nothing else. **This file is the only place a Suvadu performance number may
 originate.** If you re-run the baseline, update the README in the same
 commit; if you quote a figure anywhere else, quote it from here with its
@@ -52,7 +52,56 @@ SUVADU_BENCH_SIZES=10000,100000,1000000 \
   cargo test --release --test search_benchmark -- --ignored --nocapture
 ```
 
-## Baseline, 19 October 2026
+## Baseline, 19 October 2026 (schema v13)
+
+Suvadu 0.5.0 plus the unreleased changes on `feature/0.5.1` (schema v13),
+release profile. **Apple M4 Max, 128 GB RAM, macOS 27.2, rustc 1.96.0.**
+Single machine, one run, load average about 3–4; treat these as an order of
+magnitude, not a specification.
+
+Re-run after schema v13 widened `idx_entries_command_started` for Smart
+rank (below). Every judged case returned exactly the eligible matches and
+found its planted command at both sizes, and every query is within
+run-to-run noise of the schema v12 baseline that follows: this harness
+measures candidate selection, which v13 does not change. The database is
+1 MB larger at 100k (40 → 41 MB). Recording p95 moved from 198–203 µs to
+207 µs, inside the spread of earlier runs.
+
+### 10,000 entries — database 4 MB
+
+Recording overhead per command: p50 104µs, p95 215µs, p99 1.10ms.
+
+| case | eligible | returned | p50 | p95 |
+|---|---:|---:|---:|---:|
+| exact-old-command | 1 | 1 | 0.74ms | 0.77ms |
+| partial-phrase | 1 | 1 | 0.11ms | 0.12ms |
+| reordered-words | 1 | 1 | 0.13ms | 0.13ms |
+| short-query | 1 | 1 | 0.04ms | 0.04ms |
+| directory-specific | 1 | 1 | 0.37ms | 0.38ms |
+| failed-command | 1 | 1 | 0.10ms | 0.11ms |
+| multiline-command | 1 | 1 | 0.91ms | 0.94ms |
+| unicode-command | 1 | 1 | 1.2ms | 1.2ms |
+| unicode-case-folded | 1 | 1 | 1.2ms | 1.2ms |
+| agent-command | 1 | 1 | 0.86ms | 0.90ms |
+
+### 100,000 entries — database 41 MB
+
+Recording overhead per command: p50 110µs, p95 207µs, p99 1.27ms.
+
+| case | eligible | returned | p50 | p95 |
+|---|---:|---:|---:|---:|
+| exact-old-command | 1 | 1 | 7.7ms | 8.0ms |
+| partial-phrase | 1 | 1 | 0.12ms | 0.13ms |
+| reordered-words | 1 | 1 | 0.15ms | 0.16ms |
+| short-query | 1 | 1 | 0.05ms | 0.05ms |
+| directory-specific | 1 | 1 | 5.0ms | 5.2ms |
+| failed-command | 1 | 1 | 0.12ms | 0.13ms |
+| multiline-command | 1 | 1 | 10.5ms | 10.8ms |
+| unicode-command | 1 | 1 | 14.8ms | 15.0ms |
+| unicode-case-folded | 1 | 1 | 14.7ms | 15.3ms |
+| agent-command | 1 | 1 | 11.0ms | 12.8ms |
+
+## Baseline, 19 October 2026 (schema v12)
 
 Suvadu 0.5.0 plus the unreleased changes on `feature/0.5.1` (schema v12),
 release profile. **Apple M4 Max, 128 GB RAM, macOS 27.2, rustc 1.96.0.**
@@ -365,6 +414,53 @@ entries, two runs each. The full baseline above was not re-run.
 - Folding alone, without those two changes, cost about 25% more than
   lowercasing on 100,000 ASCII commands (6.8 ms against 5.4 ms in a
   micro-benchmark), and the two cases ran at 22.5–25 ms p50.
+
+### Smart rank: frecency, outcomes and sequences (schema v13), 19 October 2026
+
+Measured before and after recall's Smart rank started weighing frecency,
+failure rates and what follows the session's last command, on **Apple M4
+Max, 128 GB RAM, macOS 27.2, rustc 1.96.0**, release profile, one run each.
+
+- **Typing a query** — `ranked_typing_latency_on_a_realistic_history`
+  (`cargo test --release --bin suv ranked_typing_latency -- --ignored
+  --nocapture`): 100,000 runs of about 1,400 distinct commands from 24
+  command shapes, 200 shell sessions over 90 days, a tenth failing. It types
+  `git com` one keystroke at a time into one recall session opened from the
+  newest shell session, so the sequence boost is live, and reports the p50
+  of five passes after a warm-up. Each keystroke is a whole reload: count,
+  ranked window of 5,000, ranking, first page.
+
+  | Keystroke | Executions before | after | Commands before | after |
+  |---|---:|---:|---:|---:|
+  | `g` | 97–99 ms | 99 ms | 45–46 ms | 57 ms |
+  | `gi` | 60–61 ms | 56 ms | 26 ms | 26 ms |
+  | `git` | 57–59 ms | 53 ms | 24 ms | 25 ms |
+  | `git ` | 57–59 ms | 53 ms | 24 ms | 24 ms |
+  | `git c` | 67–68 ms | 65 ms | 31–32 ms | 31 ms |
+  | `git co` | 31–32 ms | 29 ms | 27 ms | 26 ms |
+  | `git com` | 26 ms | 24 ms | 21 ms | 21 ms |
+
+  "Before" is two runs on the code before the change. The first keystroke
+  pays for reading the statistics of every distinct command in the window
+  (876 for `g` in Executions, up to all 1,400 in Commands); later
+  keystrokes reuse them and only read commands not seen yet, so they cost
+  what they did. Without schema v13 the statistics needed one table lookup
+  per run, and the first keystroke took 128 ms (Executions) and 89 ms
+  (Commands); reading 876 commands' statistics on their own took 38–43 ms
+  against 8.6–9.3 ms with the wider index. The sequence lookup — the
+  session's last command, then the next command after each of its newest
+  500 runs — is read once per recall session.
+- **The other recall benchmarks** were unchanged within noise:
+  `typed_search_latency_on_a_large_history` 91–201 µs before, 119–258 µs
+  after (each query matches one row, so there is nothing to rank);
+  `matching_mode_latency_on_a_large_history` 533 µs / 323 µs / 69 µs /
+  25.3 ms (terms / literal / prefix / fuzzy) before and 778 µs / 280 µs /
+  64 µs / 24.8 ms after.
+- **Upgrading** to schema v13 rebuilds one index, holding the write lock for
+  61 ms on `v13_migration_cost_on_a_large_history`'s 100,000-command corpus
+  (`src/db.rs`); the database grew 0.3% (64,300 → 64,492 KiB after
+  `VACUUM`).
+- The judged harness was re-run as the baseline above.
 
 ## Known gaps
 
