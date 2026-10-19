@@ -24,7 +24,7 @@ use suvadu::db;
 use suvadu::repository::Repository;
 
 /// The schema version an upgrade must end at.
-const CURRENT_SCHEMA: i64 = 11;
+const CURRENT_SCHEMA: i64 = 12;
 
 /// `entries`/`sessions`/`tags`/`notes`/`bookmarks` exactly as migration v1
 /// created them: the three late columns on `entries` arrive by `ALTER TABLE`,
@@ -272,6 +272,15 @@ fn assert_current_schema_present(conn: &Connection) {
             "missing ai_summaries column after upgrade: {column}"
         );
     }
+    // v12: prefix search seeks a case-folding index.
+    assert_eq!(
+        scalar_i64(
+            conn,
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_entries_command_nocase'"
+        ),
+        1,
+        "missing idx_entries_command_nocase after upgrade"
+    );
     // Added to ai_sources after the first checkpointed release; a database
     // created by an older build must still end up with them.
     for column in ["skipped", "gaps"] {

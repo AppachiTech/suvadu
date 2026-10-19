@@ -279,6 +279,9 @@ pub fn expand_tilde(dir: &str) -> String {
 pub struct FilterBuilder {
     clauses: Vec<String>,
     params: Vec<Box<dyn rusqlite::ToSql>>,
+    /// Whether a clause reads the entry's session (`s.`), so the query
+    /// must join `sessions s`.
+    reads_session: bool,
 }
 
 impl FilterBuilder {
@@ -286,7 +289,15 @@ impl FilterBuilder {
         Self {
             clauses: Vec::new(),
             params: Vec::new(),
+            reads_session: false,
         }
+    }
+
+    /// Whether the clauses read the entry's session (`s.`). A query that
+    /// only filters can then leave `sessions` out: `ENTRY_JOINS` joins it on
+    /// its primary key, so the join never adds or drops an entry.
+    pub const fn reads_session(&self) -> bool {
+        self.reads_session
     }
 
     pub fn with_date_range(mut self, after: Option<i64>, before: Option<i64>) -> Self {
@@ -304,6 +315,7 @@ impl FilterBuilder {
     pub fn with_tag(mut self, tag_id: Option<i64>) -> Self {
         if let Some(tid) = tag_id {
             self.clauses.push("(s.tag_id = ? OR e.tag_id = ?)".into());
+            self.reads_session = true;
             self.params.push(Box::new(tid));
             self.params.push(Box::new(tid));
         }
@@ -339,11 +351,12 @@ impl FilterBuilder {
             return self;
         }
 
-        // An anchored prefix (`text%`) on `idx_entries_command` still scans
-        // that whole index rather than seeking into it: LIKE folds ASCII
-        // case, and the index is in binary order, so `Git…` and `git…` do not
-        // sit in one range. Scanning the narrow covering index is still
-        // cheaper than scanning the table.
+        // An anchored prefix (`text%`) on `command` seeks
+        // `idx_entries_command_nocase` (schema v12): the index is in `NOCASE`
+        // order, which folds exactly the ASCII case LIKE folds, so SQLite's
+        // LIKE optimization reads the prefix as one range of it — the
+        // `ESCAPE` clause included. `a_prefix_search_seeks_the_case_folding_index`
+        // holds the plan to that.
         let escaped = escape_like(q);
 
         let column = match field {
@@ -573,6 +586,7 @@ impl FilterBuilder {
     pub fn with_session_created_after(mut self, after: Option<i64>) -> Self {
         if let Some(ts) = after {
             self.clauses.push("s.created_at >= ?".into());
+            self.reads_session = true;
             self.params.push(Box::new(ts));
         }
         self
@@ -582,6 +596,7 @@ impl FilterBuilder {
     pub fn with_session_tag(mut self, tag_id: Option<i64>) -> Self {
         if let Some(tid) = tag_id {
             self.clauses.push("s.tag_id = ?".into());
+            self.reads_session = true;
             self.params.push(Box::new(tid));
         }
         self

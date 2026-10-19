@@ -10,13 +10,28 @@ use rusqlite::{params, OptionalExtension};
 
 use super::{entry_from_row, FilterBuilder, Repository, ENTRY_COLUMNS, ENTRY_JOINS};
 
-/// The rows `count_filtered` and `count_unique_filtered` count: the same
-/// entries `ENTRY_JOINS` lists, without the tag joins a count does not need.
-/// Keep the session join identical to `ENTRY_JOINS`, or a count and the list
-/// it describes disagree.
+/// The rows `count_filtered` and `count_unique_filtered` count when a clause
+/// reads the session (see `Repository::count_joins`): the same entries
+/// `ENTRY_JOINS` lists, without the tag joins a count does not need. Keep the
+/// session join identical to `ENTRY_JOINS`, or a count and the list it
+/// describes disagree.
 const COUNT_JOINS: &str = "FROM entries e LEFT JOIN sessions s ON e.session_id = s.id";
 
 impl Repository {
+    /// The FROM clause for counting, or choosing, the entries `fb` filters:
+    /// [`COUNT_JOINS`] when a clause reads the session, and `entries` alone
+    /// otherwise. The session join is on its primary key, so it never adds
+    /// or drops an entry; left in unread, it still keeps an index from
+    /// covering the query (`SQLite` drops the join only after deciding),
+    /// and a prefix count would read every matching row from the table.
+    pub(super) const fn count_joins(fb: &FilterBuilder) -> &'static str {
+        if fb.reads_session() {
+            COUNT_JOINS
+        } else {
+            "FROM entries e"
+        }
+    }
+
     /// Insert a new entry
     pub fn insert_entry(&self, entry: &Entry) -> DbResult<i64> {
         let context_json = entry
@@ -392,18 +407,14 @@ impl Repository {
         Ok(results)
     }
 
-    /// Get entries ordered by recency without deduplication.
-    /// Used by arrow-key navigation so that every invocation (including
-    /// failed commands) is accessible. When `boost_cwd` is provided,
-    /// same-directory entries sort before others at the same recency tier.
+    /// The SQL behind [`Self::get_recent_entries`] and its parameters.
     #[allow(clippy::cast_possible_wrap)]
-    pub fn get_recent_entries(
-        &self,
-        limit: usize,
-        offset: usize,
+    pub(super) fn recent_entries_query(
         filter: &impl super::EntryQuery,
         boost_cwd: Option<&str>,
-    ) -> DbResult<Vec<Entry>> {
+        limit: usize,
+        offset: usize,
+    ) -> (String, FilterBuilder) {
         let mut fb = filter.entry_filter_builder();
 
         // Recency is the PRIMARY sort key so the just-typed command is always at
@@ -416,9 +427,21 @@ impl Repository {
             ""
         };
 
+        // The page is chosen by id first, and only its rows are read whole.
+        // Sorting every candidate with all its columns cost a table lookup
+        // per candidate; choosing ids needs only what the filter and the
+        // order read, which for a prefix search (Up-arrow) is all in
+        // `idx_entries_command_nocase` (see `count_joins`; the tag joins
+        // never change which entries there are). The outer query orders by
+        // the same keys, so the page and its order are what one query would
+        // give.
+        let candidates = Self::count_joins(&fb);
         let sql = format!(
             "SELECT {ENTRY_COLUMNS}
-             {ENTRY_JOINS}{} ORDER BY e.started_at DESC{cwd_order} LIMIT ? OFFSET ?",
+             {ENTRY_JOINS} WHERE e.id IN (
+                SELECT e.id {candidates}{}
+                ORDER BY e.started_at DESC{cwd_order} LIMIT ? OFFSET ?
+             ) ORDER BY e.started_at DESC{cwd_order}",
             fb.build_where()
         );
 
@@ -427,7 +450,24 @@ impl Repository {
         }
         fb.push_param(Box::new(limit as i64));
         fb.push_param(Box::new(offset as i64));
+        if let Some(cwd) = boost_cwd {
+            fb.push_param(Box::new(cwd.to_string()));
+        }
+        (sql, fb)
+    }
 
+    /// Get entries ordered by recency without deduplication.
+    /// Used by arrow-key navigation so that every invocation (including
+    /// failed commands) is accessible. When `boost_cwd` is provided,
+    /// same-directory entries sort before others at the same recency tier.
+    pub fn get_recent_entries(
+        &self,
+        limit: usize,
+        offset: usize,
+        filter: &impl super::EntryQuery,
+        boost_cwd: Option<&str>,
+    ) -> DbResult<Vec<Entry>> {
+        let (sql, fb) = Self::recent_entries_query(filter, boost_cwd, limit, offset);
         let mut stmt = self.conn.prepare(&sql)?;
 
         let results = stmt
@@ -442,7 +482,8 @@ impl Repository {
         let fb = filter.entry_filter_builder();
 
         let sql = format!(
-            "SELECT COUNT(DISTINCT command) {COUNT_JOINS}{}",
+            "SELECT COUNT(DISTINCT command) {}{}",
+            Self::count_joins(&fb),
             fb.build_where()
         );
 
@@ -604,7 +645,11 @@ impl Repository {
     pub fn count_filtered(&self, filter: &impl super::EntryQuery) -> DbResult<i64> {
         let fb = filter.entry_filter_builder();
 
-        let sql = format!("SELECT COUNT(*) {COUNT_JOINS}{}", fb.build_where());
+        let sql = format!(
+            "SELECT COUNT(*) {}{}",
+            Self::count_joins(&fb),
+            fb.build_where()
+        );
 
         let mut stmt = self.conn.prepare(&sql)?;
         let count: i64 = stmt.query_row(fb.params_refs().as_slice(), |row| row.get(0))?;

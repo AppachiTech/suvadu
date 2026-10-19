@@ -17,7 +17,7 @@ pub enum DbError {
 pub type DbResult<T> = Result<T, DbError>;
 
 /// Current schema version. Increment when adding new migrations.
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 /// Get the path to the suvadu database file
 pub fn get_db_path() -> DbResult<PathBuf> {
@@ -415,6 +415,7 @@ fn run_migrations(conn: &mut Connection) -> DbResult<()> {
         (9, migrate_v9),
         (10, migrate_v10),
         (11, migrate_v11),
+        (12, migrate_v12),
     ];
 
     loop {
@@ -759,6 +760,30 @@ fn migrate_v11(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Migration v12: an index that answers a prefix search by seeking.
+///
+/// A prefix search (`command LIKE 'git%'`: recall's `prefix` mode, and
+/// `suv get --prefix`, which Up-arrow and the zsh-autosuggestions strategy
+/// run on every keystroke) folds ASCII case, so `idx_entries_command`, in
+/// binary order, cannot narrow it: `Git…` and `git…` are not one range, and
+/// every lookup read the whole table. With the index in `NOCASE` order —
+/// which folds exactly the case `LIKE` folds — `SQLite`'s LIKE optimization
+/// turns the prefix into one range of it. `started_at`, `executor_type` and
+/// `cwd` ride along so that choosing Up-arrow's command (newest first, agent
+/// commands hidden, the current directory breaking ties) reads the index
+/// alone.
+///
+/// `idx_entries_command` goes: `idx_entries_command_started` starts with the
+/// same column and answers every lookup it did, so it only cost space.
+fn migrate_v12(conn: &Connection) -> DbResult<()> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_entries_command_nocase
+            ON entries(command COLLATE NOCASE, started_at, executor_type, cwd);
+         DROP INDEX IF EXISTS idx_entries_command;",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -833,8 +858,12 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE schema_version (version INTEGER NOT NULL);
              INSERT INTO schema_version VALUES (8);
-             -- Every v8 database has entries; v10 re-creates a trigger on it.
-             CREATE TABLE entries (id INTEGER PRIMARY KEY, command TEXT NOT NULL);
+             -- Every v8 database has entries; v10 re-creates a trigger on it
+             -- and v12 indexes these columns.
+             CREATE TABLE entries (
+                 id INTEGER PRIMARY KEY, command TEXT NOT NULL, cwd TEXT NOT NULL,
+                 started_at INTEGER NOT NULL, executor_type TEXT
+             );
              CREATE TABLE ai_summaries (
                  id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
                  source_revision TEXT NOT NULL, text TEXT NOT NULL,
@@ -1352,6 +1381,117 @@ mod tests {
         println!(
             "v11 at 100k entries: migration {migrated:?}, full rebuild {rebuilt:?}, \
              database {} KiB -> {} KiB",
+            before / 1024,
+            after / 1024
+        );
+    }
+
+    fn index_names(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'entries'")
+            .unwrap();
+        stmt.query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    /// Back to a v11 database: `idx_entries_command`, and no v12 index.
+    fn revert_to_v11(conn: &Connection) {
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_entries_command_nocase;
+             CREATE INDEX IF NOT EXISTS idx_entries_command ON entries(command);
+             UPDATE schema_version SET version = 11;",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_v12_replaces_the_binary_command_index_with_a_case_folding_one() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let conn = init_db(&db_path).unwrap();
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'host', 1000, NULL)", [])
+            .unwrap();
+        revert_to_v11(&conn);
+        insert_entry(&conn, 1, "Git status");
+        insert_entry(&conn, 2, "git log");
+        insert_entry(&conn, 3, "gitk");
+        drop(conn);
+
+        let conn = init_db(&db_path).unwrap();
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
+        let names = index_names(&conn);
+        assert!(
+            names.contains(&"idx_entries_command_nocase".to_string()),
+            "{names:?}"
+        );
+        assert!(
+            !names.contains(&"idx_entries_command".to_string()),
+            "{names:?}"
+        );
+        // Still the command lookups' index.
+        assert!(
+            names.contains(&"idx_entries_command_started".to_string()),
+            "{names:?}"
+        );
+        let hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entries INDEXED BY idx_entries_command_nocase
+                 WHERE command LIKE 'GIT %'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 2);
+        // Another shell running it again changes nothing.
+        migrate_v12(&conn).unwrap();
+        assert_eq!(index_names(&conn), names);
+    }
+
+    /// How long v12 holds the write lock on a large history, and what its
+    /// index costs on disk. Prints rather than asserts. Run with
+    /// `cargo test --release --bin suv v12_migration_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "builds a 100k-entry database; run explicitly with --ignored"]
+    fn v12_migration_cost_on_a_large_history() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let mut conn = init_db(&db_path).unwrap();
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'host', 1000, NULL)", [])
+            .unwrap();
+        revert_to_v11(&conn);
+        let shapes = [
+            "cargo test --workspace --package suvadu-core case_",
+            "kubectl get pods -n kube-system -l app=api-gateway-",
+            "git commit -m 'fix: handle the hive-agent reconnect path' #",
+            "docker compose -f deploy/docker-compose.prod.yml up -d svc_",
+            "ssh deploy@build-runner-",
+            "rg --hidden -g '!target' 'normalize_separators' src/",
+        ];
+        conn.execute_batch("BEGIN").unwrap();
+        for i in 0..100_000_i64 {
+            let shape = shapes[usize::try_from(i).unwrap() % shapes.len()];
+            insert_entry(&conn, i + 1, &format!("{shape}{i}"));
+        }
+        conn.execute_batch("COMMIT").unwrap();
+        conn.execute_batch("VACUUM").unwrap();
+        let bytes = |conn: &Connection| -> i64 {
+            conn.query_row(
+                "SELECT page_count * page_size FROM pragma_page_count, pragma_page_size",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let before = bytes(&conn);
+        let start = std::time::Instant::now();
+        run_migrations(&mut conn).unwrap();
+        let migrated = start.elapsed();
+        conn.execute_batch("VACUUM").unwrap();
+        let after = bytes(&conn);
+        println!(
+            "v12 at 100k entries: migration {migrated:?}, database {} KiB -> {} KiB",
             before / 1024,
             after / 1024
         );

@@ -252,6 +252,54 @@ profile, one run each. The full baseline above was not re-run.
   not the keystroke; with `ZSH_AUTOSUGGEST_USE_ASYNC` unset in older versions
   it would delay typing by the same amount.
 
+### Prefix search seeks a case-folding index (schema v12), 19 October 2026
+
+Measured before and after schema v12's `idx_entries_command_nocase` on
+**Apple M4 Max, 128 GB RAM, macOS 27.2, rustc 1.96.0**, release profile,
+one run each. The full baseline above was not re-run.
+
+- **`suv get --prefix`**, the lookup Up-arrow and the zsh-autosuggestions
+  strategy run, through a fresh process as the zsh widget calls it
+  (`--offset 0 --prefix --cwd <dir>`, agent commands hidden), 200 runs of
+  each line, interleaved. The history: 100,000 commands imported from
+  JSONL, 18 command shapes (`git`, `cargo`, `terraform`, `docker`,
+  `kubectl`, …), 200 directories, a fifth of it agent commands; 77 MB
+  after `VACUUM`.
+
+  | Line typed | before p50 | before p95 | after p50 | after p95 |
+  |---|---:|---:|---:|---:|
+  | `g` | 22.7 ms | 25.3 ms | 7.8 ms | 8.3 ms |
+  | `cargo t` | 14.3 ms | 15.9 ms | 5.7 ms | 6.1 ms |
+  | `git ch` | 14.3 ms | 16.1 ms | 5.6 ms | 6.0 ms |
+  | `git checkout feature/x12` | 12.7 ms | 14.6 ms | 5.1 ms | 5.5 ms |
+  | `terraform plan -var x=4999` | 12.4 ms | 13.8 ms | 5.1 ms | 5.4 ms |
+  | `zz-no-such-command` (no match) | 12.2 ms | 14.0 ms | 5.1 ms | 5.4 ms |
+  | `--` (no match) | 12.2 ms | 13.8 ms | 5.1 ms | 5.4 ms |
+
+  `suv --version` alone took 4.0–4.1 ms p50, so a lookup now costs about
+  1–4 ms beyond starting the process. Before, every lookup read the whole
+  table: `LIKE 'git%'` folds ASCII case and the binary-ordered
+  `idx_entries_command` could not narrow it. Now the prefix is one range of
+  the `NOCASE` index, and the command is chosen from that index alone; only
+  the chosen row is read from the table.
+- **Recall's `prefix` mode**: `matching_mode_latency_on_a_large_history`
+  (100,000 entries) took 15.3 ms for `prefix` `cargo test` before and 70 µs
+  after, two runs each; `terms`, `literal` and `fuzzy` were unchanged
+  (320–555 µs, 316–330 µs and 23–24 ms both times).
+- **The judged harness** at 100,000 entries stayed within run-to-run noise
+  (46 µs – 20.6 ms p50); recording took p50 101 µs, p95 193 µs.
+- **Database size**: the new index replaces `idx_entries_command`, which
+  `idx_entries_command_started` made redundant. On the history above it
+  is 10.2 MB against the 5.2 MB it replaces, so the database grew 6.5%
+  (77.0 → 82.0 MB after `VACUUM`); the harness corpus grew from 37 MB to
+  40 MB. Until a `VACUUM` the file keeps the dropped index's pages free for
+  reuse rather than shrinking.
+- **Upgrading** builds the index once, holding the write lock for about
+  0.1 s on the history above when it is in the page cache (0.9 s when it
+  was read cold from disk), and 68 ms on
+  `v12_migration_cost_on_a_large_history`'s corpus (`src/db.rs`); other
+  shells wait up to 5 s.
+
 ## Known gaps
 
 - **Ranking quality is not measured.** The judged set records which command

@@ -3601,3 +3601,233 @@ fn an_excluded_directory_hides_its_subtree_in_any_case() {
     assert_eq!(kept, expected);
     assert!(kept.contains(&"/a/myxdir/x".to_string()));
 }
+
+// ── Prefix search and the case-folding index ────────────────────────────────
+
+fn assert_seeks_nocase_index(plan: &[String], what: &str) {
+    assert!(
+        plan.iter()
+            .any(|d| d.starts_with("SEARCH") && d.contains("idx_entries_command_nocase")),
+        "{what}: expected a seek on idx_entries_command_nocase, got {plan:#?}"
+    );
+    assert!(
+        !plan.iter().any(|d| d.starts_with("SCAN")),
+        "{what}: expected no scan, got {plan:#?}"
+    );
+}
+
+#[test]
+fn a_prefix_search_seeks_the_case_folding_index() {
+    let (_d, repo) = setup_test_db();
+    for prefix in ["git", "g", "Git st", "50%", "rare_old", r"C:\temp"] {
+        let fb = FilterBuilder::new().with_query(Some(prefix), true);
+        assert_seeks_nocase_index(&query_plan(&repo, &fb), prefix);
+    }
+}
+
+#[test]
+fn up_arrow_reads_only_the_case_folding_index_to_choose_its_command() {
+    // `suv get --prefix`, as Up-arrow and the zsh-autosuggestions strategy
+    // call it: newest first, the current directory breaking ties, agent
+    // commands hidden.
+    let (_d, repo) = setup_test_db();
+    let filter = QueryFilter {
+        query: Some("git ch"),
+        prefix_match: true,
+        exclude_agents: true,
+        ..Default::default()
+    };
+    for boost in [Some("/work"), None] {
+        let (sql, fb) = Repository::recent_entries_query(&filter, boost, 1, 0);
+        let mut stmt = repo
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        let plan: Vec<String> = stmt
+            .query_map(fb.params_refs().as_slice(), |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_seeks_nocase_index(&plan, &format!("{boost:?}"));
+        assert!(
+            plan.iter()
+                .any(|d| d.contains("COVERING INDEX idx_entries_command_nocase")),
+            "{boost:?}: the candidates should come from the index alone: {plan:#?}"
+        );
+    }
+}
+
+/// Commands a prefix differs from only by case, a wildcard or a backslash.
+const PREFIX_CORPUS: &[&str] = &[
+    "git status",
+    "Git Status",
+    "GIT STATUS --short",
+    "gitk --all",
+    "echo 50% done",
+    "echo 50x done",
+    "cargo test rare_old",
+    "cargo test rarexold",
+    r"dir C:\temp\logs",
+    "dir C:/temp/logs",
+    "écho 1",
+    "Écho 2",
+    "[x] done",
+    "@home",
+    "`tick`",
+];
+
+#[test]
+fn prefix_matching_folds_ascii_case_only_and_reads_wildcards_literally() {
+    let (_d, repo) = repo_with_commands(PREFIX_CORPUS);
+    for prefix in [
+        "git",
+        "GIT S",
+        "gitk",
+        "echo 50%",
+        "echo 50",
+        "cargo test rare_",
+        "cargo test rare_old",
+        r"dir C:\",
+        r"dir C:\temp",
+        "dir C:",
+        "é",
+        "É",
+        "[",
+        "[x",
+        "@",
+        "`",
+        "",
+    ] {
+        let mut expected: Vec<String> = PREFIX_CORPUS
+            .iter()
+            .filter(|c| {
+                c.len() >= prefix.len()
+                    && c.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+            })
+            .map(|c| (*c).to_string())
+            .collect();
+        expected.sort();
+
+        let filter = QueryFilter {
+            query: Some(prefix).filter(|p| !p.is_empty()),
+            prefix_match: true,
+            ..Default::default()
+        };
+        let listed = repo.get_entries_filtered(100, 0, &filter).unwrap();
+        assert_eq!(sorted_commands(listed), expected, "list {prefix:?}");
+        let recent = repo
+            .get_recent_entries(100, 0, &filter, Some("/tmp"))
+            .unwrap();
+        assert_eq!(sorted_commands(recent), expected, "recent {prefix:?}");
+        assert_eq!(
+            repo.count_filtered(&filter).unwrap(),
+            i64::try_from(expected.len()).unwrap(),
+            "count {prefix:?}"
+        );
+    }
+}
+
+#[test]
+fn up_arrow_still_walks_newest_first_with_the_directory_breaking_ties() {
+    let (_d, repo) = setup_test_db();
+    let session = Session::new("host".to_string(), 1000);
+    repo.insert_session(&session).unwrap();
+    for (command, cwd, at) in [
+        ("git log", "/elsewhere", 3000),
+        ("git status", "/elsewhere", 2000),
+        ("git stash", "/work", 2000),
+        ("ls", "/work", 4000),
+        ("git add", "/work", 1000),
+    ] {
+        repo.insert_entry(&crate::models::Entry::new(
+            session.id.clone(),
+            command.to_string(),
+            cwd.to_string(),
+            Some(0),
+            at,
+            at,
+        ))
+        .unwrap();
+    }
+    let filter = QueryFilter {
+        query: Some("git"),
+        prefix_match: true,
+        ..Default::default()
+    };
+    let walked: Vec<String> = (0..5)
+        .filter_map(|offset| {
+            repo.get_recent_entries(1, offset, &filter, Some("/work"))
+                .unwrap()
+                .pop()
+                .map(|e| e.command)
+        })
+        .collect();
+    assert_eq!(walked, ["git log", "git stash", "git status", "git add"]);
+}
+
+#[test]
+fn recent_entries_still_filter_by_a_sessions_tag() {
+    let (_d, repo) = setup_test_db();
+    let tagged = Session::new("host".to_string(), 1000);
+    let other = Session::new("host".to_string(), 1000);
+    repo.insert_session(&tagged).unwrap();
+    repo.insert_session(&other).unwrap();
+    let tag = repo.create_tag("work", None).unwrap();
+    repo.tag_session(&tagged.id, Some(tag)).unwrap();
+    for (session, command, at) in [(&tagged, "git push", 1000), (&other, "git pull", 2000)] {
+        repo.insert_entry(&crate::models::Entry::new(
+            session.id.clone(),
+            command.to_string(),
+            "/w".to_string(),
+            Some(0),
+            at,
+            at,
+        ))
+        .unwrap();
+    }
+    let filter = QueryFilter {
+        query: Some("git"),
+        prefix_match: true,
+        tag_id: Some(tag),
+        ..Default::default()
+    };
+    let recent = repo.get_recent_entries(10, 0, &filter, Some("/w")).unwrap();
+    assert_eq!(sorted_commands(recent), ["git push"]);
+}
+
+#[test]
+fn a_prefix_count_reads_only_the_case_folding_index() {
+    // Recall's `prefix` mode counts its matches on every keystroke.
+    let (_d, repo) = setup_test_db();
+    let filter = QueryFilter {
+        query: Some("git"),
+        prefix_match: true,
+        exclude_agents: true,
+        ..Default::default()
+    };
+    let fb = filter.to_filter_builder();
+    for count in ["COUNT(*)", "COUNT(DISTINCT command)"] {
+        let sql = format!(
+            "EXPLAIN QUERY PLAN SELECT {count} {}{}",
+            Repository::count_joins(&fb),
+            fb.build_where()
+        );
+        let mut stmt = repo.conn.prepare(&sql).unwrap();
+        let plan: Vec<String> = stmt
+            .query_map(fb.params_refs().as_slice(), |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|d| d.contains("COVERING INDEX idx_entries_command_nocase")),
+            "{count}: {plan:#?}"
+        );
+    }
+    // A clause that reads the session still gets its join.
+    let tagged = QueryFilter {
+        tag_id: Some(1),
+        ..Default::default()
+    };
+    assert!(Repository::count_joins(&tagged.to_filter_builder()).contains("sessions s"));
+}
