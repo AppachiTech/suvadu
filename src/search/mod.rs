@@ -235,10 +235,24 @@ pub struct SearchApp {
     /// the toggles that only change how the same matches are shown.
     reselect: Option<String>,
     detail_scroll: DetailScroll,
+    /// What the detail pane shows beyond the entry's own row, read from the
+    /// database once per selected command; see
+    /// [`SearchApp::refresh_detail_extras`].
+    detail_extras: DetailExtras,
     /// What closing search does, for the cancel hint: "Home" when Suvadu
     /// Home opened it (and comes back when it closes), otherwise "Quit".
     /// Set by the caller, so a test never depends on the environment.
     leave_label: &'static str,
+}
+
+/// The detail pane's extras for one command: its recorded failure output.
+/// Rendering runs every frame and never touches the database, so these are
+/// read when the selection changes, for the selected command only.
+#[derive(Default)]
+struct DetailExtras {
+    /// The command these were read for.
+    entry_id: Option<i64>,
+    output: Option<crate::models::FailureOutput>,
 }
 
 /// The detail pane's focus and scroll. Shift+Tab focuses it; while focused
@@ -334,6 +348,7 @@ impl SearchApp {
             searching: false,
             reselect: None,
             detail_scroll: DetailScroll::default(),
+            detail_extras: DetailExtras::default(),
             leave_label: "Quit",
         };
         // Derive the directory filter from the scope, unless the caller
@@ -368,6 +383,7 @@ impl SearchApp {
             if self.searching {
                 self.collect(&mut worker, generation, std::time::Duration::ZERO, repo)?;
             }
+            self.refresh_detail_extras(repo);
             self.render(terminal)?;
 
             let timeout = if self.searching {

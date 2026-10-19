@@ -438,6 +438,13 @@ printed — where Suvadu already has that output:
 | `suv wrap -- cmd` | the command's stderr, passed through to your terminal unchanged as it runs |
 | zsh and Bash hooks | **nothing** — capturing a terminal's output means standing between the program and the terminal, which breaks interactive programs |
 
+Recall's detail pane shows it under a failed command (`Shift+Tab` scrolls a
+long one), and the MCP `what_failed`, `command_status` and
+`learn_from_failures` tools and the `failures/recent` resource show its last
+three lines (all of it with `detail=true`), marked as the command's own text
+rather than instructions; without it they say plainly that why a command
+failed is not known.
+
 Escape codes and progress redraws are stripped, secrets are redacted with
 the same rules and per-directory policy as the command (before the text is
 cut), an excluded command keeps nothing, and a project's `.suvadu.toml` can
@@ -550,7 +557,8 @@ visible truncation, a stable `command-<id>` on every row, and a
 `provenance:` line saying **observed** (records Suvadu stored), **inferred**
 (anything derived from them) or **caller-reported** (text an agent wrote).
 Anything inferred also repeats that Suvadu records commands, exit codes and
-timings — never command output or file contents.
+timings — never file contents, and command output only as the opt-in end of
+a failed agent or `suv wrap` command.
 
 A saved summary is the agent's own text, stored back. Suvadu invokes no
 model and generates no prose. The writing agent and model are recorded as

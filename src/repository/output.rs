@@ -42,6 +42,21 @@ impl Repository {
             .optional()?)
     }
 
+    /// The outputs stored for any of `entry_ids`, by command id. One
+    /// primary-key lookup per id.
+    pub fn failure_outputs(
+        &self,
+        entry_ids: &[i64],
+    ) -> DbResult<std::collections::HashMap<i64, FailureOutput>> {
+        let mut out = std::collections::HashMap::new();
+        for &id in entry_ids {
+            if let Some(output) = self.failure_output(id)? {
+                out.insert(id, output);
+            }
+        }
+        Ok(out)
+    }
+
     /// Stored outputs whose command no longer exists.
     pub fn count_orphaned_outputs(&self) -> DbResult<i64> {
         Ok(self.conn.query_row(
@@ -126,6 +141,9 @@ mod tests {
             repo.failure_output(ids[0]).unwrap().unwrap().tail,
             "error: again"
         );
+        let all = repo.failure_outputs(&ids).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[&ids[0]].tail, "error: again");
         assert_eq!(repo.count_failure_outputs().unwrap(), 1);
     }
 

@@ -44,6 +44,39 @@ impl SearchApp {
             .and_then(|idx| self.entries.get(idx))
     }
 
+    /// Read what the detail pane shows for the selected command beyond its
+    /// row — its recorded failure output — when the pane is open and the
+    /// selection has moved to another command since the last read. One
+    /// primary-key lookup, only for a failed command. A read that fails
+    /// shows nothing rather than interrupting recall.
+    pub(super) fn refresh_detail_extras(&mut self, repo: &crate::repository::Repository) {
+        if !self.view.detail_pane_open {
+            return;
+        }
+        let Some((id, failed)) = self
+            .get_selected_entry()
+            .map(|e| (e.id, e.exit_code.is_some_and(|code| code != 0)))
+        else {
+            return;
+        };
+        if id.is_none() || self.detail_extras.entry_id == id {
+            return;
+        }
+        let output = id
+            .filter(|_| failed)
+            .and_then(|id| repo.failure_output(id).ok().flatten());
+        self.detail_extras = super::DetailExtras {
+            entry_id: id,
+            output,
+        };
+    }
+
+    /// The selected command's extras, when they were read for `entry`.
+    pub(super) fn detail_extras_for(&self, entry: &Entry) -> Option<&super::DetailExtras> {
+        (entry.id.is_some() && self.detail_extras.entry_id == entry.id)
+            .then_some(&self.detail_extras)
+    }
+
     /// How many recorded runs a grouped row stands for (1 outside grouping,
     /// or when the count is unknown).
     pub(super) fn unique_count(&self, entry: &Entry) -> i64 {

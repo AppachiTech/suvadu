@@ -11,6 +11,7 @@ use ratatui::{
     },
     Terminal,
 };
+use std::fmt::Write as _;
 use std::io;
 
 use super::format::{
@@ -1022,10 +1023,48 @@ impl SearchApp {
             }
         }
 
+        self.append_output_lines(&mut lines, entry, label_style);
         self.append_risk_line(&mut lines, entry, label_style);
         self.append_bookmark_note_lines(&mut lines, entry, value_style);
 
         lines
+    }
+
+    /// The end of what a failed command printed, when it was recorded
+    /// (`[capture] failure_output`).
+    fn append_output_lines(
+        &self,
+        lines: &mut Vec<Line<'static>>,
+        entry: &crate::models::Entry,
+        label_style: Style,
+    ) {
+        let Some(output) = self
+            .detail_extras_for(entry)
+            .and_then(|extras| extras.output.as_ref())
+        else {
+            return;
+        };
+        let t = theme();
+        let mut about = output.stream.clone();
+        if output.truncated_bytes > 0 {
+            let _ = write!(
+                about,
+                " · last {} · {} earlier bytes not kept",
+                crate::util::human_bytes(output.tail.len() as u64),
+                output.truncated_bytes
+            );
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<DETAIL_LABEL_WIDTH$}", "Output"), label_style),
+            Span::styled(about, Style::default().fg(t.text_muted)),
+        ]));
+        for line in output.tail.lines() {
+            lines.push(Line::from(Span::styled(
+                line.replace('\t', "    "),
+                Style::default().fg(t.text_secondary),
+            )));
+        }
     }
 
     fn append_risk_line(
@@ -2890,6 +2929,104 @@ mod tests {
                 .ends_with("feature/login"),
             "{text}"
         );
+    }
+
+    /// A repository holding `command`, failed, with `tail` stored as its
+    /// output when given, and a search app showing it with the detail
+    /// pane open.
+    fn app_with_failure(
+        command: &str,
+        tail: Option<&str>,
+    ) -> (
+        tempfile::TempDir,
+        crate::repository::Repository,
+        super::SearchApp,
+    ) {
+        use std::collections::HashSet;
+        let (dir, repo) = crate::test_utils::test_repo();
+        let session = crate::models::Session::new("host".to_string(), 1_700_000_000_000);
+        repo.insert_session(&session).unwrap();
+        let mut entry = Entry::new(
+            session.id,
+            command.to_string(),
+            "/work/proj".to_string(),
+            Some(101),
+            1_700_000_000_000,
+            1_700_000_001_000,
+        );
+        entry.id = Some(repo.insert_entry(&entry).unwrap());
+        if let Some(tail) = tail {
+            repo.insert_failure_output(
+                entry.id.unwrap(),
+                &crate::models::FailureOutput {
+                    stream: "stderr".to_string(),
+                    tail: tail.to_string(),
+                    truncated_bytes: 2048,
+                },
+            )
+            .unwrap();
+        }
+        let mut config =
+            make_default_search_config(vec![entry], HashSet::new(), HashSet::new(), false);
+        config.view.detail_pane_open = true;
+        (dir, repo, super::SearchApp::new(config))
+    }
+
+    #[test]
+    fn the_detail_pane_shows_a_failed_commands_recorded_output() {
+        let tail = "Compiling app v0.1.0\nerror[E0425]: cannot find value `x`\n\tat src/main.rs";
+        let (_dir, repo, mut app) = app_with_failure("cargo build", Some(tail));
+        app.refresh_detail_extras(&repo);
+        let entry = app.get_selected_entry().unwrap().clone();
+        let text = lines_text(&app.build_detail_lines(&entry));
+        let header = text
+            .lines()
+            .position(|l| l.starts_with("Output"))
+            .unwrap_or_else(|| panic!("no output section:\n{text}"));
+        assert!(
+            text.lines().nth(header).unwrap().contains("stderr"),
+            "{text}"
+        );
+        assert!(
+            text.lines()
+                .nth(header)
+                .unwrap()
+                .contains("2048 earlier bytes not kept"),
+            "{text}"
+        );
+        let body: Vec<&str> = text.lines().skip(header + 1).take(3).collect();
+        assert_eq!(
+            body,
+            [
+                "Compiling app v0.1.0",
+                "error[E0425]: cannot find value `x`",
+                "    at src/main.rs",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_detail_pane_has_no_output_section_without_recorded_output() {
+        let (_dir, repo, mut app) = app_with_failure("cargo build", None);
+        app.refresh_detail_extras(&repo);
+        let entry = app.get_selected_entry().unwrap().clone();
+        let text = lines_text(&app.build_detail_lines(&entry));
+        assert!(!text.contains("Output"), "{text}");
+    }
+
+    #[test]
+    fn the_detail_pane_reads_output_once_per_selected_command() {
+        let (_dir, repo, mut app) = app_with_failure("cargo build", Some("error: one"));
+        app.refresh_detail_extras(&repo);
+        // Changed underneath: a refresh for the same selection reads nothing.
+        repo.delete_all_failure_outputs().unwrap();
+        app.refresh_detail_extras(&repo);
+        let entry = app.get_selected_entry().unwrap().clone();
+        assert!(lines_text(&app.build_detail_lines(&entry)).contains("error: one"));
+        // Output read for one command is never shown for another.
+        let mut other = entry;
+        other.id = Some(999);
+        assert!(!lines_text(&app.build_detail_lines(&other)).contains("error: one"));
     }
 
     #[test]

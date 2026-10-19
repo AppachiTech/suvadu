@@ -163,7 +163,7 @@ fn recent_commands_def() -> Value {
 fn command_status_def() -> Value {
     json!({
         "name": "command_status",
-        "description": "Whether a specific command has been run before and how those runs ended. Returns previous runs with exit codes and timestamps, so you can see whether it usually succeeds. The exit code is all suvadu has: it never captured what the command printed.",
+        "description": "Whether a specific command has been run before and how those runs ended. Returns previous runs with exit codes and timestamps, so you can see whether it usually succeeds. A failed run also shows the last lines it printed when suvadu kept them — only with the opt-in [capture] failure_output, and only for commands an agent hook or suv wrap recorded; otherwise the exit code is all suvadu has.",
         "inputSchema": {
             "type": "object",
             "properties": with_paging(json!({
@@ -248,7 +248,7 @@ fn what_changed_def() -> Value {
 fn what_failed_def() -> Value {
     json!({
         "name": "what_failed",
-        "description": "Recently recorded commands that exited non-zero, grouped by the prompt they ran under where one was recorded. Tells you what was attempted and failed; it cannot tell you why, because the error text was never captured.",
+        "description": "Recently recorded commands that exited non-zero, grouped by the prompt they ran under where one was recorded. Tells you what was attempted and failed, and why where suvadu kept the end of the command's output (opt-in [capture] failure_output, for commands an agent hook or suv wrap recorded); without that output it can say what failed but not why.",
         "inputSchema": {
             "type": "object",
             "properties": with_paging(json!({
@@ -324,7 +324,7 @@ fn replay_agent_session_def() -> Value {
 fn learn_from_failures_def() -> Value {
     json!({
         "name": "learn_from_failures",
-        "description": "Commands in a project that fail often, with their recorded failure rates and whether agents fail them more than humans. Call it before starting work to avoid repeating a known-bad approach. It reports rates, not diagnoses: suvadu recorded that a command exited non-zero and nothing about why, so do not expect a cause or a confirmed fix.",
+        "description": "Commands in a project that fail often, with their recorded failure rates and whether agents fail them more than humans. Call it before starting work to avoid repeating a known-bad approach. It reports rates, not diagnoses. Where suvadu kept the end of a failed run's output (opt-in [capture] failure_output, agent-hook and suv wrap commands only), the latest is shown: what the command printed, not a confirmed cause.",
         "inputSchema": {
             "type": "object",
             "properties": with_paging(json!({
@@ -575,6 +575,63 @@ fn entry_prompt(e: &crate::models::Entry) -> Option<&str> {
         .and_then(|ctx| ctx.get("agent_prompt"))
         .map(String::as_str)
         .filter(|p| !p.is_empty())
+}
+
+/// The output stored for each failed command among `entries`, by id.
+fn failure_outputs(
+    repo: &Repository,
+    entries: &[&crate::models::Entry],
+) -> Result<std::collections::HashMap<i64, crate::models::FailureOutput>, String> {
+    let ids: Vec<i64> = entries
+        .iter()
+        .filter(|e| e.exit_code.is_some_and(|code| code != 0))
+        .filter_map(|e| e.id)
+        .collect();
+    repo.failure_outputs(&ids)
+        .map_err(|e| format!("query failed: {e}"))
+}
+
+/// `row` with the recorded output of its command `id` under it, when there
+/// is one.
+fn with_output(
+    row: String,
+    id: Option<i64>,
+    outputs: &std::collections::HashMap<i64, crate::models::FailureOutput>,
+    indent: &str,
+    detail: bool,
+) -> String {
+    let Some(output) = id.and_then(|id| outputs.get(&id)) else {
+        return row;
+    };
+    let mut row = row;
+    for line in conv::output_lines(output, indent, detail) {
+        row.push('\n');
+        row.push_str(&line);
+    }
+    row
+}
+
+/// The note on recorded output for a response about `failed` commands.
+fn output_note(
+    failed: &[&crate::models::Entry],
+    outputs: &std::collections::HashMap<i64, crate::models::FailureOutput>,
+) -> Option<String> {
+    let with = failed
+        .iter()
+        .filter(|e| e.id.is_some_and(|id| outputs.contains_key(&id)))
+        .count();
+    if failed.is_empty() {
+        None
+    } else if with == 0 {
+        Some(conv::NO_FAILURE_OUTPUT_NOTE.to_string())
+    } else if with < failed.len() {
+        Some(format!(
+            "{}; a failure without output lines has only its exit code",
+            conv::OUTPUT_NOTE
+        ))
+    } else {
+        Some(conv::OUTPUT_NOTE.to_string())
+    }
 }
 
 /// Fetch one page plus a lookahead row, and report whether more exist.
@@ -836,6 +893,7 @@ fn handle_command_status(
 
     let detail = detail(args);
     let next = more.then(|| offset.saturating_add(limit));
+    let outputs = failure_outputs(repo, &entries.iter().collect::<Vec<_>>())?;
     Ok(fit_page(&entries, offset, next, |page| {
         let successes = page.iter().filter(|e| e.exit_code == Some(0)).count();
         let unknown = page.iter().filter(|e| e.exit_code.is_none()).count();
@@ -853,7 +911,20 @@ fn handle_command_status(
             conv::Provenance::Observed,
         );
         for e in page {
-            response.line(command_row(e, detail));
+            response.line(with_output(
+                command_row(e, detail),
+                e.id,
+                &outputs,
+                "    ",
+                detail,
+            ));
+        }
+        let failed: Vec<_> = page
+            .iter()
+            .filter(|e| e.exit_code.is_some_and(|code| code != 0))
+            .collect();
+        if let Some(note) = output_note(&failed, &outputs) {
+            response = response.note(note);
         }
         if !detail {
             response = response.note(conv::DETAIL_HINT);
@@ -1410,6 +1481,7 @@ fn handle_what_failed(
     let ctx = directory.map_or_else(String::new, |d| format!(" in {d}"));
     let detail = detail(args);
     let per_group = if detail { limit } else { 5 };
+    let outputs = failure_outputs(repo, &failures.iter().collect::<Vec<_>>())?;
     Ok(fit_page(&failures, offset, next, |page| {
         // Group failures by prompt (if available)
         let mut by_prompt: std::collections::HashMap<&str, Vec<&crate::models::Entry>> =
@@ -1446,7 +1518,13 @@ fn handle_what_failed(
                     cmds.len()
                 ));
                 write_rows(&mut response, cmds, per_group, |cmd| {
-                    format!("    {}", command_row(cmd, detail))
+                    with_output(
+                        format!("    {}", command_row(cmd, detail)),
+                        cmd.id,
+                        &outputs,
+                        "      ",
+                        detail,
+                    )
                 });
             }
             response.blank();
@@ -1455,14 +1533,19 @@ fn handle_what_failed(
         if !no_prompt_failures.is_empty() {
             response.line("FAILURES WITH NO PROMPT RECORDED:");
             write_rows(&mut response, &no_prompt_failures, per_group, |cmd| {
-                format!("  {}", command_row(cmd, detail))
+                with_output(
+                    format!("  {}", command_row(cmd, detail)),
+                    cmd.id,
+                    &outputs,
+                    "    ",
+                    detail,
+                )
             });
         }
 
-        response = response.note(
-            "the exit code is all suvadu recorded; the error text these commands printed was \
-             never captured, so why each one failed is not available here",
-        );
+        if let Some(note) = output_note(&page.iter().collect::<Vec<_>>(), &outputs) {
+            response = response.note(note);
+        }
         if !detail {
             response = response.note(conv::DETAIL_HINT);
         }
@@ -2048,6 +2131,40 @@ struct CmdFailStats {
     agent_total: usize,
     agent_fails: usize,
     last_fail_at: i64,
+    /// The newest failed run, whose recorded output is shown.
+    last_fail_id: Option<i64>,
+}
+
+/// Runs and failures of each distinct command in `entries`.
+fn fail_stats(entries: &[crate::models::Entry]) -> std::collections::HashMap<&str, CmdFailStats> {
+    let mut stats: std::collections::HashMap<&str, CmdFailStats> = std::collections::HashMap::new();
+    for e in entries {
+        let entry = stats.entry(e.command.as_str()).or_insert(CmdFailStats {
+            total: 0,
+            fails: 0,
+            agent_total: 0,
+            agent_fails: 0,
+            last_fail_at: 0,
+            last_fail_id: None,
+        });
+        entry.total += 1;
+        let is_agent = e.executor_type.as_deref() == Some("agent");
+        if is_agent {
+            entry.agent_total += 1;
+        }
+        if e.exit_code.is_some_and(|c| c != 0) {
+            entry.fails += 1;
+            if is_agent {
+                entry.agent_fails += 1;
+            }
+            if e.started_at > entry.last_fail_at {
+                entry.last_fail_at = e.started_at;
+                entry.last_fail_id = e.id;
+            }
+        }
+    }
+
+    stats
 }
 
 fn handle_learn_from_failures(
@@ -2076,31 +2193,7 @@ fn handle_learn_from_failures(
         .get_entries_filtered(ANALYSIS_SAMPLE, 0, &qf)
         .map_err(|e| format!("query failed: {e}"))?;
 
-    // Group by command and compute failure stats
-    let mut stats: std::collections::HashMap<&str, CmdFailStats> = std::collections::HashMap::new();
-    for e in &entries {
-        let entry = stats.entry(e.command.as_str()).or_insert(CmdFailStats {
-            total: 0,
-            fails: 0,
-            agent_total: 0,
-            agent_fails: 0,
-            last_fail_at: 0,
-        });
-        entry.total += 1;
-        let is_agent = e.executor_type.as_deref() == Some("agent");
-        if is_agent {
-            entry.agent_total += 1;
-        }
-        if e.exit_code.is_some_and(|c| c != 0) {
-            entry.fails += 1;
-            if is_agent {
-                entry.agent_fails += 1;
-            }
-            if e.started_at > entry.last_fail_at {
-                entry.last_fail_at = e.started_at;
-            }
-        }
-    }
+    let stats = fail_stats(&entries);
 
     // Filter to commands that fail frequently (3+ runs, 40%+ failure rate)
     let mut problem_cmds: Vec<_> = stats
@@ -2119,6 +2212,10 @@ fn handle_learn_from_failures(
     let page: Vec<_> = problem_cmds.into_iter().skip(offset).take(limit).collect();
 
     let next = (offset.saturating_add(limit) < matched).then(|| offset.saturating_add(limit));
+    let latest: Vec<i64> = page.iter().filter_map(|(_, s)| s.last_fail_id).collect();
+    let outputs = repo
+        .failure_outputs(&latest)
+        .map_err(|e| format!("query failed: {e}"))?;
     Ok(fit_page(&page, offset, next, |page| {
         let mut response = conv::Response::new(
             format!(
@@ -2145,6 +2242,17 @@ fn handle_learn_from_failures(
                     conv::rate(human_fails, human_total),
                 ));
             }
+            if let Some(output) = s.last_fail_id.and_then(|id| outputs.get(&id)) {
+                for line in conv::output_lines(output, "    latest failure ", false) {
+                    response.line(line);
+                }
+            }
+        }
+        let shown_with_output = page
+            .iter()
+            .any(|(_, s)| s.last_fail_id.is_some_and(|id| outputs.contains_key(&id)));
+        if shown_with_output {
+            response = response.note(conv::OUTPUT_NOTE);
         }
         response
             .shown(page.len())
@@ -3178,6 +3286,138 @@ mod tests {
         );
         assert!(text.contains("run the tests"), "should show prompt: {text}");
         assert!(text.contains("cargo test"), "should show command: {text}");
+    }
+
+    /// A failed agent command in `/project` with `tail` stored as its
+    /// output (when given), `minutes` ago.
+    fn seed_failure(repo: &Repository, command: &str, tail: Option<&str>, minutes: i64) -> i64 {
+        let now = chrono::Utc::now().timestamp_millis();
+        if repo.get_session("s-out").unwrap().is_none() {
+            repo.insert_session(&crate::models::Session {
+                id: "s-out".to_string(),
+                hostname: "test".to_string(),
+                created_at: now - 86_400_000,
+                tag_id: None,
+            })
+            .unwrap();
+        }
+        let mut entry = crate::models::Entry::new(
+            "s-out".to_string(),
+            command.to_string(),
+            "/project".to_string(),
+            Some(1),
+            now - minutes * 60_000,
+            now - minutes * 60_000 + 500,
+        );
+        entry.executor_type = Some("agent".to_string());
+        entry.executor = Some("claude-code".to_string());
+        let id = repo.insert_entry(&entry).unwrap();
+        if let Some(tail) = tail {
+            repo.insert_failure_output(
+                id,
+                &crate::models::FailureOutput {
+                    stream: "stderr".to_string(),
+                    tail: tail.to_string(),
+                    truncated_bytes: 0,
+                },
+            )
+            .unwrap();
+        }
+        id
+    }
+
+    const TAIL: &str =
+        "Compiling app\nwarning: unused import\nerror[E0425]: cannot find value `cfg`\n\
+                        error: could not compile `app`";
+
+    #[test]
+    fn what_failed_shows_why_when_output_was_recorded() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_failure(&repo, "cargo build", Some(TAIL), 5);
+        seed_failure(&repo, "npm test", None, 3);
+        let text = call_tool(&repo, "what_failed", &json!({}), &default_mcp()).unwrap();
+        assert!(
+            text.contains("output (stderr, last 3 of 4 lines):"),
+            "{text}"
+        );
+        assert!(
+            text.contains("| error[E0425]: cannot find value `cfg`"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("| Compiling app"),
+            "concise rows preview: {text}"
+        );
+        assert!(text.contains(conv::OUTPUT_NOTE), "{text}");
+        assert!(!text.contains("never captured"), "{text}");
+        let detail = call_tool(
+            &repo,
+            "what_failed",
+            &json!({"detail": true}),
+            &default_mcp(),
+        )
+        .unwrap();
+        assert!(detail.contains("| Compiling app"), "{detail}");
+    }
+
+    #[test]
+    fn what_failed_without_recorded_output_says_how_to_get_it() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_failure(&repo, "npm test", None, 3);
+        let text = call_tool(&repo, "what_failed", &json!({}), &default_mcp()).unwrap();
+        assert!(text.contains(conv::NO_FAILURE_OUTPUT_NOTE), "{text}");
+        assert!(text.contains("[capture] failure_output"), "{text}");
+        assert!(!text.contains("output ("), "{text}");
+    }
+
+    #[test]
+    fn what_failed_pages_long_outputs_under_the_size_limit() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let tail: String = (0..60).fold(String::new(), |mut tail, i| {
+            let _ = writeln!(tail, "error line {i:02} {}", "x".repeat(50));
+            tail
+        });
+        for i in 0..40 {
+            seed_failure(&repo, &format!("make target-{i}"), Some(&tail), 10 + i);
+        }
+        let text = call_tool(
+            &repo,
+            "what_failed",
+            &json!({"detail": true, "limit": 40}),
+            &default_mcp(),
+        )
+        .unwrap();
+        assert!(text.len() <= conv::MAX_RESPONSE_BYTES, "{}", text.len());
+        let trailer = conv::parse_trailer(&text).unwrap();
+        assert_ne!(trailer["next_offset"], "none", "{trailer:?}");
+    }
+
+    #[test]
+    fn command_status_shows_the_output_of_failed_runs() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_failure(&repo, "cargo build", Some(TAIL), 5);
+        let text = call_tool(
+            &repo,
+            "command_status",
+            &json!({"command": "cargo build"}),
+            &default_mcp(),
+        )
+        .unwrap();
+        assert!(text.contains("| error: could not compile `app`"), "{text}");
+        assert!(text.contains(conv::OUTPUT_NOTE), "{text}");
+    }
+
+    #[test]
+    fn learn_from_failures_shows_the_latest_recorded_output() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        seed_failure(&repo, "cargo build", Some("error: old failure"), 30);
+        seed_failure(&repo, "cargo build", None, 20);
+        seed_failure(&repo, "cargo build", Some(TAIL), 10);
+        let text = call_tool(&repo, "learn_from_failures", &json!({}), &default_mcp()).unwrap();
+        assert!(text.contains("cargo build"), "{text}");
+        assert!(text.contains("| error: could not compile `app`"), "{text}");
+        assert!(!text.contains("old failure"), "only the latest: {text}");
+        assert!(text.contains(conv::OUTPUT_NOTE), "{text}");
     }
 
     #[test]

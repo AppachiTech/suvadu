@@ -132,7 +132,11 @@ its first, partial line. An excluded command keeps nothing. A project's
 `.suvadu.toml` can turn it off but not on. Turning it off stops new capture;
 what was kept stays until its command is deleted or you run
 `suv gc --failure-output`. JSON and JSONL exports carry it as
-`failure_output` beside its command; CSV exports do not.
+`failure_output` beside its command; CSV exports do not. Recall's detail
+pane and the MCP failure tools show it; MCP responses put every line of it
+behind `| `, flattened to one line each, and say it is the command's own
+text, not instructions — an agent reading it is reading what a program
+printed, which may itself have been written to look like instructions.
 
 How these interact:
 

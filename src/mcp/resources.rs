@@ -193,8 +193,18 @@ fn read_recent_failures(
         ),
         conv::Provenance::Observed,
     );
+    let shown: Vec<_> = failures.iter().take(MAX_FAILURES_SHOWN).copied().collect();
+    let ids: Vec<i64> = shown.iter().filter_map(|e| e.id).collect();
+    let outputs = repo
+        .failure_outputs(&ids)
+        .map_err(|e| format!("query failed: {e}"))?;
     for entry in failures.iter().take(MAX_FAILURES_SHOWN) {
         response.line(command_row(entry));
+        if let Some(output) = entry.id.and_then(|id| outputs.get(&id)) {
+            for line in conv::output_lines(output, "    ", false) {
+                response.line(line);
+            }
+        }
         if let Some(prompt) = entry
             .context
             .as_ref()
@@ -213,13 +223,24 @@ fn read_recent_failures(
             conv::more_not_shown(failures.len() - MAX_FAILURES_SHOWN)
         ));
     }
-    Ok(response
+    let with_output = shown
+        .iter()
+        .any(|e| e.id.is_some_and(|id| outputs.contains_key(&id)));
+    let note = if shown.is_empty() {
+        None
+    } else if with_output {
+        Some(conv::OUTPUT_NOTE)
+    } else {
+        Some(conv::NO_FAILURE_OUTPUT_NOTE)
+    };
+    let mut response = response
         .shown(failures.len().min(MAX_FAILURES_SHOWN))
-        .matched(failures.len())
-        .note(
-            "the exit code is all suvadu recorded; the error text these commands printed was \
-             never captured. Call what_failed for paging and grouping",
-        )
+        .matched(failures.len());
+    if let Some(note) = note {
+        response = response.note(note);
+    }
+    Ok(response
+        .note("call what_failed for paging and grouping")
         .render())
 }
 
@@ -967,6 +988,61 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("shown: 0"));
+    }
+
+    #[test]
+    fn recent_failures_show_their_recorded_output() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let now = chrono::Utc::now().timestamp_millis();
+        repo.insert_session(&crate::models::Session {
+            id: "s1".to_string(),
+            hostname: "test".to_string(),
+            created_at: now,
+            tag_id: None,
+        })
+        .unwrap();
+        let mut ids = Vec::new();
+        for (command, at) in [("make", now - 2000), ("make test", now - 1000)] {
+            ids.push(
+                repo.insert_entry(&crate::models::Entry::new(
+                    "s1".to_string(),
+                    command.to_string(),
+                    "/project".to_string(),
+                    Some(2),
+                    at,
+                    at + 100,
+                ))
+                .unwrap(),
+            );
+        }
+        let read = |repo: &Repository| -> String {
+            read_resource(
+                repo,
+                "suvadu://failures/recent",
+                &crate::config::McpConfig::default(),
+            )
+            .unwrap()["contents"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let text = read(&repo);
+        assert!(text.contains(conv::NO_FAILURE_OUTPUT_NOTE), "{text}");
+        repo.insert_failure_output(
+            ids[0],
+            &crate::models::FailureOutput {
+                stream: "stderr".to_string(),
+                tail: "make: *** No rule to make target 'all'".to_string(),
+                truncated_bytes: 0,
+            },
+        )
+        .unwrap();
+        let text = read(&repo);
+        assert!(
+            text.contains("| make: *** No rule to make target 'all'"),
+            "{text}"
+        );
+        assert!(text.contains(conv::OUTPUT_NOTE), "{text}");
     }
 
     #[test]
