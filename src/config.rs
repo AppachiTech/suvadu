@@ -103,6 +103,11 @@ pub struct SearchConfig {
     pub human_boost_percent: u32,
     #[serde(default = "default_cwd_boost_percent")]
     pub cwd_boost_percent: u32,
+    /// In Smart rank, boost what you have usually run next after the command
+    /// you just ran in this shell session. On by default; `false` keeps
+    /// Smart rank's other boosts and drops only this one.
+    #[serde(default = "default_true")]
+    pub sequence_boost: bool,
     /// How a typed query is interpreted: `terms` (default), `literal`,
     /// `prefix` or `fuzzy`. `terms` is what recall has always done, so an
     /// upgrade never reinterprets an existing query. Override per run with
@@ -134,6 +139,7 @@ impl Default for SearchConfig {
             length_threshold: 80,
             human_boost_percent: 33,
             cwd_boost_percent: 50,
+            sequence_boost: true,
             // The pre-PROD-09 behaviour, kept as the default on purpose:
             // upgrading must not change how anyone's queries are read.
             match_mode: crate::search::MatchMode::Terms,

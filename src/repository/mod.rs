@@ -12,6 +12,7 @@ mod storage;
 mod tags;
 
 pub use capture::{CaptureRecordStats, PLACEHOLDER_IMPORT_HOSTNAME, RESTORED_AT_KEY};
+pub use ranking::Followers;
 
 // Re-exported for use as a mockable trait boundary in tests and downstream consumers.
 #[allow(unused_imports)]

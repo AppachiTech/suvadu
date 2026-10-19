@@ -248,12 +248,21 @@ typed by you rather than by an agent, and — in Smart rank (`^S`,
 - **outcome**: a command that usually fails — more than half of at least
   three runs with a known exit status — is scaled down, to a quarter when it
   has never succeeded. One failure among many successes changes nothing, and
-  a run stopped with Ctrl+C (exit 130) is not a failure.
+  a run stopped with Ctrl+C (exit 130) is not a failure;
+- **sequence**: what you usually run next after the command you just ran
+  in this shell. Recall looks at the newest 500 runs of that command in
+  your history and, for each, at the next command recorded in the
+  same session within 10 minutes. A command seen there at least twice is
+  boosted by up to ×3, in proportion to how often it was the one that came
+  next — so after `git add -A`, `git commit` comes before the `git status`
+  you run far more often. It needs the shell session (`$SUVADU_SESSION_ID`,
+  set by the shell hook), and `search.sequence_boost = false` (*Sequence
+  Boost* in `suv settings`) turns off this boost alone.
 
-Frecency and outcomes count every run of that exact text in your history, not
+Frecency, outcomes and sequences count every run of that exact text in your history, not
 only the matching ones; agent runs count only while agent commands are shown.
 Ties go to interactively typed commands, then to the newest (Executions) or
-the most-run (Commands). **Recent rank** (`^S` again) leaves those three
+the most-run (Commands). **Recent rank** (`^S` again) leaves those four
 boosts out: within a tier, the fuzzy score and the human boost alone, then the
 same ties. `literal`, `prefix` and an empty query are
 not re-ranked at all: those come back newest first.

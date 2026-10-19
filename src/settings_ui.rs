@@ -87,7 +87,7 @@ impl SettingsTab {
 
     fn item_count(self, config: &Config) -> usize {
         match self {
-            Self::Search => 13,
+            Self::Search => 14,
             Self::Shell => 7,
             Self::Exclusions => config.exclusions.len(),
             Self::AutoTags => config.auto_tags.len(),
@@ -351,6 +351,10 @@ impl AppState {
             }
             (SettingsTab::Search, 12) => {
                 self.config.search.compact = !self.config.search.compact;
+                self.dirty = true;
+            }
+            (SettingsTab::Search, 13) => {
+                self.config.search.sequence_boost = !self.config.search.sequence_boost;
                 self.dirty = true;
             }
             (SettingsTab::Shell, 0) => {
@@ -1135,7 +1139,7 @@ const fn get_setting_description(tab: usize, item: usize) -> &'static str {
         (0, 0) => "Number of results to show per page in search (10-10000)",
         (0, 1) => "Open recall with identical commands grouped into one row, with when each last ran and how often. Off: list every run. Ctrl+U switches either way",
         (0, 2) => "Filter search results by the current session's tag",
-        (0, 3) => "Smart rank: within a match tier, boost commands run in this directory and ones you run often and recently (frecency), and demote ones that usually fail. Off: Recent rank, without them (toggle with ^S)",
+        (0, 3) => "Smart rank: within a match tier, boost commands run in this directory, ones you run often and recently (frecency) and what usually follows your last command (see Sequence Boost), and demote ones that usually fail. Off: Recent rank, without them (toggle with ^S)",
         (0, 4) => "Show the detail preview pane when opening search (toggle with Tab)",
         (0, 5) => "Vim-style modal navigation: j/k to move, / to search, q to quit",
         (0, 6) => "Commands longer than this (in characters) get a scoring penalty (10-500)",
@@ -1145,6 +1149,7 @@ const fn get_setting_description(tab: usize, item: usize) -> &'static str {
         (0, 10) => "How recall reads a query: terms (every word, any order), literal (exactly as typed), prefix (command starts with it), fuzzy (letters in order: gco finds git checkout). Cycle live with Ctrl+X; override per run with --match",
         (0, 11) => "History recall opens on: all, directory (exactly this directory), workspace (this Git repository or worktree), session (this shell). Cycle live with Ctrl+P, reset with Ctrl+R; override per run with --scope",
         (0, 12) => "Draw recall inline under the prompt instead of full screen, so the output you were reading stays visible. Also per run with --compact",
+        (0, 13) => "In Smart rank, boost what you have usually run next after the command you just ran in this shell (git commit after git add -A), learned from your past sessions. Applies from the next recall",
         (1, 0) => "Bind Up/Down arrow keys to cycle through command history",
         (1, 1) => "Show risk assessment badges in the search detail pane for agent commands",
         (1, 2) => "Color theme: dark (RGB for dark terminals), light (RGB for light terminals), terminal (ANSI 16 — adapts to your scheme). Changes apply immediately.",
@@ -1242,6 +1247,11 @@ fn render_search_tab(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             "Compact Recall (inline under the prompt)",
             app.config.search.compact,
             app.selected_item == 12,
+        ),
+        setting_toggle(
+            "Sequence Boost (Smart Mode)",
+            app.config.search.sequence_boost,
+            app.selected_item == 13,
         ),
     ];
 
@@ -2022,6 +2032,8 @@ mod tests {
         app.next_item();
         assert_eq!(app.selected_item, 12);
         app.next_item();
+        assert_eq!(app.selected_item, 13);
+        app.next_item();
         assert_eq!(app.selected_item, 0); // Cycle back
     }
 
@@ -2210,12 +2222,12 @@ mod tests {
         let config = Config::default();
         let mut app = AppState::new(config);
 
-        // Tab 0 has 13 items; going prev from 0 wraps to 12
+        // Tab 0 has 14 items; going prev from 0 wraps to 13
         assert_eq!(app.selected_item, 0);
         app.prev_item();
-        assert_eq!(app.selected_item, 12);
+        assert_eq!(app.selected_item, 13);
 
-        // And going next from 12 wraps to 0
+        // And going next from 13 wraps to 0
         app.next_item();
         assert_eq!(app.selected_item, 0);
     }
@@ -3772,6 +3784,22 @@ mod tests {
     }
 
     #[test]
+    fn search_tab_toggles_sequence_boost() {
+        let mut app = AppState::new(Config::default());
+        app.current_tab = SettingsTab::Search;
+        app.selected_item = 13;
+        assert!(app.config.search.sequence_boost);
+
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert!(!app.config.search.sequence_boost);
+        assert!(app.dirty);
+        let screen = crate::test_utils::render_to_text(100, 30, |f| ui(f, &mut app));
+        assert!(screen.contains("Sequence Boost (Smart Mode)"), "{screen}");
+        app.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert!(app.config.search.sequence_boost);
+    }
+
+    #[test]
     fn opened_from_home_the_quit_hint_says_home() {
         let mut app = AppState::new(Config::default());
         let screen = crate::test_utils::render_to_text(100, 30, |f| ui(f, &mut app));
@@ -3787,7 +3815,7 @@ mod tests {
     fn every_search_row_is_visible_at_80x24() {
         use ratatui::{backend::TestBackend, Terminal};
         let mut app = AppState::new(Config::default());
-        app.selected_item = 12;
+        app.selected_item = 13;
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| ui(f, &mut app)).unwrap();
         let buf = terminal.backend().buffer();
@@ -3804,7 +3832,8 @@ mod tests {
             "Show AI Agent Commands in Recall",
             "Default Match Mode: terms",
             "Starting Scope: all",
-            "Compact Recall (inline under the prompt) <<",
+            "Compact Recall (inline under the prompt)",
+            "Sequence Boost (Smart Mode) <<",
         ] {
             assert!(screen.contains(row), "{row:?} is not on screen:\n{screen}");
         }

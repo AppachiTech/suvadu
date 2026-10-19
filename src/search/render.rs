@@ -2047,6 +2047,7 @@ mod tests {
                 length_threshold: 80,
                 human_boost_percent: 33,
                 cwd_boost_percent: 50,
+                sequence_boost: true,
             },
             recall: super::super::RecallState::default(),
         };
@@ -2132,6 +2133,7 @@ mod tests {
                 length_threshold: 80,
                 human_boost_percent: 33,
                 cwd_boost_percent: 50,
+                sequence_boost: true,
             },
             recall: super::super::RecallState::default(),
         };
@@ -2178,6 +2180,7 @@ mod tests {
                 length_threshold: 80,
                 human_boost_percent: 33,
                 cwd_boost_percent: 50,
+                sequence_boost: true,
             },
             recall: super::super::RecallState::default(),
         };
@@ -2246,6 +2249,7 @@ mod tests {
                 length_threshold: 80,
                 human_boost_percent: 33,
                 cwd_boost_percent: 50,
+                sequence_boost: true,
             },
             recall: super::super::RecallState::default(),
         };
@@ -2295,6 +2299,7 @@ mod tests {
                 length_threshold: 80,
                 human_boost_percent: 33,
                 cwd_boost_percent: 50,
+                sequence_boost: true,
             },
             recall: super::super::RecallState::default(),
         };
@@ -2344,6 +2349,7 @@ mod tests {
                 length_threshold: 80,
                 human_boost_percent: 33,
                 cwd_boost_percent: 50,
+                sequence_boost: true,
             },
             recall: super::super::RecallState::default(),
         };
@@ -2619,6 +2625,7 @@ mod tests {
                 length_threshold: 80,
                 human_boost_percent: 33,
                 cwd_boost_percent: 50,
+                sequence_boost: true,
             },
             recall: super::super::RecallState::default(),
         };
@@ -2682,6 +2689,7 @@ mod tests {
                 length_threshold: 80,
                 human_boost_percent: 33,
                 cwd_boost_percent: 50,
+                sequence_boost: true,
             },
             recall: super::super::RecallState::default(),
         };
@@ -2747,6 +2755,7 @@ mod tests {
                 length_threshold: 80,
                 human_boost_percent: 33,
                 cwd_boost_percent: 50,
+                sequence_boost: true,
             },
             recall: super::super::RecallState::default(),
         }

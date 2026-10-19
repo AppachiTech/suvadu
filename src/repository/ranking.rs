@@ -1,15 +1,28 @@
 //! The history recall's Smart rank weighs a command by: how often and how
-//! recently it ran, and how often it failed.
+//! recently it ran, how often it failed, and what tends to run after the
+//! command before it.
 //!
 //! Every query here binds user text as a parameter; the only SQL built at
 //! run time is from constants (the frecency table and the executor types).
 
 use std::collections::HashMap;
 
+use rusqlite::OptionalExtension;
+
 use crate::db::DbResult;
 use crate::frecency::{self, CommandStats};
 
 use super::Repository;
+
+/// What ran next, in the same shell session, after recent runs of one
+/// command. See [`Repository::followers_of`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Followers {
+    /// Runs of the command that something followed within the window.
+    pub occurrences: u32,
+    /// How many of those each command followed.
+    pub next: HashMap<String, u32>,
+}
 
 /// `alias.executor_type` is not an agent, bot, CI or script executor — the
 /// rows recall shows while agent commands are hidden.
@@ -39,6 +52,31 @@ impl Repository {
              GROUP BY e.command",
             weight = frecency::sql_weight("e.started_at", "?1"),
             failed = frecency::sql_failed("e.exit_code"),
+        )
+    }
+
+    /// The query behind [`Self::followers_of`]: `?1` is the command, `?2`
+    /// the sample size, `?3` the window.
+    pub(super) fn followers_sql(include_agents: bool) -> String {
+        let (a_agents, b_agents) = if include_agents {
+            (String::new(), String::new())
+        } else {
+            (
+                format!(" AND {}", interactive_clause("e")),
+                format!(" AND {}", interactive_clause("b")),
+            )
+        };
+        format!(
+            "SELECT b.command FROM ( \
+                SELECT e.id, e.session_id, e.ended_at FROM entries e \
+                WHERE e.command = ?1{a_agents} \
+                ORDER BY e.started_at DESC, e.id DESC LIMIT ?2 \
+             ) a \
+             JOIN entries b ON b.id = ( \
+                SELECT MIN(n.id) FROM entries n \
+                WHERE n.session_id = a.session_id AND n.id > a.id \
+             ) \
+             WHERE b.started_at - a.ended_at <= ?3{b_agents}"
         )
     }
 
@@ -73,5 +111,45 @@ impl Repository {
             ))
         })?;
         rows.collect::<Result<_, _>>().map_err(Into::into)
+    }
+
+    /// The command run most recently in `session_id`, if any.
+    pub fn last_command_in_session(&self, session_id: &str) -> DbResult<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT command FROM entries WHERE session_id = ?1 \
+                 ORDER BY started_at DESC, id DESC LIMIT 1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// What ran next after the newest `sample` runs of `command`: for each
+    /// one, the next command recorded in the same shell session, provided it
+    /// started within `within_ms` of `command` finishing. Agent, bot, CI and
+    /// script runs take part only when `include_agents` is set.
+    ///
+    /// Commands in one session are recorded one after another, so "next" is
+    /// the next id in the session — an indexed seek per run, rather than a
+    /// sort of the whole session.
+    pub fn followers_of(
+        &self,
+        command: &str,
+        within_ms: i64,
+        sample: usize,
+        include_agents: bool,
+    ) -> DbResult<Followers> {
+        let sql = Self::followers_sql(include_agents);
+        let sample = i64::try_from(sample).unwrap_or(i64::MAX);
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let mut rows = stmt.query(rusqlite::params![command, sample, within_ms])?;
+        let mut followers = Followers::default();
+        while let Some(row) = rows.next()? {
+            followers.occurrences += 1;
+            *followers.next.entry(row.get(0)?).or_default() += 1;
+        }
+        Ok(followers)
     }
 }

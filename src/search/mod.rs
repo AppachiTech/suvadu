@@ -78,6 +78,7 @@ pub enum VimMode {
 }
 
 /// Display/mode options that control how search results are presented.
+#[allow(clippy::struct_excessive_bools)]
 pub struct ViewOptions {
     pub unique_mode: bool,
     pub context_boost: bool,
@@ -87,6 +88,9 @@ pub struct ViewOptions {
     pub length_threshold: usize,
     pub human_boost_percent: u32,
     pub cwd_boost_percent: u32,
+    /// Smart rank boosts what usually follows the session's last command
+    /// (`search.sequence_boost`).
+    pub sequence_boost: bool,
 }
 
 /// Matching mode plus recall scope: *how* a query is interpreted and *which*
@@ -836,6 +840,7 @@ fn build_search_app(
             length_threshold: config.search.length_threshold,
             human_boost_percent: config.search.human_boost_percent,
             cwd_boost_percent: config.search.cwd_boost_percent,
+            sequence_boost: config.search.sequence_boost,
         },
         recall,
     });

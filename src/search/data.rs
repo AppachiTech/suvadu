@@ -158,6 +158,7 @@ impl SearchApp {
                 .view
                 .context_boost
                 .then(|| std::sync::Arc::clone(&self.smart)),
+            sequence_boost: self.view.sequence_boost,
             page_size: self.pagination.page_size.max(1),
             reselect: self.reselect.clone(),
             loosened: self.loosened,
@@ -538,6 +539,9 @@ pub(super) struct ReloadRequest {
     /// Smart rank's history signals, when Smart rank is on; `None` is
     /// Recent rank.
     smart: Option<std::sync::Arc<super::smart::SmartRank>>,
+    /// Smart rank also boosts what usually follows the last command of
+    /// `session_id`.
+    sequence_boost: bool,
     page_size: usize,
     /// A command to keep selected across this reload — set by the view
     /// switches that show the same matches differently. Where it lands is
@@ -748,7 +752,12 @@ impl ReloadRequest {
                 return Ok(None);
             }
             let factors = match &self.smart {
-                Some(smart) => Some(smart.factors(repo, &candidates, self.show_agents)?),
+                Some(smart) => Some(smart.factors(
+                    repo,
+                    &candidates,
+                    self.show_agents,
+                    self.session_id.as_deref().filter(|_| self.sequence_boost),
+                )?),
                 None => None,
             };
             if cancelled() {

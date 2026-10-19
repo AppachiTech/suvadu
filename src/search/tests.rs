@@ -56,6 +56,7 @@ fn test_search_config(entries: Vec<Entry>, total_items: usize) -> SearchConfig {
             length_threshold: 80,
             human_boost_percent: 33,
             cwd_boost_percent: 50,
+            sequence_boost: true,
         },
         recall: RecallState::default(),
     }
@@ -6043,4 +6044,75 @@ fn smart_rank_never_changes_what_matches_or_the_count() {
         };
         assert_eq!(count(true), count(false), "unique={unique}");
     }
+}
+
+/// Yesterday's sessions: `git add -A` was nearly always followed by `git
+/// commit`, while `git status` ran far more often than either. Today's
+/// session `now` has just run `git add -A`.
+fn sequence_history() -> (tempfile::TempDir, crate::repository::Repository) {
+    let mut runs: Vec<Run> = Vec::new();
+    let day = 24 * 60;
+    for i in 0..8 {
+        let t = day + 60 * i;
+        runs.push(("git add -A", t + 3, 0, "yesterday"));
+        runs.push(("git commit", t + 2, 0, "yesterday"));
+        runs.push(("git push", t + 1, 0, "yesterday"));
+    }
+    for i in 0..30 {
+        runs.push(("git status", 10 + 2 * i, 0, "earlier"));
+    }
+    runs.push(("git status", 2, 0, "now"));
+    runs.push(("git add -A", 1, 0, "now"));
+    smart_history(&runs)
+}
+
+#[test]
+fn what_usually_follows_the_last_command_ranks_first() {
+    let (_d, repo) = sequence_history();
+    for unique in [false, true] {
+        let rows = smart_search(&repo, "git", true, unique, Some("now"));
+        assert_eq!(rows[0], "git commit", "unique={unique}: {rows:?}");
+    }
+    // Without a session to follow on from, habit decides.
+    assert_eq!(
+        smart_search(&repo, "git", true, true, None)[0],
+        "git status"
+    );
+    // And Recent rank ignores both.
+    assert_eq!(
+        smart_search(&repo, "git", false, false, Some("now"))[0],
+        "git add -A"
+    );
+}
+
+#[test]
+fn a_sequence_never_beats_a_closer_textual_match() {
+    // `make test` always followed `make`, and `make` is what just ran; but
+    // `test` is a prefix of `test.sh`, run once a month ago, and only a
+    // substring of `make test`.
+    let mut runs: Vec<Run> = Vec::new();
+    for i in 0..8 {
+        runs.push(("make", 120 + 10 * i + 1, 0, "earlier"));
+        runs.push(("make test", 120 + 10 * i, 0, "earlier"));
+    }
+    runs.push(("test.sh", 30 * 24 * 60, 0, "earlier"));
+    runs.push(("make", 1, 0, "now"));
+    let (_d, repo) = smart_history(&runs);
+    for unique in [false, true] {
+        let rows = smart_search(&repo, "test", true, unique, Some("now"));
+        assert_eq!(rows[0], "test.sh", "unique={unique}: {rows:?}");
+    }
+}
+
+#[test]
+fn sequence_boost_can_be_turned_off() {
+    let (_d, repo) = sequence_history();
+    let mut config = test_search_config(vec![], 0);
+    config.view.unique_mode = true;
+    config.view.sequence_boost = false;
+    let mut app = SearchApp::new(config);
+    app.recall.context.session_id = Some("now".into());
+    app.query = "git".into();
+    app.reload_entries(&repo).unwrap();
+    assert_eq!(app.entries[0].command, "git status");
 }

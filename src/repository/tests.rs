@@ -3912,6 +3912,76 @@ fn command_stats_of_no_commands_is_empty() {
     assert!(repo.command_stats(&[], 0, true).unwrap().is_empty());
 }
 
+#[test]
+fn last_command_in_session_is_the_newest_run_there() {
+    let (_temp, repo) = setup_test_db();
+    sessions(&repo, &["a", "b"]);
+    record(&repo, "a", "git add -A", 1_000, Some(0), "human");
+    record(&repo, "b", "ls", 2_000, Some(0), "human");
+    record(&repo, "a", "git status", 1_500, Some(0), "human");
+
+    assert_eq!(
+        repo.last_command_in_session("a").unwrap().as_deref(),
+        Some("git status")
+    );
+    assert_eq!(repo.last_command_in_session("none").unwrap(), None);
+}
+
+#[test]
+fn followers_count_what_ran_next_in_the_same_session() {
+    let (_temp, repo) = setup_test_db();
+    sessions(&repo, &["a", "b"]);
+    let minute = 60_000;
+    let mut t = 0;
+    let mut run = |session: &str, command: &str, gap: i64, executor: &str| {
+        t += gap;
+        record(&repo, session, command, t, Some(0), executor);
+    };
+    // Three times `git commit` came right after `git add -A`, once `git
+    // status` did, and once the next command was an hour later, which is
+    // not a sequence.
+    for _ in 0..3 {
+        run("a", "git add -A", minute, "human");
+        run("a", "git commit", minute, "human");
+    }
+    run("a", "git add -A", minute, "human");
+    run("a", "git status", minute, "human");
+    run("a", "git add -A", minute, "human");
+    run("a", "git push", 60 * minute, "human");
+    // Another session's next command is not this one's follower, even when
+    // it ran a moment later.
+    run("b", "git add -A", minute, "human");
+    run("a", "rm -rf build", 1, "human");
+    run("b", "make", minute, "human");
+    // An agent's follow-up only counts while agent commands are shown.
+    run("b", "git add -A", minute, "human");
+    run("b", "git commit", minute, "agent");
+
+    let hidden = repo
+        .followers_of("git add -A", 10 * minute, 500, false)
+        .unwrap();
+    assert_eq!(hidden.occurrences, 5, "{hidden:?}");
+    assert_eq!(hidden.next.get("git commit"), Some(&3));
+    assert_eq!(hidden.next.get("git status"), Some(&1));
+    assert_eq!(hidden.next.get("make"), Some(&1));
+    assert_eq!(hidden.next.get("git push"), None);
+    assert_eq!(hidden.next.get("rm -rf build"), None);
+
+    let shown = repo
+        .followers_of("git add -A", 10 * minute, 500, true)
+        .unwrap();
+    assert_eq!(shown.occurrences, 6);
+    assert_eq!(shown.next.get("git commit"), Some(&4));
+
+    // Only the newest `sample` runs of the command are read.
+    let newest = repo
+        .followers_of("git add -A", 10 * minute, 2, true)
+        .unwrap();
+    assert_eq!(newest.occurrences, 2);
+    assert_eq!(newest.next.get("git commit"), Some(&1));
+    assert_eq!(newest.next.get("make"), Some(&1));
+}
+
 /// Fail unless `sql` is answered without scanning `entries`.
 fn assert_seeks(repo: &Repository, sql: &str, params: &[&dyn rusqlite::ToSql]) {
     let mut stmt = repo
@@ -3939,6 +4009,11 @@ fn smart_rank_lookups_seek_indexes() {
             &repo,
             &Repository::command_stats_sql(include_agents),
             &[&0_i64, &"[\"a\"]"],
+        );
+        assert_seeks(
+            &repo,
+            &Repository::followers_sql(include_agents),
+            &[&"a", &500_i64, &600_000_i64],
         );
     }
 }
