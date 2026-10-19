@@ -1040,6 +1040,8 @@ static FEATURES: &[Feature] = &[
              how.",
             "It is the one of the three that runs anything: suv guard only assesses a command \
              line, and suv replay only prints what was recorded.",
+            "With [capture] failure_output on, it also passes the command's stderr through and \
+             keeps the last 4 KB, redacted, when the command fails.",
         ],
         examples: &[
             ex("suv wrap -- <COMMAND>", "Run and record a command"),
@@ -1351,11 +1353,14 @@ static FEATURES: &[Feature] = &[
         guide: &[
             "--dry-run shows what would go. Without it, orphaned sessions and notes are \
                   removed; --vacuum also compacts the database file.",
+            "--failure-output also deletes every stored failure output, keeping the \
+             commands.",
         ],
         examples: &[
             ex("suv gc --dry-run", "Preview"),
             ex("suv gc", "Remove orphaned data"),
             ex("suv gc --vacuum", "Also compact the file"),
+            ex("suv gc --failure-output", "Delete stored failure output"),
         ],
         ..BASE
     },

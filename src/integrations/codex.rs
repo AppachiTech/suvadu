@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::hook_input::{only, whole, Field};
+use super::hook_input::{only, tail, whole, Field};
 
 use crate::{config, util};
 use serde_json::{json, Value};
@@ -24,7 +24,16 @@ const HOOK_FIELDS: &[Field] = &[
         "tool_input",
         &[whole("command"), whole("cwd"), whole("workdir")],
     ),
-    only("tool_response", &[whole("exit_code")]),
+    only(
+        "tool_response",
+        &[
+            whole("exit_code"),
+            tail("output"),
+            tail("aggregated_output"),
+            tail("stdout"),
+            tail("stderr"),
+        ],
+    ),
 ];
 
 pub fn handle_hook() -> Result<()> {
@@ -163,7 +172,17 @@ fn record_command(
         executor: Some("openai-codex".into()),
         context: Some(context),
         start_cwd: None,
+        failure_output: codex_output(&event["tool_response"]),
     })
+}
+
+/// A Codex tool response's output, when it reports one as text: the
+/// combined stream (`output` or `aggregated_output`) when there is one,
+/// otherwise stdout and stderr.
+fn codex_output(response: &Value) -> Option<crate::failure_output::Captured> {
+    super::hook_input::captured_stream("output", &response["output"])
+        .or_else(|| super::hook_input::captured_stream("output", &response["aggregated_output"]))
+        .or_else(|| super::hook_input::captured_streams(&response["stdout"], &response["stderr"]))
 }
 
 pub fn handle_init() -> Result<()> {

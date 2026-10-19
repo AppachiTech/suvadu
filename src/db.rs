@@ -17,7 +17,7 @@ pub enum DbError {
 pub type DbResult<T> = Result<T, DbError>;
 
 /// Current schema version. Increment when adding new migrations.
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 
 /// Get the path to the suvadu database file
 pub fn get_db_path() -> DbResult<PathBuf> {
@@ -417,6 +417,7 @@ fn run_migrations(conn: &mut Connection) -> DbResult<()> {
         (11, migrate_v11),
         (12, migrate_v12),
         (13, migrate_v13),
+        (14, migrate_v14),
     ];
 
     loop {
@@ -815,6 +816,27 @@ fn migrate_v13(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Migration v14: `entry_output`, the end of what a failed command printed.
+///
+/// Off by default (`[capture] failure_output`), and filled only by the
+/// paths that see a command's output: agent hooks and `suv wrap`. A table
+/// of its own rather than a key in `entries.context`, so that recall and
+/// the indexes never read a few kilobytes of text per row they do not
+/// show, every tool that prints a command's context does not start
+/// printing its output, and the rows go with their command through the
+/// foreign key. It starts empty, so upgrading copies nothing.
+fn migrate_v14(conn: &Connection) -> DbResult<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS entry_output (
+            entry_id INTEGER PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+            stream TEXT NOT NULL,
+            tail TEXT NOT NULL,
+            truncated_bytes INTEGER NOT NULL DEFAULT 0
+         );",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1011,6 +1033,7 @@ mod tests {
         assert!(tables.contains(&"skills".to_string()));
         assert!(tables.contains(&"schema_version".to_string()));
         assert!(tables.contains(&"entries_fts".to_string()));
+        assert!(tables.contains(&"entry_output".to_string()));
     }
 
     #[test]
@@ -1630,6 +1653,85 @@ mod tests {
             before / 1024,
             after / 1024
         );
+    }
+
+    /// Back to a v13 database: no `entry_output` table.
+    fn revert_to_v13(conn: &Connection) {
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS entry_output;
+             UPDATE schema_version SET version = 13;",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_v14_adds_an_output_table_that_goes_with_its_command() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let conn = init_db(&db_path).unwrap();
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'host', 1000, NULL)", [])
+            .unwrap();
+        revert_to_v13(&conn);
+        insert_entry(&conn, 1, "make");
+        insert_entry(&conn, 2, "make test");
+        drop(conn);
+
+        let conn = init_db(&db_path).unwrap();
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
+        for id in [1, 2] {
+            conn.execute(
+                "INSERT INTO entry_output (entry_id, stream, tail, truncated_bytes)
+                 VALUES (?1, 'stderr', 'error: no rule', 0)",
+                [id],
+            )
+            .unwrap();
+        }
+        // A tail belongs to a command that exists...
+        assert!(conn
+            .execute(
+                "INSERT INTO entry_output (entry_id, stream, tail) VALUES (99, 'stderr', 'x')",
+                [],
+            )
+            .is_err());
+        // ...and goes when the command does.
+        conn.execute("DELETE FROM entries WHERE id = 1", [])
+            .unwrap();
+        let left: Vec<i64> = conn
+            .prepare("SELECT entry_id FROM entry_output")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(left, [2]);
+        // Another shell running it again changes nothing.
+        migrate_v14(&conn).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entry_output", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    /// How long v14 holds the write lock on a large history. Prints rather
+    /// than asserts. Run with
+    /// `cargo test --release --bin suv v14_migration_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "builds a 100k-entry database; run explicitly with --ignored"]
+    fn v14_migration_cost_on_a_large_history() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let mut conn = init_db(&db_path).unwrap();
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'host', 1000, NULL)", [])
+            .unwrap();
+        revert_to_v13(&conn);
+        conn.execute_batch("BEGIN").unwrap();
+        for i in 0..100_000_i64 {
+            insert_entry(&conn, i + 1, &format!("cargo test case_{}", i % 1000));
+        }
+        conn.execute_batch("COMMIT").unwrap();
+        let start = std::time::Instant::now();
+        run_migrations(&mut conn).unwrap();
+        println!("v14 at 100k entries: migration {:?}", start.elapsed());
     }
 
     #[test]

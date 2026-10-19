@@ -30,6 +30,8 @@ pub struct Config {
     #[serde(default)]
     pub shell: ShellConfig,
     #[serde(default)]
+    pub capture: CaptureConfig,
+    #[serde(default)]
     pub agent: AgentConfig,
     #[serde(default)]
     pub redaction: RedactionConfig,
@@ -58,6 +60,7 @@ impl Default for Config {
             theme: crate::theme::ThemeName::default(),
             search: SearchConfig::default(),
             shell: ShellConfig::default(),
+            capture: CaptureConfig::default(),
             agent: AgentConfig::default(),
             redaction: RedactionConfig::default(),
             exclusions: Vec::new(),
@@ -186,6 +189,16 @@ impl Default for ShellConfig {
             capture_git_branch: true,
         }
     }
+}
+
+/// What is kept beside a recorded command, beyond the command itself.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CaptureConfig {
+    /// Keep the last few kilobytes a command printed when it fails, where
+    /// that output is available: agent hooks that report it and `suv wrap`.
+    /// Interactive shell commands never have it. Off by default.
+    #[serde(default = "default_false")]
+    pub failure_output: bool,
 }
 
 /// A user-defined risk pattern. Complements `risk_ignore_patterns` (which
@@ -597,8 +610,8 @@ fn merge_toml_value(base: &mut toml::Value, overlay: toml::Value) {
 ///   redaction on; an overlay can still turn it on.
 /// - `enabled = true` is ignored when the global config has recording off;
 ///   an overlay can still turn recording off for its project.
-/// - `shell.capture_git_branch = true` is likewise ignored when the global
-///   config has it off.
+/// - `shell.capture_git_branch = true` and `capture.failure_output = true`
+///   are likewise ignored when the global config has them off.
 /// - `exclusions` and `redaction.extra_patterns` are the union of the
 ///   global entries and the overlay's, never a replacement.
 ///
@@ -641,6 +654,7 @@ pub fn overlay_config_for_dir(base: &Config, dir: &std::path::Path) -> ConfigRes
 fn keep_global_privacy(base: &Config, merged: &mut Config) {
     merged.enabled &= base.enabled;
     merged.shell.capture_git_branch &= base.shell.capture_git_branch;
+    merged.capture.failure_output &= base.capture.failure_output;
     merged.redaction.enabled |= base.redaction.enabled;
     merged.exclusions = union_keeping_order(&base.exclusions, &merged.exclusions);
     merged.redaction.extra_patterns = union_keeping_order(
@@ -1622,6 +1636,48 @@ unknown_agent_key = 1
                 .unwrap()
                 .shell
                 .capture_git_branch
+        );
+    }
+
+    #[test]
+    fn failure_output_is_off_unless_turned_on() {
+        assert!(!Config::default().capture.failure_output);
+        let cfg: Config = toml::from_str("[shell]\ncapture_git_branch = false\n").unwrap();
+        assert!(!cfg.capture.failure_output, "missing key means off");
+        let cfg: Config = toml::from_str("[capture]\nfailure_output = true\n").unwrap();
+        assert!(cfg.capture.failure_output);
+    }
+
+    #[test]
+    fn a_project_overlay_can_stop_keeping_failure_output_but_not_start_it() {
+        let dir = TempDir::new().unwrap();
+        let overlay = dir.path().join(".suvadu.toml");
+        std::fs::write(&overlay, "[capture]\nfailure_output = true\n").unwrap();
+        assert!(
+            !overlay_config_for_dir(&Config::default(), dir.path())
+                .unwrap()
+                .capture
+                .failure_output,
+            "a cloned repository must not turn output capture on"
+        );
+
+        std::fs::write(&overlay, "[capture]\nfailure_output = false\n").unwrap();
+        let mut base = Config::default();
+        base.capture.failure_output = true;
+        assert!(
+            !overlay_config_for_dir(&base, dir.path())
+                .unwrap()
+                .capture
+                .failure_output
+        );
+        std::fs::remove_file(&overlay).unwrap();
+        std::fs::write(&overlay, "[search]\npage_limit = 10\n").unwrap();
+        assert!(
+            overlay_config_for_dir(&base, dir.path())
+                .unwrap()
+                .capture
+                .failure_output,
+            "an overlay that does not mention it keeps the global choice"
         );
     }
 

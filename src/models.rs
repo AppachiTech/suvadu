@@ -118,6 +118,22 @@ impl Entry {
     }
 }
 
+/// The end of what a failed command printed, kept when failure-output
+/// capture is on (`[capture] failure_output`). Stored in `entry_output`,
+/// one row per command, and deleted with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailureOutput {
+    /// Which stream the text came from: `stderr` (`suv wrap`),
+    /// `stdout+stderr` (both, stdout first) or `output` (one combined
+    /// stream, as an agent reported it).
+    pub stream: String,
+    /// The last lines, terminal escapes stripped and secrets redacted.
+    pub tail: String,
+    /// Bytes of output left out before `tail`, about: counted on the raw
+    /// output before the kept window and on the cleaned text after it.
+    pub truncated_bytes: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tag {
     pub id: i64,

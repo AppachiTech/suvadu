@@ -18,11 +18,17 @@ pub fn handle_wrap(
 
     let started_at = chrono::Utc::now().timestamp_millis();
 
-    // Execute the command
-    let status = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&cmd_str)
-        .status();
+    // Execute the command. Its stderr goes through Suvadu only when its
+    // tail could be kept; otherwise the command has the terminal itself.
+    let (status, failure_output) = if keeps_failure_output(&cwd) {
+        run_teeing_stderr(&cmd_str)
+    } else {
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&cmd_str)
+            .status();
+        (status, None)
+    };
 
     let ended_at = chrono::Utc::now().timestamp_millis();
 
@@ -40,6 +46,7 @@ pub fn handle_wrap(
         executor: Some(executor.to_string()),
         context: None,
         start_cwd: None,
+        failure_output,
     }) {
         eprintln!("suvadu: failed to record command: {e}");
     }
@@ -47,6 +54,78 @@ pub fn handle_wrap(
     // Flush stderr before exiting — process::exit skips destructors and buffer flushes
     let _ = std::io::Write::flush(&mut std::io::stderr());
     process::exit(exit_code);
+}
+
+/// Whether a command run in `cwd` would have its failure output kept: the
+/// same policy recording applies, read once more here because it decides
+/// how the command is started.
+fn keeps_failure_output(cwd: &str) -> bool {
+    if crate::config::is_paused() {
+        return false;
+    }
+    let config = crate::config::capture_config_for_dir(std::path::Path::new(cwd));
+    config.enabled && config.capture.failure_output
+}
+
+/// How long the command's stderr is still read after it exits, for what
+/// it wrote last. A background process it started may hold the pipe open
+/// for good, and `suv wrap` must not wait on it.
+const STDERR_DRAIN: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Run `cmd` under `sh -c` with its stderr passed through to ours byte
+/// for byte as it arrives, keeping the last window of it. The command
+/// sees a pipe rather than a terminal on stderr, so a program that colours
+/// or animates only on a terminal prints plainly.
+fn run_teeing_stderr(
+    cmd: &str,
+) -> (
+    std::io::Result<std::process::ExitStatus>,
+    Option<crate::failure_output::Captured>,
+) {
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    let mut child = match std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => return (Err(e), None),
+    };
+    let Some(mut pipe) = child.stderr.take() else {
+        return (child.wait(), None);
+    };
+    let tail = Arc::new(Mutex::new(crate::failure_output::TailBuffer::new()));
+    let kept = Arc::clone(&tail);
+    let tee = std::thread::spawn(move || {
+        let mut stderr = std::io::stderr();
+        let mut chunk = [0u8; 8192];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let _ = stderr.write_all(&chunk[..n]);
+                    if let Ok(mut tail) = kept.lock() {
+                        tail.push(&chunk[..n]);
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+    });
+    let status = child.wait();
+    let deadline = std::time::Instant::now() + STDERR_DRAIN;
+    while !tee.is_finished() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let captured = tail
+        .lock()
+        .ok()
+        .map(|mut tail| std::mem::take(&mut *tail).into_captured("stderr"));
+    (status, captured)
 }
 
 /// Extract the exit code from an `ExitStatus`.
@@ -92,6 +171,25 @@ mod tests {
             .status()
             .unwrap();
         assert_eq!(exit_code_from_status(status), 42);
+    }
+
+    #[test]
+    fn a_teed_command_keeps_its_stderr_and_exit_status() {
+        let (status, captured) = run_teeing_stderr("echo out; echo 'error: nope' >&2; exit 4");
+        assert_eq!(exit_code_from_status(status.unwrap()), 4);
+        let captured = captured.unwrap();
+        assert_eq!(captured.stream, "stderr");
+        assert_eq!(captured.text, "error: nope\n");
+        assert_eq!(captured.dropped_bytes, 0);
+    }
+
+    #[test]
+    fn a_background_process_holding_stderr_open_does_not_hold_up_wrap() {
+        let start = std::time::Instant::now();
+        let (status, captured) = run_teeing_stderr("echo first >&2; (sleep 5 >&2 &); exit 1");
+        assert!(start.elapsed() < std::time::Duration::from_secs(3));
+        assert_eq!(exit_code_from_status(status.unwrap()), 1);
+        assert_eq!(captured.unwrap().text, "first\n");
     }
 
     #[cfg(unix)]

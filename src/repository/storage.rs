@@ -43,12 +43,12 @@ pub struct StorageUsage {
 
 /// Which category a table (or one of its indexes) belongs to.
 ///
-/// Tags, notes and bookmarks annotate commands and disappear with them, so
-/// they are reported as part of Commands rather than as categories a user
-/// would have to reason about separately.
+/// Tags, notes, bookmarks and failure output annotate commands and
+/// disappear with them, so they are reported as part of Commands rather
+/// than as categories a user would have to reason about separately.
 fn category_of(table: &str) -> &'static str {
     match table {
-        "entries" | "notes" | "bookmarks" | "aliases" | "tags" => COMMANDS,
+        "entries" | "entry_output" | "notes" | "bookmarks" | "aliases" | "tags" => COMMANDS,
         "sessions" | "ai_sessions" | "ai_events" | "ai_sources" => SESSIONS,
         "ai_summaries" => SUMMARIES,
         "skills" => SKILLS,
@@ -245,6 +245,11 @@ mod tests {
             .iter()
             .find(|c| c.name == name)
             .unwrap_or_else(|| panic!("missing category {name}"))
+    }
+
+    #[test]
+    fn failure_output_is_charged_to_commands() {
+        assert_eq!(category_of("entry_output"), COMMANDS);
     }
 
     #[test]

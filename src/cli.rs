@@ -270,6 +270,14 @@ pub enum Commands {
         /// from here
         #[arg(long)]
         start_cwd: Option<String>,
+        /// Read what the command printed on stdin. Its tail is kept if the
+        /// command failed and `[capture] failure_output` is on
+        #[arg(long)]
+        output_stdin: bool,
+        /// Bytes of output the caller left out before what it sends on
+        /// stdin
+        #[arg(long, default_value_t = 0, requires = "output_stdin")]
+        output_dropped_bytes: u64,
     },
 
     /// Set up shell hooks or AI tool integrations
@@ -737,7 +745,7 @@ pub enum Commands {
     /// Also rebuilds the search index when it no longer matches your
     /// history (`suv doctor` reports when it does not).
     #[command(
-        after_help = "Examples:\n  suv gc              # Remove orphaned sessions/notes, repair the search index\n  suv gc --dry-run    # Preview what would be cleaned\n  suv gc --vacuum     # Also compact the database file"
+        after_help = "Examples:\n  suv gc                   # Remove orphaned sessions/notes/output, repair the search index\n  suv gc --dry-run         # Preview what would be cleaned\n  suv gc --vacuum          # Also compact the database file\n  suv gc --failure-output  # Also delete all stored failure output, keeping the commands"
     )]
     Gc {
         /// Preview what would be deleted without deleting
@@ -746,12 +754,17 @@ pub enum Commands {
         /// Run VACUUM after cleanup to compact the database file
         #[arg(long)]
         vacuum: bool,
+        /// Also delete the output stored for every failed command
+        /// (`[capture] failure_output`), keeping the commands themselves.
+        /// Add --vacuum to also reclaim the pages it used
+        #[arg(long)]
+        failure_output: bool,
     },
 
     /// Execute a command and record it in Suvadu history
     /// Useful for AI agents and scripts that don't load shell hooks
     #[command(
-        after_help = "Examples:\n  suv wrap -- git status\n  suv wrap --executor-type agent --executor claude-code -- npm test"
+        after_help = "With [capture] failure_output = true, the command's stderr is passed through\nunchanged as it runs and, if the command fails, its last 4 KB is kept, escape\ncodes stripped and secrets redacted. The command then sees a pipe, not a\nterminal, on stderr.\n\nExamples:\n  suv wrap -- git status\n  suv wrap --executor-type agent --executor claude-code -- npm test"
     )]
     Wrap {
         /// The command to execute

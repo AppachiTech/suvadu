@@ -8,6 +8,7 @@ mod cli;
 mod commands;
 mod config;
 mod db;
+mod failure_output;
 mod frecency;
 mod home;
 mod hooks;
@@ -209,7 +210,11 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
             no_backup,
         ),
         Commands::Backup { out } => commands::entry::handle_backup(out.as_deref()),
-        Commands::Gc { dry_run, vacuum } => commands::entry::handle_gc(dry_run, vacuum),
+        Commands::Gc {
+            dry_run,
+            vacuum,
+            failure_output,
+        } => commands::entry::handle_gc(dry_run, vacuum, failure_output),
         Commands::Uninstall => commands::settings::handle_uninstall(),
         Commands::Version => {
             let hash = env!("BUILD_HASH");
@@ -302,12 +307,23 @@ fn run_add(cmd: Commands) -> Result<(), Box<dyn std::error::Error>> {
         executor_type,
         executor,
         start_cwd,
+        output_stdin,
+        output_dropped_bytes,
     } = cmd
     else {
         unreachable!()
     };
     // Read cached agent prompt if available (written by opencode/claude-code plugins)
     let context = commands::entry::read_agent_prompt(&session_id);
+    // Drained whatever the policy, so the sender never sees a broken pipe;
+    // only the last window is held.
+    let failure_output = if output_stdin {
+        let mut captured = commands::entry::read_output_tail(std::io::stdin().lock())?;
+        captured.dropped_bytes += output_dropped_bytes;
+        Some(captured)
+    } else {
+        None
+    };
     commands::entry::handle_add_with_context(commands::entry::AddParams {
         session_id,
         command,
@@ -319,6 +335,7 @@ fn run_add(cmd: Commands) -> Result<(), Box<dyn std::error::Error>> {
         executor,
         context,
         start_cwd,
+        failure_output,
     })
 }
 
@@ -537,6 +554,8 @@ mod tests {
             executor_type: None,
             executor: None,
             start_cwd: None,
+            output_stdin: false,
+            output_dropped_bytes: 0,
         }));
         assert!(!is_user_facing_command(&Commands::Get {
             query: String::new(),

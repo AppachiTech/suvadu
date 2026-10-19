@@ -83,7 +83,7 @@ governs it.
 
 | Category | Holds | Goes away when |
 |---|---|---|
-| Commands | command text, directory, exit code, start/end times, duration, executor type and name, an optional tag, and a `context` JSON blob (which holds the git branch, when there was one); plus their notes, bookmarks, aliases, tags and the two trigram search indexes (one over the command as typed, one with its separators removed) | you run `suv delete <pattern>` |
+| Commands | command text, directory, exit code, start/end times, duration, executor type and name, an optional tag, and a `context` JSON blob (which holds the git branch, when there was one); plus their notes, bookmarks, aliases, tags and the two trigram search indexes (one over the command as typed, one with its separators removed); and, **only with failure-output capture on**, the last 4 KB a failed command printed (`entry_output`: which stream, the cleaned and redacted text, and how many bytes were left out before it) | you run `suv delete <pattern>`; `suv gc --failure-output` removes every stored failure output and keeps the commands |
 | Sessions | shell sessions (id, **machine hostname**, creation time, tag), and agent sessions with their captured transcript events and the adapter checkpoints that record which transcript files were read and how far | an agent session is removed with `suv agent delete-session <id>`; a shell session row stays behind after its commands are deleted |
 | Summaries | session summaries written over MCP, with their cited evidence IDs, the session revision they were written from, and the caller-declared agent and model | their agent session is deleted — editing or deleting commands only marks a summary *stale*, it does not remove it |
 | Skills | shared skill documents | you run `suv skills remove`; a sync rewrites agent-side copies, not the stored row |
@@ -110,6 +110,29 @@ those passes through the same redaction and exclusion policy as the command
 before it is written; a field an exclusion pattern matched is withheld
 entirely and named in `context.withheld_fields`, so a missing field is
 visible rather than silent.
+
+**Failure output** (`[capture] failure_output`, *Keep Failure Output* in
+`suv settings`, off by default) is the only command output Suvadu ever
+stores. It is kept only for a command that exited non-zero (not 130, Ctrl+C),
+and only from a path that already holds the output: an agent hook whose
+payload carries it (Claude Code's `PostToolUseFailure` error text, or stdout
+and stderr on a `PostToolUse` that reports a non-zero exit; Cursor's
+`afterShellExecution` `output`; a Codex `PostToolUse` response that carries an
+exit code and `output`, `aggregated_output` or `stdout`/`stderr` text;
+OpenCode's bash tool output, sent by the plugin on `suv add`'s stdin) and
+`suv wrap`, which tees the command's stderr. **The zsh and Bash hooks never
+see output and never send it**: capturing a terminal means standing between
+the program and the terminal, which breaks anything interactive. On every
+path the output is cut to its last 64 KB first, then terminal escape
+sequences and carriage-return redraws are stripped, then it is redacted with
+the same rules and the same per-directory policy as the command text, and
+only then cut to its last 4 KB at a line start — so a secret crossing the
+cut is replaced before the cut. A window cut from a longer output also drops
+its first, partial line. An excluded command keeps nothing. A project's
+`.suvadu.toml` can turn it off but not on. Turning it off stops new capture;
+what was kept stays until its command is deleted or you run
+`suv gc --failure-output`. JSON and JSONL exports carry it as
+`failure_output` beside its command; CSV exports do not.
 
 How these interact:
 
@@ -153,10 +176,11 @@ The same configuration governs every path that writes to the database.
 | Path | Space-prefix skipped | Exclusions applied | Redaction applied |
 |---|---|---|---|
 | Live shell/agent recording (`suv add`, hooks) | yes | yes, per directory | yes, per directory |
+| Failure output (agent hooks, `suv add --output-stdin`, `suv wrap`) | n/a — kept only beside a recorded command | yes, per directory: an excluded command keeps no output | yes, per directory, after escape stripping and before the 4 KB cut |
 | Bash import (`suv import --from bash-history`, including `--dry-run`) | yes | yes, global config only | yes, global config only |
 | Zsh import (`suv import --from zsh-history`, including `--dry-run`) | yes | yes, global config only | yes, global config only |
 | Atuin import (`suv import --from atuin-db`, including `--dry-run`) | yes | yes, per source directory — command **and** free-text metadata | yes, per source directory — command **and** free-text metadata |
-| JSONL import (`suv import`) | n/a | no — restoring a Suvadu export is meant to reproduce it exactly | no |
+| JSONL import (`suv import`) | n/a | no — restoring a Suvadu export is meant to reproduce it exactly, failure output included (still held to 4 KB) | no |
 | Native transcript ingestion (Codex, Claude Code, OpenCode) | n/a | yes, per directory | yes, per directory |
 | Session summaries saved over MCP | n/a | yes — matching text is refused, not trimmed | yes |
 
@@ -404,9 +428,11 @@ redaction.
 Also stored, once per shell session rather than per command: the **machine's
 hostname**.
 
-**Never captured:** command output, file contents, and anything another
-program read or wrote. Suvadu records that a command ran, how it exited and
-how long it took — nothing about what it did.
+**Never captured from the shell:** command output, file contents, and
+anything another program read or wrote. Suvadu records that a command ran,
+how it exited and how long it took — nothing about what it did. The opt-in
+failure output above comes only from agent hooks and `suv wrap`, never from
+these hooks.
 
 The branch name goes through the same redaction as the command text, and is
 read only after the exclusion check, so an excluded command leaves no branch

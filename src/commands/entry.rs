@@ -47,6 +47,10 @@ pub struct AddParams {
     /// (`cd`, `pushd`, …): the git branch is read from here. `None` means
     /// `cwd`.
     pub start_cwd: Option<String>,
+    /// What the command printed, from a capture path that saw it (an agent
+    /// hook or `suv wrap`). Kept only for a failure, and only when
+    /// `[capture] failure_output` is on for the command's directory.
+    pub failure_output: Option<crate::failure_output::Captured>,
 }
 
 /// Maximum lengths for input fields (defense against malicious/buggy hooks).
@@ -112,6 +116,24 @@ pub fn handle_add_with_context(params: AddParams) -> Result<(), Box<dyn std::err
     handle_add_inner(params, &config, &repo)
 }
 
+/// Read `reader` to its end, keeping only the last window of it, as the
+/// output of a command recorded with `suv add --output-stdin`.
+pub fn read_output_tail(
+    mut reader: impl std::io::Read,
+) -> std::io::Result<crate::failure_output::Captured> {
+    let mut tail = crate::failure_output::TailBuffer::new();
+    let mut chunk = [0u8; 16 * 1024];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => tail.push(&chunk[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(tail.into_captured("output"))
+}
+
 /// Pre-check: returns `true` if the input should be silently dropped
 /// (space-prefixed, an oversized session ID or directory, or an invalid
 /// session ID). An oversized command is kept, cut to length later.
@@ -147,6 +169,7 @@ fn handle_add_inner(
         executor,
         context,
         start_cwd,
+        failure_output,
     } = params;
 
     if !config.enabled {
@@ -261,8 +284,17 @@ fn handle_add_inner(
         repo.insert_session_if_missing(&session.id, &session.hostname, session.created_at)?;
     }
 
+    // Cleaned and redacted with this directory's policy, after the
+    // exclusion check: an excluded command keeps nothing of its output.
+    let output = failure_output
+        .filter(|_| config.capture.failure_output && crate::failure_output::is_failure(exit_code))
+        .and_then(|captured| crate::failure_output::finish(&captured, &config.redaction));
+
     // Insert entry
-    repo.insert_entry(&entry)?;
+    let id = repo.insert_entry(&entry)?;
+    if let Some(output) = output {
+        repo.insert_failure_output(id, &output)?;
+    }
 
     Ok(()) // Silent success
 }
@@ -603,45 +635,67 @@ fn handle_note_with_repo(
     Ok(())
 }
 
-pub fn handle_gc(dry_run: bool, vacuum: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub fn handle_gc(
+    dry_run: bool,
+    vacuum: bool,
+    drop_failure_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let repo = Repository::init()?;
 
     let stale_prompts = count_stale_prompt_caches();
 
     if dry_run {
-        let (orphaned_sessions, orphaned_notes) = count_gc_candidates(&repo)?;
+        let found = handle_gc_with_repo(&repo, true, false, drop_failure_output)?;
         let index_drifted = repair_search_index(&repo, true)?;
         println!("Dry run — nothing will be deleted.\n");
-        println!("  Orphaned sessions (no entries): {orphaned_sessions}");
-        println!("  Orphaned notes (missing entry): {orphaned_notes}");
+        println!("  Orphaned sessions (no entries): {}", found.sessions);
+        println!("  Orphaned notes (missing entry): {}", found.notes);
+        if drop_failure_output {
+            println!("  Stored failure output:          {}", found.outputs);
+        } else {
+            println!("  Orphaned failure output:        {}", found.outputs);
+        }
         println!("  Stale prompt cache files:       {stale_prompts}");
         println!(
             "  Search index needs a rebuild:   {}",
             if index_drifted { "yes" } else { "no" }
         );
-        if orphaned_sessions == 0 && orphaned_notes == 0 && stale_prompts == 0 && !index_drifted {
+        if found == GcCounts::default() && stale_prompts == 0 && !index_drifted {
             println!("\nNothing to clean up.");
         }
         return Ok(());
     }
 
-    let (deleted_sessions, deleted_notes) = handle_gc_with_repo(&repo, false, vacuum)?;
+    let removed = handle_gc_with_repo(&repo, false, vacuum, drop_failure_output)?;
     let deleted_prompts = clean_prompt_caches();
     let rebuilt_index = repair_search_index(&repo, false)?;
     if rebuilt_index {
         println!("Rebuilt the search index, which no longer matched your history.");
     }
 
-    if deleted_sessions > 0 {
-        println!("Removed {deleted_sessions} orphaned sessions.");
+    if removed.sessions > 0 {
+        println!("Removed {} orphaned sessions.", removed.sessions);
     }
-    if deleted_notes > 0 {
-        println!("Removed {deleted_notes} orphaned notes.");
+    if removed.notes > 0 {
+        println!("Removed {} orphaned notes.", removed.notes);
+    }
+    if removed.outputs > 0 {
+        if drop_failure_output {
+            println!(
+                "Removed the failure output stored for {} commands; the commands stay.",
+                removed.outputs
+            );
+        } else {
+            println!(
+                "Removed {} orphaned failure-output records.",
+                removed.outputs
+            );
+        }
     }
     if deleted_prompts > 0 {
         println!("Removed {deleted_prompts} stale prompt cache files.");
     }
-    if deleted_sessions == 0 && deleted_notes == 0 && deleted_prompts == 0 && !rebuilt_index {
+    if removed == GcCounts::default() && deleted_prompts == 0 && !rebuilt_index {
         println!("Nothing to clean up.");
     }
 
@@ -666,30 +720,45 @@ fn repair_search_index(
     Ok(true)
 }
 
-/// Count repo-level GC candidates (orphaned sessions and notes).
-fn count_gc_candidates(repo: &Repository) -> Result<(i64, i64), Box<dyn std::error::Error>> {
-    let orphaned_sessions = repo.count_orphaned_sessions()?;
-    let orphaned_notes = repo.count_orphaned_notes()?;
-    Ok((orphaned_sessions, orphaned_notes))
+/// What a `suv gc` found (on a dry run) or removed.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct GcCounts {
+    sessions: usize,
+    notes: usize,
+    /// Failure output whose command is gone, or with `--failure-output`,
+    /// every stored one.
+    outputs: usize,
 }
 
-/// Perform repo-level garbage collection. Returns `(deleted_sessions, deleted_notes)`.
+/// Repo-level garbage collection: orphaned sessions, notes and failure
+/// output, and with `drop_failure_output` every stored failure output.
+/// With `dry_run`, counts what would go and changes nothing.
 fn handle_gc_with_repo(
     repo: &Repository,
     dry_run: bool,
     vacuum: bool,
-) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    drop_failure_output: bool,
+) -> Result<GcCounts, Box<dyn std::error::Error>> {
+    let as_count = |n: i64| usize::try_from(n).unwrap_or(0);
     if dry_run {
-        let orphaned_sessions = repo.count_orphaned_sessions()?;
-        let orphaned_notes = repo.count_orphaned_notes()?;
-        println!("Dry run — repo cleanup preview:");
-        println!("  Orphaned sessions (no entries): {orphaned_sessions}");
-        println!("  Orphaned notes (missing entry): {orphaned_notes}");
-        return Ok((0, 0));
+        return Ok(GcCounts {
+            sessions: as_count(repo.count_orphaned_sessions()?),
+            notes: as_count(repo.count_orphaned_notes()?),
+            outputs: as_count(if drop_failure_output {
+                repo.count_failure_outputs()?
+            } else {
+                repo.count_orphaned_outputs()?
+            }),
+        });
     }
 
-    let deleted_notes = repo.delete_orphaned_notes()?;
-    let deleted_sessions = repo.delete_orphaned_sessions()?;
+    let notes = repo.delete_orphaned_notes()?;
+    let outputs = if drop_failure_output {
+        repo.delete_all_failure_outputs()?
+    } else {
+        repo.delete_orphaned_outputs()?
+    };
+    let sessions = repo.delete_orphaned_sessions()?;
 
     if vacuum {
         println!("Running VACUUM...");
@@ -697,7 +766,11 @@ fn handle_gc_with_repo(
         println!("Database compacted.");
     }
 
-    Ok((deleted_sessions, deleted_notes))
+    Ok(GcCounts {
+        sessions,
+        notes,
+        outputs,
+    })
 }
 
 /// Maximum age for prompt cache files (7 days).
@@ -1260,9 +1333,8 @@ mod tests {
         let (_dir, repo) = test_repo();
         seed_entries(&repo, &["git status"]);
         // dry_run should succeed and not delete anything
-        let (sessions, notes) = handle_gc_with_repo(&repo, true, false).unwrap();
-        assert_eq!(sessions, 0);
-        assert_eq!(notes, 0);
+        let removed = handle_gc_with_repo(&repo, true, false, false).unwrap();
+        assert_eq!(removed, GcCounts::default());
     }
 
     #[test]
@@ -1280,8 +1352,8 @@ mod tests {
         // Verify session exists
         assert!(repo.get_session("orphan-session").unwrap().is_some());
 
-        let (deleted_sessions, _) = handle_gc_with_repo(&repo, false, false).unwrap();
-        assert_eq!(deleted_sessions, 1);
+        let removed = handle_gc_with_repo(&repo, false, false, false).unwrap();
+        assert_eq!(removed.sessions, 1);
 
         // Session should be gone now
         assert!(repo.get_session("orphan-session").unwrap().is_none());
@@ -1312,15 +1384,68 @@ mod tests {
         // Verify the orphan is detected
         assert_eq!(repo.count_orphaned_notes().unwrap(), 1);
 
-        let (_, deleted_notes) = handle_gc_with_repo(&repo, false, false).unwrap();
-        assert_eq!(deleted_notes, 1);
+        let removed = handle_gc_with_repo(&repo, false, false, false).unwrap();
+        assert_eq!(removed.notes, 1);
+    }
+
+    fn with_outputs(repo: &Repository) -> Vec<i64> {
+        let ids = seed_entries(repo, &["make", "make test"]);
+        for id in &ids {
+            repo.insert_failure_output(
+                *id,
+                &crate::models::FailureOutput {
+                    stream: "stderr".into(),
+                    tail: "error".into(),
+                    truncated_bytes: 0,
+                },
+            )
+            .unwrap();
+        }
+        ids
+    }
+
+    #[test]
+    fn gc_removes_failure_output_whose_command_is_gone() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let repo = Repository::new(crate::db::init_db(&db_path).unwrap());
+        let ids = with_outputs(&repo);
+        {
+            let raw = rusqlite::Connection::open(&db_path).unwrap();
+            raw.pragma_update(None, "foreign_keys", "OFF").unwrap();
+            raw.execute("DELETE FROM entries WHERE id = ?1", [ids[0]])
+                .unwrap();
+        }
+        let preview = handle_gc_with_repo(&repo, true, false, false).unwrap();
+        assert_eq!(preview.outputs, 1);
+        assert_eq!(
+            repo.count_failure_outputs().unwrap(),
+            2,
+            "a dry run deletes nothing"
+        );
+        let removed = handle_gc_with_repo(&repo, false, false, false).unwrap();
+        assert_eq!(removed.outputs, 1);
+        assert!(repo.failure_output(ids[1]).unwrap().is_some());
+    }
+
+    #[test]
+    fn gc_can_drop_every_failure_output_and_keep_the_commands() {
+        let (_dir, repo) = test_repo();
+        with_outputs(&repo);
+        let preview = handle_gc_with_repo(&repo, true, false, true).unwrap();
+        assert_eq!(preview.outputs, 2);
+        assert_eq!(repo.count_failure_outputs().unwrap(), 2);
+        let removed = handle_gc_with_repo(&repo, false, false, true).unwrap();
+        assert_eq!(removed.outputs, 2);
+        assert_eq!(repo.count_failure_outputs().unwrap(), 0);
+        assert_eq!(repo.count_entries().unwrap(), 2);
     }
 
     #[test]
     fn test_handle_gc_vacuum() {
         let (_dir, repo) = test_repo();
         // Just verify vacuum doesn't error
-        handle_gc_with_repo(&repo, false, true).unwrap();
+        handle_gc_with_repo(&repo, false, true, false).unwrap();
     }
 
     // ── should_drop_early tests ───────────────────────────────
@@ -1337,6 +1462,7 @@ mod tests {
             executor: None,
             context: None,
             start_cwd: None,
+            failure_output: None,
         }
     }
 
@@ -1472,6 +1598,94 @@ mod tests {
             .get_entries_filtered(10, 0, &crate::repository::QueryFilter::default())
             .unwrap()
             .is_empty());
+    }
+
+    // ── failure output ────────────────────────────────────────
+
+    fn failing(command: &str, exit_code: i32, stderr: &str) -> AddParams {
+        AddParams {
+            exit_code: Some(exit_code),
+            failure_output: Some(crate::failure_output::Captured::from_text("stderr", stderr)),
+            ..make_params(command)
+        }
+    }
+
+    fn capturing() -> config::Config {
+        let mut config = default_config();
+        config.capture.failure_output = true;
+        config
+    }
+
+    fn stored_output(repo: &Repository) -> Option<crate::models::FailureOutput> {
+        repo.failure_output(only_entry(repo).id.unwrap()).unwrap()
+    }
+
+    #[test]
+    fn failure_output_is_not_kept_unless_turned_on() {
+        let (_dir, repo) = test_repo();
+        let params = failing("make", 2, "make: *** No rule to make target\n");
+        handle_add_inner(params, &default_config(), &repo).unwrap();
+        assert_eq!(stored_output(&repo), None);
+        assert_eq!(repo.count_failure_outputs().unwrap(), 0);
+    }
+
+    #[test]
+    fn a_failed_commands_output_is_kept_cleaned_and_redacted() {
+        let (_dir, repo) = test_repo();
+        let stderr = "\u{1b}[31merror\u{1b}[0m: push rejected for \
+                      https://bot:ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789@github.com/o/r\n";
+        handle_add_inner(failing("git push", 1, stderr), &capturing(), &repo).unwrap();
+        let output = stored_output(&repo).unwrap();
+        assert_eq!(output.stream, "stderr");
+        assert!(
+            output.tail.starts_with("error: push rejected"),
+            "{}",
+            output.tail
+        );
+        assert!(!output.tail.contains("ghp_aBcDeF"), "{}", output.tail);
+        assert!(!output.tail.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn a_success_or_ctrl_c_keeps_no_output() {
+        for code in [0, 130] {
+            let (_dir, repo) = test_repo();
+            handle_add_inner(
+                failing("cargo run", code, "warning: unused\n"),
+                &capturing(),
+                &repo,
+            )
+            .unwrap();
+            assert_eq!(stored_output(&repo), None, "exit {code}");
+        }
+        let (_dir, repo) = test_repo();
+        let params = AddParams {
+            exit_code: None,
+            ..failing("cargo run", 1, "boom\n")
+        };
+        handle_add_inner(params, &capturing(), &repo).unwrap();
+        assert_eq!(
+            stored_output(&repo),
+            None,
+            "an unknown exit is not a failure"
+        );
+    }
+
+    #[test]
+    fn an_excluded_command_leaves_no_output_behind() {
+        let (_dir, repo) = test_repo();
+        let mut config = capturing();
+        config.exclusions = vec!["^deploy".into()];
+        handle_add_inner(failing("deploy --prod", 1, "denied\n"), &config, &repo).unwrap();
+        assert_eq!(repo.count_entries().unwrap(), 0);
+        assert_eq!(repo.count_failure_outputs().unwrap(), 0);
+    }
+
+    #[test]
+    fn output_with_nothing_printable_stores_no_row() {
+        let (_dir, repo) = test_repo();
+        handle_add_inner(failing("false", 1, "\u{1b}[0m\n\n"), &capturing(), &repo).unwrap();
+        assert_eq!(stored_output(&repo), None);
     }
 
     #[test]

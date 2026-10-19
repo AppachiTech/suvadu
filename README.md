@@ -423,11 +423,37 @@ plugin contract, capture can degrade silently — `suv doctor` reports per
 agent whether its process was detected, its integration is installed, and
 commands, native sessions and MCP registration have been seen.
 
+### Why it failed: failure output (opt-in)
+
+With `[capture] failure_output = true` (*Keep Failure Output* in
+`suv settings`; off by default), a command that fails keeps the last 4 KB it
+printed — where Suvadu already has that output:
+
+| Path | Output kept |
+|---|---|
+| Claude Code | the `PostToolUseFailure` error text, without its `Exit code N` line |
+| Cursor | `afterShellExecution`'s `output` |
+| Codex | the `PostToolUse` response's `output`, `aggregated_output` or `stdout`/`stderr` text, when it also carries an exit code |
+| OpenCode | the bash tool's output, sent by the plugin (rerun `suv init opencode`) |
+| `suv wrap -- cmd` | the command's stderr, passed through to your terminal unchanged as it runs |
+| zsh and Bash hooks | **nothing** — capturing a terminal's output means standing between the program and the terminal, which breaks interactive programs |
+
+Escape codes and progress redraws are stripped, secrets are redacted with
+the same rules and per-directory policy as the command (before the text is
+cut), an excluded command keeps nothing, and a project's `.suvadu.toml` can
+turn it off but not on. Under `suv wrap` the command's stderr is a pipe, so a
+program that colours or animates only on a terminal prints plainly there, and
+a background process it leaves running loses its stderr once `suv wrap`
+exits. The output goes with its command on `suv delete`, travels in JSON and
+JSONL exports, and `suv gc --failure-output` deletes all of it while keeping
+the commands.
+
 ### What is never captured
 
 - **Command output and file contents.** Suvadu records that a command ran,
   how it exited, how long it took and where — never what it printed or what
-  it changed. Every inferred MCP answer repeats this.
+  it changed — except the opt-in failure output above, the end of what a
+  failed agent or `suv wrap` command printed.
 - **From native transcripts:** thinking blocks, attachments, images, file
   contents and raw tool results. Codex commentary and reasoning, injected
   AGENTS/environment context and developer instructions are excluded too.

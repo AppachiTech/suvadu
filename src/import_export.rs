@@ -165,7 +165,7 @@ pub fn handle_export(
                 } else {
                     writeln!(out, ",")?;
                 }
-                write!(out, "  {}", serde_json::to_string(&entry)?)?;
+                write!(out, "  {}", export_record(&repo, entry)?)?;
                 count += 1;
                 Ok(())
             })?;
@@ -178,12 +178,8 @@ pub fn handle_export(
             }
         }
         "jsonl" => {
-            let mut count = 0usize;
-            repo.stream_export_entries(after_ms, before_ms, |entry| {
-                println!("{}", serde_json::to_string(&entry)?);
-                count += 1;
-                Ok(())
-            })?;
+            let count =
+                write_jsonl_export(&repo, after_ms, before_ms, &mut std::io::stdout().lock())?;
             if count == 0 {
                 eprintln!("No entries to export.");
             } else {
@@ -221,6 +217,46 @@ pub fn handle_export(
     }
 
     Ok(())
+}
+
+/// One exported command: the entry's own fields, plus `failure_output`
+/// when output was stored for it. A JSONL import reads the same shape, so
+/// an export restores its output too.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ExportedEntry {
+    #[serde(flatten)]
+    entry: Entry,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failure_output: Option<crate::models::FailureOutput>,
+}
+
+/// `entry` as one JSON/JSONL export record.
+fn export_record(repo: &Repository, entry: Entry) -> Result<String, Box<dyn std::error::Error>> {
+    let failure_output = match entry.id {
+        Some(id) if entry.exit_code.is_some_and(|code| code != 0) => repo.failure_output(id)?,
+        _ => None,
+    };
+    Ok(serde_json::to_string(&ExportedEntry {
+        entry,
+        failure_output,
+    })?)
+}
+
+/// Write the entries between `after` and `before` to `out` as JSONL, one
+/// [`ExportedEntry`] per line. Returns how many were written.
+fn write_jsonl_export(
+    repo: &Repository,
+    after: Option<i64>,
+    before: Option<i64>,
+    out: &mut impl Write,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut count = 0usize;
+    repo.stream_export_entries(after, before, |entry| {
+        writeln!(out, "{}", export_record(repo, entry)?)?;
+        count += 1;
+        Ok(())
+    })?;
+    Ok(count)
 }
 
 /// Result of a JSONL import. Returned by `import_jsonl_into_repo` so callers
@@ -396,8 +432,8 @@ pub fn import_jsonl_into_repo_opts<R: BufRead>(
         if trimmed.is_empty() {
             continue;
         }
-        let mut entry: Entry = match serde_json::from_str(trimmed) {
-            Ok(e) => e,
+        let (mut entry, failure_output) = match serde_json::from_str::<ExportedEntry>(trimmed) {
+            Ok(e) => (e.entry, e.failure_output),
             Err(err) => {
                 eprintln!("Line {}: parse error: {err}", line_num + 1);
                 stats.parse_errors += 1;
@@ -443,8 +479,15 @@ pub fn import_jsonl_into_repo_opts<R: BufRead>(
             restored_at.to_string(),
         );
 
-        match repo.insert_entry(&entry) {
-            Ok(_) => {
+        // Restored as exported, like the rest of the row: it was cleaned
+        // and redacted when it was captured.
+        let inserted = repo.insert_entry(&entry).and_then(|id| {
+            failure_output.map_or(Ok(()), |output| {
+                repo.insert_failure_output(id, &crate::failure_output::clamp(output))
+            })
+        });
+        match inserted {
+            Ok(()) => {
                 stats.imported += 1;
                 batch_count += 1;
             }
@@ -2138,6 +2181,94 @@ mod tests {
             .unwrap();
         imported_cmds.sort();
         assert_eq!(imported_cmds, vec!["cargo test", "git status", "ls -la"]);
+    }
+
+    #[test]
+    fn failure_output_travels_with_its_command_through_export_and_import() {
+        let (_dir_a, repo_a) = crate::test_utils::test_repo();
+        let session = Session::new("mac1".to_string(), 1_600_000_000_000);
+        repo_a.insert_session(&session).unwrap();
+        let failed = repo_a
+            .insert_entry(&Entry::new(
+                session.id.clone(),
+                "cargo build".to_string(),
+                "/work".to_string(),
+                Some(101),
+                1_700_000_000_000,
+                1_700_000_000_500,
+            ))
+            .unwrap();
+        repo_a
+            .insert_entry(&Entry::new(
+                session.id,
+                "ls".to_string(),
+                "/work".to_string(),
+                Some(0),
+                1_700_000_000_001,
+                1_700_000_000_501,
+            ))
+            .unwrap();
+        let output = crate::models::FailureOutput {
+            stream: "stderr".to_string(),
+            tail: "error[E0425]: cannot find value `x`".to_string(),
+            truncated_bytes: 7,
+        };
+        repo_a.insert_failure_output(failed, &output).unwrap();
+
+        let mut jsonl = Vec::new();
+        let count = write_jsonl_export(&repo_a, None, None, &mut jsonl).unwrap();
+        assert_eq!(count, 2);
+        let lines: Vec<serde_json::Value> = String::from_utf8(jsonl.clone())
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines[0]["failure_output"]["tail"], output.tail);
+        assert!(lines[1].get("failure_output").is_none());
+
+        let (_dir_b, repo_b) = crate::test_utils::test_repo();
+        let stats = import_jsonl_into_repo(&repo_b, jsonl.as_slice()).unwrap();
+        assert_eq!(stats.imported, 2);
+        let mut restored = Vec::new();
+        repo_b
+            .stream_export_entries(None, None, |e| {
+                restored.push((e.command.clone(), repo_b.failure_output(e.id.unwrap())?));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(restored[0], ("cargo build".to_string(), Some(output)));
+        assert_eq!(restored[1], ("ls".to_string(), None));
+    }
+
+    #[test]
+    fn an_imported_failure_output_is_held_to_the_tail_limit() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut line = serde_json::to_value(Entry::new(
+            "s1".to_string(),
+            "make".to_string(),
+            "/work".to_string(),
+            Some(2),
+            1,
+            2,
+        ))
+        .unwrap();
+        let huge: String = (0..10_000).fold(String::new(), |mut huge, i| {
+            let _ = std::fmt::Write::write_fmt(&mut huge, format_args!("line {i}\n"));
+            huge
+        });
+        line["failure_output"] =
+            serde_json::json!({"stream": "stderr", "tail": huge, "truncated_bytes": 0});
+        import_jsonl_into_repo(&repo, format!("{line}\n").as_bytes()).unwrap();
+        let mut stored = None;
+        repo.stream_export_entries(None, None, |e| {
+            stored = repo.failure_output(e.id.unwrap())?;
+            Ok(())
+        })
+        .unwrap();
+        let stored = stored.unwrap();
+        assert!(stored.tail.len() <= crate::failure_output::TAIL_BYTES);
+        assert!(stored.tail.trim_end().ends_with("line 9999"));
+        assert!(stored.truncated_bytes > 0);
     }
 
     #[test]

@@ -20,21 +20,87 @@ pub const MAX_HOOK_PAYLOAD_BYTES: u64 = 16 * 1024 * 1024;
 
 /// A field a hook uses. `inner` empty keeps the whole value; otherwise only
 /// the named sub-fields of an object are kept, and a value of any other
-/// type becomes null.
+/// type becomes null. A `tail` field keeps only the end of a string.
 #[derive(Clone, Copy)]
 pub struct Field {
     pub name: &'static str,
     pub inner: &'static [Self],
+    pub tail: bool,
 }
 
 /// A field kept whole.
 pub const fn whole(name: &'static str) -> Field {
-    Field { name, inner: &[] }
+    Field {
+        name,
+        inner: &[],
+        tail: false,
+    }
 }
 
 /// An object field of which only `inner` is kept.
 pub const fn only(name: &'static str, inner: &'static [Field]) -> Field {
-    Field { name, inner }
+    Field {
+        name,
+        inner,
+        tail: false,
+    }
+}
+
+/// A string field of which only the last
+/// [`crate::failure_output::WINDOW_BYTES`] are kept — a tool's output,
+/// which can be megabytes. Read it with [`tail_text`]; a value of any other
+/// type becomes null.
+pub const fn tail(name: &'static str) -> Field {
+    Field {
+        name,
+        inner: &[],
+        tail: true,
+    }
+}
+
+/// A [`tail`] field's text and how many bytes before it were dropped, or
+/// `None` when the field was absent or not a string.
+pub fn tail_text(value: &Value) -> Option<(&str, u64)> {
+    match value {
+        Value::String(text) => Some((text, 0)),
+        Value::Object(cut) => Some((
+            cut.get("tail")?.as_str()?,
+            cut.get("dropped_bytes")?.as_u64()?,
+        )),
+        _ => None,
+    }
+}
+
+/// A tool's output as one [`tail`] field held it, labelled `stream`.
+/// `None` when the field was absent, not a string, or empty.
+pub fn captured_stream(
+    stream: &'static str,
+    value: &Value,
+) -> Option<crate::failure_output::Captured> {
+    let (text, dropped) = tail_text(value).filter(|(text, _)| !text.trim().is_empty())?;
+    Some(crate::failure_output::Captured::from_window(
+        stream, text, dropped,
+    ))
+}
+
+/// A tool's output from its separate stdout and stderr [`tail`] fields:
+/// the one that has text, or both, stdout first (`stdout+stderr`). How
+/// they interleaved is not reported, so it is not reconstructed.
+pub fn captured_streams(stdout: &Value, stderr: &Value) -> Option<crate::failure_output::Captured> {
+    match (
+        captured_stream("stdout", stdout),
+        captured_stream("stderr", stderr),
+    ) {
+        (Some(out), Some(err)) => {
+            let text = format!("{}\n{}", out.text.trim_end_matches('\n'), err.text);
+            Some(crate::failure_output::Captured::from_window(
+                "stdout+stderr",
+                &text,
+                out.dropped_bytes + err.dropped_bytes,
+            ))
+        }
+        (one, None) | (None, one) => one,
+    }
 }
 
 /// The picked fields of a hook payload.
@@ -125,7 +191,7 @@ impl<'de> Visitor<'de> for TopLevel<'_> {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
         while let Some(key) = map.next_key::<String>()? {
             if let Some(field) = self.fields.iter().find(|field| field.name == key) {
-                let value = map.next_value_seed(Pick(field.inner))?;
+                let value = map.next_value_seed(Pick::of(field))?;
                 self.out.insert(key, value);
             } else {
                 map.next_value::<IgnoredAny>()?;
@@ -162,6 +228,34 @@ impl<'de> Visitor<'de> for TopLevel<'_> {
 /// Deserializes one picked field's value.
 struct Pick(&'static [Field]);
 
+impl Pick {
+    /// How `field`'s value is read: its tail, whole, or its sub-fields.
+    const fn of(field: &Field) -> PickValue {
+        if field.tail {
+            PickValue::Tail
+        } else {
+            PickValue::Fields(Self(field.inner))
+        }
+    }
+}
+
+/// [`Pick`] for a field that may be a [`tail`].
+enum PickValue {
+    Fields(Pick),
+    Tail,
+}
+
+impl<'de> DeserializeSeed<'de> for PickValue {
+    type Value = Value;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
+        match self {
+            Self::Fields(pick) => pick.deserialize(deserializer),
+            Self::Tail => deserializer.deserialize_any(TailVisitor),
+        }
+    }
+}
+
 impl<'de> DeserializeSeed<'de> for Pick {
     type Value = Value;
 
@@ -170,6 +264,65 @@ impl<'de> DeserializeSeed<'de> for Pick {
             return serde::Deserialize::deserialize(deserializer);
         }
         deserializer.deserialize_any(self)
+    }
+}
+
+/// Keeps the end of a string value; anything else becomes null.
+struct TailVisitor;
+
+impl TailVisitor {
+    fn keep(text: &str) -> Value {
+        let mut start = text
+            .len()
+            .saturating_sub(crate::failure_output::WINDOW_BYTES);
+        while !text.is_char_boundary(start) {
+            start += 1;
+        }
+        if start == 0 {
+            return Value::String(text.to_string());
+        }
+        let mut cut = Map::new();
+        cut.insert("tail".into(), Value::String(text[start..].to_string()));
+        cut.insert("dropped_bytes".into(), Value::from(start as u64));
+        Value::Object(cut)
+    }
+}
+
+impl<'de> Visitor<'de> for TailVisitor {
+    type Value = Value;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("any JSON value")
+    }
+
+    fn visit_str<E>(self, text: &str) -> Result<Value, E> {
+        Ok(Self::keep(text))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(Value::Null)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(Value::Null)
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+    fn visit_i64<E>(self, _: i64) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+    fn visit_u64<E>(self, _: u64) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+    fn visit_unit<E>(self) -> Result<Value, E> {
+        Ok(Value::Null)
     }
 }
 
@@ -184,7 +337,7 @@ impl<'de> Visitor<'de> for Pick {
         let mut out = Map::new();
         while let Some(key) = map.next_key::<String>()? {
             if let Some(field) = self.0.iter().find(|field| field.name == key) {
-                let value = map.next_value_seed(Self(field.inner))?;
+                let value = map.next_value_seed(Self::of(field))?;
                 out.insert(key, value);
             } else {
                 map.next_value::<IgnoredAny>()?;
@@ -265,6 +418,61 @@ mod tests {
         }
         assert!(read(&b""[..], FIELDS).unwrap().is_none());
         assert_eq!(read_bytes(b"null").event, Value::Null);
+    }
+
+    const OUTPUT_FIELDS: &[Field] = &[
+        whole("session_id"),
+        only(
+            "tool_response",
+            &[whole("exit_code"), tail("stdout"), tail("stderr")],
+        ),
+    ];
+
+    #[test]
+    fn a_tail_field_keeps_only_the_end_of_a_long_string() {
+        let window = crate::failure_output::WINDOW_BYTES;
+        let stdout = format!("{}\nerror: the end", "x".repeat(3 * window));
+        let payload = json!({
+            "session_id":"s1",
+            "tool_response":{"stdout":stdout,"stderr":"short","exit_code":2}
+        })
+        .to_string();
+        let event = read(payload.as_bytes(), OUTPUT_FIELDS)
+            .unwrap()
+            .unwrap()
+            .event;
+        let (text, dropped) = tail_text(&event["tool_response"]["stdout"]).unwrap();
+        assert_eq!(text.len(), window);
+        assert!(text.ends_with("error: the end"));
+        assert_eq!(dropped, (stdout.len() - window) as u64);
+        assert_eq!(
+            tail_text(&event["tool_response"]["stderr"]),
+            Some(("short", 0))
+        );
+        assert_eq!(event["tool_response"]["exit_code"], 2);
+    }
+
+    #[test]
+    fn a_tail_field_of_another_type_is_null_and_cuts_on_a_character() {
+        let event = read(
+            br#"{"tool_response":{"stdout":{"text":"x"},"stderr":[1]}}"#.as_slice(),
+            OUTPUT_FIELDS,
+        )
+        .unwrap()
+        .unwrap()
+        .event;
+        assert_eq!(event["tool_response"], json!({"stdout":null,"stderr":null}));
+        assert_eq!(tail_text(&Value::Null), None);
+
+        let window = crate::failure_output::WINDOW_BYTES;
+        let payload = json!({"tool_response":{"stdout":"é".repeat(window)}}).to_string();
+        let event = read(payload.as_bytes(), OUTPUT_FIELDS)
+            .unwrap()
+            .unwrap()
+            .event;
+        let (text, dropped) = tail_text(&event["tool_response"]["stdout"]).unwrap();
+        assert!(text.chars().all(|c| c == 'é'));
+        assert_eq!(text.len() as u64 + dropped, (2 * window) as u64);
     }
 
     #[test]

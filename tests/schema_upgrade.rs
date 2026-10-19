@@ -24,7 +24,7 @@ use suvadu::db;
 use suvadu::repository::Repository;
 
 /// The schema version an upgrade must end at.
-const CURRENT_SCHEMA: i64 = 13;
+const CURRENT_SCHEMA: i64 = 14;
 
 /// `entries`/`sessions`/`tags`/`notes`/`bookmarks` exactly as migration v1
 /// created them: the three late columns on `entries` arrive by `ALTER TABLE`,
@@ -249,6 +249,8 @@ fn assert_current_schema_present(conn: &Connection) {
         "ai_events",
         "ai_sources",
         "ai_summaries",
+        // v14: the end of a failed command's output, when capture is on.
+        "entry_output",
     ] {
         assert!(
             table_exists(conn, table),

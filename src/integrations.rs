@@ -17,7 +17,7 @@ use crate::util::atomic_write;
 /// payloads are read through [`hook_input`] with a larger cap instead.
 const MAX_HOOK_INPUT_BYTES: u64 = 1_048_576;
 
-use hook_input::{only, whole, Field};
+use hook_input::{only, tail, whole, Field};
 
 /// What the Claude Code `PostToolUse`/`PostToolUseFailure` hooks use.
 const CLAUDE_TOOL_FIELDS: &[Field] = &[
@@ -26,7 +26,13 @@ const CLAUDE_TOOL_FIELDS: &[Field] = &[
     whole("cwd"),
     only(
         "tool_response",
-        &[whole("exit_code"), whole("exitCode"), whole("status_code")],
+        &[
+            whole("exit_code"),
+            whole("exitCode"),
+            whole("status_code"),
+            tail("stdout"),
+            tail("stderr"),
+        ],
     ),
     whole("error"),
     whole("session_id"),
@@ -47,6 +53,7 @@ const CURSOR_SHELL_FIELDS: &[Field] = &[
     whole("command"),
     whole("cwd"),
     whole("exit_code"),
+    tail("output"),
     whole("duration"),
     whole("conversation_id"),
 ];
@@ -129,6 +136,13 @@ pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
     // Read cached prompt for this session (set by UserPromptSubmit hook)
     let context = claude_command_context(&event, native_session_id, &session_id);
 
+    // Kept only if this run reports a failure, which a success hook does
+    // only with an explicit exit code.
+    let failure_output = hook_input::captured_streams(
+        &event["tool_response"]["stdout"],
+        &event["tool_response"]["stderr"],
+    );
+
     crate::commands::entry::handle_add_with_context(crate::commands::entry::AddParams {
         session_id,
         command: command.to_string(),
@@ -140,6 +154,7 @@ pub fn handle_hook_claude_code() -> Result<(), Box<dyn std::error::Error>> {
         executor: Some("claude-code".to_string()),
         context,
         start_cwd: None,
+        failure_output,
     })
 }
 
@@ -347,6 +362,13 @@ pub fn handle_hook_claude_code_failure() -> Result<(), Box<dyn std::error::Error
 
     let context = claude_command_context(&event, native_session_id, &session_id);
 
+    let failure_output = event
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .map(claude_error_output)
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| crate::failure_output::Captured::from_text("output", text));
+
     crate::commands::entry::handle_add_with_context(crate::commands::entry::AddParams {
         session_id,
         command: command.to_string(),
@@ -358,6 +380,7 @@ pub fn handle_hook_claude_code_failure() -> Result<(), Box<dyn std::error::Error
         executor: Some("claude-code".to_string()),
         context,
         start_cwd: None,
+        failure_output,
     })
 }
 
@@ -500,6 +523,7 @@ pub fn handle_hook_cursor() -> Result<(), Box<dyn std::error::Error>> {
         executor: Some("cursor".to_string()),
         context,
         start_cwd: None,
+        failure_output: hook_input::captured_stream("output", &event["output"]),
     })
 }
 
@@ -566,6 +590,18 @@ fn parse_exit_code_from_error(error: &str) -> Option<i32> {
         }
     }
     None
+}
+
+/// The command's output in a Claude Code `PostToolUseFailure` error: the
+/// error text without its first line when that line only gives the exit
+/// status (`Exit code 1`, `Command exited with non-zero status code 2`).
+fn claude_error_output(error: &str) -> &str {
+    let (first, rest) = error.split_once('\n').unwrap_or((error, ""));
+    if first.len() <= 80 && parse_exit_code_from_error(first).is_some() {
+        rest
+    } else {
+        error
+    }
 }
 
 /// Returns `true` if `id` contains only safe characters for use in file names.
@@ -1290,6 +1326,10 @@ const sentMessageIDs = new Map();
 // Stay well under the hook's 16 MB input cap, however long the session.
 const MAX_BATCH_BYTES = 4 * 1024 * 1024;
 
+// The end of a failed command's output sent to suv add; it keeps at most
+// its last 64 KB to clean and redact, and stores the last 4 KB of that.
+const OUTPUT_TAIL_CHARS = 64 * 1024;
+
 function sendBatch(sessionID, directory, batch) {
   const result = spawnSync(
     "suv",
@@ -1393,8 +1433,22 @@ export default async (input) => {
       if (exit !== undefined && exit !== null) {
         args.push("--exit-code", String(exit));
       }
+      // A failed command's output goes on stdin; suv keeps its tail only
+      // when failure-output capture is on. Only the end is sent, and how
+      // much was left out, so a huge log costs nothing.
+      let input;
+      const text = typeof output?.output === "string" ? output.output : output?.metadata?.output;
+      if (exit !== undefined && exit !== null && exit !== 0 && typeof text === "string" && text) {
+        input = text.slice(-OUTPUT_TAIL_CHARS);
+        const dropped = Buffer.byteLength(text) - Buffer.byteLength(input);
+        args.push("--output-stdin", "--output-dropped-bytes", String(dropped));
+      }
       try {
-        spawnSync("suv", args, { stdio: "ignore", timeout: 5000 });
+        spawnSync("suv", args, {
+          input,
+          stdio: [input === undefined ? "ignore" : "pipe", "ignore", "ignore"],
+          timeout: 5000,
+        });
       } catch {
         // Best-effort — don't break opencode if suvadu fails
       }
