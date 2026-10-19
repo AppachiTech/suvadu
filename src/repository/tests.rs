@@ -4005,10 +4005,23 @@ fn assert_seeks(repo: &Repository, sql: &str, params: &[&dyn rusqlite::ToSql]) {
 fn smart_rank_lookups_seek_indexes() {
     let (_temp, repo) = setup_test_db();
     for include_agents in [false, true] {
-        assert_seeks(
-            &repo,
-            &Repository::command_stats_sql(include_agents),
-            &[&0_i64, &"[\"a\"]"],
+        let sql = Repository::command_stats_sql(include_agents);
+        assert_seeks(&repo, &sql, &[&0_i64, &"[\"a\"]"]);
+        // Every column the statistics read is in the index, so a command's
+        // runs never cost a lookup in the table each.
+        let mut stmt = repo
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        let plan: Vec<String> = stmt
+            .query_map(rusqlite::params![0_i64, "[\"a\"]"], |row| row.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|d| d.contains("COVERING INDEX idx_entries_command_started")),
+            "{plan:#?}"
         );
         assert_seeks(
             &repo,

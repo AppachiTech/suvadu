@@ -24,7 +24,7 @@ use suvadu::db;
 use suvadu::repository::Repository;
 
 /// The schema version an upgrade must end at.
-const CURRENT_SCHEMA: i64 = 12;
+const CURRENT_SCHEMA: i64 = 13;
 
 /// `entries`/`sessions`/`tags`/`notes`/`bookmarks` exactly as migration v1
 /// created them: the three late columns on `entries` arrive by `ALTER TABLE`,
@@ -280,6 +280,16 @@ fn assert_current_schema_present(conn: &Connection) {
         ),
         1,
         "missing idx_entries_command_nocase after upgrade"
+    );
+    // v13: Smart rank's statistics read the command index alone.
+    assert_eq!(
+        scalar_i64(
+            conn,
+            "SELECT COUNT(*) FROM pragma_index_info('idx_entries_command_started') \
+             WHERE name IN ('exit_code', 'executor_type')"
+        ),
+        2,
+        "idx_entries_command_started lacks the outcome columns after upgrade"
     );
     // Added to ai_sources after the first checkpointed release; a database
     // created by an older build must still end up with them.

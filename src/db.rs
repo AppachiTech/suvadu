@@ -17,7 +17,7 @@ pub enum DbError {
 pub type DbResult<T> = Result<T, DbError>;
 
 /// Current schema version. Increment when adding new migrations.
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 
 /// Get the path to the suvadu database file
 pub fn get_db_path() -> DbResult<PathBuf> {
@@ -416,6 +416,7 @@ fn run_migrations(conn: &mut Connection) -> DbResult<()> {
         (10, migrate_v10),
         (11, migrate_v11),
         (12, migrate_v12),
+        (13, migrate_v13),
     ];
 
     loop {
@@ -795,6 +796,25 @@ fn migrate_v12(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Migration v13: Smart rank's statistics come from an index alone.
+///
+/// Recall's Smart rank sums a weight per run by age and counts failures for
+/// every distinct command in its ranked window, leaving agent runs out
+/// while they are hidden (`Repository::command_stats`). The command index
+/// found those runs but held neither their exit status nor their executor,
+/// so each run cost a lookup in the table, which dominated a one-letter
+/// query on a large history (BENCHMARKS.md). With `exit_code` and
+/// `executor_type` in the index it is read alone. The index keeps its name and its leading
+/// columns, so every lookup it answered before it still answers.
+fn migrate_v13(conn: &Connection) -> DbResult<()> {
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_entries_command_started;
+         CREATE INDEX idx_entries_command_started
+            ON entries(command, started_at, exit_code, executor_type);",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -870,10 +890,10 @@ mod tests {
             "CREATE TABLE schema_version (version INTEGER NOT NULL);
              INSERT INTO schema_version VALUES (8);
              -- Every v8 database has entries; v10 re-creates a trigger on it
-             -- and v12 indexes these columns.
+             -- and v12 and v13 index these columns.
              CREATE TABLE entries (
                  id INTEGER PRIMARY KEY, command TEXT NOT NULL, cwd TEXT NOT NULL,
-                 started_at INTEGER NOT NULL, executor_type TEXT
+                 exit_code INTEGER, started_at INTEGER NOT NULL, executor_type TEXT
              );
              CREATE TABLE ai_summaries (
                  id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
@@ -1503,6 +1523,110 @@ mod tests {
         let after = bytes(&conn);
         println!(
             "v12 at 100k entries: migration {migrated:?}, database {} KiB -> {} KiB",
+            before / 1024,
+            after / 1024
+        );
+    }
+
+    /// The columns of index `name`, in order.
+    fn index_columns(conn: &Connection, name: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT name FROM pragma_index_info(?1) ORDER BY seqno")
+            .unwrap();
+        stmt.query_map([name], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    /// Back to a v12 database: the command index without the outcome
+    /// columns.
+    fn revert_to_v12(conn: &Connection) {
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_entries_command_started;
+             CREATE INDEX idx_entries_command_started ON entries(command, started_at);
+             UPDATE schema_version SET version = 12;",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_v13_carries_outcomes_in_the_command_index() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let conn = init_db(&db_path).unwrap();
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'host', 1000, NULL)", [])
+            .unwrap();
+        revert_to_v12(&conn);
+        insert_entry(&conn, 1, "make");
+        insert_entry(&conn, 2, "make");
+        drop(conn);
+
+        let conn = init_db(&db_path).unwrap();
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_eq!(
+            index_columns(&conn, "idx_entries_command_started"),
+            ["command", "started_at", "exit_code", "executor_type"]
+        );
+        let runs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entries INDEXED BY idx_entries_command_started
+                 WHERE command = 'make'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(runs, 2);
+        // Another shell running it again changes nothing.
+        let names = index_names(&conn);
+        migrate_v13(&conn).unwrap();
+        assert_eq!(index_names(&conn), names);
+        assert_eq!(index_columns(&conn, "idx_entries_command_started").len(), 4);
+    }
+
+    /// How long v13 holds the write lock on a large history, and what its
+    /// wider index costs on disk. Prints rather than asserts. Run with
+    /// `cargo test --release --bin suv v13_migration_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "builds a 100k-entry database; run explicitly with --ignored"]
+    fn v13_migration_cost_on_a_large_history() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let mut conn = init_db(&db_path).unwrap();
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'host', 1000, NULL)", [])
+            .unwrap();
+        revert_to_v12(&conn);
+        let shapes = [
+            "cargo test --workspace --package suvadu-core case_",
+            "kubectl get pods -n kube-system -l app=api-gateway-",
+            "git commit -m 'fix: handle the hive-agent reconnect path' #",
+            "docker compose -f deploy/docker-compose.prod.yml up -d svc_",
+            "ssh deploy@build-runner-",
+            "rg --hidden -g '!target' 'normalize_separators' src/",
+        ];
+        conn.execute_batch("BEGIN").unwrap();
+        for i in 0..100_000_i64 {
+            let shape = shapes[usize::try_from(i).unwrap() % shapes.len()];
+            insert_entry(&conn, i + 1, &format!("{shape}{}", i % 1000));
+        }
+        conn.execute_batch("COMMIT").unwrap();
+        conn.execute_batch("VACUUM").unwrap();
+        let bytes = |conn: &Connection| -> i64 {
+            conn.query_row(
+                "SELECT page_count * page_size FROM pragma_page_count, pragma_page_size",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let before = bytes(&conn);
+        let start = std::time::Instant::now();
+        run_migrations(&mut conn).unwrap();
+        let migrated = start.elapsed();
+        conn.execute_batch("VACUUM").unwrap();
+        let after = bytes(&conn);
+        println!(
+            "v13 at 100k entries: migration {migrated:?}, database {} KiB -> {} KiB",
             before / 1024,
             after / 1024
         );
