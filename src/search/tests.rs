@@ -3048,6 +3048,116 @@ fn typed_search_latency_on_a_large_history() {
     }
 }
 
+/// A 100,000-command history shaped like a real one: a few dozen command
+/// shapes with varying arguments (about 1,400 distinct commands), 200 shell
+/// sessions, 90 days of timestamps ending now, a tenth of the runs failing.
+/// Built in one transaction. Returns the id of the newest session.
+fn realistic_history(entries: usize) -> (tempfile::TempDir, crate::repository::Repository, String) {
+    const SHAPES: &[&str] = &[
+        "git status",
+        "git add -A",
+        "git commit",
+        "git push origin feature/x{n}",
+        "git checkout feature/x{n}",
+        "git log --oneline -n {n}",
+        "git diff HEAD~{n}",
+        "cargo test",
+        "cargo test search::tests::case_{n}",
+        "cargo build --release",
+        "cargo clippy --all-targets",
+        "cargo run -- search --query q{n}",
+        "docker compose up -d",
+        "docker logs -f svc{n}",
+        "kubectl get pods -n ns{n}",
+        "kubectl describe pod web-{n}",
+        "terraform plan -var x={n}",
+        "npm run dev",
+        "npm test -- --grep t{n}",
+        "ls -la",
+        "cd ~/src/project{n}",
+        "vim src/file{n}.rs",
+        "make test",
+        "ssh host{n}.example.com",
+    ];
+    let (dir, repo) = crate::test_utils::test_repo();
+    let now = chrono::Utc::now().timestamp_millis();
+    let span = 90 * 24 * 3_600_000_i64;
+    let sessions = 200;
+    for s in 0..sessions {
+        repo.insert_session(&crate::models::Session {
+            id: format!("bench-{s}"),
+            hostname: "test".into(),
+            created_at: now - span,
+            tag_id: None,
+        })
+        .unwrap();
+    }
+    let mut seed: u64 = 42;
+    let mut next = || {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        seed >> 33
+    };
+    let tx = repo.transaction().unwrap();
+    let total = i64::try_from(entries).unwrap();
+    for i in 0..total {
+        let shape = SHAPES[usize::try_from(next()).unwrap() % SHAPES.len()];
+        let command = shape.replace("{n}", &(next() % 100).to_string());
+        // Sessions run one after another, oldest first.
+        let session = i * sessions / total;
+        let mut entry = create_test_entry(&command);
+        entry.session_id = format!("bench-{session}");
+        entry.started_at = now - span + span * i / total;
+        entry.ended_at = entry.started_at + 500;
+        entry.cwd = format!("/home/u/src/project{}", next() % 20);
+        entry.exit_code = Some(i32::from(next() % 10 == 0));
+        repo.insert_entry(&entry).unwrap();
+    }
+    tx.commit().unwrap();
+    (dir, repo, format!("bench-{}", sessions - 1))
+}
+
+/// What a person typing a query pays per keystroke on a realistic 100k
+/// history, in both views, from inside the newest shell session. Ignored by
+/// default; run with
+/// `cargo test --release --bin suv ranked_typing_latency -- --ignored --nocapture`.
+#[test]
+#[ignore = "builds a 100k-entry database; run explicitly with --ignored"]
+fn ranked_typing_latency_on_a_realistic_history() {
+    let (_dir, repo, session) = realistic_history(100_000);
+    let keystrokes = ["g", "gi", "git", "git ", "git c", "git co", "git com"];
+    for unique in [false, true] {
+        // Each pass types the whole query into one recall session, as a
+        // person does; the first pass is a warm-up.
+        let mut per_key = vec![Vec::new(); keystrokes.len()];
+        for _ in 0..6 {
+            let mut config = test_search_config(vec![], 0);
+            config.view.unique_mode = unique;
+            config.view.current_cwd = Some("/home/u/src/project3".into());
+            let mut app = SearchApp::new(config);
+            app.recall.context.session_id = Some(session.clone());
+            for (k, query) in keystrokes.iter().enumerate() {
+                app.query = (*query).into();
+                let start = std::time::Instant::now();
+                app.reload_entries(&repo).unwrap();
+                per_key[k].push(start.elapsed());
+            }
+        }
+        println!("{}:", if unique { "Commands" } else { "Executions" });
+        for (k, query) in keystrokes.iter().enumerate() {
+            let mut runs = per_key[k][1..].to_vec();
+            runs.sort();
+            println!(
+                "  {:10} p50 {:>9.2?}  max {:>9.2?}",
+                format!("{query:?}"),
+                runs[runs.len() / 2],
+                runs[runs.len() - 1]
+            );
+        }
+    }
+}
+
 #[test]
 #[ignore = "builds a 100k-entry database; run explicitly with --ignored"]
 fn matching_mode_latency_on_a_large_history() {
