@@ -133,6 +133,9 @@ pub struct FilterState {
     pub exit_code_input: String,
     pub executor_filter_input: String,
     pub focus_index: usize, // 0=start, 1=end, 2=tag, 3=exit, 4=executor
+    /// Why the last Enter in the filter popup applied nothing: the field
+    /// at `focus_index` could not be read. Cleared by editing any field.
+    pub error: Option<String>,
 
     // Executor selector (populated from DB on filter open)
     pub executors: Vec<String>,
@@ -295,6 +298,7 @@ impl SearchApp {
                 exit_code_input: cfg.exit_code_input.unwrap_or_default(),
                 executor_filter_input: cfg.executor_filter_input.unwrap_or_default(),
                 focus_index: 0,
+                error: None,
                 executors: cfg.executors,
                 executor_sel: 0,
             },

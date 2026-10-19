@@ -1947,8 +1947,15 @@ fn test_filter_enter_unknown_tag_name() {
     app.filters.tag_filter_input = "nonexistent".to_string();
 
     let action = app.handle_input(KeyEvent::from(KeyCode::Enter));
-    assert!(matches!(action, SearchAction::Reload));
-    assert_eq!(app.filters.tag_id, None); // tag not found
+    // Not applied as "no tag filter": the popup stays open on the tag field.
+    assert!(matches!(action, SearchAction::Continue));
+    assert!(matches!(app.dialog, DialogState::Filter));
+    assert_eq!(app.filters.focus_index, 2);
+    assert_eq!(app.filters.tag_id, None);
+    assert_eq!(
+        app.filters.error.as_deref(),
+        Some("No tag named \"nonexistent\". Tags: deploy")
+    );
 }
 
 #[test]
@@ -1985,8 +1992,11 @@ fn test_filter_enter_invalid_exit_code() {
     app.dialog = DialogState::Filter;
     app.filters.exit_code_input = "abc".to_string();
 
-    app.handle_input(KeyEvent::from(KeyCode::Enter));
-    assert_eq!(app.filters.exit_code, None); // parse failure → None
+    let action = app.handle_input(KeyEvent::from(KeyCode::Enter));
+    assert!(matches!(action, SearchAction::Continue));
+    assert!(matches!(app.dialog, DialogState::Filter));
+    assert_eq!(app.filters.focus_index, 3);
+    assert_eq!(app.filters.exit_code, None);
 }
 
 #[test]
@@ -5487,4 +5497,164 @@ fn no_results_says_the_separator_fallback_was_tried_too() {
     app.reload_entries(&repo).unwrap();
     let screen = render_lines(&mut app, 100, 30).join("\n");
     assert!(!screen.contains("also tried"), "{screen}");
+}
+
+// ── Filter popup: Enter applies every field or none ──
+
+fn press(app: &mut SearchApp, code: KeyCode) -> SearchAction {
+    app.handle_input(KeyEvent::from(code))
+}
+
+fn type_text(app: &mut SearchApp, text: &str) {
+    for c in text.chars() {
+        press(app, KeyCode::Char(c));
+    }
+}
+
+/// Recall with the tag `work` (id 7) known.
+fn app_with_work_tag() -> SearchApp {
+    let mut config = test_search_config(vec![create_test_entry("ls")], 1);
+    config.tags = vec![Tag {
+        id: 7,
+        name: "work".into(),
+        description: None,
+    }];
+    SearchApp::new(config)
+}
+
+fn filter_popup_text(app: &SearchApp) -> String {
+    crate::test_utils::render_to_text(120, 40, |f| app.render_filter_popup(f, f.area()))
+}
+
+/// Replace the focused filter field's text with `text`.
+fn set_field(app: &mut SearchApp, text: &str) {
+    for _ in 0..200 {
+        press(app, KeyCode::Backspace);
+    }
+    type_text(app, text);
+}
+
+/// Applies start date 2024-01-15, no end date, tag `work` and exit code 1.
+fn apply_good_filters(app: &mut SearchApp) {
+    app.handle_input(ctrl_key('f'));
+    for text in ["2024-01-15", "", "work", "1"] {
+        set_field(app, text);
+        press(app, KeyCode::Tab);
+    }
+    assert!(matches!(press(app, KeyCode::Enter), SearchAction::Reload));
+    assert!(matches!(app.dialog, DialogState::None));
+    assert!(app.filters.after.is_some());
+    assert_eq!(app.filters.before, None);
+    assert_eq!(app.filters.tag_id, Some(7));
+    assert_eq!(app.filters.exit_code, Some(1));
+}
+
+/// Opens the popup, moves to `field`, replaces its text with `text` and
+/// presses Enter from another field.
+fn enter_in_field(app: &mut SearchApp, field: usize, text: &str) -> SearchAction {
+    app.handle_input(ctrl_key('f'));
+    for _ in 0..field {
+        press(app, KeyCode::Tab);
+    }
+    set_field(app, text);
+    // Leave the field, so Enter has to bring the focus back to it.
+    press(app, KeyCode::Tab);
+    press(app, KeyCode::Enter)
+}
+
+#[test]
+fn an_unreadable_filter_field_applies_nothing_and_names_the_field() {
+    for (field, text, message) in [
+        (0, "last tuesday", "Can't read the start date"),
+        (1, "soon", "Can't read the end date"),
+        (2, "wrok", "No tag named \"wrok\""),
+        (3, "one", "Can't read the exit code \"one\""),
+    ] {
+        let mut app = app_with_work_tag();
+        apply_good_filters(&mut app);
+        let (after, tag_id, exit_code) =
+            (app.filters.after, app.filters.tag_id, app.filters.exit_code);
+        let page = app.pagination.page;
+
+        let action = enter_in_field(&mut app, field, text);
+
+        // Nothing reloads, the popup stays open on the field, and every
+        // filter applied before is still applied.
+        assert!(matches!(action, SearchAction::Continue), "{text}");
+        assert!(matches!(app.dialog, DialogState::Filter), "{text}");
+        assert_eq!(app.filters.focus_index, field, "{text}");
+        assert_eq!(app.filters.after, after, "{text}");
+        assert_eq!(app.filters.before, None, "{text}");
+        assert_eq!(app.filters.tag_id, tag_id, "{text}");
+        assert_eq!(app.filters.exit_code, exit_code, "{text}");
+        assert_eq!(app.pagination.page, page, "{text}");
+        let screen = filter_popup_text(&app);
+        assert!(screen.contains(message), "{text}:\n{screen}");
+    }
+}
+
+#[test]
+fn an_unreadable_date_names_the_accepted_formats() {
+    let mut app = app_with_work_tag();
+    enter_in_field(&mut app, 0, "last tuesday");
+    let screen = filter_popup_text(&app);
+    for form in ["today", "N days ago", "YYYY-MM-DD"] {
+        assert!(screen.contains(form), "{form}:\n{screen}");
+    }
+    let message = app.filters.error.clone().expect("a message");
+    assert!(message.contains(crate::util::DATE_INPUT_FORMATS));
+}
+
+#[test]
+fn editing_the_field_clears_the_message_and_a_fix_applies() {
+    let mut app = app_with_work_tag();
+    enter_in_field(&mut app, 3, "one");
+    assert!(app.filters.error.is_some());
+    for _ in 0.."one".len() {
+        press(&mut app, KeyCode::Backspace);
+    }
+    assert!(app.filters.error.is_none());
+    assert!(!filter_popup_text(&app).contains("Can't read"));
+    type_text(&mut app, "2");
+    assert!(matches!(
+        press(&mut app, KeyCode::Enter),
+        SearchAction::Reload
+    ));
+    assert_eq!(app.filters.exit_code, Some(2));
+
+    // Typing and pasting clear it too, and so do Esc and reopening.
+    for clear in ["type", "paste", "esc"] {
+        let mut app = app_with_work_tag();
+        enter_in_field(&mut app, 2, "nope");
+        assert!(app.filters.error.is_some());
+        match clear {
+            "type" => type_text(&mut app, "x"),
+            "paste" => {
+                app.handle_paste("x");
+            }
+            _ => {
+                press(&mut app, KeyCode::Esc);
+                app.handle_input(ctrl_key('f'));
+            }
+        }
+        assert!(app.filters.error.is_none(), "{clear}");
+    }
+}
+
+#[test]
+fn blank_filter_fields_clear_their_filters() {
+    let mut app = app_with_work_tag();
+    apply_good_filters(&mut app);
+    app.handle_input(ctrl_key('f'));
+    for _ in 0..4 {
+        set_field(&mut app, " ");
+        press(&mut app, KeyCode::Tab);
+    }
+    assert!(matches!(
+        press(&mut app, KeyCode::Enter),
+        SearchAction::Reload
+    ));
+    assert_eq!(app.filters.after, None);
+    assert_eq!(app.filters.tag_id, None);
+    assert_eq!(app.filters.exit_code, None);
 }

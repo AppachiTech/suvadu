@@ -1108,8 +1108,25 @@ impl SearchApp {
         // The filter layout needs: 2 (border) + 2+2 (margin) + 1 (progress)
         // + 5*3 (fields) + 1 (help) = 23 rows ideal.
         // On small terminals, use all available height; on larger ones cap at 50%.
-        let popup_height = 23u16.min(area.height.saturating_sub(2));
         let popup_width = (area.width * 60 / 100).max(30).min(area.width);
+        // Why the last Enter applied nothing, wrapped to the popup's inner
+        // width (border and margin take 2 columns a side); the popup grows
+        // to fit it.
+        let error_rows: Vec<Line<'static>> =
+            self.filters
+                .error
+                .as_deref()
+                .map_or_else(Vec::new, |error| {
+                    crate::util::wrap_line(
+                        &Line::styled(error.to_string(), Style::default().fg(t.error)),
+                        usize::from(popup_width.saturating_sub(4)),
+                        true,
+                    )
+                });
+        let error_height = u16::try_from(error_rows.len()).unwrap_or(u16::MAX);
+        let popup_height = 23u16
+            .saturating_add(error_height)
+            .min(area.height.saturating_sub(2));
         let popup_area = Rect {
             x: area.x + (area.width.saturating_sub(popup_width)) / 2,
             y: area.y + (area.height.saturating_sub(popup_height)) / 2,
@@ -1119,8 +1136,8 @@ impl SearchApp {
         f.render_widget(Clear, popup_area);
         f.render_widget(block, popup_area);
 
-        // Available inner height after border (2) + margin (4)
-        let inner_height = popup_height.saturating_sub(6);
+        // Available inner height after border (2) + margin (4) + message
+        let inner_height = popup_height.saturating_sub(6 + error_height);
         // Each filter field is 3 rows; progress is 1; help is 1.
         // With ≤12 inner rows we can't fit all fields — show only the
         // focused field and its neighbors to avoid clipping.
@@ -1144,11 +1161,12 @@ impl SearchApp {
             self.render_filter_progress(f, chunks[0]);
             self.render_filter_fields(f, &chunks);
 
-            let help_text =
-                Paragraph::new("Tab/S-Tab: switch fields  |  Enter: apply  |  Esc: cancel")
-                    .alignment(Alignment::Center)
-                    .style(Style::default().fg(t.text_muted));
-            f.render_widget(help_text, chunks[6]);
+            Self::render_filter_footer(
+                f,
+                chunks[6],
+                error_rows,
+                "Tab/S-Tab: switch fields  |  Enter: apply  |  Esc: cancel",
+            );
         } else {
             // Compact mode: show progress + only the focused field + help.
             // This fits in as little as 7 inner rows (1 + 3 + 1 + margin).
@@ -1165,11 +1183,32 @@ impl SearchApp {
             self.render_filter_progress(f, chunks[0]);
             self.render_single_filter_field(f, chunks[1]);
 
-            let help_text = Paragraph::new("Tab/S-Tab: switch  |  Enter: apply  |  Esc: cancel")
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(t.text_muted));
-            f.render_widget(help_text, chunks[2]);
+            Self::render_filter_footer(
+                f,
+                chunks[2],
+                error_rows,
+                "Tab/S-Tab: switch  |  Enter: apply  |  Esc: cancel",
+            );
         }
+    }
+
+    /// The filter popup's last rows: why Enter applied nothing, if it did
+    /// not, and then the key help.
+    fn render_filter_footer(
+        f: &mut ratatui::Frame,
+        area: Rect,
+        error_rows: Vec<Line<'static>>,
+        help: &'static str,
+    ) {
+        let t = theme();
+        let mut lines: Vec<Line<'static>> = error_rows
+            .into_iter()
+            .map(|row| row.alignment(Alignment::Center))
+            .collect();
+        lines.push(
+            Line::styled(help, Style::default().fg(t.text_muted)).alignment(Alignment::Center),
+        );
+        f.render_widget(Paragraph::new(lines), area);
     }
 
     fn render_filter_progress(&self, f: &mut ratatui::Frame, area: Rect) {

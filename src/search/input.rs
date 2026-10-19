@@ -8,6 +8,14 @@ use crate::util;
 const MAX_INPUT_LEN: usize = 2000;
 
 /// Whether `c` still fits in `input` under [`MAX_INPUT_LEN`], in bytes.
+/// The filter popup's text fields, read: what Enter applies.
+struct ReadFilters {
+    after: Option<i64>,
+    before: Option<i64>,
+    tag_id: Option<i64>,
+    exit_code: Option<i32>,
+}
+
 const fn fits(input: &str, c: char) -> bool {
     input.len() + c.len_utf8() <= MAX_INPUT_LEN
 }
@@ -151,6 +159,7 @@ impl SearchApp {
             _ => return, // field 4 is a selector, no text paste
         };
         push_capped(target, text);
+        self.filters.error = None;
     }
 
     pub(super) fn handle_input(&mut self, key: KeyEvent) -> SearchAction {
@@ -435,6 +444,7 @@ impl SearchApp {
             KeyCode::Char('f') => {
                 self.dialog = DialogState::Filter;
                 self.filters.focus_index = 0;
+                self.filters.error = None;
             }
             KeyCode::Char('v') => {
                 // Verbatim: the selected command's exact text, every
@@ -694,6 +704,7 @@ impl SearchApp {
     fn handle_filter_input(&mut self, key: KeyEvent) -> SearchAction {
         match key.code {
             KeyCode::Esc => {
+                self.filters.error = None;
                 self.dialog = DialogState::None;
             }
             KeyCode::Tab => {
@@ -722,74 +733,76 @@ impl SearchApp {
                 let total = self.filters.executors.len() + 1;
                 self.filters.executor_sel = (self.filters.executor_sel + 1) % total;
             }
-            KeyCode::Backspace => match self.filters.focus_index {
-                0 => {
-                    self.filters.start_date_input.pop();
-                }
-                1 => {
-                    self.filters.end_date_input.pop();
-                }
-                2 => {
-                    self.filters.tag_filter_input.pop();
-                }
-                3 => {
-                    self.filters.exit_code_input.pop();
-                }
-                // field 4 is a selector, no text backspace
-                _ => {}
-            },
-            KeyCode::Char(c) => match self.filters.focus_index {
-                0 if fits(&self.filters.start_date_input, c) => {
-                    self.filters.start_date_input.push(c);
-                }
-                1 if fits(&self.filters.end_date_input, c) => {
-                    self.filters.end_date_input.push(c);
-                }
-                2 if fits(&self.filters.tag_filter_input, c) => {
-                    self.filters.tag_filter_input.push(c);
-                }
-                3 if fits(&self.filters.exit_code_input, c) => {
-                    self.filters.exit_code_input.push(c);
-                }
-                // field 4 is a selector, no text input
-                _ => {}
-            },
+            KeyCode::Backspace => {
+                self.filters.error = None;
+                self.pop_filter_char();
+            }
+            KeyCode::Char(c) => {
+                self.filters.error = None;
+                self.push_filter_char(c);
+            }
             _ => {}
         }
         SearchAction::Continue
     }
 
+    /// Delete the last character of the focused text field.
+    fn pop_filter_char(&mut self) {
+        match self.filters.focus_index {
+            0 => {
+                self.filters.start_date_input.pop();
+            }
+            1 => {
+                self.filters.end_date_input.pop();
+            }
+            2 => {
+                self.filters.tag_filter_input.pop();
+            }
+            3 => {
+                self.filters.exit_code_input.pop();
+            }
+            // field 4 is a selector, no text backspace
+            _ => {}
+        }
+    }
+
+    /// Type `c` into the focused text field, within the length limit.
+    fn push_filter_char(&mut self, c: char) {
+        match self.filters.focus_index {
+            0 if fits(&self.filters.start_date_input, c) => {
+                self.filters.start_date_input.push(c);
+            }
+            1 if fits(&self.filters.end_date_input, c) => {
+                self.filters.end_date_input.push(c);
+            }
+            2 if fits(&self.filters.tag_filter_input, c) => {
+                self.filters.tag_filter_input.push(c);
+            }
+            3 if fits(&self.filters.exit_code_input, c) => {
+                self.filters.exit_code_input.push(c);
+            }
+            // field 4 is a selector, no text input
+            _ => {}
+        }
+    }
+
+    /// Apply the popup's fields, all or nothing. A field that cannot be read
+    /// keeps every applied filter as it was and leaves the popup open on that
+    /// field, saying why; a blank field clears its filter.
     fn apply_filters(&mut self) -> SearchAction {
-        // Apply filters
-        self.filters.after = if self.filters.start_date_input.is_empty() {
-            None
-        } else {
-            util::parse_date_input(&self.filters.start_date_input, false)
+        let read = match self.read_filter_fields() {
+            Ok(read) => read,
+            Err((field, message)) => {
+                self.filters.focus_index = field;
+                self.filters.error = Some(message);
+                return SearchAction::Continue;
+            }
         };
-
-        self.filters.before = if self.filters.end_date_input.is_empty() {
-            None
-        } else {
-            util::parse_date_input(&self.filters.end_date_input, true)
-        };
-
-        // Resolve tag name to ID
-        self.filters.tag_id = if self.filters.tag_filter_input.is_empty() {
-            None
-        } else {
-            let input_lower = self.filters.tag_filter_input.to_lowercase();
-            self.tags
-                .iter()
-                .find(|t| t.name == input_lower)
-                .map(|t| t.id)
-        };
-
-        // Parse exit code
-        self.filters.exit_code = if self.filters.exit_code_input.is_empty() {
-            None
-        } else {
-            self.filters.exit_code_input.trim().parse::<i32>().ok()
-        };
+        self.filters.error = None;
+        self.filters.after = read.after;
+        self.filters.before = read.before;
+        self.filters.tag_id = read.tag_id;
+        self.filters.exit_code = read.exit_code;
 
         // Apply executor from selector -- extract the name part after ": "
         // e.g. "agent: claude-code" -> "claude-code"
@@ -813,5 +826,67 @@ impl SearchApp {
         // Reset to page 1 on new filter
         self.pagination.page = 1;
         SearchAction::Reload
+    }
+
+    /// The filter popup's text fields as filter values, or the first field
+    /// (in the popup's order) that cannot be read and why.
+    fn read_filter_fields(&self) -> Result<ReadFilters, (usize, String)> {
+        let date = |field: usize, which: &str, input: &str, end_of_day: bool| {
+            let input = input.trim();
+            if input.is_empty() {
+                return Ok(None);
+            }
+            util::parse_date_input(input, end_of_day)
+                .map(Some)
+                .ok_or_else(|| {
+                    (
+                        field,
+                        format!(
+                            "Can't read the {which} date \"{input}\". Accepted: {}",
+                            util::DATE_INPUT_FORMATS
+                        ),
+                    )
+                })
+        };
+        let after = date(0, "start", &self.filters.start_date_input, false)?;
+        let before = date(1, "end", &self.filters.end_date_input, true)?;
+
+        let tag = self.filters.tag_filter_input.trim();
+        let tag_id = if tag.is_empty() {
+            None
+        } else {
+            let wanted = tag.to_lowercase();
+            let found = self.tags.iter().find(|t| t.name == wanted).map(|t| t.id);
+            if found.is_none() {
+                let known: Vec<&str> = self.tags.iter().map(|t| t.name.as_str()).collect();
+                let hint = if known.is_empty() {
+                    "There are no tags yet".to_string()
+                } else {
+                    format!("Tags: {}", known.join(", "))
+                };
+                return Err((2, format!("No tag named \"{tag}\". {hint}")));
+            }
+            found
+        };
+
+        let code = self.filters.exit_code_input.trim();
+        let exit_code = if code.is_empty() {
+            None
+        } else {
+            Some(code.parse::<i32>().map_err(|_| {
+                (
+                    3,
+                    format!(
+                        "Can't read the exit code \"{code}\". Use a whole number, such as 0 or 1"
+                    ),
+                )
+            })?)
+        };
+        Ok(ReadFilters {
+            after,
+            before,
+            tag_id,
+            exit_code,
+        })
     }
 }
