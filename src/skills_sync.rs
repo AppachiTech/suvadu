@@ -15,6 +15,9 @@
 //! edited this by hand", reporting the second as a conflict instead of
 //! silently overwriting it, and [`cleanup`] can remove exactly the files
 //! suvadu generated — and nothing else — once the skill behind them is gone.
+//! Every sync does that too: a generated file whose skill was removed or
+//! disabled is removed on the next sync, provided it still carries
+//! suvadu's intact marker.
 
 use crate::cli::SyncTarget;
 use crate::models::{Skill, SKILL_SCOPE_GLOBAL, SKILL_STATUS_ACTIVE};
@@ -415,9 +418,6 @@ fn sync_inner(
         notes,
         dry_run: options.dry_run,
     };
-    if relevant.is_empty() {
-        return Ok(report);
-    }
 
     for &target in targets {
         match target {
@@ -437,6 +437,22 @@ fn sync_inner(
             }
         }
     }
+
+    // What was removed or disabled since the last sync leaves its generated
+    // files behind; take away the ones suvadu can prove it wrote.
+    remove_orphans(
+        &all,
+        &relevant,
+        targets,
+        cwd,
+        home,
+        codex_home_override,
+        OrphanOptions {
+            dry_run: options.dry_run,
+            report_foreign: false,
+        },
+        &mut report,
+    )?;
 
     Ok(report)
 }
@@ -973,7 +989,50 @@ fn cleanup_inner(
     let all = repo.list_skills(None, Some(SKILL_STATUS_ACTIVE))?;
     let cwd_str = cwd.to_string_lossy().to_string();
     let (relevant, _) = resolve_for_cwd(&all, &cwd_str);
+    let mut report = SyncReport {
+        changes: Vec::new(),
+        notes: Vec::new(),
+        dry_run,
+    };
+    remove_orphans(
+        &all,
+        &relevant,
+        targets,
+        cwd,
+        home,
+        codex_home_override,
+        OrphanOptions {
+            dry_run,
+            report_foreign: true,
+        },
+        &mut report,
+    )?;
+    Ok(report)
+}
 
+/// How [`remove_orphans`] reports what it leaves alone.
+#[derive(Debug, Clone, Copy)]
+struct OrphanOptions {
+    dry_run: bool,
+    /// Report files with no suvadu marker at all. An explicit cleanup says
+    /// why it left each one; a sync stays quiet about files that were
+    /// never suvadu's, such as your own hand-written Claude Code skills.
+    report_foreign: bool,
+}
+
+/// Remove generated files and blocks that no skill in `relevant` (the
+/// skills a sync from `cwd` writes) still wants.
+#[allow(clippy::too_many_arguments)]
+fn remove_orphans(
+    all: &[Skill],
+    relevant: &[&Skill],
+    targets: &[SyncTarget],
+    cwd: &Path,
+    home: Option<&Path>,
+    codex_home_override: Option<&Path>,
+    options: OrphanOptions,
+    report: &mut SyncReport,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Global destinations are shared by every project, so what belongs in
     // them is decided by the active *global* library entries — before any
     // project-scoped shadowing. `relevant` has shadowed globals removed for
@@ -985,35 +1044,28 @@ fn cleanup_inner(
         .filter(|s| s.scope == SKILL_SCOPE_GLOBAL)
         .map(|s| s.name.as_str())
         .collect();
-
-    let mut report = SyncReport {
-        changes: Vec::new(),
-        notes: Vec::new(),
-        dry_run,
-    };
+    let dry_run = options.dry_run;
 
     for &target in targets {
         match target {
             SyncTarget::ClaudeCode => {
-                if let Some(home) = home {
-                    cleanup_claude_root(
-                        &home.join(".claude").join("skills"),
-                        &global_names,
-                        dry_run,
-                        &mut report,
-                    )?;
-                }
-                let expected: Vec<&str> = relevant
+                let mut project_expected: Vec<&str> = relevant
                     .iter()
                     .filter(|s| s.scope != SKILL_SCOPE_GLOBAL)
                     .map(|s| s.name.as_str())
                     .collect();
-                cleanup_claude_root(
-                    &cwd.join(".claude").join("skills"),
-                    &expected,
-                    dry_run,
-                    &mut report,
-                )?;
+                let project_root = cwd.join(".claude").join("skills");
+                let global_root = home.map(|h| h.join(".claude").join("skills"));
+                if let Some(global_root) = &global_root {
+                    if same_location(global_root, &project_root) {
+                        // Synced from home itself, both scopes share one
+                        // directory: a single pass, keeping both sets.
+                        project_expected.extend(global_names.iter().copied());
+                    } else {
+                        cleanup_claude_root(global_root, &global_names, options, report)?;
+                    }
+                }
+                cleanup_claude_root(&project_root, &project_expected, options, report)?;
             }
             SyncTarget::Cursor => {
                 // Cursor rules live in this project only and a shadowed
@@ -1023,26 +1075,49 @@ fn cleanup_inner(
                 cleanup_cursor(
                     &cwd.join(".cursor").join("rules"),
                     &expected,
-                    dry_run,
-                    &mut report,
+                    options,
+                    report,
                 )?;
             }
             SyncTarget::Codex => {
                 let has_global = !global_names.is_empty();
-                if let Some(codex_home) = codex_home_path(home, codex_home_override) {
-                    cleanup_codex_file(
-                        &codex_home.join("AGENTS.md"),
-                        has_global,
-                        dry_run,
-                        &mut report,
-                    )?;
-                }
                 let has_project = relevant.iter().any(|s| s.scope != SKILL_SCOPE_GLOBAL);
-                cleanup_codex_file(&cwd.join("AGENTS.md"), has_project, dry_run, &mut report)?;
+                let project_file = cwd.join("AGENTS.md");
+                let global_file =
+                    codex_home_path(home, codex_home_override).map(|h| h.join("AGENTS.md"));
+                if let Some(global_file) = &global_file {
+                    if same_location(global_file, &project_file) {
+                        cleanup_codex_file(
+                            global_file,
+                            has_global || has_project,
+                            dry_run,
+                            report,
+                        )?;
+                        continue;
+                    }
+                    cleanup_codex_file(global_file, has_global, dry_run, report)?;
+                }
+                cleanup_codex_file(&project_file, has_project, dry_run, report)?;
             }
         }
     }
-    Ok(report)
+    Ok(())
+}
+
+/// Whether `a` and `b` name the same file or directory, however spelled.
+/// A home reached through a symlink (`/var` → `/private/var` on macOS) or
+/// a project's `.claude/skills` linked to the global one are one place on
+/// disk, and removing orphans must treat them as one: otherwise the
+/// project pass would delete what the global pass just kept. Paths that do
+/// not exist (yet) can hold nothing to remove, so plain equality decides.
+fn same_location(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 const FOREIGN_CLEANUP_DETAIL: &str =
@@ -1058,9 +1133,10 @@ fn cleanup_generated_file(
     path: &Path,
     skill_name: &str,
     still_wanted: bool,
-    dry_run: bool,
+    options: OrphanOptions,
     report: &mut SyncReport,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let dry_run = options.dry_run;
     if still_wanted {
         return Ok(());
     }
@@ -1073,6 +1149,7 @@ fn cleanup_generated_file(
         Some(Ownership::Ours) => None,
         Some(Ownership::Appended) => Some(APPENDED_CLEANUP_DETAIL),
         Some(_) => Some(DRIFTED_CLEANUP_DETAIL),
+        None if !options.report_foreign => return Ok(()),
         None => Some(FOREIGN_CLEANUP_DETAIL),
     };
     if let Some(detail) = detail {
@@ -1109,7 +1186,7 @@ fn cleanup_generated_file(
 fn cleanup_claude_root(
     root: &Path,
     expected: &[&str],
-    dry_run: bool,
+    options: OrphanOptions,
     report: &mut SyncReport,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Ok(entries) = std::fs::read_dir(root) else {
@@ -1131,7 +1208,7 @@ fn cleanup_claude_root(
             &dir.join("SKILL.md"),
             &name,
             expected.contains(&name.as_str()),
-            dry_run,
+            options,
             report,
         )?;
     }
@@ -1141,7 +1218,7 @@ fn cleanup_claude_root(
 fn cleanup_cursor(
     rules_dir: &Path,
     expected: &[&str],
-    dry_run: bool,
+    options: OrphanOptions,
     report: &mut SyncReport,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Ok(entries) = std::fs::read_dir(rules_dir) else {
@@ -1163,7 +1240,7 @@ fn cleanup_cursor(
             &file,
             &name,
             expected.contains(&name.as_str()),
-            dry_run,
+            options,
             report,
         )?;
     }
@@ -1276,7 +1353,7 @@ fn escape_yaml_scalar(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{NewSkill, SKILL_STATUS_PENDING};
+    use crate::models::{NewSkill, SKILL_STATUS_ARCHIVED, SKILL_STATUS_PENDING};
     use crate::test_utils::test_repo;
 
     fn skill(name: &str, scope: &str) -> NewSkill {
@@ -1320,6 +1397,179 @@ mod tests {
             .iter()
             .find(|c| c.path == path)
             .unwrap_or_else(|| panic!("no change reported for {}", path.display()))
+    }
+
+    // ── Orphans removed by sync ───────────────────────────────────────────
+
+    #[test]
+    fn sync_removes_the_files_of_a_skill_deleted_or_disabled_since_the_last_sync() {
+        let (_dir, repo) = test_repo();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let codex_home = tempfile::tempdir().unwrap();
+        repo.create_skill(&skill("gone", SKILL_SCOPE_GLOBAL))
+            .unwrap();
+        repo.create_skill(&skill("paused", SKILL_SCOPE_GLOBAL))
+            .unwrap();
+        repo.create_skill(&skill("kept", SKILL_SCOPE_GLOBAL))
+            .unwrap();
+        let run = |options| {
+            sync_inner(
+                &repo,
+                &ALL_TARGETS,
+                cwd.path(),
+                Some(home.path()),
+                Some(codex_home.path()),
+                options,
+            )
+            .unwrap()
+        };
+        run(SyncOptions::apply());
+        let skill_md = |name: &str| home.path().join(format!(".claude/skills/{name}/SKILL.md"));
+        assert!(skill_md("gone").exists() && skill_md("paused").exists());
+
+        repo.delete_skill("gone", SKILL_SCOPE_GLOBAL).unwrap();
+        repo.set_skill_status("paused", SKILL_SCOPE_GLOBAL, SKILL_STATUS_ARCHIVED)
+            .unwrap();
+
+        let preview = run(SyncOptions::preview());
+        assert_eq!(preview.removed(), 4, "{:?}", preview.lines(false));
+        assert!(skill_md("gone").exists(), "a preview removes nothing");
+        assert!(preview
+            .lines(false)
+            .iter()
+            .any(|l| l.contains("would remove")));
+
+        let applied = run(SyncOptions::apply());
+        assert_eq!(applied.removed(), 4);
+        assert!(!skill_md("gone").exists());
+        assert!(!skill_md("paused").exists());
+        assert!(!cwd.path().join(".cursor/rules/gone.mdc").exists());
+        assert!(skill_md("kept").exists());
+        assert!(cwd.path().join(".cursor/rules/kept.mdc").exists());
+        let agents = std::fs::read_to_string(codex_home.path().join("AGENTS.md")).unwrap();
+        assert!(agents.contains("## kept") && !agents.contains("## gone"));
+    }
+
+    #[test]
+    fn sync_removes_the_managed_block_once_no_skill_is_left_for_it() {
+        let (_dir, repo) = test_repo();
+        let cwd = tempfile::tempdir().unwrap();
+        let scope = cwd.path().to_string_lossy().to_string();
+        repo.create_skill(&skill("only", &scope)).unwrap();
+        let agents = cwd.path().join("AGENTS.md");
+        std::fs::write(&agents, "# Mine\n").unwrap();
+        apply(&repo, &[SyncTarget::Codex], cwd.path(), None);
+        assert!(std::fs::read_to_string(&agents)
+            .unwrap()
+            .contains("## only"));
+
+        repo.delete_skill("only", &scope).unwrap();
+        let report = apply(&repo, &[SyncTarget::Codex], cwd.path(), None);
+        assert_eq!(report.removed(), 1, "{:?}", report.lines(false));
+        assert_eq!(std::fs::read_to_string(&agents).unwrap(), "# Mine\n");
+    }
+
+    #[test]
+    fn sync_is_quiet_about_hand_written_agent_files_and_keeps_edited_orphans() {
+        let (_dir, repo) = test_repo();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let mine = home.path().join(".claude/skills/my-own/SKILL.md");
+        std::fs::create_dir_all(mine.parent().unwrap()).unwrap();
+        std::fs::write(&mine, "my own skill, not suvadu's").unwrap();
+
+        repo.create_skill(&skill("edited", SKILL_SCOPE_GLOBAL))
+            .unwrap();
+        apply(
+            &repo,
+            &[SyncTarget::ClaudeCode],
+            cwd.path(),
+            Some(home.path()),
+        );
+        let edited = home.path().join(".claude/skills/edited/SKILL.md");
+        let content = std::fs::read_to_string(&edited).unwrap();
+        std::fs::write(&edited, content.replace("Body for", "My edit of")).unwrap();
+        repo.delete_skill("edited", SKILL_SCOPE_GLOBAL).unwrap();
+
+        let report = apply(
+            &repo,
+            &[SyncTarget::ClaudeCode],
+            cwd.path(),
+            Some(home.path()),
+        );
+        assert!(
+            !report.changes.iter().any(|c| c.path == mine),
+            "a file suvadu never wrote is not even mentioned by a sync"
+        );
+        assert!(mine.exists());
+        assert_eq!(report.left_alone(), 1, "the edited orphan is reported");
+        assert!(edited.exists(), "an edited file is never deleted");
+    }
+
+    #[test]
+    fn syncing_from_home_itself_never_removes_the_global_skills() {
+        let (_dir, repo) = test_repo();
+        let home = tempfile::tempdir().unwrap();
+        repo.create_skill(&skill("everywhere", SKILL_SCOPE_GLOBAL))
+            .unwrap();
+        let codex_home = home.path();
+        let run = || {
+            sync_inner(
+                &repo,
+                &ALL_TARGETS,
+                home.path(),
+                Some(home.path()),
+                Some(codex_home),
+                SyncOptions::apply(),
+            )
+            .unwrap()
+        };
+        run();
+        let report = run();
+        assert_eq!(report.removed(), 0, "{:?}", report.lines(false));
+        assert!(home
+            .path()
+            .join(".claude/skills/everywhere/SKILL.md")
+            .exists());
+        assert!(std::fs::read_to_string(home.path().join("AGENTS.md"))
+            .unwrap()
+            .contains("## everywhere"));
+    }
+
+    /// The same directory reached by two spellings — a symlinked home, as
+    /// macOS gives every temporary directory (`/var` → `/private/var`) —
+    /// is still one directory: the project pass must not remove what the
+    /// global pass keeps.
+    #[cfg(unix)]
+    #[test]
+    fn syncing_from_home_through_a_symlink_never_removes_the_global_skills() {
+        let (_dir, repo) = test_repo();
+        let base = tempfile::tempdir().unwrap();
+        let real = base.path().join("real-home");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.path().join("home-link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        repo.create_skill(&skill("everywhere", SKILL_SCOPE_GLOBAL))
+            .unwrap();
+        let run = || {
+            sync_inner(
+                &repo,
+                &ALL_TARGETS,
+                &real,
+                Some(&link),
+                Some(&link),
+                SyncOptions::apply(),
+            )
+            .unwrap()
+        };
+        run();
+        let report = run();
+        assert_eq!(report.removed(), 0, "{:?}", report.lines(false));
+        assert!(real.join(".claude/skills/everywhere/SKILL.md").exists());
+        assert!(std::fs::read_to_string(real.join("AGENTS.md"))
+            .unwrap()
+            .contains("## everywhere"));
     }
 
     #[test]

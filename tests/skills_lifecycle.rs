@@ -442,6 +442,37 @@ fn an_agent_proposal_never_becomes_active_on_its_own() {
         .contains("pending review"));
 }
 
+/// Removing or disabling a library skill takes its generated files away on
+/// the next sync, without a separate cleanup step.
+#[test]
+fn the_next_sync_removes_the_files_of_a_removed_or_disabled_skill() {
+    let sb = Sandbox::new();
+    sb.suv(&["skills", "add", "temp", "--body", "Temporary."]);
+    sb.suv(&["skills", "add", "paused", "--body", "Paused."]);
+    sb.suv(&["skills", "sync"]);
+    assert!(sb.claude_skill("temp").exists() && sb.claude_skill("paused").exists());
+
+    sb.suv(&["skills", "rm", "temp"]);
+    sb.suv(&["skills", "disable", "paused"]);
+    assert!(
+        sb.claude_skill("temp").exists(),
+        "rm alone never deletes files"
+    );
+    let preview = sb.suv(&["skills", "sync", "--dry-run"]);
+    assert!(preview.contains("would be removed"), "{preview}");
+    assert!(
+        sb.claude_skill("temp").exists(),
+        "a preview removes nothing"
+    );
+
+    let sync = sb.suv(&["skills", "sync"]);
+    assert!(sync.contains("removed"), "{sync}");
+    for name in ["temp", "paused"] {
+        assert!(!sb.claude_skill(name).exists(), "{sync}");
+        assert!(!sb.cursor_rule(name).exists(), "{sync}");
+    }
+}
+
 /// Recursively find the first file named exactly `name` under `path`. The
 /// real config directory is platform-specific (`directories`' `ProjectDirs`,
 /// not `XDG_CONFIG_HOME` on macOS), so search rather than hardcode.

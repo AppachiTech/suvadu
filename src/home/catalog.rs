@@ -1008,9 +1008,10 @@ static FEATURES: &[Feature] = &[
         guide: &[
             "The library lives in Suvadu. suv skills sync writes active skills into each \
              agent's own files (Claude Code, Cursor, Codex), inside sections Suvadu manages; \
-             suv skills cleanup removes those sections for skills that are gone or disabled.",
+             the next sync, or suv skills cleanup, removes those sections for skills that are \
+             gone or disabled.",
             "rm and disable change the library only: files already generated stay until the \
-             next cleanup.",
+             next sync or cleanup.",
         ],
         examples: &[
             ex("suv skills list", "What is in the library"),

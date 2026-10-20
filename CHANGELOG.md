@@ -28,6 +28,7 @@ All notable changes to this project will be documented in this file.
 - **A project `.suvadu.toml` can only tighten privacy** — it can no longer turn redaction off or recording back on, and its `exclusions` and `redaction.extra_patterns` add to your global lists instead of replacing them.
 - **`suv update` only installs a strictly newer release**, and refuses a download whose signed version does not match the release it advertises.
 - **Suvadu now declares Rust 1.95 as its minimum** (`rust-version`), which its SQLite dependency already required; CI checks it. `cargo install` on an older toolchain now says so up front instead of failing inside a dependency's build script.
+- **`suv skills sync` removes what it generated for skills that are gone** — a skill removed with `suv skills rm` or stopped with `suv skills disable` used to leave its `SKILL.md`, Cursor rule and `AGENTS.md` section behind until a separate `suv skills cleanup`. The next sync now removes them, with the same ownership check cleanup uses: only files and blocks that still carry Suvadu's intact marker go, a file edited since is reported and kept, and hand-written agent files are not mentioned at all. `--dry-run` lists them as *would remove*. `suv skills cleanup` still does the same on its own.
 
 ### Fixed
 - **The session picker keeps your place** — coming back from a session's timeline reset `suv sessions` to an empty query, no filters and the first row of the first page. The query, filters, page and selection now stay as you left them.

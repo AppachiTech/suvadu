@@ -390,10 +390,10 @@ fn handle_edit(
 }
 
 /// What removing a skill from the library does *not* do. Deleting the row
-/// cannot safely delete the agent files generated from it — one may have
-/// been edited since, and suvadu refuses to destroy work it can't prove it
-/// owns — so removal says plainly what is left behind and names the
-/// deliberate operation that clears it.
+/// does not touch the agent files generated from it — the next sync (or
+/// cleanup) removes the ones suvadu can prove it wrote and nobody edited
+/// since — so removal says plainly what is left behind for now and what
+/// clears it.
 pub fn removal_notice(name: &str, scope: &str, destinations: &[Destination]) -> String {
     let mut out = format!("✓ Skill '{name}' removed from the library ({scope})\n");
     if destinations.is_empty() {
@@ -405,7 +405,7 @@ pub fn removal_notice(name: &str, scope: &str, destinations: &[Destination]) -> 
         }
     }
     out.push_str(
-        "  Run `suv skills cleanup --dry-run` to review what suvadu can remove, then\n  `suv skills cleanup` to remove it. Anything you edited by hand is kept and reported.",
+        "  The next `suv skills sync` removes them, or run `suv skills cleanup` (`--dry-run`\n  to review first) to remove them now. Anything you edited by hand is kept and reported.",
     );
     out
 }
@@ -473,7 +473,7 @@ fn handle_set_enabled(
         );
     } else {
         println!(
-            "✓ Skill '{}' disabled ({}) — kept in the library, no longer synced.\n  Already-generated files stay until `suv skills cleanup`; `suv skills enable {}` undoes this.",
+            "✓ Skill '{}' disabled ({}) — kept in the library, no longer synced.\n  Already-generated files are removed by the next `suv skills sync` (or `suv skills cleanup` now); `suv skills enable {}` undoes this.",
             updated.name, updated.scope, updated.name
         );
     }
@@ -580,15 +580,20 @@ fn handle_sync(
     }
     println!(
         "{}",
-        sync_summary(report.written(), report.conflicts(), dry_run)
+        sync_summary(
+            report.written(),
+            report.conflicts(),
+            report.removed(),
+            dry_run
+        )
     );
     Ok(())
 }
 
 /// The closing line of a sync run: what happened, and what to do next when
 /// something was left untouched.
-pub fn sync_summary(written: usize, conflicts: usize, dry_run: bool) -> String {
-    let mut out = if written == 0 && conflicts == 0 {
+pub fn sync_summary(written: usize, conflicts: usize, removed: usize, dry_run: bool) -> String {
+    let mut out = if written == 0 && conflicts == 0 && removed == 0 {
         "\nNothing to sync — no active skills, or everything already up to date.".to_string()
     } else if written == 0 {
         // A blocked write is not an up-to-date file; saying so would hide
@@ -599,6 +604,17 @@ pub fn sync_summary(written: usize, conflicts: usize, dry_run: bool) -> String {
     } else {
         format!("\n{written} file(s) written.")
     };
+    if removed > 0 {
+        let verb = if dry_run {
+            "would be removed"
+        } else {
+            "removed"
+        };
+        let _ = write!(
+            out,
+            "\n{removed} generated file(s)/block(s) {verb} — the skill behind them is gone or no longer synced."
+        );
+    }
     if conflicts > 0 {
         let _ = write!(
             out,
@@ -937,7 +953,7 @@ mod tests {
 
     #[test]
     fn sync_summary_does_not_claim_everything_is_up_to_date_when_a_conflict_blocked_it() {
-        let out = sync_summary(0, 1, false);
+        let out = sync_summary(0, 1, 0, false);
         assert!(
             !out.contains("Nothing to sync"),
             "a conflict is not 'up to date': {out}"
@@ -948,7 +964,19 @@ mod tests {
 
     #[test]
     fn sync_summary_reports_a_clean_no_op() {
-        assert!(sync_summary(0, 0, false).contains("Nothing to sync"));
+        assert!(sync_summary(0, 0, 0, false).contains("Nothing to sync"));
+    }
+
+    #[test]
+    fn sync_summary_counts_files_removed_for_skills_that_are_gone() {
+        let out = sync_summary(0, 0, 2, false);
+        assert!(!out.contains("Nothing to sync"), "{out}");
+        assert!(
+            out.contains("2 generated file(s)/block(s) removed"),
+            "{out}"
+        );
+        let preview = sync_summary(1, 0, 2, true);
+        assert!(preview.contains("would be removed"), "{preview}");
     }
 
     #[test]

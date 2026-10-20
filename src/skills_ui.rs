@@ -166,7 +166,12 @@ pub fn format_sync_status(report: &crate::skills_sync::SyncReport) -> (StatusLev
             ),
         );
     }
-    if report.written() == 0 {
+    let removed = if report.removed() > 0 {
+        format!(", {} removed", report.removed())
+    } else {
+        String::new()
+    };
+    if report.written() == 0 && report.removed() == 0 {
         (
             StatusLevel::Info,
             "Nothing to sync — no active skills, or everything already up to date".to_string(),
@@ -174,7 +179,7 @@ pub fn format_sync_status(report: &crate::skills_sync::SyncReport) -> (StatusLev
     } else {
         (
             StatusLevel::Info,
-            format!("Synced: {} file(s) written", report.written()),
+            format!("Synced: {} file(s) written{removed}", report.written()),
         )
     }
 }
@@ -218,7 +223,7 @@ pub fn preview_text(s: &Skill, destinations: &[crate::skills_sync::Destination])
 /// expects the agent files to disappear with the library entry.
 pub fn delete_confirm_text(name: &str) -> String {
     format!(
-        "Delete skill '{name}'? [y/N]\n\nThis removes it from the library only. Files already\ngenerated from it stay on disk until you run\n`suv skills cleanup` (`--dry-run` to preview).\nTo stop it syncing but keep it, use `suv skills disable`."
+        "Delete skill '{name}'? [y/N]\n\nThis removes it from the library only. Files already\ngenerated from it stay on disk until the next sync\n(^S) or `suv skills cleanup` removes them.\nTo stop it syncing but keep it, use `suv skills disable`."
     )
 }
 

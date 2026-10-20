@@ -1115,8 +1115,8 @@ pub enum SkillsCommands {
         triggers: Vec<String>,
     },
 
-    /// Remove a skill from the library (generated agent files are left in
-    /// place — see `suv skills cleanup`)
+    /// Remove a skill from the library (generated agent files stay until the
+    /// next `suv skills sync` or `suv skills cleanup` removes them)
     Rm {
         /// Skill name
         name: String,
@@ -1144,6 +1144,10 @@ pub enum SkillsCommands {
     },
 
     /// Materialize active skills into each AI agent's native file format
+    ///
+    /// Also removes the files suvadu generated for skills that are gone or
+    /// disabled. A file edited since suvadu wrote it is never removed or
+    /// overwritten without --force.
     #[command(
         after_help = "Examples:\n  suv skills sync                       # all configured targets\n  suv skills sync --target claude-code  # just Claude Code\n  suv skills sync --dry-run             # preview without writing"
     )]
