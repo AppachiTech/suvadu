@@ -36,7 +36,7 @@ const SKILL_COLUMNS: &str =
 /// no `:`) in one place — every creation path (CLI `add`, the skills TUI,
 /// and the `propose_skill` MCP tool) goes through `create_skill`, so
 /// enforcing it here covers all three.
-fn is_valid_skill_name(name: &str) -> bool {
+pub fn is_valid_skill_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
         && name

@@ -409,6 +409,10 @@ pub const SKILL_SOURCE_HUMAN: &str = "human";
 /// opposed to a human-authored or agent-proposed one). Always `active`,
 /// never routed through `propose_skill`'s pending-review flow.
 pub const SKILL_SOURCE_SUVADU: &str = "suvadu";
+/// Source value for a skill read from a repository's `.suvadu/skills/*.md`
+/// file. Never stored in the `skills` table: it is read from the file each
+/// time, and is read-only to suvadu.
+pub const SKILL_SOURCE_REPO: &str = "repo";
 
 /// A reusable instruction/prompt shared across AI coding agents via MCP.
 ///

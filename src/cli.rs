@@ -737,7 +737,7 @@ pub enum Commands {
     /// Manage the shared skills library — reusable instructions any
     /// MCP-capable AI agent can read, instead of each agent keeping its own copy
     #[command(
-        after_help = "Examples:\n  suv skills                              # interactive management TUI\n  suv skills add deploy-checklist --description \"Steps before a deploy\" < deploy.md\n  suv skills list\n  suv skills show deploy-checklist\n  suv skills sync --target claude-code"
+        after_help = "Examples:\n  suv skills                              # interactive management TUI\n  suv skills add deploy-checklist --description \"Steps before a deploy\" < deploy.md\n  suv skills list\n  suv skills show deploy-checklist\n  suv skills sync --target claude-code\n  suv skills trust                        # trust this repo's .suvadu/skills/*.md"
     )]
     Skills {
         #[command(subcommand)]
@@ -1145,9 +1145,10 @@ pub enum SkillsCommands {
 
     /// Materialize active skills into each AI agent's native file format
     ///
-    /// Also removes the files suvadu generated for skills that are gone or
-    /// disabled. A file edited since suvadu wrote it is never removed or
-    /// overwritten without --force.
+    /// Also writes this project's trusted repo skills (`.suvadu/skills/*.md`,
+    /// see `suv skills trust`) and removes the files suvadu generated for
+    /// skills that are gone, disabled or no longer trusted. A file edited
+    /// since suvadu wrote it is never removed or overwritten without --force.
     #[command(
         after_help = "Examples:\n  suv skills sync                       # all configured targets\n  suv skills sync --target claude-code  # just Claude Code\n  suv skills sync --dry-run             # preview without writing"
     )]
@@ -1175,6 +1176,42 @@ pub enum SkillsCommands {
         /// Preview what would be removed without removing
         #[arg(long)]
         dry_run: bool,
+    },
+
+    /// Trust the skills committed in a repository's `.suvadu/skills/`
+    ///
+    /// Repo skills arrive with whatever you clone, so `suv skills sync`
+    /// writes one into your agent files only after you have read it and
+    /// trusted it here. Trust is recorded per file with a hash of its
+    /// content: once the file changes (after a pull, say) it is "changed
+    /// since trusted" and is not synced until you trust it again.
+    #[command(
+        after_help = "Examples:\n  suv skills trust --dry-run          # list this repository's skills and their state\n  suv skills show deploy              # read one before trusting it\n  suv skills trust                    # trust every one not yet trusted\n  suv skills trust deploy             # trust just one\n  suv skills trust --repo ~/src/app   # another checkout's skills"
+    )]
+    Trust {
+        /// Trust only the repo skill with this name (default: all of them)
+        name: Option<String>,
+        /// The repository (or any directory inside it) whose skills to
+        /// trust (default: the current directory)
+        #[arg(long, value_name = "PATH")]
+        repo: Option<String>,
+        /// List what would be trusted without recording anything
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Stop trusting a repository's skills. The next `suv skills sync`
+    /// there removes the agent files suvadu wrote for them
+    #[command(
+        after_help = "Examples:\n  suv skills untrust                    # every repo skill here\n  suv skills untrust deploy             # just one\n  suv skills untrust --repo ~/src/app   # another checkout"
+    )]
+    Untrust {
+        /// Untrust only the repo skill with this name (default: all of them)
+        name: Option<String>,
+        /// The repository (or any directory inside it) whose skills to
+        /// untrust (default: the current directory)
+        #[arg(long, value_name = "PATH")]
+        repo: Option<String>,
     },
 }
 
@@ -1395,6 +1432,45 @@ mod tests {
             } => assert!(json),
             _ => panic!("Expected Skills{{ command: Some(List) }}"),
         }
+    }
+
+    #[test]
+    fn test_cli_parses_skills_trust_and_untrust_with_a_repo_path() {
+        let cli = Cli::try_parse_from([
+            "suv",
+            "skills",
+            "trust",
+            "deploy",
+            "--repo",
+            "~/src/app",
+            "--dry-run",
+        ])
+        .unwrap();
+        match cli.command.unwrap() {
+            Commands::Skills {
+                command:
+                    Some(SkillsCommands::Trust {
+                        name,
+                        repo,
+                        dry_run,
+                    }),
+            } => {
+                assert_eq!(name.as_deref(), Some("deploy"));
+                assert_eq!(repo.as_deref(), Some("~/src/app"));
+                assert!(dry_run);
+            }
+            _ => panic!("Expected Skills{{ command: Some(Trust) }}"),
+        }
+        let cli = Cli::try_parse_from(["suv", "skills", "untrust"]).unwrap();
+        assert!(matches!(
+            cli.command.unwrap(),
+            Commands::Skills {
+                command: Some(SkillsCommands::Untrust {
+                    name: None,
+                    repo: None
+                })
+            }
+        ));
     }
 
     #[test]

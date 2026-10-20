@@ -51,7 +51,7 @@ fn category_of(table: &str) -> &'static str {
         "entries" | "entry_output" | "notes" | "bookmarks" | "aliases" | "tags" => COMMANDS,
         "sessions" | "ai_sessions" | "ai_events" | "ai_sources" | "ai_snapshots" => SESSIONS,
         "ai_summaries" => SUMMARIES,
-        "skills" => SKILLS,
+        "skills" | "skill_trust" => SKILLS,
         // The FTS5 indexes and their shadow tables are the cost of searching
         // commands, so they are charged to commands.
         other if other.starts_with("entries_fts") || other.starts_with("entries_norm_fts") => {
@@ -250,6 +250,11 @@ mod tests {
     #[test]
     fn git_snapshots_are_charged_to_sessions() {
         assert_eq!(category_of("ai_snapshots"), SESSIONS);
+    }
+
+    #[test]
+    fn repo_skill_trust_is_charged_to_skills() {
+        assert_eq!(category_of("skill_trust"), SKILLS);
     }
 
     #[test]

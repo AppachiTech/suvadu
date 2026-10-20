@@ -1004,6 +1004,8 @@ static FEATURES: &[Feature] = &[
             "skills enable",
             "skills sync",
             "skills cleanup",
+            "skills trust",
+            "skills untrust",
         ],
         guide: &[
             "The library lives in Suvadu. suv skills sync writes active skills into each \
@@ -1012,6 +1014,9 @@ static FEATURES: &[Feature] = &[
              gone or disabled.",
             "rm and disable change the library only: files already generated stay until the \
              next sync or cleanup.",
+            "Skills committed in a repository's .suvadu/skills/*.md are synced for that project \
+             only after suv skills trust records their content; a changed file needs trusting \
+             again. Suvadu never edits those files.",
         ],
         examples: &[
             ex("suv skills list", "What is in the library"),
@@ -1024,6 +1029,10 @@ static FEATURES: &[Feature] = &[
             ex(
                 "suv skills cleanup --dry-run",
                 "Preview what cleanup would remove",
+            ),
+            ex(
+                "suv skills trust --dry-run",
+                "This repository's skills and whether they are trusted",
             ),
         ],
         ..BASE

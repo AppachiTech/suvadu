@@ -130,8 +130,58 @@ suv agent sessions          # List captured Codex/Claude sessions and reported t
 suv skills                  # Interactive skills management (browse, add, edit, sync, review)
 suv skills add my-skill     # Add a skill any MCP-capable agent can read
 suv skills sync             # Materialize skills into Claude Code/Cursor/Codex
+suv skills trust            # Trust this repo's .suvadu/skills/*.md so sync writes them
 suv bookmarks get box --set host=db1   # Print a bookmark with its {{placeholders}} filled
 ```
+
+### Team skills in the repository
+
+Commit skills next to the code, one Markdown file each, in
+`.suvadu/skills/`:
+
+```markdown
+---
+name: release            # optional; defaults to the file name (release.md)
+description: How we cut a release
+triggers: [release, tag]
+targets: [claude-code, codex]   # optional; default: every agent
+---
+
+1. Bump the version in Cargo.toml.
+2. Tag, then push the tag.
+```
+
+Everyone who clones the repository gets them, so Suvadu treats them as
+**untrusted** until you have read them:
+
+```bash
+suv skills list                 # repo skills show origin 'repo' and 'untrusted'
+suv skills show release         # read one (its file path, trust, body)
+suv skills trust --dry-run      # list this repository's skills and their state
+suv skills trust                # trust them (or: suv skills trust release)
+suv skills sync                 # from the repository root: writes them like project skills
+```
+
+- The project is the nearest directory with a `.suvadu/skills/` folder,
+  looking up from where you are but never above the git repository's root.
+  Repo skills sync from that directory, into its `.claude/skills/`,
+  `.cursor/rules/` and `AGENTS.md`, exactly where a project skill would go.
+- Trust is recorded per file with a hash of its content (`suv skills trust
+  --repo PATH` for another checkout). When the file changes — after a pull,
+  say — it is *changed since trusted*: the next sync stops writing it and
+  removes the copy it wrote, until you trust it again. `suv skills untrust`
+  takes trust back, and the next sync removes the copies.
+- Suvadu never edits, moves or deletes a repo skill file: edit the file. In
+  `suv skills` they are read-only and show their path; `edit`, `rm` and
+  `disable` refuse them and say which file to change.
+- A trusted repo skill takes the place of a library skill scoped to the
+  same project with the same name (and shadows a global one there), and the
+  sync says so. An untrusted one changes nothing.
+- Deleting the file removes its synced copies on the next sync — only
+  copies Suvadu wrote and nobody edited since.
+- A file is skipped, with a warning naming it, when its name is not
+  letters, digits, `-` and `_`, it is a symlink, it is over 256 KB or not
+  UTF-8, it has no body, or its `targets` names an unknown agent.
 
 ### Bookmarks with placeholders
 
@@ -697,7 +747,7 @@ See the [full integration guide](https://suvadu.sh/blog/track-ai-agent-commands-
 | **History** | Non-interactive `suv history` with filters, `--json`, pipeable to other tools |
 | **Agent Dashboard** | Timeline, risk assessment, per-agent analytics, exportable reports; `suv agent report --fail-on <low\|medium\|high\|critical>` for local CI / git-hook gating |
 | **MCP Server** | 22 read-only tools, 8 resources and 6 prompts, plus two opt-in write tools that are off by default — agent session replay and incremental cross-agent summary checkpoints, project context, failure learning; one response convention with explicit provenance |
-| **Skills Library** | `suv skills` — interactive TUI to browse, add, edit, delete, sync, and review shared skills any MCP-capable agent can read instead of each tool keeping its own copy. `sync --dry-run` diffs the managed region of each generated file; a region edited outside Suvadu is reported as a conflict and skipped, not overwritten (`--force` overrides), and the files of skills since removed or disabled are removed. `add/list/show/edit/rm/disable/enable/sync/cleanup` also work as scriptable subcommands |
+| **Skills Library** | `suv skills` — interactive TUI to browse, add, edit, delete, sync, and review shared skills any MCP-capable agent can read instead of each tool keeping its own copy. `sync --dry-run` diffs the managed region of each generated file; a region edited outside Suvadu is reported as a conflict and skipped, not overwritten (`--force` overrides), and the files of skills since removed or disabled are removed. Team skills committed in `.suvadu/skills/*.md` sync once you trust them — see [Team skills in the repository](#team-skills-in-the-repository). `add/list/show/edit/rm/disable/enable/sync/cleanup/trust/untrust` also work as scriptable subcommands |
 | **Prompt Explorer** | `suv agent prompts` groups **recorded commands** by the prompt that triggered them, with that turn's successes, failures and duration. A prompt that ran no recorded command does not appear — for the agent's own transcript, use a session timeline |
 | **Unified Sessions** | `suv sessions` browses human and AI sessions together, with a **Capture** column that reports `full` or `gaps: N` from recorded gaps alone — never inferred from exit codes. Native Codex, Claude Code and OpenCode sessions show prompts, responses, commands, every observed model and provider-reported token totals; `s` opens saved summaries (badged CURRENT / NEW ACTIVITY / EVIDENCE CHANGED; `Tab` toggles rendered/raw, `Ctrl+Y` copies) and `h` builds a handoff scaffold from captured records only |
 | **Stats** | Heatmap, hourly distribution, top commands, executor breakdown; `--human` (or `Ctrl+H` in the TUI) excludes AI-agent activity |

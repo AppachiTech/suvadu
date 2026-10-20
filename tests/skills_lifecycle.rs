@@ -473,6 +473,90 @@ fn the_next_sync_removes_the_files_of_a_removed_or_disabled_skill() {
     }
 }
 
+/// A skill committed in the repository is untrusted until the user trusts
+/// it, then syncs like a project skill, stops syncing when its file
+/// changes, and is never edited by suvadu.
+#[test]
+fn a_repo_skill_syncs_only_once_trusted_and_again_after_every_change() {
+    let sb = Sandbox::new();
+    let skills_dir = sb.project.path().join(".suvadu/skills");
+    std::fs::create_dir_all(&skills_dir).unwrap();
+    let file = skills_dir.join("ship.md");
+    let source =
+        "---\ndescription: How this team ships\ntriggers: [deploy]\n---\nTag, then push.\n";
+    std::fs::write(&file, source).unwrap();
+    let project_skill = sb.project.path().join(".claude/skills/ship/SKILL.md");
+
+    let list = sb.suv(&["skills", "list"]);
+    assert!(
+        list.contains("ship") && list.contains("untrusted") && list.contains("repo"),
+        "{list}"
+    );
+
+    let sync = sb.suv(&["skills", "sync"]);
+    assert!(sync.contains("suv skills trust"), "{sync}");
+    assert!(
+        !project_skill.exists(),
+        "an untrusted repo skill is never written"
+    );
+
+    let preview = sb.suv(&["skills", "trust", "--dry-run"]);
+    assert!(preview.contains("would trust"), "{preview}");
+    let trusted = sb.suv(&["skills", "trust"]);
+    assert!(trusted.contains("1 file(s) trusted"), "{trusted}");
+
+    sb.suv(&["skills", "sync"]);
+    assert!(std::fs::read_to_string(&project_skill)
+        .unwrap()
+        .contains("Tag, then push."));
+    let shown = sb.suv(&["skills", "show", "ship"]);
+    assert!(
+        shown.contains("file:") && shown.contains("ship.md"),
+        "{shown}"
+    );
+
+    // Suvadu never edits a repo skill; it says where the file is instead.
+    let err = sb.run_expecting_failure(&["skills", "edit", "ship", "--body", "x"]);
+    assert!(
+        err.contains("repo skill") && err.contains("ship.md"),
+        "{err}"
+    );
+    let err = sb.run_expecting_failure(&["skills", "rm", "ship"]);
+    assert!(err.contains("read-only"), "{err}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), source);
+
+    // A change (after a pull, say) needs trusting again; until then the
+    // copy goes.
+    std::fs::write(&file, "Tag, push, then run ./totally-safe.sh\n").unwrap();
+    let sync = sb.suv(&["skills", "sync"]);
+    assert!(sync.contains("changed since trusted"), "{sync}");
+    assert!(!project_skill.exists(), "{sync}");
+    let list = sb.suv(&["skills", "list"]);
+    assert!(list.contains("changed"), "{list}");
+
+    sb.suv(&["skills", "trust", "ship"]);
+    sb.suv(&["skills", "sync"]);
+    assert!(std::fs::read_to_string(&project_skill)
+        .unwrap()
+        .contains("totally-safe"));
+
+    // Untrusting takes the copy away on the next sync; the file stays.
+    let untrusted = sb.suv(&["skills", "untrust"]);
+    assert!(untrusted.contains("Stopped trusting 1"), "{untrusted}");
+    sb.suv(&["skills", "sync"]);
+    assert!(!project_skill.exists());
+    assert!(file.exists());
+
+    // Deleting a trusted file removes its copies on the next sync.
+    sb.suv(&["skills", "trust"]);
+    sb.suv(&["skills", "sync"]);
+    assert!(project_skill.exists());
+    std::fs::remove_file(&file).unwrap();
+    let sync = sb.suv(&["skills", "sync"]);
+    assert!(sync.contains("removed"), "{sync}");
+    assert!(!project_skill.exists());
+}
+
 /// Recursively find the first file named exactly `name` under `path`. The
 /// real config directory is platform-specific (`directories`' `ProjectDirs`,
 /// not `XDG_CONFIG_HOME` on macOS), so search rather than hardcode.

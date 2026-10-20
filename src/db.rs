@@ -17,7 +17,7 @@ pub enum DbError {
 pub type DbResult<T> = Result<T, DbError>;
 
 /// Current schema version. Increment when adding new migrations.
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 
 /// Get the path to the suvadu database file
 pub fn get_db_path() -> DbResult<PathBuf> {
@@ -419,6 +419,7 @@ fn run_migrations(conn: &mut Connection) -> DbResult<()> {
         (13, migrate_v13),
         (14, migrate_v14),
         (15, migrate_v15),
+        (16, migrate_v16),
     ];
 
     loop {
@@ -870,10 +871,62 @@ fn migrate_v15(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Migration v16: `skill_trust`, which repo skill files the user trusted.
+///
+/// A repo skill is a Markdown file under a project's `.suvadu/skills/`,
+/// arriving with whatever the user clones. `suv skills sync` writes one
+/// into agent files only while its content hash matches a row here, added
+/// by `suv skills trust`. One row per file (project root plus the file's
+/// path inside it), holding only the hash and when it was trusted — never
+/// the file's text. It starts empty, so upgrading copies nothing.
+fn migrate_v16(conn: &Connection) -> DbResult<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS skill_trust (
+            root TEXT NOT NULL,
+            path TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            trusted_at INTEGER NOT NULL,
+            PRIMARY KEY (root, path)
+         );",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_v16_adds_an_empty_trust_table_keyed_by_root_and_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let conn = init_db(&db_path).unwrap();
+        conn.execute_batch(
+            "DROP TABLE skill_trust;
+             UPDATE schema_version SET version = 15;",
+        )
+        .unwrap();
+        drop(conn);
+
+        let conn = init_db(&db_path).unwrap();
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
+        let insert = |hash: &str| {
+            conn.execute(
+                "INSERT INTO skill_trust (root, path, content_hash, trusted_at)
+                 VALUES ('/r', '.suvadu/skills/a.md', ?1, 1)",
+                [hash],
+            )
+        };
+        insert("h1").unwrap();
+        assert!(insert("h2").is_err(), "one row per file");
+        // Another shell running it again changes nothing.
+        migrate_v16(&conn).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM skill_trust", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
 
     #[test]
     fn test_init_db() {

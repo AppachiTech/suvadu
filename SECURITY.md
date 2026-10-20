@@ -86,7 +86,7 @@ governs it.
 | Commands | command text, directory, exit code, start/end times, duration, executor type and name, an optional tag, and a `context` JSON blob (which holds the git branch, when there was one); plus their notes, bookmarks, aliases, tags and the two trigram search indexes (one over the command as typed, one with its separators removed); and, **only with failure-output capture on**, the last 4 KB a failed command printed (`entry_output`: which stream, the cleaned and redacted text, and how many bytes were left out before it) | you run `suv delete <pattern>`; `suv gc --failure-output` removes every stored failure output and keeps the commands |
 | Sessions | shell sessions (id, **machine hostname**, creation time, tag), and agent sessions with their captured transcript events and the adapter checkpoints that record which transcript files were read and how far (for a Cursor conversation, which Cursor pushes event by event: a 64-bit fingerprint of each stored event, taken after redaction, so a repeated hook run is stored once, and the count of events seen); and, unless `agent.record_git_snapshots` is off, up to two **git snapshots** per agent session (`ai_snapshots`: when, the directory, the repository root, the commit and branch checked out, and up to 500 changed paths with their git status — never contents or diffs) | an agent session is removed with `suv agent delete-session <id>`, snapshots included; `suv gc` removes snapshots a day old whose session left no other record; a shell session row stays behind after its commands are deleted |
 | Summaries | session summaries written over MCP, with their cited evidence IDs, the session revision they were written from, and the caller-declared agent and model | their agent session is deleted — editing or deleting commands only marks a summary *stale*, it does not remove it |
-| Skills | shared skill documents | you run `suv skills remove`; a sync rewrites agent-side copies, not the stored row |
+| Skills | shared skill documents; and, for each repo skill file you trusted, its project root, its path inside the project, a sha256 of its content and when you trusted it (`skill_trust` — never the file's text) | you run `suv skills remove`; a sync rewrites agent-side copies, not the stored row; `suv skills untrust` forgets a repository's trust |
 | Backups | full database copies from `suv backup`, the automatic pre-delete snapshot, and the pre-import snapshot taken by `suv import --from atuin-db` | **you delete the files yourself** |
 
 The `context` blob of a command recorded live carries `git_branch` — the
@@ -372,6 +372,20 @@ A skill store agents can both read and write is a shared-memory poisoning
 target, which is why the proposal gate is checked before any database
 connection is opened at all. Turning an opt-in back off stops new writes; it
 does not delete what was already stored.
+
+**Repo skills are untrusted until you trust them.** A `.suvadu/skills/*.md`
+file arrives with whatever repository you clone, the same way a
+`.suvadu.toml` does, so it is treated as data from a stranger. `suv skills
+sync` copies one into your agent files (Claude Code skills, Cursor rules,
+`AGENTS.md`) only after `suv skills trust` has recorded a sha256 of that
+file's exact content; any change to the file makes it *changed since
+trusted* and it stops syncing, and the copy Suvadu wrote is removed, until
+you trust it again. Until then it cannot shadow or replace any of your own
+skills either. Suvadu only reads these files — it never writes, moves or
+deletes them — and skips a symlink (which could point anywhere on disk), a
+file over 256 KB, one that is not UTF-8, and one whose name could escape the
+agent directories it is written into; terminal control characters are
+dropped from their text before it is printed or copied.
 
 **Summaries are caller-reported text.** Suvadu invokes no model and
 generates no prose — a summary is whatever the connected agent wrote, stored

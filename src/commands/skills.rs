@@ -79,7 +79,291 @@ fn handle_skills_with_repo(
             force,
         } => handle_sync(repo, target, dry_run, force),
         SkillsCommands::Cleanup { target, dry_run } => handle_cleanup(repo, target, dry_run),
+        SkillsCommands::Trust {
+            name,
+            repo: repo_path,
+            dry_run,
+        } => {
+            let start = repo_start(repo_path.as_deref(), &std::env::current_dir()?);
+            for line in trust_here(repo, &start, home().as_deref(), name.as_deref(), dry_run)? {
+                println!("{line}");
+            }
+            Ok(())
+        }
+        SkillsCommands::Untrust {
+            name,
+            repo: repo_path,
+        } => {
+            let start = repo_start(repo_path.as_deref(), &std::env::current_dir()?);
+            println!(
+                "{}",
+                untrust_here(repo, &start, home().as_deref(), name.as_deref())?
+            );
+            Ok(())
+        }
     }
+}
+
+fn home() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(std::path::PathBuf::from)
+}
+
+/// Where `trust`/`untrust` look for repo skills: `--repo PATH` (with `~`
+/// expanded, a relative path taken from `cwd`), or `cwd` itself.
+fn repo_start(repo_arg: Option<&str>, cwd: &std::path::Path) -> std::path::PathBuf {
+    repo_arg.map_or_else(
+        || cwd.to_path_buf(),
+        |p| cwd.join(crate::repository::expand_tilde(p)),
+    )
+}
+
+/// The repo skills for the project around `start`, or an error saying none
+/// were found.
+fn require_discovery(
+    repo: &Repository,
+    start: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> Result<crate::repo_skills::Discovery, Box<dyn std::error::Error>> {
+    crate::repo_skills::discover(repo, start, home)?.ok_or_else(|| {
+        format!(
+            "No repo skills for {}: no `.suvadu/skills/` directory there or above it \
+             (up to the repository root).",
+            start.display()
+        )
+        .into()
+    })
+}
+
+/// `suv skills trust`: record the current content hash of a project's repo
+/// skills (or the one named), so `suv skills sync` writes them.
+pub fn trust_here(
+    repo: &Repository,
+    start: &std::path::Path,
+    home: Option<&std::path::Path>,
+    name: Option<&str>,
+    dry_run: bool,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    use crate::repo_skills::Trust;
+    let found = require_discovery(repo, start, home)?;
+    let mut out: Vec<String> = found
+        .warnings
+        .iter()
+        .map(|w| format!("warning: {w}"))
+        .collect();
+    let chosen: Vec<&crate::repo_skills::RepoSkill> = match name {
+        Some(name) => vec![found.find(name).ok_or_else(|| {
+            format!(
+                "No repo skill named '{name}' in {}/.suvadu/skills. Found: {}",
+                found.root.display(),
+                if found.skills.is_empty() {
+                    "none".to_string()
+                } else {
+                    found
+                        .skills
+                        .iter()
+                        .map(|s| s.skill.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            )
+        })?],
+        None => found.skills.iter().collect(),
+    };
+    if chosen.is_empty() {
+        out.push(format!(
+            "No usable skill files in {}/.suvadu/skills.",
+            found.root.display()
+        ));
+        return Ok(out);
+    }
+    out.push(format!("Repo skills in {}:", found.root.display()));
+    for s in &chosen {
+        let verb = match (s.trust, dry_run) {
+            (Trust::Trusted, _) => "already trusted",
+            (Trust::Changed, true) => "would re-trust (changed)",
+            (Trust::Changed, false) => "re-trusted (changed)",
+            (Trust::Untrusted, true) => "would trust",
+            (Trust::Untrusted, false) => "trusted",
+        };
+        out.push(format!(
+            "  {verb:<24}  {:<24}  {}  sha256:{}",
+            s.skill.name,
+            s.rel_path,
+            &s.hash[..12]
+        ));
+    }
+    let pending = chosen.iter().filter(|s| s.trust != Trust::Trusted).count();
+    if pending == 0 {
+        out.push("\nNothing to trust — every one is trusted at its current content.".to_string());
+        return Ok(out);
+    }
+    out.push(String::new());
+    out.push(
+        "These files came with the repository. Trusting one lets `suv skills sync` copy its text \
+         into your agent files (Claude Code skills, Cursor rules, AGENTS.md) and lets connected \
+         agents read it over MCP, so read each one first (`suv skills show <name>`). Any later \
+         change to a file needs trusting again."
+            .to_string(),
+    );
+    if dry_run {
+        out.push(format!(
+            "{pending} file(s) would be trusted. Re-run without --dry-run to trust them."
+        ));
+    } else {
+        crate::repo_skills::trust(repo, &found, &chosen)?;
+        out.push(format!(
+            "{pending} file(s) trusted. Run `suv skills sync` from {} to write them.",
+            found.root.display()
+        ));
+    }
+    Ok(out)
+}
+
+/// `suv skills untrust`: forget the trust recorded for a project's repo
+/// skills (or the one named). Their generated files go on the next sync.
+/// Works on a root whose `.suvadu/skills/` has since been removed, too:
+/// the trust recorded for it is still forgotten.
+pub fn untrust_here(
+    repo: &Repository,
+    start: &std::path::Path,
+    home: Option<&std::path::Path>,
+    name: Option<&str>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let found = crate::repo_skills::discover(repo, start, home)?;
+    let (scope, root) = found.as_ref().map_or_else(
+        || {
+            (
+                crate::models::normalize_scope_path(&start.to_string_lossy()),
+                start.to_path_buf(),
+            )
+        },
+        |f| (f.scope(), f.root.clone()),
+    );
+    let removed = match name {
+        Some(name) => {
+            let s = found
+                .as_ref()
+                .and_then(|f| f.find(name))
+                .ok_or_else(|| format!("No repo skill named '{name}' in {}.", root.display()))?;
+            repo.untrust_repo_skills(&scope, Some(&s.rel_path))?
+        }
+        None => repo.untrust_repo_skills(&scope, None)?,
+    };
+    Ok(if removed == 0 {
+        format!(
+            "Nothing to untrust — no trust is recorded for repo skills in {}.",
+            root.display()
+        )
+    } else {
+        format!(
+            "Stopped trusting {removed} repo skill file(s) in {}. The next `suv skills sync` there removes the agent files suvadu wrote for them.",
+            root.display()
+        )
+    })
+}
+
+/// The error for a library operation on a name that only a repo skill has:
+/// suvadu never edits, disables or deletes a file in a repository.
+fn repo_only_error(found: Option<&crate::repo_skills::Discovery>, name: &str) -> Option<String> {
+    let s = found?.find(name)?;
+    Some(format!(
+        "'{name}' is a repo skill from {} — it is read-only to suvadu. Edit or delete that file instead (and `suv skills untrust {name}` to stop it syncing).",
+        s.path.display()
+    ))
+}
+
+/// Where a repo skill would be written by a sync from `cwd`: nowhere until
+/// it is trusted, and only to the agents its `targets:` names.
+fn repo_destinations(
+    rs: &crate::repo_skills::RepoSkill,
+    cwd: &std::path::Path,
+) -> Vec<Destination> {
+    if rs.trust != crate::repo_skills::Trust::Trusted {
+        return Vec::new();
+    }
+    let targets: Vec<crate::cli::SyncTarget> = ALL_TARGETS
+        .into_iter()
+        .filter(|&t| rs.syncs_to(t))
+        .collect();
+    crate::skills_sync::destinations_for(&rs.skill, &targets, cwd)
+}
+
+/// [`repo_destinations`] from the current directory.
+fn repo_destinations_here(rs: &crate::repo_skills::RepoSkill) -> Vec<Destination> {
+    std::env::current_dir().map_or_else(|_| Vec::new(), |cwd| repo_destinations(rs, &cwd))
+}
+
+/// The trusted repo skill that takes `skill`'s place in its project, if
+/// any: a library skill scoped to the same project root with the same name.
+pub fn shadowing_repo_skill<'a>(
+    found: &'a crate::repo_skills::Discovery,
+    skill: &Skill,
+) -> Option<&'a crate::repo_skills::RepoSkill> {
+    if skill.source == crate::models::SKILL_SOURCE_REPO || skill.scope != found.scope() {
+        return None;
+    }
+    found.trusted().find(|rs| rs.skill.name == skill.name)
+}
+
+/// One `suv skills list` row for a repo skill: its trust state stands in
+/// for the library state, since trust is what decides whether it syncs.
+pub fn format_repo_list_row(rs: &crate::repo_skills::RepoSkill, name_width: usize) -> String {
+    format!(
+        "{:<width$} {:<14} {:<18} {:<20} {}",
+        rs.skill.name,
+        rs.trust.word(),
+        "repo",
+        util::truncate_str(&rs.rel_path, 20, "…"),
+        util::truncate_str(&rs.skill.description, 50, "…"),
+        width = name_width
+    )
+}
+
+/// `suv skills show` for a repo skill: where its file is, whether it is
+/// trusted, and where it syncs.
+pub fn format_repo_skill_details(
+    rs: &crate::repo_skills::RepoSkill,
+    destinations: &[Destination],
+) -> String {
+    let s = &rs.skill;
+    let mut out = format!("{}\n", s.name);
+    let _ = writeln!(out, "  scope:    {}", s.scope);
+    let _ = writeln!(out, "  file:     {}", rs.path.display());
+    let _ = writeln!(out, "  origin:   {}", origin_label(&s.source));
+    let _ = writeln!(out, "  trust:    {}", rs.trust.explain());
+    if let Some(targets) = &rs.targets {
+        let names: Vec<&str> = targets
+            .iter()
+            .map(|&t| crate::skills_sync::target_label(t))
+            .collect();
+        let _ = writeln!(out, "  targets:  {}", names.join(", "));
+    }
+    if !s.triggers.is_empty() {
+        let _ = writeln!(out, "  triggers: {}", s.triggers.join(", "));
+    }
+    if !s.description.is_empty() {
+        let _ = writeln!(out, "  summary:  {}", s.description);
+    }
+    if destinations.is_empty() {
+        let reason = if rs.trust == crate::repo_skills::Trust::Trusted {
+            format!("nothing from here — run `suv skills sync` from {}", s.scope)
+        } else {
+            "nothing until it is trusted".to_string()
+        };
+        let _ = writeln!(out, "  syncs to: {reason}");
+    } else {
+        let _ = writeln!(out, "  syncs to:");
+        for d in destinations {
+            let _ = writeln!(
+                out,
+                "    {} — {}",
+                crate::skills_sync::target_label(d.target),
+                d.describe()
+            );
+        }
+    }
+    let _ = write!(out, "\n{}", s.body);
+    out
 }
 
 /// Targets to act on: the one the user named, or all of them.
@@ -106,6 +390,9 @@ pub fn origin_label(source: &str) -> String {
     match source {
         SKILL_SOURCE_HUMAN => "you".to_string(),
         SKILL_SOURCE_SUVADU => "suvadu (built-in, kept up to date for you)".to_string(),
+        crate::models::SKILL_SOURCE_REPO => {
+            "this repository (a file in .suvadu/skills/ — read-only to suvadu)".to_string()
+        }
         other => other.strip_prefix("agent:").map_or_else(
             || other.to_string(),
             |agent| format!("proposed by agent '{agent}'"),
@@ -197,13 +484,32 @@ fn handle_list(
     let scope_filter = scope.map(|s| resolve_scope(Some(s))).transpose()?;
     let status_filter = if all { None } else { Some(SKILL_STATUS_ACTIVE) };
     let skills = repo.list_skills(scope_filter.as_deref(), status_filter)?;
+    let found = crate::repo_skills::discover_here(repo)
+        .filter(|f| scope_filter.as_deref().is_none_or(|s| s == f.scope()));
+    let repo_skills: &[crate::repo_skills::RepoSkill] =
+        found.as_ref().map_or(&[], |f| f.skills.as_slice());
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&skills)?);
+        let mut rows: Vec<serde_json::Value> = skills
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<_, _>>()?;
+        for rs in repo_skills {
+            let mut value = serde_json::to_value(&rs.skill)?;
+            value["path"] = rs.path.display().to_string().into();
+            value["trust"] = rs.trust.word().into();
+            rows.push(value);
+        }
+        println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
     }
 
-    if skills.is_empty() {
+    if let Some(found) = &found {
+        for w in &found.warnings {
+            println!("warning: {w}");
+        }
+    }
+    if skills.is_empty() && repo_skills.is_empty() {
         println!("No skills yet. Use `suv skills add <name>` to save one.");
         return Ok(());
     }
@@ -211,6 +517,7 @@ fn handle_list(
     let max_name = skills
         .iter()
         .map(|s| s.name.len())
+        .chain(repo_skills.iter().map(|s| s.skill.name.len()))
         .max()
         .unwrap_or(4)
         .max(4);
@@ -230,7 +537,18 @@ fn handle_list(
     for s in &skills {
         println!("{}", format_list_row(s, max_name));
     }
-    println!("\n{} skill(s)", skills.len());
+    for rs in repo_skills {
+        println!("{}", format_repo_list_row(rs, max_name));
+    }
+    println!("\n{} skill(s)", skills.len() + repo_skills.len());
+    if repo_skills
+        .iter()
+        .any(|s| s.trust != crate::repo_skills::Trust::Trusted)
+    {
+        println!(
+            "Repo skills (origin 'repo', from .suvadu/skills/) sync only once trusted: read them with `suv skills show <name>`, then `suv skills trust`."
+        );
+    }
     if skills.iter().any(|s| s.status != SKILL_STATUS_ACTIVE) {
         println!(
             "Only 'active' skills are written to agent files. `suv skills show <name>` lists the exact files for one skill."
@@ -290,10 +608,13 @@ fn resolve_target(
         None => repo.find_skill(name, None)?,
     };
     skill.ok_or_else(|| {
-        format!(
-            "No active skill named '{name}' found. Pass --scope to target a specific one, or check `suv skills list --all`."
-        )
-        .into()
+        repo_only_error(crate::repo_skills::discover_here(repo).as_ref(), name)
+            .unwrap_or_else(|| {
+                format!(
+                    "No active skill named '{name}' found. Pass --scope to target a specific one, or check `suv skills list --all`."
+                )
+            })
+            .into()
     })
 }
 
@@ -349,11 +670,29 @@ fn handle_show(
     name: &str,
     scope: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let found = crate::repo_skills::discover_here(repo);
+    if scope.is_none() {
+        if let Some(rs) = found.as_ref().and_then(|f| f.find(name)) {
+            println!(
+                "{}",
+                format_repo_skill_details(rs, &repo_destinations_here(rs))
+            );
+            return Ok(());
+        }
+    }
     let skill = resolve_for_display(repo, name, scope)?;
-    println!(
-        "{}",
-        format_skill_details(&skill, &destinations_here(&skill))
-    );
+    let mut text = format_skill_details(&skill, &destinations_here(&skill));
+    if let Some(rs) = found.as_ref().and_then(|f| shadowing_repo_skill(f, &skill)) {
+        text = text.replacen(
+            "\n  syncs to:",
+            &format!(
+                "\n  shadowed: by the trusted repo file {} — that file is what syncs to this project\n  syncs to:",
+                rs.path.display()
+            ),
+            1,
+        );
+    }
+    println!("{text}");
     Ok(())
 }
 
@@ -498,7 +837,11 @@ fn resolve_any_status(
         .filter(|s| s.name == name)
         .collect();
     match matches.len() {
-        0 => Err(format!("No skill named '{name}'. See `suv skills list --all`.").into()),
+        0 => Err(
+            repo_only_error(crate::repo_skills::discover_here(repo).as_ref(), name)
+                .unwrap_or_else(|| format!("No skill named '{name}'. See `suv skills list --all`."))
+                .into(),
+        ),
         1 => Ok(matches.remove(0)),
         _ => Err(format!(
             "'{name}' exists in several scopes ({}). Pass --scope to pick one.",
@@ -694,6 +1037,203 @@ mod tests {
     use super::*;
     use crate::models::{SKILL_SOURCE_HUMAN, SKILL_STATUS_PENDING};
     use crate::test_utils::test_repo;
+
+    fn repo_project(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(".suvadu/skills");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, content) in files {
+            std::fs::write(dir.join(name), content).unwrap();
+        }
+        root
+    }
+
+    fn trust_states(repo: &Repository, root: &std::path::Path) -> Vec<(String, &'static str)> {
+        crate::repo_skills::discover(repo, root, None)
+            .unwrap()
+            .unwrap()
+            .skills
+            .iter()
+            .map(|s| (s.skill.name.clone(), s.trust.word()))
+            .collect()
+    }
+
+    #[test]
+    fn trust_dry_run_lists_without_recording_and_trust_records_each_file() {
+        let (_dir, repo) = test_repo();
+        let root = repo_project(&[("a.md", "Do a.\n"), ("b.md", "Do b.\n")]);
+
+        let preview = trust_here(&repo, root.path(), None, None, true)
+            .unwrap()
+            .join("\n");
+        assert!(preview.contains("would trust") && preview.contains(".suvadu/skills/a.md"));
+        assert!(preview.contains("read each one first"), "{preview}");
+        assert_eq!(trust_states(&repo, root.path())[0].1, "untrusted");
+
+        let done = trust_here(&repo, root.path(), None, Some("a"), false)
+            .unwrap()
+            .join("\n");
+        assert!(done.contains("1 file(s) trusted"), "{done}");
+        assert_eq!(
+            trust_states(&repo, root.path()),
+            vec![("a".to_string(), "trusted"), ("b".to_string(), "untrusted")]
+        );
+
+        trust_here(&repo, root.path(), None, None, false).unwrap();
+        let again = trust_here(&repo, root.path(), None, None, false)
+            .unwrap()
+            .join("\n");
+        assert!(again.contains("Nothing to trust"), "{again}");
+
+        std::fs::write(root.path().join(".suvadu/skills/b.md"), "Do b, changed.\n").unwrap();
+        assert_eq!(trust_states(&repo, root.path())[1].1, "changed");
+        let retrust = trust_here(&repo, root.path(), None, None, false)
+            .unwrap()
+            .join("\n");
+        assert!(retrust.contains("re-trusted (changed)"), "{retrust}");
+    }
+
+    #[test]
+    fn trust_works_from_a_subdirectory_or_a_repo_path() {
+        let (_dir, repo) = test_repo();
+        let root = repo_project(&[("a.md", "Do a.\n")]);
+        std::fs::create_dir_all(root.path().join(".git")).unwrap();
+        let sub = root.path().join("src/deep");
+        std::fs::create_dir_all(&sub).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+
+        let start = repo_start(Some(&sub.to_string_lossy()), elsewhere.path());
+        trust_here(&repo, &start, None, None, false).unwrap();
+        assert_eq!(trust_states(&repo, root.path())[0].1, "trusted");
+
+        // A relative --repo is taken from the current directory.
+        let relative = repo_start(Some("src/deep"), root.path());
+        assert_eq!(relative, sub);
+        assert_eq!(repo_start(None, elsewhere.path()), elsewhere.path());
+    }
+
+    #[test]
+    fn trust_errors_name_what_is_missing() {
+        let (_dir, repo) = test_repo();
+        let root = repo_project(&[("a.md", "Do a.\n")]);
+        let err = trust_here(&repo, root.path(), None, Some("nope"), false).unwrap_err();
+        assert!(err.to_string().contains("Found: a"), "{err}");
+
+        let empty = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(empty.path().join(".git")).unwrap();
+        let err = trust_here(&repo, empty.path(), None, None, false).unwrap_err();
+        assert!(err.to_string().contains("No repo skills"), "{err}");
+    }
+
+    #[test]
+    fn untrust_forgets_the_recorded_hashes() {
+        let (_dir, repo) = test_repo();
+        let root = repo_project(&[("a.md", "Do a.\n"), ("b.md", "Do b.\n")]);
+        trust_here(&repo, root.path(), None, None, false).unwrap();
+        let one = untrust_here(&repo, root.path(), None, Some("a")).unwrap();
+        assert!(one.contains("1 repo skill file(s)"), "{one}");
+        assert_eq!(
+            trust_states(&repo, root.path()),
+            vec![("a".to_string(), "untrusted"), ("b".to_string(), "trusted")]
+        );
+        untrust_here(&repo, root.path(), None, None).unwrap();
+        let none = untrust_here(&repo, root.path(), None, None).unwrap();
+        assert!(none.contains("Nothing to untrust"), "{none}");
+    }
+
+    #[test]
+    fn untrust_still_works_once_the_skills_directory_is_gone() {
+        let (_dir, repo) = test_repo();
+        let root = repo_project(&[("a.md", "Do a.\n")]);
+        trust_here(&repo, root.path(), None, None, false).unwrap();
+        std::fs::remove_dir_all(root.path().join(".suvadu")).unwrap();
+        let out = untrust_here(&repo, root.path(), None, None).unwrap();
+        assert!(out.contains("1 repo skill file(s)"), "{out}");
+        let scope = crate::models::normalize_scope_path(&root.path().to_string_lossy());
+        assert!(repo.repo_skill_trust(&scope).unwrap().is_empty());
+    }
+
+    #[test]
+    fn repo_skill_details_show_the_file_and_trust_and_list_rows_mark_the_origin() {
+        let (_dir, repo) = test_repo();
+        let root = repo_project(&[(
+            "a.md",
+            "---\ndescription: the a skill\ntargets: [codex]\n---\nDo a.\n",
+        )]);
+        let found = crate::repo_skills::discover(&repo, root.path(), None)
+            .unwrap()
+            .unwrap();
+        let rs = &found.skills[0];
+        let details = format_repo_skill_details(rs, &[]);
+        assert!(
+            details.contains(&rs.path.display().to_string()),
+            "{details}"
+        );
+        assert!(details.contains("untrusted"), "{details}");
+        assert!(details.contains("nothing until it is trusted"), "{details}");
+        assert!(details.contains("read-only to suvadu"), "{details}");
+        assert!(details.contains("targets:  Codex"), "{details}");
+        let row = format_repo_list_row(rs, 4);
+        assert!(row.contains("untrusted") && row.contains("repo"), "{row}");
+    }
+
+    #[test]
+    fn a_trusted_repo_skill_destinations_follow_its_targets() {
+        let (_dir, repo) = test_repo();
+        let root = repo_project(&[("a.md", "---\ntargets: [cursor]\n---\nDo a.\n")]);
+        trust_here(&repo, root.path(), None, None, false).unwrap();
+        let found = crate::repo_skills::discover(&repo, root.path(), None)
+            .unwrap()
+            .unwrap();
+        let dests = repo_destinations(&found.skills[0], root.path());
+        assert_eq!(dests.len(), 1, "{dests:?}");
+        assert_eq!(dests[0].target, crate::cli::SyncTarget::Cursor);
+        let elsewhere = tempfile::tempdir().unwrap();
+        assert!(repo_destinations(&found.skills[0], elsewhere.path()).is_empty());
+    }
+
+    #[test]
+    fn a_trusted_repo_skill_shadows_the_library_project_skill_of_the_same_name() {
+        let (_dir, repo) = test_repo();
+        let root = repo_project(&[("deploy.md", "Repo version.\n")]);
+        let scope = crate::models::normalize_scope_path(&root.path().to_string_lossy());
+        let library = repo
+            .create_skill(&NewSkill {
+                name: "deploy".into(),
+                description: String::new(),
+                body: "Library version.".into(),
+                triggers: Vec::new(),
+                scope,
+                source: SKILL_SOURCE_HUMAN.into(),
+                status: SKILL_STATUS_ACTIVE.into(),
+            })
+            .unwrap();
+        let found = crate::repo_skills::discover(&repo, root.path(), None)
+            .unwrap()
+            .unwrap();
+        assert!(
+            shadowing_repo_skill(&found, &library).is_none(),
+            "untrusted: no effect"
+        );
+        trust_here(&repo, root.path(), None, None, false).unwrap();
+        let found = crate::repo_skills::discover(&repo, root.path(), None)
+            .unwrap()
+            .unwrap();
+        assert!(shadowing_repo_skill(&found, &library).is_some());
+    }
+
+    #[test]
+    fn a_library_command_on_a_repo_only_name_points_at_the_file() {
+        let (_dir, repo) = test_repo();
+        let root = repo_project(&[("deploy.md", "Repo version.\n")]);
+        let found = crate::repo_skills::discover(&repo, root.path(), None).unwrap();
+        let err = repo_only_error(found.as_ref(), "deploy").unwrap();
+        assert!(
+            err.contains("read-only") && err.contains("deploy.md"),
+            "{err}"
+        );
+        assert!(repo_only_error(found.as_ref(), "other").is_none());
+    }
 
     fn add(
         repo: &Repository,

@@ -18,6 +18,7 @@ mod integrations;
 mod mcp;
 mod models;
 mod redact;
+mod repo_skills;
 mod repository;
 mod risk;
 mod search;
