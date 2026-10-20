@@ -36,11 +36,11 @@ pub fn get_definition() -> Value {
 pub fn resolve_definition() -> Value {
     json!({
         "name": "resolve_current_agent_session",
-        "description": "Resolve 'this/current session' conservatively to a captured Suvadu session. Call this first whenever the user says 'this session', 'what I was just doing' or 'summarize our work' — search_commands and recent_commands have no idea which session is yours and will return other projects' work. Uses an explicit ID first, then agent-provided native session environment (Codex and Claude Code only; OpenCode has no such environment variable, so it falls straight through to the cwd fallback), then an unambiguous recent session in the current directory. Returns candidates instead of guessing when ambiguous. The in-progress turn may not be captured until Stop/SessionEnd. Times are epoch milliseconds UTC.",
+        "description": "Resolve 'this/current session' conservatively to a captured Suvadu session. Call this first whenever the user says 'this session', 'what I was just doing' or 'summarize our work' — search_commands and recent_commands have no idea which session is yours and will return other projects' work. Uses an explicit ID first, then agent-provided native session environment (Codex and Claude Code only; OpenCode and Cursor have no such environment variable, so they fall straight through to the cwd fallback), then an unambiguous recent session in the current directory. Returns candidates instead of guessing when ambiguous. The in-progress turn may not be captured until Stop/SessionEnd. Times are epoch milliseconds UTC.",
         "inputSchema": {"type": "object", "properties": {
             "session_id": {"type": "string", "description": "Optional explicit Suvadu session ID"},
             "native_id": {"type": "string", "description": "Optional native agent session ID"},
-            "agent": {"type": "string", "description": "Optional agent: openai-codex/codex, claude-code/claude, or opencode"},
+            "agent": {"type": "string", "description": "Optional agent: openai-codex/codex, claude-code/claude, opencode, or cursor"},
             "cwd": {"type": "string", "description": "Optional working directory hint"}
         }}
     })
@@ -144,7 +144,10 @@ fn prefixed_session_id(native_id: &str, agent: &str) -> Result<String, String> {
         "openai-codex" | "codex" => Ok(format!("codex-{native_id}")),
         "claude-code" | "claude" => Ok(format!("claude-{native_id}")),
         "opencode" => Ok(format!("opencode-{native_id}")),
-        _ => Err("agent must be openai-codex/codex, claude-code/claude, or opencode".to_string()),
+        "cursor" => Ok(format!("cursor-{native_id}")),
+        _ => Err(
+            "agent must be openai-codex/codex, claude-code/claude, opencode, or cursor".to_string(),
+        ),
     }
 }
 
@@ -214,6 +217,7 @@ pub fn resolve(repo: &Repository, args: &Value, mcp: &McpConfig) -> Result<Strin
                     "codex" | "openai-codex" => session["agent"] == "openai-codex",
                     "claude" | "claude-code" => session["agent"] == "claude-code",
                     "opencode" => session["agent"] == "opencode",
+                    "cursor" => session["agent"] == "cursor",
                     _ => false,
                 })
         })
@@ -603,6 +607,43 @@ mod tests {
         );
         assert_eq!(resolved["resolved"], true);
         assert_eq!(resolved["session"]["id"], "opencode-ses-xyz");
+    }
+
+    fn insert_cursor_session(repo: &Repository, conversation: &str, cwd: &str) {
+        let event = crate::ai_sessions::cursor::event_from_payload(
+            &json!({"hook_event_name": "beforeSubmitPrompt", "generation_id": "gen-1", "prompt": "Fix the bug"}),
+            cwd,
+            1_000,
+        )
+        .unwrap();
+        repo.import_cursor_event(conversation, event, |_| {
+            Ok(crate::ai_sessions::CapturePolicy::default())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn current_session_resolver_finds_cursor_sessions_by_native_id_and_agent() {
+        let (_dir, repo) = captured_session();
+        insert_cursor_session(&repo, "conv-abc", "/work/project");
+        let resolved = call_json(
+            &repo,
+            "resolve_current_agent_session",
+            &json!({"native_id": "conv-abc", "agent": "cursor"}),
+            &McpConfig::default(),
+        );
+        assert_eq!(resolved["resolved"], true);
+        assert_eq!(resolved["session"]["id"], "cursor-conv-abc");
+        assert_eq!(resolved["session"]["agent"], "cursor");
+
+        let by_cwd = call_json(
+            &repo,
+            "resolve_current_agent_session",
+            &json!({"cwd": "/work/project", "agent": "cursor"}),
+            &McpConfig::default(),
+        );
+        assert_eq!(by_cwd["resolved"], true);
+        assert_eq!(by_cwd["session"]["id"], "cursor-conv-abc");
     }
 
     #[test]
