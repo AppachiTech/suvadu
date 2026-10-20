@@ -274,7 +274,7 @@ fn repo_only_error(found: Option<&crate::repo_skills::Discovery>, name: &str) ->
 
 /// Where a repo skill would be written by a sync from `cwd`: nowhere until
 /// it is trusted, and only to the agents its `targets:` names.
-fn repo_destinations(
+pub fn repo_destinations(
     rs: &crate::repo_skills::RepoSkill,
     cwd: &std::path::Path,
 ) -> Vec<Destination> {

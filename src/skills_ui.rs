@@ -1,7 +1,9 @@
 //! Interactive management app for the shared skills library — `suv skills`
 //! with no subcommand launches this. Browse/filter with a live preview,
 //! add/edit (body via $EDITOR), delete, sync, and review pending
-//! agent-proposed skills, all from one screen.
+//! agent-proposed skills, all from one screen. The current project's repo
+//! skills (`.suvadu/skills/*.md`) are listed too, read-only, with their
+//! file path and trust state.
 //!
 //! This is a presentation layer only: every mutation goes through the same
 //! `Repository`/`skills_sync` functions the CLI subcommands in
@@ -350,7 +352,13 @@ pub fn form_from_existing(skill: &Skill) -> FormState {
 }
 
 pub struct SkillsApp {
+    /// The library's active skills, then this project's repo skills.
     skills: Vec<Skill>,
+    /// Repo skills found from `here`, with their file paths and trust.
+    repo_skills: Option<crate::repo_skills::Discovery>,
+    /// The directory repo skills are discovered from, and `HOME`.
+    here: Option<std::path::PathBuf>,
+    home: Option<std::path::PathBuf>,
     query: String,
     filtered: Vec<usize>,
     list_state: ListState,
@@ -365,7 +373,21 @@ pub struct SkillsApp {
 
 impl SkillsApp {
     fn load(repo: &Repository) -> Result<Self, Box<dyn std::error::Error>> {
-        let skills = repo.list_skills(None, Some(SKILL_STATUS_ACTIVE))?;
+        Self::load_in(
+            repo,
+            std::env::current_dir().ok(),
+            std::env::var_os("HOME").map(std::path::PathBuf::from),
+        )
+    }
+
+    /// [`Self::load`] with the directory repo skills are found from given
+    /// explicitly, so tests never depend on the process's directory.
+    fn load_in(
+        repo: &Repository,
+        here: Option<std::path::PathBuf>,
+        home: Option<std::path::PathBuf>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let (skills, repo_skills) = library(repo, here.as_deref(), home.as_deref())?;
         let filtered = filtered_skill_indices(&skills, "");
         let mut list_state = ListState::default();
         if !filtered.is_empty() {
@@ -373,6 +395,9 @@ impl SkillsApp {
         }
         Ok(Self {
             skills,
+            repo_skills,
+            here,
+            home,
             query: String::new(),
             filtered,
             list_state,
@@ -382,6 +407,66 @@ impl SkillsApp {
             pending_state: ListState::default(),
             leave_label: "Quit",
         })
+    }
+
+    /// Re-read the library and the repo skills after a change.
+    fn reload(&mut self, repo: &Repository) -> Result<(), Box<dyn std::error::Error>> {
+        let (skills, repo_skills) = library(repo, self.here.as_deref(), self.home.as_deref())?;
+        self.skills = skills;
+        self.repo_skills = repo_skills;
+        Ok(())
+    }
+
+    /// The repo file behind `skill`, when it is a repo skill.
+    fn repo_skill(&self, skill: &Skill) -> Option<&crate::repo_skills::RepoSkill> {
+        if skill.source != crate::models::SKILL_SOURCE_REPO {
+            return None;
+        }
+        self.repo_skills.as_ref()?.find(&skill.name)
+    }
+
+    /// Edit and delete act on the library; a repo skill is a file in the
+    /// repository, which suvadu never changes. Says so instead.
+    fn refuse_if_repo_skill(&mut self) -> bool {
+        let Some(path) = self
+            .selected_skill()
+            .and_then(|s| self.repo_skill(s))
+            .map(|rs| rs.path.display().to_string())
+        else {
+            return false;
+        };
+        self.status_message = Some((
+            StatusLevel::Error,
+            format!("Repo skill — read-only here. Edit {path} instead"),
+        ));
+        true
+    }
+
+    /// The preview pane's text for `s`.
+    fn preview_for(&self, s: &Skill) -> String {
+        let here = self.here.as_deref();
+        if let Some(rs) = self.repo_skill(s) {
+            let destinations = here.map_or_else(Vec::new, |cwd| {
+                crate::commands::skills::repo_destinations(rs, cwd)
+            });
+            return repo_preview_text(rs, &destinations);
+        }
+        let mut text = preview_text(s, &destinations_here(s));
+        if let Some(rs) = self
+            .repo_skills
+            .as_ref()
+            .and_then(|f| crate::commands::skills::shadowing_repo_skill(f, s))
+        {
+            text = text.replacen(
+                "\nsyncs to:",
+                &format!(
+                    "\nshadowed: by the trusted repo file {} — that file syncs here instead\nsyncs to:",
+                    rs.path.display()
+                ),
+                1,
+            );
+        }
+        text
     }
 
     fn refresh_filter(&mut self) {
@@ -396,6 +481,52 @@ impl SkillsApp {
             .and_then(|i| self.filtered.get(i))
             .and_then(|&idx| self.skills.get(idx))
     }
+}
+
+/// The library's active skills followed by the repo skills found from
+/// `here` (every trust state, so an untrusted one is visible too).
+fn library(
+    repo: &Repository,
+    here: Option<&std::path::Path>,
+    home: Option<&std::path::Path>,
+) -> Result<(Vec<Skill>, Option<crate::repo_skills::Discovery>), Box<dyn std::error::Error>> {
+    let mut skills = repo.list_skills(None, Some(SKILL_STATUS_ACTIVE))?;
+    let found = here.and_then(|cwd| crate::repo_skills::discover(repo, cwd, home).ok().flatten());
+    if let Some(found) = &found {
+        skills.extend(found.skills.iter().map(|rs| rs.skill.clone()));
+    }
+    Ok((skills, found))
+}
+
+/// The preview pane for a repo skill: its file, whether it is trusted, and
+/// that it is edited as a file, not here.
+pub fn repo_preview_text(
+    rs: &crate::repo_skills::RepoSkill,
+    destinations: &[crate::skills_sync::Destination],
+) -> String {
+    use std::fmt::Write as _;
+    let s = &rs.skill;
+    let mut out = format!("{}\n", s.name);
+    let _ = writeln!(out, "scope:    {}", s.scope);
+    let _ = writeln!(out, "source:   repo file (read-only here — edit the file)");
+    let _ = writeln!(out, "file:     {}", rs.path.display());
+    let _ = writeln!(out, "trust:    {}", rs.trust.explain());
+    if !s.triggers.is_empty() {
+        let _ = writeln!(out, "triggers: {}", s.triggers.join(", "));
+    }
+    if destinations.is_empty() {
+        let _ = writeln!(out, "syncs to: nothing right now");
+    } else {
+        let _ = writeln!(out, "syncs to:");
+        for d in destinations {
+            let _ = writeln!(out, "  {}", d.path.display());
+        }
+    }
+    if !s.description.is_empty() {
+        let _ = write!(out, "\n{}\n", s.description);
+    }
+    let _ = write!(out, "\n{}", s.body);
+    out
 }
 
 /// Launch the interactive skills management app (bare `suv skills`).
@@ -482,6 +613,9 @@ fn handle_browse_key(
             app.mode = Mode::Form(FormState::new_add());
         }
         KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.refuse_if_repo_skill() {
+                return Ok(false);
+            }
             if let Some(skill) = app.selected_skill() {
                 app.mode = Mode::Form(form_from_existing(skill));
             }
@@ -495,6 +629,9 @@ fn handle_browse_key(
             app.mode = Mode::Review;
         }
         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.refuse_if_repo_skill() {
+                return Ok(false);
+            }
             if let Some(skill) = app.selected_skill() {
                 app.mode = Mode::ConfirmDelete {
                     name: skill.name.clone(),
@@ -565,7 +702,7 @@ fn handle_confirm_delete_key(
             match repo.delete_skill(name, scope) {
                 Ok(removed) => {
                     let removed_index = app.list_state.selected().unwrap_or(0);
-                    app.skills = repo.list_skills(None, Some(SKILL_STATUS_ACTIVE))?;
+                    app.reload(repo)?;
                     app.refresh_filter();
                     app.list_state
                         .select(reselect_after_removal(removed_index, app.filtered.len()));
@@ -700,7 +837,7 @@ fn save_form(
             };
             match repo.create_skill(&new) {
                 Ok(skill) => {
-                    app.skills = repo.list_skills(None, Some(SKILL_STATUS_ACTIVE))?;
+                    app.reload(repo)?;
                     app.refresh_filter();
                     app.status_message =
                         Some((StatusLevel::Info, format!("Added '{}'", skill.name)));
@@ -720,7 +857,7 @@ fn save_form(
                 Some(&triggers),
             ) {
                 Ok(Some(updated)) => {
-                    app.skills = repo.list_skills(None, Some(SKILL_STATUS_ACTIVE))?;
+                    app.reload(repo)?;
                     app.refresh_filter();
                     app.status_message = Some((
                         StatusLevel::Info,
@@ -792,7 +929,7 @@ fn apply_review_key(
             let verb = if approve { "Approved" } else { "Rejected" };
             app.status_message = Some((StatusLevel::Info, format!("{verb} '{}'", skill.name)));
             if approve {
-                app.skills = repo.list_skills(None, Some(SKILL_STATUS_ACTIVE))?;
+                app.reload(repo)?;
                 app.refresh_filter();
             }
         }
@@ -900,11 +1037,11 @@ fn render_browse(
         .iter()
         .filter_map(|&i| app.skills.get(i))
         .map(|s| {
-            ListItem::new(Line::from(format!(
-                "{}  ({})",
-                s.name,
-                scope_label(&s.scope)
-            )))
+            let place = app.repo_skill(s).map_or_else(
+                || scope_label(&s.scope),
+                |rs| format!("repo · {}", rs.trust.word()),
+            );
+            ListItem::new(Line::from(format!("{}  ({place})", s.name)))
         })
         .collect();
     let empty = items.is_empty();
@@ -925,7 +1062,7 @@ fn render_browse(
         "No matching skills.".to_string()
     } else {
         app.selected_skill()
-            .map(|s| preview_text(s, &destinations_here(s)))
+            .map(|s| app.preview_for(s))
             .unwrap_or_default()
     };
     let preview = Paragraph::new(body_text).wrap(Wrap { trim: false }).block(
@@ -1330,6 +1467,121 @@ mod tests {
 
         let mut app = SkillsApp::load(&repo).unwrap();
         assert!(handle_key(&mut app, ctrl_c(), &repo, &mut no_editor).unwrap());
+    }
+
+    /// A project directory with one repo skill file.
+    fn project_with_repo_skill() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(".suvadu/skills");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("ship.md"),
+            "---\ndescription: How we ship\n---\nTag it.\n",
+        )
+        .unwrap();
+        root
+    }
+
+    fn select_named(app: &mut SkillsApp, name: &str, source: &str) {
+        let pos = app
+            .filtered
+            .iter()
+            .position(|&i| app.skills[i].name == name && app.skills[i].source == source)
+            .unwrap();
+        app.list_state.select(Some(pos));
+    }
+
+    fn ctrl(c: char) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn repo_skills_are_listed_with_their_trust_and_file_and_are_read_only() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        library_with(&repo, "release");
+        let root = project_with_repo_skill();
+        let file = root.path().join(".suvadu/skills/ship.md");
+        let mut app = SkillsApp::load_in(&repo, Some(root.path().to_path_buf()), None).unwrap();
+        assert_eq!(app.skills.len(), 2);
+        select_named(&mut app, "ship", crate::models::SKILL_SOURCE_REPO);
+
+        let screen = crate::test_utils::render_to_text(160, 30, |f| render(f, &mut app));
+        assert!(screen.contains("ship  (repo · untrusted)"), "{screen}");
+        assert!(screen.contains("read-only here"), "{screen}");
+        assert!(screen.contains("ship.md"), "{screen}");
+        assert!(screen.contains("suv skills trust"), "{screen}");
+
+        // Edit and delete are refused with the file to edit instead.
+        assert!(!handle_key(&mut app, ctrl('e'), &repo, &mut no_editor).unwrap());
+        assert!(matches!(app.mode, Mode::Browse), "no edit form opened");
+        let msg = app.status_message.as_ref().map(|(_, m)| m.clone()).unwrap();
+        assert!(
+            msg.contains("read-only") && msg.contains("ship.md"),
+            "{msg}"
+        );
+
+        app.status_message = None;
+        assert!(!handle_key(&mut app, ctrl('d'), &repo, &mut no_editor).unwrap());
+        assert!(matches!(app.mode, Mode::Browse), "no delete prompt opened");
+        assert!(app.status_message.is_some());
+        assert!(file.exists(), "the repo file is never touched");
+
+        // A library skill is still editable.
+        select_named(&mut app, "release", crate::models::SKILL_SOURCE_HUMAN);
+        handle_key(&mut app, ctrl('e'), &repo, &mut no_editor).unwrap();
+        assert!(matches!(app.mode, Mode::Form(_)));
+    }
+
+    #[test]
+    fn a_trusted_repo_skill_shows_as_trusted_and_a_changed_one_says_so() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let root = project_with_repo_skill();
+        let found = crate::repo_skills::discover(&repo, root.path(), None)
+            .unwrap()
+            .unwrap();
+        let all: Vec<_> = found.skills.iter().collect();
+        crate::repo_skills::trust(&repo, &found, &all).unwrap();
+
+        let mut app = SkillsApp::load_in(&repo, Some(root.path().to_path_buf()), None).unwrap();
+        let screen = crate::test_utils::render_to_text(160, 30, |f| render(f, &mut app));
+        assert!(screen.contains("ship  (repo · trusted)"), "{screen}");
+
+        std::fs::write(
+            root.path().join(".suvadu/skills/ship.md"),
+            "Tag it twice.\n",
+        )
+        .unwrap();
+        app.reload(&repo).unwrap();
+        app.refresh_filter();
+        let screen = crate::test_utils::render_to_text(160, 30, |f| render(f, &mut app));
+        assert!(screen.contains("ship  (repo · changed)"), "{screen}");
+        assert!(screen.contains("changed since trusted"), "{screen}");
+    }
+
+    #[test]
+    fn a_library_skill_shadowed_by_a_trusted_repo_file_says_so() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let root = project_with_repo_skill();
+        repo.create_skill(&crate::models::NewSkill {
+            name: "ship".into(),
+            description: String::new(),
+            body: "Library version.".into(),
+            triggers: Vec::new(),
+            scope: crate::models::normalize_scope_path(&root.path().to_string_lossy()),
+            source: crate::models::SKILL_SOURCE_HUMAN.into(),
+            status: SKILL_STATUS_ACTIVE.into(),
+        })
+        .unwrap();
+        let found = crate::repo_skills::discover(&repo, root.path(), None)
+            .unwrap()
+            .unwrap();
+        let all: Vec<_> = found.skills.iter().collect();
+        crate::repo_skills::trust(&repo, &found, &all).unwrap();
+
+        let mut app = SkillsApp::load_in(&repo, Some(root.path().to_path_buf()), None).unwrap();
+        select_named(&mut app, "ship", crate::models::SKILL_SOURCE_HUMAN);
+        let screen = crate::test_utils::render_to_text(160, 30, |f| render(f, &mut app));
+        assert!(screen.contains("shadowed"), "{screen}");
     }
 
     #[test]
