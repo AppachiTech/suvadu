@@ -84,7 +84,7 @@ governs it.
 | Category | Holds | Goes away when |
 |---|---|---|
 | Commands | command text, directory, exit code, start/end times, duration, executor type and name, an optional tag, and a `context` JSON blob (which holds the git branch, when there was one); plus their notes, bookmarks, aliases, tags and the two trigram search indexes (one over the command as typed, one with its separators removed); and, **only with failure-output capture on**, the last 4 KB a failed command printed (`entry_output`: which stream, the cleaned and redacted text, and how many bytes were left out before it) | you run `suv delete <pattern>`; `suv gc --failure-output` removes every stored failure output and keeps the commands |
-| Sessions | shell sessions (id, **machine hostname**, creation time, tag), and agent sessions with their captured transcript events and the adapter checkpoints that record which transcript files were read and how far; and, unless `agent.record_git_snapshots` is off, up to two **git snapshots** per agent session (`ai_snapshots`: when, the directory, the repository root, the commit and branch checked out, and up to 500 changed paths with their git status — never contents or diffs) | an agent session is removed with `suv agent delete-session <id>`, snapshots included; `suv gc` removes snapshots a day old whose session left no other record; a shell session row stays behind after its commands are deleted |
+| Sessions | shell sessions (id, **machine hostname**, creation time, tag), and agent sessions with their captured transcript events and the adapter checkpoints that record which transcript files were read and how far (for a Cursor conversation, which Cursor pushes event by event: a 64-bit fingerprint of each stored event, taken after redaction, so a repeated hook run is stored once, and the count of events seen); and, unless `agent.record_git_snapshots` is off, up to two **git snapshots** per agent session (`ai_snapshots`: when, the directory, the repository root, the commit and branch checked out, and up to 500 changed paths with their git status — never contents or diffs) | an agent session is removed with `suv agent delete-session <id>`, snapshots included; `suv gc` removes snapshots a day old whose session left no other record; a shell session row stays behind after its commands are deleted |
 | Summaries | session summaries written over MCP, with their cited evidence IDs, the session revision they were written from, and the caller-declared agent and model | their agent session is deleted — editing or deleting commands only marks a summary *stale*, it does not remove it |
 | Skills | shared skill documents | you run `suv skills remove`; a sync rewrites agent-side copies, not the stored row |
 | Backups | full database copies from `suv backup`, the automatic pre-delete snapshot, and the pre-import snapshot taken by `suv import --from atuin-db` | **you delete the files yourself** |
@@ -141,7 +141,8 @@ printed, which may itself have been written to look like instructions.
 **Agent git snapshots** (`[agent] record_git_snapshots`, *Record Agent Git
 Snapshots* in `suv settings`, on by default) are taken by the Claude Code
 (`UserPromptSubmit`, `Stop`/`SessionEnd`), Codex (`UserPromptSubmit`,
-`Stop`/`SessionEnd`) and OpenCode (prompt, `session.idle`) hooks: one at the
+`Stop`/`SessionEnd`), OpenCode (prompt, `session.idle`) and Cursor
+(`beforeSubmitPrompt`, `stop`) hooks: one at the
 first prompt of a session, kept, and one at each turn end, replacing the last.
 Each runs `git --no-optional-locks -c core.fsmonitor=false status
 --porcelain=v2 --branch -z` in the session's repository, with `GIT_DIR` and
@@ -210,7 +211,8 @@ The same configuration governs every path that writes to the database.
 | Atuin import (`suv import --from atuin-db`, including `--dry-run`) | yes | yes, per source directory — command **and** free-text metadata | yes, per source directory — command **and** free-text metadata |
 | JSONL import (`suv import`) | n/a | no — restoring a Suvadu export is meant to reproduce it exactly, failure output included (still held to 4 KB) | no |
 | Native transcript ingestion (Codex, Claude Code, OpenCode) | n/a | yes, per directory | yes, per directory |
-| Agent git snapshots (Claude Code, Codex, OpenCode hooks) | n/a | yes, per directory: a changed path matching an exclusion is left out and counted | yes, per directory: every path and the branch name |
+| Cursor session hooks (`beforeSubmitPrompt`, `afterAgentResponse`, `stop`) | n/a | yes, per workspace: an event whose text matches is not stored | yes, per workspace: the policy of the hook's first `workspace_roots` entry, since Cursor sends these hooks no `cwd`; an event without a workspace is not stored |
+| Agent git snapshots (Claude Code, Codex, OpenCode, Cursor hooks) | n/a | yes, per directory: a changed path matching an exclusion is left out and counted | yes, per directory: every path and the branch name |
 | Session summaries saved over MCP | n/a | yes — matching text is refused, not trimmed | yes |
 
 **"Per directory" means the policy of the directory the command ran in** —
@@ -239,11 +241,10 @@ catch a format it has never seen.
 
 **One gap, in the prompt cache rather than the database.** Before an agent
 prompt is attached to a command it is written to `<data_dir>/prompts/`. The
-Claude Code, Codex and OpenCode prompt hooks redact and truncate it there.
-The **Cursor** hook truncates but does not redact at cache time, and the
-**pi.dev** extension truncates to 500 characters in JavaScript, bypassing
-both `agent.prompt_capture_max_chars` and redaction. In both cases the
-prompt is redacted again, with that command's own directory policy, before
+Claude Code, Codex, OpenCode and Cursor prompt hooks redact and truncate it
+there (Cursor with its workspace's policy). The **pi.dev** extension
+truncates to 500 characters in JavaScript, bypassing both
+`agent.prompt_capture_max_chars` and redaction. Its prompt is redacted again, with that command's own directory policy, before
 it reaches the database — so what is *stored* is redacted, but the cache
 file on disk may briefly hold the original text. Those files are `0o600` in
 a `0o700` directory, and `suv gc` deletes cache files older than 7 days.

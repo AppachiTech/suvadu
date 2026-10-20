@@ -108,7 +108,7 @@ src/
   util/              # Date/path/exclusion helpers, terminal guards, syntax highlighting
   hooks.rs           # Shell hook generation (Zsh, Bash)
   integrations.rs    # Claude Code, Cursor, OpenCode, Antigravity, pi.dev integrations
-  integrations/      # Codex-specific hooks and the agent-integration registry
+  integrations/      # Codex and Cursor session hooks, and the agent-integration registry
   import_export.rs   # History import (JSONL, Zsh, Bash, Atuin) and export (JSON/JSONL/CSV)
   import_export/     # The read-only Atuin database adapter
   redact.rs          # Secret detection and redaction applied before a command is recorded
@@ -133,7 +133,7 @@ src/
   mcp/               # MCP server: JSON-RPC protocol, tool/resource/prompt definitions.
                      # catalog.rs is the single source of which capabilities exist;
                      # conventions.rs is the one response shape they all follow
-  ai_sessions/       # Native agent transcript adapters and the handoff template
+  ai_sessions/       # Native agent transcript and hook adapters, and the handoff template
 ```
 
 Docs and evidence that live at the repository root (`docs/` is gitignored):

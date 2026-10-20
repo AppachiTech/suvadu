@@ -16,7 +16,7 @@
 **Suvadu** replaces your shell history with a SQLite-backed store. Every command gets structured context — exit code, duration, directory, executor, session. AI agents can query it via MCP. 100% local.
 
 - **Measured, not asserted** — at 100,000 entries on one M4 Max: **207 µs** p95 to record a command, **0.05–15 ms** p95 for a judged search over the whole history. One machine, one run — the harness, the corpus and what is still unmeasured are in [BENCHMARKS.md](BENCHMARKS.md)
-- **AI agent tracking** — full session capture for Claude Code, Codex and OpenCode; commands and prompts for Cursor and pi.dev; command tagging alone for Antigravity, Windsurf, Aider, Continue and Copilot ([what each tier means](#what-each-agent-actually-gives-you))
+- **AI agent tracking** — full session capture for Claude Code, Codex, OpenCode and Cursor (Cursor without token usage); commands and prompts for pi.dev; command tagging alone for Antigravity, Windsurf, Aider, Continue and Copilot ([what each tier means](#what-each-agent-actually-gives-you))
 - **Prompt Explorer** — trace every recorded command back to the prompt that triggered it
 - **MCP Server** — **22 read-only tools, 8 resources and 6 prompts, all read-only by default.** The two write tools stay off until you turn their opt-in on. Agent session discovery, project context, failure learning, risk assessment, a shared skills library, your bookmarked command templates. Configurable via `suv settings`
 - **100% local** — no cloud, no telemetry, no account. The only request Suvadu makes on its own is a once-a-day check for a newer release, which you can turn off. MIT licensed.
@@ -419,7 +419,7 @@ tested against is rejected with the migration id rather than guessed at — run
 ```bash
 suv init claude-code    # Claude Code — commands, sessions, tokens + MCP
 suv init codex          # Codex — commands, sessions, tokens + MCP
-suv init cursor         # Cursor — hooks + MCP + prompt capture
+suv init cursor         # Cursor — commands, sessions (no tokens) + MCP
 suv init opencode       # OpenCode — plugin + full session capture (commands, sessions, tokens)
 suv init pi             # pi.dev — extension + prompt capture
 suv init antigravity    # Antigravity — auto-detect
@@ -436,7 +436,7 @@ Three different things get called "AI agent support". Here is which one you get:
 | Claude Code | `claude-code` | yes (hooks) | yes | **yes** | not pinned to a version — see the caveat below |
 | Codex | `codex` | yes (hooks) | yes | **yes** | CLI 0.153.4 |
 | OpenCode | `opencode` | yes (plugin) | yes | **yes** | CLI 1.18.30 |
-| Cursor | `cursor` | yes (hooks) | yes | no | not pinned |
+| Cursor | `cursor` | yes (hooks) | yes | **yes** — prompts, final responses and turn ends; no token usage | not pinned |
 | pi.dev | `pi` | yes (extension) | yes (capped at 500 characters by the extension) | no | not pinned |
 | Antigravity | `antigravity` | via the shell hook | no | no | — |
 | Windsurf, Aider, Continue, Copilot | — | via the shell hook | no | no | — |
@@ -515,7 +515,7 @@ makes it once per selected failed command.
 
 ### What changed: agent git snapshots
 
-When a Claude Code, Codex or OpenCode session works in a git repository,
+When a Claude Code, Codex, OpenCode or Cursor session works in a git repository,
 Suvadu takes a **git snapshot** of it at the session's first prompt and again
 at each turn end (Claude Code and Codex `UserPromptSubmit` and
 `Stop`/`SessionEnd`; OpenCode's prompt and `session.idle`): the commit and
@@ -543,7 +543,7 @@ replaces the last one, so a session holds at most two.
   removes those a day old whose session left no other record. They are not
   exported, like the agent sessions they belong to.
 
-Cursor sessions get no snapshot: Suvadu installs no turn-end hook for Cursor.
+Cursor sessions get them too, at `beforeSubmitPrompt` and `stop`.
 
 The MCP `what_changed` tool reads them. Given a `session_id`, it compares the
 session's two snapshots and reports, with `provenance: observed`, the paths
@@ -609,6 +609,8 @@ Claude Code commands link to their native prompt turn after transcript reconcili
 
 `suv init opencode` installs a plugin at `~/.opencode/plugins/suvadu.js` and also registers that directory in `~/.config/opencode/opencode.jsonc`'s `plugin` array — OpenCode does not reliably auto-load plugins from the directory alone. If your `opencode.jsonc` already has JSONC-style comments (which this step can't safely parse and rewrite without risking the rest of your config), it prints the exact line to add yourself instead. Bash commands OpenCode executes are recorded immediately; prompts, assistant responses, model, and token usage are captured when a session goes idle, via OpenCode's own `session.messages` API. The plugin hands Suvadu only what it stores — each message's text, model and token counts, never tool output or reasoning — and only the messages it has not already imported, so a long session costs each idle only its new messages. Rerun `suv init opencode` after upgrading Suvadu or OpenCode, then fully quit and relaunch OpenCode so the updated plugin and config take effect. Tested against OpenCode CLI 1.18.30; if OpenCode reports a plugin load error after an OpenCode upgrade, its plugin contract may have changed again and `suv init opencode` will need a matching update.
 
+`suv init cursor` registers four hooks in `~/.cursor/hooks.json`, beside any you already have there: `afterShellExecution` (commands), `beforeSubmitPrompt` (prompts), and `afterAgentResponse` and `stop` (the final response of each turn and how it ended). Each Cursor conversation becomes one session, `cursor-<conversation_id>`, with the conversation's commands linked to the turn (Cursor's generation id) they ran in. The caveats are Cursor's: its hooks report **no token usage**, so a Cursor session's tokens are *unavailable* — never zero — and its capture status says so; they carry no timestamps, so events are timed when the hook receives them; Cursor sends only the final response text of a turn, so intermediate assistant messages, thinking (`afterAgentThought`, not installed) and tool calls other than shell commands are not captured; and an event is captured only when Cursor names a workspace, whose `.suvadu.toml` decides its redaction and exclusions. Rerun `suv init cursor` and restart Cursor after upgrading Suvadu.
+
 For agents configured with MCP, ask: *"What commands failed in this project recently?"*
 
 ### Prompt Explorer or session timeline?
@@ -621,7 +623,7 @@ subsumes the other.
   reports that turn's command count, successes, failures and total time. A
   prompt that produced no recorded command never appears — there is nothing
   to group. It works for every agent whose prompt is captured, including
-  Cursor and pi.dev, which have no session timeline, and it browses across
+  pi.dev, which has no session timeline, and it browses across
   sessions with a time window and an executor filter.
 - **Session timelines** (`suv sessions`, and `suv agent sessions` for the
   non-interactive view) are built from the agent's **own transcript**,
@@ -629,7 +631,7 @@ subsumes the other.
   interrupted turns, every observed model and provider-reported token
   totals — including sessions with no commands at all — plus capture
   completeness, saved summaries (`s`) and the handoff scaffold (`h`). Only
-  Claude Code, Codex and OpenCode have one.
+  Claude Code, Codex, OpenCode and Cursor have one.
 
 ### MCP: read-only by default
 
