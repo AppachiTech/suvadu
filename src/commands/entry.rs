@@ -655,6 +655,7 @@ pub fn handle_gc(
         } else {
             println!("  Orphaned failure output:        {}", found.outputs);
         }
+        println!("  Orphaned git snapshots:         {}", found.snapshots);
         println!("  Stale prompt cache files:       {stale_prompts}");
         println!(
             "  Search index needs a rebuild:   {}",
@@ -692,6 +693,12 @@ pub fn handle_gc(
             );
         }
     }
+    if removed.snapshots > 0 {
+        println!(
+            "Removed {} git snapshots whose agent session is gone.",
+            removed.snapshots
+        );
+    }
     if deleted_prompts > 0 {
         println!("Removed {deleted_prompts} stale prompt cache files.");
     }
@@ -728,6 +735,9 @@ struct GcCounts {
     /// Failure output whose command is gone, or with `--failure-output`,
     /// every stored one.
     outputs: usize,
+    /// Git snapshots a day old or more whose agent session left no other
+    /// record.
+    snapshots: usize,
 }
 
 /// Repo-level garbage collection: orphaned sessions, notes and failure
@@ -740,6 +750,8 @@ fn handle_gc_with_repo(
     drop_failure_output: bool,
 ) -> Result<GcCounts, Box<dyn std::error::Error>> {
     let as_count = |n: i64| usize::try_from(n).unwrap_or(0);
+    let snapshot_cutoff =
+        chrono::Utc::now().timestamp_millis() - crate::repository::ORPHAN_SNAPSHOT_AGE_MS;
     if dry_run {
         return Ok(GcCounts {
             sessions: as_count(repo.count_orphaned_sessions()?),
@@ -749,6 +761,7 @@ fn handle_gc_with_repo(
             } else {
                 repo.count_orphaned_outputs()?
             }),
+            snapshots: as_count(repo.count_orphaned_git_snapshots(snapshot_cutoff)?),
         });
     }
 
@@ -759,6 +772,7 @@ fn handle_gc_with_repo(
         repo.delete_orphaned_outputs()?
     };
     let sessions = repo.delete_orphaned_sessions()?;
+    let snapshots = repo.delete_orphaned_git_snapshots(snapshot_cutoff)?;
 
     if vacuum {
         println!("Running VACUUM...");
@@ -770,6 +784,7 @@ fn handle_gc_with_repo(
         sessions,
         notes,
         outputs,
+        snapshots,
     })
 }
 
@@ -1439,6 +1454,36 @@ mod tests {
         assert_eq!(removed.outputs, 2);
         assert_eq!(repo.count_failure_outputs().unwrap(), 0);
         assert_eq!(repo.count_entries().unwrap(), 2);
+    }
+
+    #[test]
+    fn gc_removes_day_old_git_snapshots_left_without_a_session() {
+        use crate::ai_sessions::git_snapshot::{GitSnapshot, SnapshotKind};
+        let (_dir, repo) = test_repo();
+        let now = chrono::Utc::now().timestamp_millis();
+        let shot = |session: &str, at: i64| GitSnapshot {
+            session_id: session.into(),
+            kind: SnapshotKind::End,
+            at,
+            cwd: "/r".into(),
+            repo_root: "/r".into(),
+            head: None,
+            branch: None,
+            paths: Vec::new(),
+            path_count: 0,
+            omitted: 0,
+            capped: false,
+        };
+        repo.save_git_snapshot(&shot("claude-old", now - 2 * 24 * 3_600_000))
+            .unwrap();
+        repo.save_git_snapshot(&shot("claude-now", now)).unwrap();
+        let preview = handle_gc_with_repo(&repo, true, false, false).unwrap();
+        assert_eq!(preview.snapshots, 1);
+        assert!(repo.git_snapshots("claude-old").unwrap().1.is_some());
+        let removed = handle_gc_with_repo(&repo, false, false, false).unwrap();
+        assert_eq!(removed.snapshots, 1);
+        assert!(repo.git_snapshots("claude-old").unwrap().1.is_none());
+        assert!(repo.git_snapshots("claude-now").unwrap().1.is_some());
     }
 
     #[test]

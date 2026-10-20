@@ -232,6 +232,12 @@ pub struct AgentConfig {
     /// in the cache dir; the cap keeps the cache lightweight. Default 4000.
     #[serde(default = "default_prompt_capture_max_chars")]
     pub prompt_capture_max_chars: usize,
+    /// Take a git snapshot of an agent session's working directory at its
+    /// first prompt and at each turn end: the commit and branch checked
+    /// out and the changed paths (never contents), so `what_changed`
+    /// reports what changed instead of guessing. On by default.
+    #[serde(default = "default_true")]
+    pub record_git_snapshots: bool,
 }
 
 const fn default_prompt_capture_max_chars() -> usize {
@@ -245,6 +251,7 @@ impl Default for AgentConfig {
             risk_ignore_patterns: Vec::new(),
             risk_extra_patterns: Vec::new(),
             prompt_capture_max_chars: default_prompt_capture_max_chars(),
+            record_git_snapshots: true,
         }
     }
 }
@@ -610,8 +617,9 @@ fn merge_toml_value(base: &mut toml::Value, overlay: toml::Value) {
 ///   redaction on; an overlay can still turn it on.
 /// - `enabled = true` is ignored when the global config has recording off;
 ///   an overlay can still turn recording off for its project.
-/// - `shell.capture_git_branch = true` and `capture.failure_output = true`
-///   are likewise ignored when the global config has them off.
+/// - `shell.capture_git_branch = true`, `capture.failure_output = true` and
+///   `agent.record_git_snapshots = true` are likewise ignored when the
+///   global config has them off.
 /// - `exclusions` and `redaction.extra_patterns` are the union of the
 ///   global entries and the overlay's, never a replacement.
 ///
@@ -655,6 +663,7 @@ fn keep_global_privacy(base: &Config, merged: &mut Config) {
     merged.enabled &= base.enabled;
     merged.shell.capture_git_branch &= base.shell.capture_git_branch;
     merged.capture.failure_output &= base.capture.failure_output;
+    merged.agent.record_git_snapshots &= base.agent.record_git_snapshots;
     merged.redaction.enabled |= base.redaction.enabled;
     merged.exclusions = union_keeping_order(&base.exclusions, &merged.exclusions);
     merged.redaction.extra_patterns = union_keeping_order(
@@ -1678,6 +1687,38 @@ unknown_agent_key = 1
                 .capture
                 .failure_output,
             "an overlay that does not mention it keeps the global choice"
+        );
+    }
+
+    #[test]
+    fn git_snapshots_are_recorded_unless_turned_off() {
+        assert!(Config::default().agent.record_git_snapshots);
+        let cfg: Config = toml::from_str("[agent]\nprompt_capture_max_chars = 10\n").unwrap();
+        assert!(cfg.agent.record_git_snapshots, "missing key means on");
+        let cfg: Config = toml::from_str("[agent]\nrecord_git_snapshots = false\n").unwrap();
+        assert!(!cfg.agent.record_git_snapshots);
+    }
+
+    #[test]
+    fn a_project_overlay_can_stop_git_snapshots_but_not_start_them() {
+        let dir = TempDir::new().unwrap();
+        let overlay = dir.path().join(".suvadu.toml");
+        std::fs::write(&overlay, "[agent]\nrecord_git_snapshots = false\n").unwrap();
+        assert!(
+            !overlay_config_for_dir(&Config::default(), dir.path())
+                .unwrap()
+                .agent
+                .record_git_snapshots
+        );
+        std::fs::write(&overlay, "[agent]\nrecord_git_snapshots = true\n").unwrap();
+        let mut base = Config::default();
+        base.agent.record_git_snapshots = false;
+        assert!(
+            !overlay_config_for_dir(&base, dir.path())
+                .unwrap()
+                .agent
+                .record_git_snapshots,
+            "a cloned repository must not turn snapshots back on"
         );
     }
 

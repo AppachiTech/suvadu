@@ -88,7 +88,7 @@ impl SettingsTab {
     fn item_count(self, config: &Config) -> usize {
         match self {
             Self::Search => 14,
-            Self::Shell => 8,
+            Self::Shell => 9,
             Self::Exclusions => config.exclusions.len(),
             Self::AutoTags => config.auto_tags.len(),
             Self::Agents => config.agents.len(),
@@ -305,6 +305,7 @@ impl AppState {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // One arm per toggle row, kept together.
     fn toggle_bool(&mut self) {
         match (self.current_tab, self.selected_item) {
             (SettingsTab::Search, 1) => {
@@ -393,6 +394,10 @@ impl AppState {
             }
             (SettingsTab::Shell, 7) => {
                 self.config.capture.failure_output = !self.config.capture.failure_output;
+                self.dirty = true;
+            }
+            (SettingsTab::Shell, 8) => {
+                self.config.agent.record_git_snapshots = !self.config.agent.record_git_snapshots;
                 self.dirty = true;
             }
             (SettingsTab::Shell, 4) => {
@@ -1162,6 +1167,7 @@ const fn get_setting_description(tab: usize, item: usize) -> &'static str {
         (1, 5) => "Look for a newer release once a day, in the background, and mention it before a command you run at a terminal. The request only reads the latest version number; nothing about you or your history is sent. SUVADU_NO_UPDATE_CHECK=1 also turns it off",
         (1, 6) => "Store the git branch checked out where each command started, read from the repository's files (no git process runs). Shown in recall's detail pane. A project's .suvadu.toml can turn it off but not back on",
         (1, 7) => "When a command fails, keep the last 4 KB it printed, escape codes stripped and secrets redacted, so recall and the MCP failure tools can show why. Only agent hooks that report output and suv wrap have it; commands typed in your shell never do. Off by default. A project's .suvadu.toml can turn it off but not on; suv gc --failure-output deletes what was kept",
+        (1, 8) => "At an AI agent session's first prompt and at each turn end (Claude Code, Codex, OpenCode), run git status in its working directory and keep the commit, the branch and which paths changed -- never file contents or diffs -- so what_changed reports what changed instead of guessing. Paths are redacted, excluded ones are left out, and at most 500 are kept. Git gets 2 seconds and is skipped outside a repository. A project's .suvadu.toml can turn it off but not back on",
         (4, _) => "Custom agent detection rules. When an env var is set, suvadu tags commands with that agent name and type. Custom agents are checked before built-in agents. Restart your shell (source ~/.zshrc) after adding or removing agents.",
         (5, 0) => "Default time window in days for MCP tools (1-365). Agents use this when they don't specify a date range.",
         (5, 1) => "Default result limit for MCP tools (1-500). Agents use this when they don't specify a limit.",
@@ -1334,6 +1340,11 @@ fn render_shell_tab(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             "Keep Failure Output",
             app.config.capture.failure_output,
             app.selected_item == 7,
+        ),
+        setting_toggle(
+            "Record Agent Git Snapshots",
+            app.config.agent.record_git_snapshots,
+            app.selected_item == 8,
         ),
     ];
 
@@ -2150,8 +2161,23 @@ mod tests {
     }
 
     #[test]
+    fn git_snapshots_can_be_switched_off_in_settings() {
+        let mut app = AppState::new(Config::default());
+        app.current_tab = SettingsTab::Shell;
+        app.selected_item = 8;
+        assert!(app.config.agent.record_git_snapshots, "on by default");
+        app.toggle_bool();
+        assert!(!app.config.agent.record_git_snapshots);
+        assert!(app.dirty);
+        let description = get_setting_description(1, 8);
+        assert!(description.contains("git"), "{description}");
+        assert!(description.contains("never"), "{description}");
+        assert!(description.contains(".suvadu.toml"), "{description}");
+    }
+
+    #[test]
     fn the_home_rows_are_listed_and_explained() {
-        assert_eq!(SettingsTab::Shell.item_count(&Config::default()), 8);
+        assert_eq!(SettingsTab::Shell.item_count(&Config::default()), 9);
         let startup = get_setting_description(1, 3);
         assert!(
             startup.contains("suv home") && startup.contains("scripts"),

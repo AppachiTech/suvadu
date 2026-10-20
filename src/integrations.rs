@@ -48,6 +48,7 @@ const SESSION_END_FIELDS: &[Field] = &[
     whole("hook_event_name"),
     whole("session_id"),
     whole("transcript_path"),
+    whole("cwd"),
 ];
 const CURSOR_SHELL_FIELDS: &[Field] = &[
     whole("command"),
@@ -173,6 +174,11 @@ pub fn handle_hook_claude_prompt() -> Result<(), Box<dyn std::error::Error>> {
     if !is_valid_session_id(session_id) {
         return Ok(());
     }
+    crate::commands::agent_session::record_git_snapshot(
+        &format!("claude-{session_id}"),
+        event["cwd"].as_str(),
+        crate::ai_sessions::git_snapshot::SnapshotKind::Start,
+    );
 
     let prompt = event
         .get("prompt")
@@ -256,6 +262,11 @@ pub fn handle_hook_opencode_prompt(
     std::io::stdin()
         .take(MAX_HOOK_INPUT_BYTES)
         .read_to_string(&mut prompt)?;
+    crate::commands::agent_session::record_git_snapshot(
+        &format!("opencode-{session_id}"),
+        Some(directory),
+        crate::ai_sessions::git_snapshot::SnapshotKind::Start,
+    );
     if prompt.is_empty() {
         return Ok(());
     }
@@ -403,6 +414,11 @@ pub fn handle_hook_claude_session() -> Result<(), Box<dyn std::error::Error>> {
     else {
         return Ok(());
     };
+    crate::commands::agent_session::record_git_snapshot(
+        &format!("claude-{session_id}"),
+        event["cwd"].as_str(),
+        crate::ai_sessions::git_snapshot::SnapshotKind::End,
+    );
     let Some(path) = event["transcript_path"]
         .as_str()
         .filter(|path| !path.is_empty())
@@ -446,6 +462,11 @@ pub fn handle_hook_opencode_session(
     if input.len() as u64 > MAX_OPENCODE_HOOK_INPUT_BYTES {
         return Err("OpenCode hook input exceeds 16 MB".into());
     }
+    crate::commands::agent_session::record_git_snapshot(
+        &format!("opencode-{session_id}"),
+        Some(directory),
+        crate::ai_sessions::git_snapshot::SnapshotKind::End,
+    );
     // A failure exits non-zero: the plugin then keeps these messages and
     // sends them again on the next idle instead of treating them as done.
     crate::commands::agent_session::import_native_opencode(session_id, directory, &input)

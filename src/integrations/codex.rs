@@ -46,6 +46,7 @@ pub fn handle_hook() -> Result<()> {
             || payload.event["transcript_path"].is_string(),
     )?;
     let event = payload.event;
+    snapshot(&event);
     if terminal_hook(
         &event,
         |path, id| crate::commands::agent_session::import_native(path, Some(id)),
@@ -92,6 +93,23 @@ pub fn handle_hook() -> Result<()> {
             record_command(&event, session, turn, &prompts_dir)
         }
         _ => Ok(()),
+    }
+}
+
+/// A git snapshot at a session's first prompt and at each turn end.
+fn snapshot(event: &Value) {
+    use crate::ai_sessions::git_snapshot::SnapshotKind;
+    let kind = match event["hook_event_name"].as_str() {
+        Some("UserPromptSubmit") => SnapshotKind::Start,
+        Some("Stop" | "SessionEnd") => SnapshotKind::End,
+        _ => return,
+    };
+    if let Some(session) = event["session_id"].as_str().filter(|id| valid_id(id)) {
+        crate::commands::agent_session::record_git_snapshot(
+            &format!("codex-{session}"),
+            event["cwd"].as_str(),
+            kind,
+        );
     }
 }
 

@@ -185,7 +185,7 @@ pub const TOOLS: &[ToolEntry] = &[
     },
     ToolEntry {
         name: "what_changed",
-        summary: "Recorded commands in a directory, plus the change categories inferred from the ones that succeeded.",
+        summary: "What an agent session changed in git, observed from snapshots; or a directory's recorded commands with inferred change categories.",
         write_opt_in: None,
     },
     ToolEntry {

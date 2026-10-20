@@ -484,12 +484,61 @@ an inference from what ran next, never an observed cause. Each lookup takes
 under a millisecond on a 100,000-command history (BENCHMARKS.md), and recall
 makes it once per selected failed command.
 
+### What changed: agent git snapshots
+
+When a Claude Code, Codex or OpenCode session works in a git repository,
+Suvadu takes a **git snapshot** of it at the session's first prompt and again
+at each turn end (Claude Code and Codex `UserPromptSubmit` and
+`Stop`/`SessionEnd`; OpenCode's prompt and `session.idle`): the commit and
+branch checked out, and which paths `git status` reports as staged,
+unstaged, untracked, renamed, deleted or conflicted. **Paths only — never
+file contents, never diffs.** The first snapshot is kept; each turn end
+replaces the last one, so a session holds at most two.
+
+- `git` runs only at those moments, never per command, as
+  `git --no-optional-locks status --porcelain=v2 --branch -z` with
+  `core.fsmonitor` off, so it never takes the index lock from under the agent
+  and a repository's own config cannot make it run a program. It gets 2
+  seconds; if it is slower, missing from `PATH` or the directory is not in a
+  repository, nothing is recorded and the agent's hook carries on. Outside a
+  repository no `git` process starts. In a 10,000-file repository a snapshot
+  adds about 30–35 ms to the hook that takes it, nearly all of it `git status`
+  (Apple M4 Max; see BENCHMARKS.md); later prompts add under 1 ms.
+- Paths matching your `exclusions` are left out (and counted), the rest and
+  the branch name are redacted like command text, and at most 500 paths are
+  kept — a snapshot says when more changed.
+- Turn it off with *Record Agent Git Snapshots* in `suv settings` or
+  `[agent] record_git_snapshots = false`; a project's `.suvadu.toml` can turn
+  it off but not back on. Paused capture records none.
+- Snapshots go with their session on `suv agent delete-session`; `suv gc`
+  removes those a day old whose session left no other record. They are not
+  exported, like the agent sessions they belong to.
+
+Cursor sessions get no snapshot: Suvadu installs no turn-end hook for Cursor.
+
+The MCP `what_changed` tool reads them. Given a `session_id`, it compares the
+session's two snapshots and reports, with `provenance: observed`, the paths
+whose git status changed in between and the commits made between the two
+HEADs, which it asks the repository for at that moment (`git rev-list`,
+`git log`, `git diff --name-only`, under the same 2-second limit) — so a
+commit made during the session is listed with its subject and the files it
+touched. Those subjects and paths are never stored, and get the repository's
+own exclusions and redaction before they are shown; if the repository or the
+commits are gone, it gives just the two HEADs. A path changed in the
+repository, **not necessarily by the agent**, and a path that already showed
+a change at the start and shows the same one at the end is not listed even if
+it changed again. Without both snapshots it falls back to reading the
+session's commands for their likely effect, marked inferred, and says why.
+Asked about a directory and a time window instead, it lists the sessions there
+that have snapshots before its usual command-text breakdown.
+
 ### What is never captured
 
 - **Command output and file contents.** Suvadu records that a command ran,
   how it exited, how long it took and where — never what it printed or what
   it changed — except the opt-in failure output above, the end of what a
-  failed agent or `suv wrap` command printed.
+  failed agent or `suv wrap` command printed. Agent git snapshots name the
+  paths that changed, never their contents.
 - **From native transcripts:** thinking blocks, attachments, images, file
   contents and raw tool results. Codex commentary and reasoning, injected
   AGENTS/environment context and developer instructions are excluded too.

@@ -1,6 +1,7 @@
 //! Agent-neutral session records and versioned native transcript adapters.
 pub mod claude;
 pub mod codex;
+pub mod git_snapshot;
 pub mod handoff;
 pub mod opencode;
 

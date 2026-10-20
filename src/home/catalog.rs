@@ -1351,8 +1351,9 @@ static FEATURES: &[Feature] = &[
         ],
         command_paths: &["gc"],
         guide: &[
-            "--dry-run shows what would go. Without it, orphaned sessions and notes are \
-                  removed; --vacuum also compacts the database file.",
+            "--dry-run shows what would go. Without it, orphaned sessions, notes and \
+             failure output, and agent git snapshots a day old whose session is gone, are \
+             removed; --vacuum also compacts the database file.",
             "--failure-output also deletes every stored failure output, keeping the \
              commands.",
         ],

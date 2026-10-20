@@ -73,6 +73,8 @@ pub struct AiSessionDeletion {
     pub events: i64,
     pub commands: i64,
     pub summaries: i64,
+    /// Git snapshots of the session's working directory.
+    pub snapshots: i64,
 }
 
 fn hash_field(hash: &mut Sha256, value: &[u8]) {
@@ -1492,7 +1494,7 @@ impl Repository {
     /// for "nothing matched".
     pub fn ai_session_deletion_preview(&self, id: &str) -> DbResult<AiSessionDeletion> {
         let exists: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM ai_sessions WHERE id=?1 UNION SELECT 1 FROM ai_sources WHERE session_id=?1)",
+            "SELECT EXISTS(SELECT 1 FROM ai_sessions WHERE id=?1 UNION SELECT 1 FROM ai_sources WHERE session_id=?1 UNION SELECT 1 FROM ai_snapshots WHERE session_id=?1)",
             [id],
             |r| r.get(0),
         )?;
@@ -1505,18 +1507,20 @@ impl Repository {
             events: count("SELECT COUNT(*) FROM ai_events WHERE session_id=?1")?,
             commands: count("SELECT COUNT(*) FROM entries WHERE session_id=?1")?,
             summaries: count("SELECT COUNT(*) FROM ai_summaries WHERE session_id=?1")?,
+            snapshots: count("SELECT COUNT(*) FROM ai_snapshots WHERE session_id=?1")?,
         })
     }
 
     /// Explicit deletion includes shell evidence and checkpoints, preventing retained summaries.
     pub fn delete_ai_session(&self, id: &str) -> DbResult<usize> {
         let tx = self.conn.unchecked_transaction()?;
-        let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ai_sessions WHERE id=?1 UNION SELECT 1 FROM ai_sources WHERE session_id=?1)",[id],|r|r.get(0))?;
+        let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ai_sessions WHERE id=?1 UNION SELECT 1 FROM ai_sources WHERE session_id=?1 UNION SELECT 1 FROM ai_snapshots WHERE session_id=?1)",[id],|r|r.get(0))?;
         if !exists {
             return Err(invalid("AI session not found"));
         }
         let commands = tx.execute("DELETE FROM entries WHERE session_id=?1", [id])?;
         tx.execute("DELETE FROM ai_sources WHERE session_id=?1", [id])?;
+        tx.execute("DELETE FROM ai_snapshots WHERE session_id=?1", [id])?;
         let sessions = tx.execute("DELETE FROM ai_sessions WHERE id=?1", [id])?;
         tx.commit()?;
         Ok(commands + sessions)

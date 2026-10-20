@@ -84,7 +84,7 @@ governs it.
 | Category | Holds | Goes away when |
 |---|---|---|
 | Commands | command text, directory, exit code, start/end times, duration, executor type and name, an optional tag, and a `context` JSON blob (which holds the git branch, when there was one); plus their notes, bookmarks, aliases, tags and the two trigram search indexes (one over the command as typed, one with its separators removed); and, **only with failure-output capture on**, the last 4 KB a failed command printed (`entry_output`: which stream, the cleaned and redacted text, and how many bytes were left out before it) | you run `suv delete <pattern>`; `suv gc --failure-output` removes every stored failure output and keeps the commands |
-| Sessions | shell sessions (id, **machine hostname**, creation time, tag), and agent sessions with their captured transcript events and the adapter checkpoints that record which transcript files were read and how far | an agent session is removed with `suv agent delete-session <id>`; a shell session row stays behind after its commands are deleted |
+| Sessions | shell sessions (id, **machine hostname**, creation time, tag), and agent sessions with their captured transcript events and the adapter checkpoints that record which transcript files were read and how far; and, unless `agent.record_git_snapshots` is off, up to two **git snapshots** per agent session (`ai_snapshots`: when, the directory, the repository root, the commit and branch checked out, and up to 500 changed paths with their git status — never contents or diffs) | an agent session is removed with `suv agent delete-session <id>`, snapshots included; `suv gc` removes snapshots a day old whose session left no other record; a shell session row stays behind after its commands are deleted |
 | Summaries | session summaries written over MCP, with their cited evidence IDs, the session revision they were written from, and the caller-declared agent and model | their agent session is deleted — editing or deleting commands only marks a summary *stale*, it does not remove it |
 | Skills | shared skill documents | you run `suv skills remove`; a sync rewrites agent-side copies, not the stored row |
 | Backups | full database copies from `suv backup`, the automatic pre-delete snapshot, and the pre-import snapshot taken by `suv import --from atuin-db` | **you delete the files yourself** |
@@ -138,13 +138,37 @@ behind `| `, flattened to one line each, and say it is the command's own
 text, not instructions — an agent reading it is reading what a program
 printed, which may itself have been written to look like instructions.
 
+**Agent git snapshots** (`[agent] record_git_snapshots`, *Record Agent Git
+Snapshots* in `suv settings`, on by default) are taken by the Claude Code
+(`UserPromptSubmit`, `Stop`/`SessionEnd`), Codex (`UserPromptSubmit`,
+`Stop`/`SessionEnd`) and OpenCode (prompt, `session.idle`) hooks: one at the
+first prompt of a session, kept, and one at each turn end, replacing the last.
+Each runs `git --no-optional-locks -c core.fsmonitor=false status
+--porcelain=v2 --branch -z` in the session's repository, with `GIT_DIR` and
+the like removed from its environment, no terminal prompts, and a 2-second
+limit after which nothing is recorded; outside a repository no `git` process
+starts. Only the commit id, the branch and which paths changed (with their
+two-letter status and a rename's source path) are kept — never file
+contents, never a diff. Each path is checked against your exclusion patterns
+(a match is left out and only counted) and redacted like command text, and
+the branch name is redacted too; at most 500 paths are kept, and a snapshot
+records when more changed. Paused capture, a directory with recording off,
+or a project `.suvadu.toml` that turns it off records nothing; a
+`.suvadu.toml` can turn it off but not on. Snapshots are not exported, like
+the agent sessions they belong to. When `what_changed` compares two of them it
+asks the repository, then and there, for the commits between the two HEADs
+(`git rev-list`, `git log`, `git diff --name-only`, under the same 2-second
+limit); those subjects and paths are never stored, and pass through the same
+exclusions and redaction before they are shown.
+
 How these interact:
 
 - Deleting commands does not delete the agent sessions or summaries that
   referred to them. A summary whose evidence changed is reported as stale and
   keeps its text.
 - Deleting an agent session *does* delete its captured events, its adapter
-  checkpoint, its summaries and the shell commands recorded under it.
+  checkpoint, its summaries, its git snapshots and the shell commands
+  recorded under it.
 - Every `suv delete` writes a pre-delete backup first (unless `--no-backup`),
   so a delete that reduces the live database **adds** a full copy of the
   database as it was moments earlier. Backups accumulate until you remove
@@ -186,6 +210,7 @@ The same configuration governs every path that writes to the database.
 | Atuin import (`suv import --from atuin-db`, including `--dry-run`) | yes | yes, per source directory — command **and** free-text metadata | yes, per source directory — command **and** free-text metadata |
 | JSONL import (`suv import`) | n/a | no — restoring a Suvadu export is meant to reproduce it exactly, failure output included (still held to 4 KB) | no |
 | Native transcript ingestion (Codex, Claude Code, OpenCode) | n/a | yes, per directory | yes, per directory |
+| Agent git snapshots (Claude Code, Codex, OpenCode hooks) | n/a | yes, per directory: a changed path matching an exclusion is left out and counted | yes, per directory: every path and the branch name |
 | Session summaries saved over MCP | n/a | yes — matching text is refused, not trimmed | yes |
 
 **"Per directory" means the policy of the directory the command ran in** —

@@ -489,6 +489,28 @@ change touches how recall searches or ranks.
   `v14_migration_cost_on_a_large_history`'s 100,000-command corpus
   (`src/db.rs`).
 
+### Agent git snapshots (schema v15), 19 October 2026
+
+Measured on **Apple M4 Max, 128 GB RAM, macOS 27.2, rustc 1.96.0, git
+2.54.0**, release profile, one run of 40 timed hook invocations per line
+after 3 warm-ups (`cargo test --release --test git_snapshots hook_overhead
+-- --ignored --nocapture`), in a repository of 10,000 tracked files with 50
+modified and 20 untracked. The search baseline above was not re-run: nothing
+here touches search.
+
+| Claude Code hook | snapshots on | snapshots off |
+|---|---|---|
+| `UserPromptSubmit`, the session's first prompt (takes the start snapshot) | 39.6 ms median, 45.3 ms p95 | 9.9 ms median, 10.4 ms p95 |
+| `UserPromptSubmit`, any later prompt (one lookup, no `git`) | 10.8 ms median, 11.7 ms p95 | 9.9 ms median, 10.4 ms p95 |
+| `Stop`, in the repository (replaces the end snapshot) | 39.2 ms median, 40.3 ms p95 | 4.2 ms median, 4.4 ms p95 |
+| `Stop`, outside a repository (no `git` process) | 4.9 ms median, 6.2 ms p95 | — |
+
+Nearly all of the added time is `git status` itself, which scales with the
+working tree; it is cut off at 2 s. It is paid once per session at the first
+prompt and once per turn end, never per command. **Upgrading** to schema v15
+creates one empty table: 0.19 ms on `v15_migration_cost_on_a_large_history`'s
+100,000-command corpus (`src/db.rs`).
+
 ## Known gaps
 
 - **Ranking quality is not measured.** The judged set records which command

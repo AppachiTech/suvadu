@@ -9,6 +9,7 @@ mod notes;
 mod output;
 mod ranking;
 mod skills;
+mod snapshots;
 mod stats;
 mod storage;
 mod tags;
@@ -16,6 +17,7 @@ mod tags;
 pub use capture::{CaptureRecordStats, PLACEHOLDER_IMPORT_HOSTNAME, RESTORED_AT_KEY};
 pub use followups::Run;
 pub use ranking::Followers;
+pub use snapshots::ORPHAN_SNAPSHOT_AGE_MS;
 
 // Re-exported for use as a mockable trait boundary in tests and downstream consumers.
 #[allow(unused_imports)]

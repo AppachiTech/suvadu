@@ -18,11 +18,81 @@ fn capture_policy(cfg: config::Config, paused: bool) -> CapturePolicy {
 /// load falls back exactly as recording a command does -- the global config,
 /// or the defaults with redaction on -- and is noted for `suv doctor`, so a
 /// typo in a `.suvadu.toml` cannot fail every import and lose the session.
-fn capture_policy_for_dir(cwd: &str, paused: bool) -> CapturePolicy {
+pub fn capture_policy_for_dir(cwd: &str, paused: bool) -> CapturePolicy {
     capture_policy(
         config::capture_config_for_dir(std::path::Path::new(cwd)),
         paused,
     )
+}
+
+/// Take a git snapshot of `cwd` for the agent session `session_id` (the id
+/// its commands are recorded under: `claude-<id>`, `codex-<id>`,
+/// `opencode-<id>`), at a session's first prompt (`Start`, kept once) or a
+/// turn end (`End`, replacing the last one).
+///
+/// Called from agent hooks, so it never fails them: paused capture, a
+/// project with recording or `agent.record_git_snapshots` off, a directory
+/// outside a repository, a missing or slow `git`, all quietly record
+/// nothing, and a database error is only reported on stderr. A `Start` the
+/// session already has costs one lookup and no `git` process. A turn end
+/// whose hook names no directory uses the one of the first prompt.
+pub fn record_git_snapshot(
+    session_id: &str,
+    cwd: Option<&str>,
+    kind: crate::ai_sessions::git_snapshot::SnapshotKind,
+) {
+    if config::is_paused() {
+        return;
+    }
+    if let Err(error) = try_record_git_snapshot(session_id, cwd, kind) {
+        eprintln!("suvadu: git snapshot: {error}");
+    }
+}
+
+fn try_record_git_snapshot(
+    session_id: &str,
+    cwd: Option<&str>,
+    kind: crate::ai_sessions::git_snapshot::SnapshotKind,
+) -> Result<()> {
+    use crate::ai_sessions::git_snapshot::{self, GitSnapshot, SnapshotKind};
+    let cwd = cwd.filter(|cwd| !cwd.is_empty());
+    // Settled before the database is opened, so a project that turned
+    // snapshots off costs nothing more.
+    if let Some(cwd) = cwd {
+        let cfg = config::capture_config_for_dir(std::path::Path::new(cwd));
+        if !cfg.enabled || !cfg.agent.record_git_snapshots {
+            return Ok(());
+        }
+    }
+    let repo = crate::repository::Repository::init()?;
+    if kind == SnapshotKind::Start && repo.has_git_snapshot(session_id, SnapshotKind::Start)? {
+        return Ok(());
+    }
+    let cwd = match cwd {
+        Some(cwd) => cwd.to_string(),
+        None => match repo.git_snapshots(session_id)?.0 {
+            Some(start) => start.cwd,
+            None => return Ok(()),
+        },
+    };
+    let cfg = config::capture_config_for_dir(std::path::Path::new(&cwd));
+    if !cfg.enabled || !cfg.agent.record_git_snapshots {
+        return Ok(());
+    }
+    let Some(status) = git_snapshot::observe(std::path::Path::new(&cwd), git_snapshot::GIT_TIMEOUT)
+    else {
+        return Ok(());
+    };
+    let snapshot = GitSnapshot::from_status(
+        session_id,
+        kind,
+        chrono::Utc::now().timestamp_millis(),
+        &cwd,
+        status,
+        &capture_policy(cfg, false),
+    );
+    repo.save_git_snapshot(&snapshot)?;
+    Ok(())
 }
 
 pub fn import_native(path: &std::path::Path, expected: Option<&str>) -> Result<serde_json::Value> {
@@ -148,8 +218,8 @@ pub fn delete(id: &str) -> Result<()> {
     // no sense of how much evidence hangs off it.
     let preview = repo.ai_session_deletion_preview(id)?;
     println!(
-        "Deleting session {id}: {} captured event(s), {} recorded command(s), {} saved summary/summaries.",
-        preview.events, preview.commands, preview.summaries
+        "Deleting session {id}: {} captured event(s), {} recorded command(s), {} saved summary/summaries, {} git snapshot(s).",
+        preview.events, preview.commands, preview.summaries, preview.snapshots
     );
     let count = repo.delete_ai_session(id)?;
     println!("Deleted session {id} and {count} session/command records. Native agent transcripts are unchanged.");

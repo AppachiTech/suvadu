@@ -745,7 +745,7 @@ pub enum Commands {
     /// Also rebuilds the search index when it no longer matches your
     /// history (`suv doctor` reports when it does not).
     #[command(
-        after_help = "Examples:\n  suv gc                   # Remove orphaned sessions/notes/output, repair the search index\n  suv gc --dry-run         # Preview what would be cleaned\n  suv gc --vacuum          # Also compact the database file\n  suv gc --failure-output  # Also delete all stored failure output, keeping the commands"
+        after_help = "Examples:\n  suv gc                   # Remove orphaned sessions/notes/output/git snapshots, repair the search index\n  suv gc --dry-run         # Preview what would be cleaned\n  suv gc --vacuum          # Also compact the database file\n  suv gc --failure-output  # Also delete all stored failure output, keeping the commands"
     )]
     Gc {
         /// Preview what would be deleted without deleting

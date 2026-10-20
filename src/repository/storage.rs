@@ -49,7 +49,7 @@ pub struct StorageUsage {
 fn category_of(table: &str) -> &'static str {
     match table {
         "entries" | "entry_output" | "notes" | "bookmarks" | "aliases" | "tags" => COMMANDS,
-        "sessions" | "ai_sessions" | "ai_events" | "ai_sources" => SESSIONS,
+        "sessions" | "ai_sessions" | "ai_events" | "ai_sources" | "ai_snapshots" => SESSIONS,
         "ai_summaries" => SUMMARIES,
         "skills" => SKILLS,
         // The FTS5 indexes and their shadow tables are the cost of searching
@@ -245,6 +245,11 @@ mod tests {
             .iter()
             .find(|c| c.name == name)
             .unwrap_or_else(|| panic!("missing category {name}"))
+    }
+
+    #[test]
+    fn git_snapshots_are_charged_to_sessions() {
+        assert_eq!(category_of("ai_snapshots"), SESSIONS);
     }
 
     #[test]
