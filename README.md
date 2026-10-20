@@ -74,20 +74,6 @@ is filed under the branch it was typed on; one that switches branches, under
 the branch it switched to. Turn it off with *Record Git Branch* in
 `suv settings` or `[shell] capture_git_branch = false`.
 
-**zsh-autosuggestions.** The zsh hook ships a strategy for
-[zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions) that
-suggests what Up-arrow would recall — the newest command starting with what you
-typed, with AI-agent commands hidden unless `Alt+A` revealed them. Enable it in
-`~/.zshrc`, falling back to zsh's own history when Suvadu has nothing:
-
-```zsh
-ZSH_AUTOSUGGEST_STRATEGY=(suvadu history)
-```
-
-Each suggestion is one `suv get` lookup, the same one Up-arrow makes (its
-cost is in BENCHMARKS.md). zsh-autosuggestions 0.7 fetches suggestions
-asynchronously by default, so typing does not wait for it.
-
 **Staying up to date.** Once a day, in the background, Suvadu looks up the
 newest release number (the same `version.txt` that `suv update` reads) and,
 when there is a newer one, says so in one line before a command you run at a
@@ -96,6 +82,53 @@ it (`brew upgrade suvadu`, `cargo install suvadu` or `suv update`). Nothing
 about you or your history is sent. It never runs in shell hooks, recall,
 scripts, pipes or CI. Turn it off with *Check for Updates* in `suv settings`,
 `[update] check = false` in `config.toml`, or `SUVADU_NO_UPDATE_CHECK=1`.
+
+### Up-arrow recall
+
+In zsh, Up and Down recall from Suvadu as soon as the hook is loaded; there
+is nothing else to set up. Up brings back the newest command that starts with
+what you have typed, then older ones, newest first — the current directory
+only breaks ties between commands recorded at the same millisecond — and Down
+walks back towards what you typed. Only commands you typed are recalled:
+`Alt+A` shows AI-agent commands too, for that shell.
+
+- **Turn it off** with *Enable Arrow Key Navigation* on the Shell tab of
+  `suv settings`, or `[shell] enable_arrow_navigation = false` in
+  `config.toml`. It takes effect in new shells (or `exec zsh`), which keep
+  zsh's own Up/Down and leave `Alt+A` alone.
+- **Bash is not covered yet.** The Bash hook binds only `Ctrl+R`; Up and Down
+  keep Bash's own history.
+- **Check it:** `bindkey '^[[A'` should print `"^[[A" suvadu-up-arrow`, and
+  `bindkey '^[OA'` (the sequence many terminals send) `"^[OA" suvadu-up-arrow`.
+- **If something else answers Up**, a plugin loaded after
+  `eval "$(suv init zsh)"` rebound it — oh-my-zsh's key bindings,
+  zsh-history-substring-search, zsh-vi-mode, fzf's key bindings, atuin and
+  mcfly all bind Up. Put the `eval "$(suv init zsh)"` line last in
+  `~/.zshrc`, after your plugin manager and plugins, then `exec zsh`; a
+  plain setting such as `ZSH_AUTOSUGGEST_STRATEGY` can still follow it.
+  zsh-vi-mode binds its keys at the first prompt instead, so also set
+  `ZVM_INIT_MODE=sourcing` before it loads.
+- **`suv doctor` reports it.** Once per zsh, at its first prompt — when all
+  of `~/.zshrc` has run — the hook checks whether Up is still Suvadu's and
+  notes what took it over; doctor's *Up-arrow* line names that widget and the
+  fix, and the note is removed when a later zsh finds Up is Suvadu's again. The
+  check prints nothing, costs about 0.8 ms per shell start (BENCHMARKS.md),
+  and is skipped when arrow navigation is off.
+
+**zsh-autosuggestions.** The zsh hook ships a strategy for
+[zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions) that
+suggests what [Up-arrow would recall](#up-arrow-recall) — the newest command
+starting with what you typed, with AI-agent commands hidden unless `Alt+A`
+revealed them. Enable it in `~/.zshrc`, falling back to zsh's own history when
+Suvadu has nothing:
+
+```zsh
+ZSH_AUTOSUGGEST_STRATEGY=(suvadu history)
+```
+
+Each suggestion is one `suv get` lookup, the same one Up-arrow makes (its
+cost is in BENCHMARKS.md). zsh-autosuggestions 0.7 fetches suggestions
+asynchronously by default, so typing does not wait for it.
 
 ---
 
@@ -108,6 +141,8 @@ exec zsh    # or: exec bash
 ```
 
 (or just open a new terminal). Also make sure the new location, such as `~/.cargo/bin`, is on your `PATH`.
+
+**Up-arrow shows zsh's own history, not Suvadu's** — Check: `bindkey '^[[A'` or `bindkey '^[OA'` prints a widget other than `suvadu-up-arrow` (such as `up-line-or-beginning-search` or `history-substring-search-up`), and `suv doctor`'s *Up-arrow* line says what took it over. Cause: a plugin loaded after the hook rebound the key, arrow navigation is off (*Enable Arrow Key Navigation* in `suv settings`), or the shell is Bash, whose Up keeps Bash's own history. Repair: move `eval "$(suv init zsh)"` to the end of `~/.zshrc` and run `exec zsh`, or turn the setting back on. See [Up-arrow recall](#up-arrow-recall).
 
 More at [suvadu.sh/cli/shell-integration](https://suvadu.sh/cli/shell-integration/).
 
@@ -393,7 +428,8 @@ shortcut.
 
 Up/Down arrow recall is a different, simpler path: prefix match, newest
 first, no deduplication, with the current directory used only to break ties
-between commands recorded at the same millisecond.
+between commands recorded at the same millisecond — see
+[Up-arrow recall](#up-arrow-recall).
 
 `suv search --compact` draws the same UI inline under your prompt instead of
 taking over the screen, so the output you were reading stays visible.
@@ -759,7 +795,7 @@ See the [full integration guide](https://suvadu.sh/blog/track-ai-agent-commands-
 | **Doctor** | `suv doctor` separates what blocks shell-history capture from optional integrations, gives each check its own repair, reports what the stored data actually proves, and lists storage by category next to the retention rule that changes it |
 | **Organization** | Tags, bookmarks (`suv bookmarks` opens an interactive picker that recalls one into your prompt; a bookmark with `{{name}}`/`{{name:default}}` placeholders asks for each value first, and `suv bookmarks get <label> --set name=value` prints it filled — see [Bookmarks with placeholders](#bookmarks-with-placeholders)), notes, and `suv aliases` — an interactive manager (add/edit/delete) for shell aliases, plus suggestions for your frequently-typed long commands |
 | **Privacy & Safety** | Space-prefix exclusion, regex patterns, secret redaction (extend via `redaction.extra_patterns`), local-only — applied to every ingestion path, imports and saved summaries included. `suv backup`, an automatic snapshot before any `suv delete`, and `suv delete --dry-run` to see the matched commands and what a delete leaves behind. See [SECURITY.md](SECURITY.md). |
-| **Arrow Keys** | Recency-first Up/Down recall — your most recent commands surface first, prefix-matched, with the current directory used only to separate commands recorded at the same millisecond. Agent commands are hidden by default; reveal them with `Alt+A` (per shell) or `--include-agents`. The same lookup drives a [zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions) strategy: `ZSH_AUTOSUGGEST_STRATEGY=(suvadu history)`. |
+| **Arrow Keys** | Recency-first Up/Down recall — your most recent commands surface first, prefix-matched, with the current directory used only to separate commands recorded at the same millisecond. Agent commands are hidden by default; reveal them with `Alt+A` (per shell) or `--include-agents`. Zsh only (Bash keeps its own Up/Down), and `suv doctor` warns when a plugin loaded later takes Up over — see [Up-arrow recall](#up-arrow-recall). The same lookup drives a [zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions) strategy: `ZSH_AUTOSUGGEST_STRATEGY=(suvadu history)`. |
 | **Git Branch** | Every command recorded inside a git repository keeps the branch it started on, read from `.git` with no `git` process, shown in recall's detail pane and in detailed MCP rows. Worktrees and submodules are followed; a detached HEAD is kept as its short hash. |
 | **Vim Bindings** | Optional vim-style `j`/`k`/`Ctrl+U`/`Ctrl+D` navigation in search TUI |
 
