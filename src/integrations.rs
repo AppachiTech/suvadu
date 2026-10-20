@@ -5,6 +5,7 @@
 
 pub mod agent_hook;
 pub mod codex;
+pub mod cursor;
 pub mod hook_input;
 pub mod registry;
 
@@ -57,8 +58,9 @@ const CURSOR_SHELL_FIELDS: &[Field] = &[
     tail("output"),
     whole("duration"),
     whole("conversation_id"),
+    whole("generation_id"),
+    whole("workspace_roots"),
 ];
-const CURSOR_PROMPT_FIELDS: &[Field] = &[whole("conversation_id"), whole("prompt")];
 
 /// Read a JSON hook payload from stdin, keeping only `fields`; `None` for
 /// empty input.
@@ -497,10 +499,7 @@ pub fn handle_hook_cursor() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let cwd = event
-        .get("cwd")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or(".");
+    let cwd = cursor::command_cwd(&event);
 
     let exit_code = event
         .get("exit_code")
@@ -526,12 +525,20 @@ pub fn handle_hook_cursor() -> Result<(), Box<dyn std::error::Error>> {
     let now = chrono::Utc::now().timestamp_millis();
     let started_at = now - duration_ms;
 
-    // Read cached prompt for this session (set by beforeSubmitPrompt hook)
-    let context = get_cached_prompt(&session_id).map(|prompt| {
-        let mut ctx = HashMap::new();
-        ctx.insert("agent_prompt".to_string(), prompt);
-        ctx
-    });
+    // The prompt cached by beforeSubmitPrompt, and the turn the command ran
+    // in: Cursor's generation id, which is also the turn id of that turn's
+    // captured prompt and response.
+    let mut context = HashMap::new();
+    if let Some(prompt) = get_cached_prompt(&session_id) {
+        context.insert("agent_prompt".to_string(), prompt);
+    }
+    if let Some(generation) = event["generation_id"]
+        .as_str()
+        .filter(|id| is_valid_session_id(id))
+    {
+        context.insert("agent_turn_id".to_string(), generation.to_string());
+    }
+    let context = (!context.is_empty()).then_some(context);
 
     crate::commands::entry::handle_add_with_context(crate::commands::entry::AddParams {
         session_id,
@@ -548,48 +555,18 @@ pub fn handle_hook_cursor() -> Result<(), Box<dyn std::error::Error>> {
     })
 }
 
-/// Handle `beforeSubmitPrompt` hook from Cursor — caches the user prompt.
+/// Handle `beforeSubmitPrompt` hook from Cursor — caches the prompt for
+/// the commands it leads to and stores it in the Cursor session.
 ///
-/// Payload: `{ "prompt": "...", "conversation_id": "...", ... }`
-/// Must return `{"continue": true}` on stdout to let Cursor proceed.
+/// Always answers `{"continue":true}` on stdout so Cursor proceeds.
 pub fn handle_hook_cursor_prompt() -> Result<(), Box<dyn std::error::Error>> {
-    let event =
-        read_hook_payload(CURSOR_PROMPT_FIELDS)?.map_or(serde_json::Value::Null, |p| p.event);
+    cursor::handle_hook_prompt()
+}
 
-    let conversation_id = event
-        .get("conversation_id")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    if !is_valid_session_id(conversation_id) {
-        println!("{{\"continue\":true}}");
-        return Ok(());
-    }
-
-    let prompt = event
-        .get("prompt")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-
-    if !prompt.is_empty() {
-        let session_id = format!("cursor-{conversation_id}");
-        let prompts_dir = get_prompts_dir()?;
-        std::fs::create_dir_all(&prompts_dir)?;
-        let prompt_file = prompts_dir.join(format!("{session_id}.prompt"));
-        let max_chars =
-            crate::config::load_config_cached().map_or(4000, |c| c.agent.prompt_capture_max_chars);
-        let truncated = crate::util::truncate_str(prompt, max_chars, "...");
-        atomic_write(&prompt_file, &truncated)?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&prompt_file, std::fs::Permissions::from_mode(0o600));
-        }
-    }
-
-    // Must respond to let Cursor proceed
-    println!("{{\"continue\":true}}");
-    Ok(())
+/// Handle Cursor's `afterAgentResponse` and `stop` hooks — stores the
+/// response or how the turn ended in the Cursor session.
+pub fn handle_hook_cursor_session() -> Result<(), Box<dyn std::error::Error>> {
+    cursor::handle_hook_session()
 }
 
 /// Parse an exit code from Claude Code's error string.
@@ -1834,7 +1811,28 @@ pub fn handle_init_pi() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Set up Cursor AI agent integration via `afterShellExecution` hook.
+/// The scripts `suv init cursor` installs, by the Cursor hook events each
+/// one is registered for.
+struct CursorHookScripts {
+    shell: String,
+    prompt: String,
+    session: String,
+}
+
+impl CursorHookScripts {
+    fn by_event(&self) -> [(&'static str, &str); 4] {
+        [
+            ("afterShellExecution", &self.shell),
+            ("beforeSubmitPrompt", &self.prompt),
+            ("afterAgentResponse", &self.session),
+            ("stop", &self.session),
+        ]
+    }
+}
+
+/// Set up Cursor capture: commands (`afterShellExecution`), prompts
+/// (`beforeSubmitPrompt`), responses and turn ends (`afterAgentResponse`,
+/// `stop`), and the MCP server.
 pub fn handle_init_cursor() -> Result<(), Box<dyn std::error::Error>> {
     let current_exe = std::env::current_exe()?;
     let bin_path = current_exe.to_string_lossy().to_string();
@@ -1847,26 +1845,24 @@ pub fn handle_init_cursor() -> Result<(), Box<dyn std::error::Error>> {
         .join("hooks");
     std::fs::create_dir_all(&hooks_dir)?;
 
-    // Write the afterShellExecution hook script
-    let hook_script_path = hooks_dir.join("cursor-after-shell.sh");
-    let script = agent_hook::script(&bin_path, "hook-cursor", "cursor");
-    crate::util::atomic_write_with_mode(&hook_script_path, &script, 0o700)?;
-
-    // Write the beforeSubmitPrompt hook script
-    let prompt_hook_path = hooks_dir.join("cursor-prompt.sh");
-    let prompt_script = agent_hook::script(&bin_path, "hook-cursor-prompt", "cursor");
-    crate::util::atomic_write_with_mode(&prompt_hook_path, &prompt_script, 0o700)?;
-
-    let hook_path_str = hook_script_path.to_string_lossy().to_string();
-    let prompt_hook_path_str = prompt_hook_path.to_string_lossy().to_string();
+    let write_script = |file: &str, target: &str| -> std::io::Result<String> {
+        let path = hooks_dir.join(file);
+        let script = agent_hook::script(&bin_path, target, "cursor");
+        crate::util::atomic_write_with_mode(&path, &script, 0o700)?;
+        Ok(path.to_string_lossy().to_string())
+    };
+    let scripts = CursorHookScripts {
+        shell: write_script("cursor-after-shell.sh", "hook-cursor")?,
+        prompt: write_script("cursor-prompt.sh", "hook-cursor-prompt")?,
+        session: write_script("cursor-session.sh", "hook-cursor-session")?,
+    };
 
     // Try auto-merge into ~/.cursor/hooks.json
     let cursor_dir = PathBuf::from(&home).join(".cursor");
     std::fs::create_dir_all(&cursor_dir)?;
     let hooks_json_path = cursor_dir.join("hooks.json");
 
-    let auto_configured =
-        try_merge_cursor_hooks(&hooks_json_path, &hook_path_str, &prompt_hook_path_str);
+    let auto_configured = try_merge_cursor_hooks(&hooks_json_path, &scripts);
 
     let color = crate::util::color_enabled();
     let (b, r) = if color {
@@ -1880,8 +1876,9 @@ pub fn handle_init_cursor() -> Result<(), Box<dyn std::error::Error>> {
     println!("{b}Suvadu \u{2014} Cursor Integration{r}");
     println!();
     println!("Hook scripts installed:");
-    println!("  {hook_path_str}");
-    println!("  {prompt_hook_path_str}");
+    for path in [&scripts.shell, &scripts.prompt, &scripts.session] {
+        println!("  {path}");
+    }
     println!();
 
     if matches!(auto_configured, Ok(true)) {
@@ -1894,10 +1891,7 @@ pub fn handle_init_cursor() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         println!("Add this to ~/.cursor/hooks.json:");
         println!();
-        println!(
-            "{}",
-            generate_cursor_hooks_snippet(&hook_path_str, &prompt_hook_path_str)
-        );
+        println!("{}", generate_cursor_hooks_snippet(&scripts));
         println!();
         println!("Then restart Cursor to activate.");
     }
@@ -1910,33 +1904,34 @@ pub fn handle_init_cursor() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!();
-    println!("Verify with: {cyan}suv search --executor cursor{r}");
+    println!("Captured: commands, prompts, final responses and turn ends, as one session");
+    println!("per Cursor conversation. Cursor reports no token usage to its hooks.");
+    println!("Verify with: {cyan}suv sessions{r} or {cyan}suv search --executor cursor{r}");
     print_post_install_tips(cyan, r, true, true);
 
     Ok(())
 }
 
 /// Generate the JSON snippet for Cursor hooks.json.
-fn generate_cursor_hooks_snippet(hook_path: &str, prompt_hook_path: &str) -> String {
-    serde_json::to_string_pretty(&serde_json::json!({
-        "version": 1,
-        "hooks": {
-            "afterShellExecution": [{
-                "command": hook_path
-            }],
-            "beforeSubmitPrompt": [{
-                "command": prompt_hook_path
-            }]
-        }
-    }))
-    .unwrap_or_default()
+fn generate_cursor_hooks_snippet(scripts: &CursorHookScripts) -> String {
+    let hooks = scripts
+        .by_event()
+        .into_iter()
+        .map(|(event, command)| {
+            (
+                event.to_string(),
+                serde_json::json!([{ "command": command }]),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    serde_json::to_string_pretty(&serde_json::json!({ "version": 1, "hooks": hooks }))
+        .unwrap_or_default()
 }
 
 /// Try to merge Suvadu hooks into an existing Cursor hooks.json.
 fn try_merge_cursor_hooks(
     hooks_path: &Path,
-    hook_path: &str,
-    prompt_hook_path: &str,
+    scripts: &CursorHookScripts,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let mut settings: serde_json::Value = if hooks_path.exists() {
         let content = std::fs::read_to_string(hooks_path)?;
@@ -1953,10 +1948,9 @@ fn try_merge_cursor_hooks(
     let hooks = obj.entry("hooks").or_insert_with(|| serde_json::json!({}));
     let hooks_obj = hooks.as_object_mut().ok_or("hooks is not an object")?;
 
-    // Add afterShellExecution hook if missing
-    add_cursor_hook_if_missing(hooks_obj, "afterShellExecution", hook_path)?;
-    // Add beforeSubmitPrompt hook if missing
-    add_cursor_hook_if_missing(hooks_obj, "beforeSubmitPrompt", prompt_hook_path)?;
+    for (event, command) in scripts.by_event() {
+        add_cursor_hook_if_missing(hooks_obj, event, command)?;
+    }
 
     let updated = serde_json::to_string_pretty(&settings)?;
     atomic_write(hooks_path, &updated)?;

@@ -75,7 +75,7 @@ pub const REGISTRY: &[AgentIntegration] = &[
         display_name: "Cursor",
         mcp_config_relpath: Some(".cursor/mcp.json"),
         executor_name: "cursor",
-        session_agent: None,
+        session_agent: Some("cursor"),
         process_names: &["Cursor", "cursor"],
         install: InstallKind::HookScripts,
     },

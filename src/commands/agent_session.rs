@@ -139,6 +139,17 @@ pub fn import_native_opencode(
     Ok(repo.import_opencode_session(session_id, cwd, messages_json, |_| Ok(policy.clone()))?)
 }
 
+/// Store one event a Cursor hook delivered, under its directory's policy.
+pub fn import_cursor_event(
+    conversation_id: &str,
+    event: crate::ai_sessions::AiEvent,
+) -> Result<serde_json::Value> {
+    let paused = config::is_paused();
+    let repo = crate::repository::Repository::init()?;
+    let policy = capture_policy_for_dir(&event.cwd, paused);
+    Ok(repo.import_cursor_event(conversation_id, event, |_| Ok(policy.clone()))?)
+}
+
 pub fn import(path: &std::path::Path) -> Result<()> {
     let agent = detect_native_agent(path)?;
     loop {

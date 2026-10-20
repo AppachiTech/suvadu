@@ -1,6 +1,6 @@
 //! Persistent, agent-neutral session evidence. Native logs are read incrementally.
 use super::Repository;
-use crate::ai_sessions::{claude, codex, opencode, AiEvent, CapturePolicy, SummaryInput};
+use crate::ai_sessions::{claude, codex, cursor, opencode, AiEvent, CapturePolicy, SummaryInput};
 use crate::db::{DbError, DbResult};
 use crate::models::{AiSummaryRecord, CaptureStatus, SessionKind, SessionSummary, SummaryBasis};
 use rusqlite::{params, OptionalExtension};
@@ -41,6 +41,9 @@ const MAX_SUPPORTED_ADAPTER_VERSION: u32 = {
     }
     if opencode::ADAPTER_VERSION > max {
         max = opencode::ADAPTER_VERSION;
+    }
+    if cursor::ADAPTER_VERSION > max {
+        max = cursor::ADAPTER_VERSION;
     }
     max
 };
@@ -259,6 +262,7 @@ fn event_source_offset(id: &str) -> Option<u64> {
         })
         .or_else(|| {
             id.strip_prefix("opencode-")
+                .or_else(|| id.strip_prefix("cursor-"))
                 .and_then(|value| value.split('-').next())
                 .and_then(|value| value.parse().ok())
         })
@@ -711,6 +715,119 @@ impl Repository {
         }))
     }
 
+    /// Store one event pushed by a Cursor hook in the conversation
+    /// `conversation_id`. Cursor leaves no transcript to read back, so the
+    /// checkpoint holds only the fingerprints of deliveries already stored
+    /// (a hook run twice stores its event once) and the next sequence
+    /// number, which also bounds a capture gap. Cursor reports no token
+    /// counts, so its sessions are stored with usage unavailable.
+    pub fn import_cursor_event(
+        &self,
+        conversation_id: &str,
+        mut event: AiEvent,
+        policy_for: impl Fn(&str) -> DbResult<CapturePolicy>,
+    ) -> DbResult<Value> {
+        if !crate::util::is_valid_session_id(conversation_id) {
+            return Err(invalid("Cursor conversation ID is not a safe identifier"));
+        }
+        let path = format!("cursor-conversation:{conversation_id}");
+        let id = format!("cursor-{conversation_id}");
+        let tx = self.conn.unchecked_transaction()?;
+        let previous = tx
+            .query_row(
+                "SELECT state,adapter_version,skipped,gaps FROM ai_sources WHERE path=?1",
+                [&path],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u32>(1)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let (mut state, mut skipped, mut gaps) =
+            if let Some((state, version, skipped, gaps)) = previous {
+                if version != cursor::ADAPTER_VERSION {
+                    return Err(invalid(
+                    "Cursor conversation uses a different adapter version; import was not advanced",
+                ));
+                }
+                (
+                    decode::<cursor::CursorState>(&state)?,
+                    skipped,
+                    decode::<CaptureGaps>(&gaps)?,
+                )
+            } else {
+                (
+                    cursor::CursorState::default(),
+                    false,
+                    CaptureGaps::default(),
+                )
+            };
+        let policy = policy_for(&event.cwd)?;
+        let mut inserted = 0;
+        let stored = if policy.enabled {
+            sanitize_event(&mut event, &policy, &mut HashMap::new())
+        } else {
+            // Numbered only so the gap it leaves has an end; nothing of it
+            // is kept.
+            let seq = cursor::assign_id(&mut state, &mut event);
+            gaps.observe(&event.cwd, &policy, seq + 1);
+            false
+        };
+        skipped |= !stored;
+        if stored {
+            let fingerprint = cursor::fingerprint(&event);
+            if state.seen.contains(&fingerprint) {
+                return Ok(json!({
+                    "session_id": id, "imported_events": 0, "has_more": false,
+                    "coverage": "partial", "usage_complete": false
+                }));
+            }
+            cursor::assign_id(&mut state, &mut event);
+            state.seen.insert(fingerprint);
+            tx.execute(
+                "INSERT OR IGNORE INTO ai_sessions(id,native_id,agent,cwd,parent_id,created_at,updated_at,usage_complete) VALUES (?1,?2,?3,?4,NULL,?5,?5,0)",
+                params![id, conversation_id, cursor::AGENT, event.cwd, event.at],
+            )?;
+            inserted = tx.execute(
+                "INSERT OR IGNORE INTO ai_events(session_id,event_id,kind,cwd,data) VALUES (?1,?2,?3,?4,?5)",
+                params![
+                    id,
+                    event.id,
+                    event.kind,
+                    event.cwd,
+                    serde_json::to_string(&event).map_err(|_| invalid("Cannot encode event"))?
+                ],
+            )?;
+            tx.execute(
+                "UPDATE ai_sessions SET revision=revision+1,updated_at=?2,usage_complete=0 WHERE id=?1",
+                params![id, chrono::Utc::now().timestamp_millis()],
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO ai_sources(path,session_id,identity,byte_offset,state,adapter_version,skipped,gaps) VALUES (?1,?2,'cursor-hooks',0,?3,?4,?5,?6) ON CONFLICT(path) DO UPDATE SET state=excluded.state,skipped=excluded.skipped,gaps=excluded.gaps",
+            params![
+                path,
+                id,
+                serde_json::to_string(&state).map_err(|_| invalid("Cannot encode checkpoint"))?,
+                cursor::ADAPTER_VERSION,
+                skipped,
+                serde_json::to_string(&gaps).map_err(|_| invalid("Cannot encode capture gaps"))?
+            ],
+        )?;
+        tx.commit()?;
+        Ok(json!({
+            "session_id": id,
+            "imported_events": inserted,
+            "has_more": false,
+            "coverage": "partial",
+            "usage_complete": false
+        }))
+    }
+
     fn ai_session_header(&self, id: &str, excluded_dirs: &[String]) -> DbResult<Value> {
         let row = self.conn.query_row("SELECT native_id,agent,cwd,parent_id,created_at,updated_at,revision,usage_complete FROM ai_sessions WHERE id=?1", [id], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,i64>(4)?,r.get::<_,i64>(5)?,r.get::<_,i64>(6)?,r.get::<_,bool>(7)?))).optional()?.ok_or_else(|| invalid("Session not found or excluded"))?;
         let mut paths = self.conn.prepare("SELECT cwd FROM ai_events WHERE session_id=?1 UNION SELECT cwd FROM entries WHERE session_id=?1")?;
@@ -764,7 +881,7 @@ impl Repository {
             }
         }
         let model = latest_model;
-        let capture = self.ai_capture_status(id, row.7, unreadable, excluded_dirs)?;
+        let capture = self.ai_capture_status(id, &row.1, row.7, unreadable, excluded_dirs)?;
         Ok(
             json!({"id":id,"native_id":row.0,"agent":row.1,"cwd":row.2,"parent_id":row.3,"created_at":row.4,"updated_at":row.5,"first_activity_at":first_activity_at.unwrap_or(row.4),"last_activity_at":last_activity_at.unwrap_or(row.5),"revision":format!("e{}-c{count}-{max_id}",row.6),"model":model,"models":models,"usage":usage,"coverage":"partial","usage_complete":row.7,"event_count":event_count,"command_count":count,"preview":preview,"capture":capture,"coverage_note":"Captured native transcript events and locally recorded shell commands only; child sessions, non-shell tools and unavailable records are not combined."}),
         )
@@ -784,6 +901,7 @@ impl Repository {
     fn ai_capture_status(
         &self,
         id: &str,
+        agent: &str,
         usage_complete: bool,
         unreadable_records: usize,
         excluded_dirs: &[String],
@@ -854,7 +972,12 @@ impl Repository {
                  and were skipped"
             ));
         }
-        if !usage_complete {
+        if agent == cursor::AGENT {
+            known_missing.push(
+                "Cursor does not report token usage to its hooks; usage is unavailable, not zero"
+                    .to_string(),
+            );
+        } else if !usage_complete {
             known_missing.push(
                 "Token usage totals for part of this session were never captured; unknown is not zero"
                     .to_string(),
@@ -2973,5 +3096,205 @@ mod tests {
         assert!(repo.ai_summaries_for_session("codex-fixture").unwrap()[0]
             .text
             .contains("ghp_abcdefghijklmnopqrstuvwxyz0123"));
+    }
+
+    fn cursor_delivery(event: &str, extra: &Value) -> AiEvent {
+        let mut payload = json!({
+            "hook_event_name": event, "conversation_id": "conv-1",
+            "generation_id": "gen-1", "model": "claude-sonnet-5"
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            payload[key] = value.clone();
+        }
+        crate::ai_sessions::cursor::event_from_payload(&payload, "/work/project", 1_000).unwrap()
+    }
+
+    fn import_cursor(repo: &Repository, event: AiEvent, policy: &CapturePolicy) -> Value {
+        repo.import_cursor_event("conv-1", event, |_| Ok(policy.clone()))
+            .unwrap()
+    }
+
+    #[test]
+    fn cursor_deliveries_build_one_session_and_a_redelivery_is_stored_once() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let policy = CapturePolicy::default();
+        let prompt = cursor_delivery("beforeSubmitPrompt", &json!({"prompt": "Fix the bug"}));
+        let response = cursor_delivery("afterAgentResponse", &json!({"text": "Fixed it."}));
+        let stop = cursor_delivery("stop", &json!({"status": "completed"}));
+        assert_eq!(
+            import_cursor(&repo, prompt.clone(), &policy)["imported_events"],
+            1
+        );
+        assert_eq!(
+            import_cursor(&repo, response.clone(), &policy)["imported_events"],
+            1
+        );
+        assert_eq!(import_cursor(&repo, stop, &policy)["imported_events"], 1);
+        // The same hook run again, later: nothing new.
+        let mut again = response;
+        again.at = 5_000;
+        assert_eq!(import_cursor(&repo, again, &policy)["imported_events"], 0);
+        assert_eq!(import_cursor(&repo, prompt, &policy)["imported_events"], 0);
+
+        let session = repo.get_ai_session("cursor-conv-1", 20, 0, &[]).unwrap();
+        let header = &session["session"];
+        assert_eq!(header["agent"], "cursor");
+        assert_eq!(header["native_id"], "conv-1");
+        assert_eq!(header["cwd"], "/work/project");
+        assert_eq!(header["model"], "claude-sonnet-5");
+        let kinds = session["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["kind"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(kinds, ["prompt", "response", "turn_completed"]);
+        assert_eq!(session["events"][0]["turn_id"], "gen-1");
+        // Cursor reports no token counts: unavailable, never zero.
+        assert!(header["usage"].is_null());
+        assert_eq!(header["usage_complete"], false);
+        let missing = header["capture"]["known_missing"].to_string();
+        assert!(
+            missing.contains("Cursor does not report token usage"),
+            "{missing}"
+        );
+        assert_eq!(header["preview"], "Fix the bug");
+    }
+
+    #[test]
+    fn cursor_text_is_redacted_truncated_and_exclusions_store_nothing() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let policy = CapturePolicy {
+            exclusions: vec!["top-secret-project".into()],
+            max_chars: 60,
+            ..CapturePolicy::default()
+        };
+        let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123";
+        let prompt = format!("Push with GITHUB_TOKEN={secret} then {}", "x".repeat(200));
+        import_cursor(
+            &repo,
+            cursor_delivery("beforeSubmitPrompt", &json!({"prompt": prompt})),
+            &policy,
+        );
+        let excluded = import_cursor(
+            &repo,
+            cursor_delivery(
+                "afterAgentResponse",
+                &json!({"text": "notes about top-secret-project"}),
+            ),
+            &policy,
+        );
+        assert_eq!(excluded["imported_events"], 0);
+
+        let session = repo.get_ai_session("cursor-conv-1", 20, 0, &[]).unwrap();
+        let events = session["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        let text = events[0]["data"]["text"].as_str().unwrap();
+        assert!(!text.contains(secret), "{text}");
+        assert!(text.contains("REDACTED"), "{text}");
+        assert_eq!(events[0]["data"]["truncated"], true);
+        let stored: String = repo
+            .conn
+            .query_row(
+                "SELECT group_concat(data) FROM ai_events UNION ALL SELECT state FROM ai_sources",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!stored.contains(secret));
+        assert!(!stored.contains("top-secret-project"));
+    }
+
+    #[test]
+    fn a_paused_cursor_delivery_is_dropped_and_named_as_a_gap() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let paused = CapturePolicy {
+            enabled: false,
+            paused: true,
+            ..CapturePolicy::default()
+        };
+        let result = import_cursor(
+            &repo,
+            cursor_delivery("beforeSubmitPrompt", &json!({"prompt": "while paused"})),
+            &paused,
+        );
+        assert_eq!(result["imported_events"], 0);
+        assert_eq!(
+            repo.list_ai_sessions(20, 0, &[]).unwrap()["sessions"],
+            json!([])
+        );
+
+        import_cursor(
+            &repo,
+            cursor_delivery("afterAgentResponse", &json!({"text": "after resume"})),
+            &CapturePolicy::default(),
+        );
+        let session = repo.get_ai_session("cursor-conv-1", 20, 0, &[]).unwrap();
+        assert_eq!(session["events"].as_array().unwrap().len(), 1);
+        assert_eq!(session["events"][0]["data"]["text"], "after resume");
+        assert!(session["session"]["capture"]["known_missing"]
+            .to_string()
+            .contains("paused"));
+        let stored: String = repo
+            .conn
+            .query_row("SELECT state || gaps FROM ai_sources", [], |row| row.get(0))
+            .unwrap();
+        assert!(!stored.contains("while paused"));
+    }
+
+    #[test]
+    fn a_cursor_checkpoint_from_another_adapter_version_is_not_advanced() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let policy = CapturePolicy::default();
+        import_cursor(
+            &repo,
+            cursor_delivery("beforeSubmitPrompt", &json!({"prompt": "hi"})),
+            &policy,
+        );
+        repo.conn
+            .execute("UPDATE ai_sources SET adapter_version=9999", [])
+            .unwrap();
+        assert!(repo
+            .import_cursor_event(
+                "conv-1",
+                cursor_delivery("afterAgentResponse", &json!({"text": "hello"})),
+                |_| Ok(policy.clone()),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn deleting_a_cursor_session_removes_its_events_and_checkpoint() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let policy = CapturePolicy::default();
+        let prompt = cursor_delivery("beforeSubmitPrompt", &json!({"prompt": "hi"}));
+        import_cursor(&repo, prompt.clone(), &policy);
+        assert_eq!(
+            repo.ai_session_deletion_preview("cursor-conv-1")
+                .unwrap()
+                .events,
+            1
+        );
+        repo.delete_ai_session("cursor-conv-1").unwrap();
+        let left: i64 = repo
+            .conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM ai_events) + (SELECT COUNT(*) FROM ai_sources) + (SELECT COUNT(*) FROM ai_sessions)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0);
+        // Nothing remembers the deleted delivery, so a new one starts over.
+        assert_eq!(import_cursor(&repo, prompt, &policy)["imported_events"], 1);
+    }
+
+    #[test]
+    fn an_unsafe_cursor_conversation_id_is_refused() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let event = cursor_delivery("beforeSubmitPrompt", &json!({"prompt": "hi"}));
+        assert!(repo
+            .import_cursor_event("../../etc", event, |_| Ok(CapturePolicy::default()))
+            .is_err());
     }
 }
