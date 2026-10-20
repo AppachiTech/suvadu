@@ -792,6 +792,10 @@ agent rebuilds from the full session.
 
 See the [full integration guide](https://suvadu.sh/blog/track-ai-agent-commands-with-suvadu/) and [MCP server docs](https://suvadu.sh/cli/mcp-server/).
 
+To add the MCP server to any other client by hand, run `suvadu mcp-serve` (or `suv mcp-serve`) as a stdio server.
+
+- MCP Registry name: `mcp-name: io.github.AppachiTech/suvadu`
+
 ---
 
 ## Key Features

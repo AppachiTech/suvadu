@@ -1,0 +1,28 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.AppachiTech/suvadu",
+  "title": "Suvadu",
+  "description": "Local shell history and AI agent sessions over MCP: search commands, failures, risk and git changes",
+  "websiteUrl": "https://suvadu.sh",
+  "repository": {
+    "url": "https://github.com/AppachiTech/suvadu",
+    "source": "github"
+  },
+  "version": "0.5.2",
+  "packages": [
+    {
+      "registryType": "cargo",
+      "identifier": "suvadu",
+      "version": "0.5.2",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp-serve"
+        }
+      ]
+    }
+  ]
+}

@@ -9,12 +9,39 @@ license = "MIT"
 homepage = "https://suvadu.sh"
 repository = "https://github.com/AppachiTech/suvadu"
 readme = "README.md"
-categories = ["command-line-utilities"]
-keywords = ["shell", "history", "tui", "ai", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+keywords = ["shell", "history", "zsh", "mcp", "ai"]
+
+# `cargo binstall suvadu` downloads the release tarball instead of building.
+# The asset names carry no target triple, so each target is mapped by hand.
+[package.metadata.binstall]
+pkg-fmt = "tgz"
+bin-dir = "{ bin }{ binary-ext }"
+
+[package.metadata.binstall.signing]
+algorithm = "minisign"
+pubkey = "RWSnsbPkvYdmk4EtxJ9WjItHLwx/GkmnBFNjeUhGWT2Z2efNdLTNMBy5"
+file = "{ url }.minisig"
+
+[package.metadata.binstall.overrides.aarch64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/suv-macos-v{ version }.tar.gz"
+
+[package.metadata.binstall.overrides.x86_64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/suv-macos-x86_64-v{ version }.tar.gz"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/suv-linux-v{ version }.tar.gz"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/suv-linux-aarch64-v{ version }.tar.gz"
 
 [[bin]]
 name = "suv"
 path = "src/main.rs"
+
+[[bin]]
+name = "suvadu"
+path = "src/bin/suvadu.rs"
 
 [dependencies]
 rusqlite = { version = "0.40", features = ["bundled", "functions"] }

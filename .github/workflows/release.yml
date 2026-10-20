@@ -84,11 +84,13 @@ jobs:
           # Create directory structure for R2
           mkdir -p artifacts/${{ matrix.os }}/archive
 
-          # Prepare binary
+          # Prepare binary. The `suvadu` link is for `cargo binstall`, which
+          # expects every binary the crate declares; installers use `suv`.
           cp target/${{ matrix.target }}/release/suv suv
+          ln -sf suv suvadu
 
           # Create main tarball (e.g. suv-macos-latest.tar.gz or suv-linux-aarch64-latest.tar.gz)
-          tar -czf artifacts/${{ matrix.os }}/suv-${{ matrix.os }}${{ matrix.suffix }}-latest.tar.gz suv LICENSE scripts/uninstall.sh
+          tar -czf artifacts/${{ matrix.os }}/suv-${{ matrix.os }}${{ matrix.suffix }}-latest.tar.gz suv suvadu LICENSE scripts/uninstall.sh
 
           # Generate SHA256 checksums
           if [ "${{ matrix.os }}" = "macos" ]; then
@@ -228,7 +230,7 @@ jobs:
 
           cat > "$FORMULA_PATH" <<EOF
           class Suvadu < Formula
-            desc "Total recall for your terminal."
+            desc "Shell history search with AI agent command tracking and an MCP server"
             homepage "https://suvadu.sh/"
             version "${VERSION}"
 

@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **`cargo install suvadu` also installs `suvadu`** — the same command as `suv`, under the package's name, as Homebrew and the install script already provide with a link. It runs the `suv` installed beside it with the same arguments, output and exit status, so `suvadu mcp-serve` works however Suvadu was installed. This is the name MCP clients use when they install Suvadu from the official MCP Registry, where Suvadu is now described by `server.json` (`io.github.AppachiTech/suvadu`).
+- **`cargo binstall suvadu` downloads the release binaries** instead of building from source, and verifies each tarball's minisign signature with the same key `suv update` uses. Release tarballs now also hold a `suvadu` link to `suv`, which the installers ignore.
+
+### Changed
+- **Homebrew describes Suvadu by what it does** — `brew search` and `brew info` now show "Shell history search with AI agent command tracking and an MCP server" instead of "Total recall for your terminal.", from the next release's formula.
+
 ## [0.5.1] - 2026-10-20
 
 ### Added
