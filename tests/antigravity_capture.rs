@@ -22,6 +22,7 @@ struct Recorded {
 struct Sandbox {
     _root: tempfile::TempDir,
     home: PathBuf,
+    zsh: Option<PathBuf>,
 }
 
 impl Sandbox {
@@ -29,7 +30,22 @@ impl Sandbox {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
-        Self { _root: root, home }
+        Self {
+            _root: root,
+            home,
+            zsh: zsh_bin(),
+        }
+    }
+
+    /// A sandbox for a test that runs agent commands, or `None` (and the
+    /// test is skipped) on a machine without zsh.
+    fn with_zsh() -> Option<Self> {
+        let sb = Self::new();
+        if sb.zsh.is_none() {
+            eprintln!("skipping: zsh not found");
+            return None;
+        }
+        Some(sb)
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -75,7 +91,7 @@ impl Sandbox {
     /// `ANTIGRAVITY_AGENT` is set. -d skips /etc/zsh*, so only the sandbox
     /// `~/.zshenv` runs.
     fn agent_zsh(&self, command: &str, agent: bool, cwd: &Path) -> Output {
-        let mut cmd = Command::new(zsh());
+        let mut cmd = Command::new(self.zsh.as_ref().expect("Sandbox::with_zsh"));
         self.isolate(&mut cmd);
         if agent {
             cmd.env("ANTIGRAVITY_AGENT", "1");
@@ -126,7 +142,7 @@ impl Sandbox {
     }
 }
 
-fn zsh() -> PathBuf {
+fn zsh_bin() -> Option<PathBuf> {
     [
         "/bin/zsh",
         "/usr/bin/zsh",
@@ -136,7 +152,6 @@ fn zsh() -> PathBuf {
     .iter()
     .map(PathBuf::from)
     .find(|p| p.exists())
-    .expect("zsh is required for the Antigravity capture tests")
 }
 
 fn canonical(path: &Path) -> String {
@@ -148,7 +163,9 @@ fn canonical(path: &Path) -> String {
 
 #[test]
 fn an_agent_command_is_recorded_with_its_exit_code_and_directory() {
-    let sb = Sandbox::new();
+    let Some(sb) = Sandbox::with_zsh() else {
+        return;
+    };
     sb.init();
     let project = sb.path("project");
     std::fs::create_dir_all(project.join("sub")).unwrap();
@@ -175,7 +192,9 @@ fn an_agent_command_is_recorded_with_its_exit_code_and_directory() {
 
 #[test]
 fn shells_outside_antigravity_are_left_alone() {
-    let sb = Sandbox::new();
+    let Some(sb) = Sandbox::with_zsh() else {
+        return;
+    };
     sb.init();
     let out = sb.agent_zsh("true", false, &sb.home);
     assert!(out.status.success());
@@ -184,7 +203,9 @@ fn shells_outside_antigravity_are_left_alone() {
 
 #[test]
 fn a_nested_zsh_inside_an_agent_command_is_not_recorded_twice() {
-    let sb = Sandbox::new();
+    let Some(sb) = Sandbox::with_zsh() else {
+        return;
+    };
     sb.init();
     let out = sb.agent_zsh("zsh -d -c 'echo inner'", true, &sb.home);
     assert!(out.status.success());
@@ -194,7 +215,9 @@ fn a_nested_zsh_inside_an_agent_command_is_not_recorded_twice() {
 
 #[test]
 fn a_command_that_sets_its_own_exit_trap_is_still_recorded() {
-    let sb = Sandbox::new();
+    let Some(sb) = Sandbox::with_zsh() else {
+        return;
+    };
     sb.init();
     let out = sb.agent_zsh("trap 'echo mine' EXIT; exit 3", true, &sb.home);
     assert_eq!(out.status.code(), Some(3));
@@ -206,7 +229,9 @@ fn a_command_that_sets_its_own_exit_trap_is_still_recorded() {
 
 #[test]
 fn the_agent_command_prints_nothing_extra() {
-    let sb = Sandbox::new();
+    let Some(sb) = Sandbox::with_zsh() else {
+        return;
+    };
     sb.init();
     let out = sb.agent_zsh("echo hello", true, &sb.home);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hello\n");

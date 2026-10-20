@@ -458,18 +458,22 @@ fn run_opencode_tool(s: &Sandbox, command: &str, output: &serde_json::Value) {
     let driver = s.home.path().join("driver.mjs");
     std::fs::write(
         &driver,
-        r#"import { pathToFileURL } from "url";
-const [plugin, command, cwd, output] = process.argv.slice(2);
+        r#"import { readFileSync } from "fs";
+import { pathToFileURL } from "url";
+const [plugin, command, cwd, outputFile] = process.argv.slice(2);
 const client = { session: { messages: async () => ({ data: [] }) } };
 const hooks = await (await import(pathToFileURL(plugin).href)).default({ client, directory: cwd });
 await hooks["tool.execute.after"](
   { tool: "bash", sessionID: "ses_1", args: { command, workdir: cwd } },
-  JSON.parse(output),
+  JSON.parse(readFileSync(outputFile, "utf8")),
 );
 "#,
     )
     .unwrap();
     let cwd = s.project();
+    // In a file, not an argument: Linux limits one argument to 128 KB.
+    let output_file = s.home.path().join("tool-output.json");
+    std::fs::write(&output_file, output.to_string()).unwrap();
     let result = s
         .command()
         .env(
@@ -501,7 +505,7 @@ await hooks["tool.execute.after"](
         .arg(s.home.path().join(".opencode/plugins/suvadu.js"))
         .arg(command)
         .arg(&cwd)
-        .arg(output.to_string())
+        .arg(&output_file)
         .output()
         .unwrap();
     assert!(

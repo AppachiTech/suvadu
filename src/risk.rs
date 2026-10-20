@@ -1880,7 +1880,7 @@ fn skip_single_quoted(b: &[u8], i: usize) -> usize {
 }
 
 /// Index just past the `'` that closes a `$'…'` string.
-fn skip_ansi_c_quoted(b: &[u8], mut i: usize) -> usize {
+const fn skip_ansi_c_quoted(b: &[u8], mut i: usize) -> usize {
     while i < b.len() {
         match b[i] {
             b'\\' => i += 2,
