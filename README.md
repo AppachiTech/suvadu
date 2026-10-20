@@ -130,7 +130,33 @@ suv agent sessions          # List captured Codex/Claude sessions and reported t
 suv skills                  # Interactive skills management (browse, add, edit, sync, review)
 suv skills add my-skill     # Add a skill any MCP-capable agent can read
 suv skills sync             # Materialize skills into Claude Code/Cursor/Codex
+suv bookmarks get box --set host=db1   # Print a bookmark with its {{placeholders}} filled
 ```
+
+### Bookmarks with placeholders
+
+A bookmark can be a template:
+
+```bash
+suv bookmarks add "ssh {{user:root}}@{{host}} -p {{port:22}}" -l box
+suv bookmarks                       # pick it: a popup asks for user, host, port
+suv bookmarks get box --set host=db1   # prints: ssh root@db1 -p 22
+```
+
+- `{{name}}` is a placeholder; `{{name:default}}` gives it a default
+  (everything after the first `:`, verbatim). Names start with a letter or
+  `_` and continue with letters, digits, `_` or `-`; `{{ name }}` is fine.
+- A placeholder used more than once is asked for once and filled everywhere.
+- `\{{` is a literal `{{`. Anything else in double braces that is not a
+  placeholder — `{{.State.Status}}` in a `docker inspect -f`, a `{{` with
+  no `}}` — is left exactly as typed.
+- Values are inserted **verbatim**: you are typing shell syntax, so quote a
+  value with spaces or `$` the way the shell needs.
+- In the picker's popup, `Tab`/`Enter` moves to the next value, `Enter` on
+  the last puts the filled command on your prompt (it is never run), and
+  `Esc` goes back to the list. `suv bookmarks get` fails with the names of
+  any placeholders left without a value or default.
+- Filled values are never stored.
 
 ---
 
@@ -671,7 +697,7 @@ See the [full integration guide](https://suvadu.sh/blog/track-ai-agent-commands-
 | **Unified Sessions** | `suv sessions` browses human and AI sessions together, with a **Capture** column that reports `full` or `gaps: N` from recorded gaps alone — never inferred from exit codes. Native Codex, Claude Code and OpenCode sessions show prompts, responses, commands, every observed model and provider-reported token totals; `s` opens saved summaries (badged CURRENT / NEW ACTIVITY / EVIDENCE CHANGED; `Tab` toggles rendered/raw, `Ctrl+Y` copies) and `h` builds a handoff scaffold from captured records only |
 | **Stats** | Heatmap, hourly distribution, top commands, executor breakdown; `--human` (or `Ctrl+H` in the TUI) excludes AI-agent activity |
 | **Doctor** | `suv doctor` separates what blocks shell-history capture from optional integrations, gives each check its own repair, reports what the stored data actually proves, and lists storage by category next to the retention rule that changes it |
-| **Organization** | Tags, bookmarks (`suv bookmarks` opens an interactive picker that recalls one into your prompt), notes, and `suv aliases` — an interactive manager (add/edit/delete) for shell aliases, plus suggestions for your frequently-typed long commands |
+| **Organization** | Tags, bookmarks (`suv bookmarks` opens an interactive picker that recalls one into your prompt; a bookmark with `{{name}}`/`{{name:default}}` placeholders asks for each value first, and `suv bookmarks get <label> --set name=value` prints it filled — see [Bookmarks with placeholders](#bookmarks-with-placeholders)), notes, and `suv aliases` — an interactive manager (add/edit/delete) for shell aliases, plus suggestions for your frequently-typed long commands |
 | **Privacy & Safety** | Space-prefix exclusion, regex patterns, secret redaction (extend via `redaction.extra_patterns`), local-only — applied to every ingestion path, imports and saved summaries included. `suv backup`, an automatic snapshot before any `suv delete`, and `suv delete --dry-run` to see the matched commands and what a delete leaves behind. See [SECURITY.md](SECURITY.md). |
 | **Arrow Keys** | Recency-first Up/Down recall — your most recent commands surface first, prefix-matched, with the current directory used only to separate commands recorded at the same millisecond. Agent commands are hidden by default; reveal them with `Alt+A` (per shell) or `--include-agents`. The same lookup drives a [zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions) strategy: `ZSH_AUTOSUGGEST_STRATEGY=(suvadu history)`. |
 | **Git Branch** | Every command recorded inside a git repository keeps the branch it started on, read from `.git` with no `git` process, shown in recall's detail pane and in detailed MCP rows. Worktrees and submodules are followed; a detached HEAD is kept as its short hash. |

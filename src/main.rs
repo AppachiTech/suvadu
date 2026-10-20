@@ -26,6 +26,7 @@ mod settings_ui;
 mod skills_builtin;
 mod skills_sync;
 mod skills_ui;
+mod snippet;
 mod stats_ui;
 mod suggest;
 mod suggest_ui;

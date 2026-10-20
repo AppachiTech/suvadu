@@ -41,6 +41,57 @@ enum Mode {
     ConfirmDelete {
         command: String,
     },
+    /// Filling in a picked bookmark's `{{placeholders}}` before recalling it.
+    Fill(FillState),
+}
+
+/// The placeholder popup: one value per distinct placeholder, in order,
+/// each prefilled with its default.
+struct FillState {
+    template: crate::snippet::Template,
+    values: Vec<String>,
+    focus: usize,
+}
+
+impl FillState {
+    fn new(command: &str) -> Option<Self> {
+        let template = crate::snippet::Template::parse(command);
+        if !template.has_placeholders() {
+            return None;
+        }
+        let values = template
+            .placeholders()
+            .iter()
+            .map(|p| p.default.clone().unwrap_or_default())
+            .collect();
+        Some(Self {
+            template,
+            values,
+            focus: 0,
+        })
+    }
+
+    fn filled(&self) -> String {
+        self.template.fill_in_order(&self.values)
+    }
+
+    const fn is_last(&self) -> bool {
+        self.focus + 1 >= self.values.len()
+    }
+
+    fn push_str_capped(&mut self, text: &str) {
+        if let Some(field) = self.values.get_mut(self.focus) {
+            for c in text.chars() {
+                // A value is one shell word or phrase: a pasted line break
+                // becomes a space rather than a second command.
+                let c = if c == '\n' || c == '\r' { ' ' } else { c };
+                if c.is_control() || field.len() + c.len_utf8() > MAX_FIELD_LEN {
+                    continue;
+                }
+                field.push(c);
+            }
+        }
+    }
 }
 
 struct PickerApp {
@@ -118,6 +169,21 @@ impl PickerApp {
 
     fn selected_command(&self) -> Option<String> {
         self.selected_bookmark().map(|b| b.command.clone())
+    }
+
+    /// Enter on a bookmark: recall it as-is, or open the placeholder popup
+    /// first when it has `{{placeholders}}`.
+    fn pick(&mut self) -> Step {
+        let Some(command) = self.selected_command() else {
+            return Step::Leave(None);
+        };
+        match FillState::new(&command) {
+            Some(fill) => {
+                self.mode = Mode::Fill(fill);
+                Step::Stay
+            }
+            None => Step::Leave(Some(command)),
+        }
     }
 
     fn start_add(&mut self) {
@@ -235,13 +301,14 @@ pub fn pick_bookmark(repo: &Repository) -> Result<Option<String>, Box<dyn std::e
         if !event::poll(std::time::Duration::from_mins(1))? {
             continue;
         }
-        if let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press {
-                continue;
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if let Step::Leave(picked) = handle_key(&mut app, repo, key)? {
+                    break picked;
+                }
             }
-            if let Step::Leave(picked) = handle_key(&mut app, repo, key)? {
-                break picked;
-            }
+            Event::Paste(text) => handle_paste(&mut app, &text),
+            _ => {}
         }
     };
 
@@ -268,6 +335,7 @@ fn handle_key(
     match &app.mode {
         Mode::Form { .. } => handle_form_input(app, repo, key)?,
         Mode::ConfirmDelete { .. } => handle_confirm_delete_input(app, repo, key)?,
+        Mode::Fill(_) => return Ok(handle_fill_input(app, key)),
         Mode::Browse => {
             if key.modifiers.contains(KeyModifiers::CONTROL) {
                 match key.code {
@@ -285,7 +353,7 @@ fn handle_key(
                 KeyCode::Esc => return Ok(Step::Leave(None)),
                 KeyCode::Up => app.move_up(),
                 KeyCode::Down => app.move_down(),
-                KeyCode::Enter => return Ok(Step::Leave(app.selected_command())),
+                KeyCode::Enter => return Ok(app.pick()),
                 KeyCode::Backspace => {
                     app.query.pop();
                     app.apply_filter();
@@ -357,6 +425,43 @@ fn handle_form_input(
     Ok(())
 }
 
+/// Keys in the placeholder popup. Tab/Enter move to the next value and
+/// Enter on the last one recalls the filled command — never run, only put
+/// on the prompt. Esc goes back to the list without recalling anything.
+fn handle_fill_input(app: &mut PickerApp, key: crossterm::event::KeyEvent) -> Step {
+    let Mode::Fill(fill) = &mut app.mode else {
+        return Step::Stay;
+    };
+    match key.code {
+        KeyCode::Esc => app.mode = Mode::Browse,
+        KeyCode::Enter if fill.is_last() => return Step::Leave(Some(fill.filled())),
+        KeyCode::Enter | KeyCode::Tab | KeyCode::Down => {
+            if !fill.is_last() {
+                fill.focus += 1;
+            }
+        }
+        KeyCode::BackTab | KeyCode::Up => fill.focus = fill.focus.saturating_sub(1),
+        KeyCode::Backspace => {
+            if let Some(field) = fill.values.get_mut(fill.focus) {
+                field.pop();
+            }
+        }
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            fill.push_str_capped(c.encode_utf8(&mut [0; 4]));
+        }
+        _ => {}
+    }
+    Step::Stay
+}
+
+/// A paste goes into the focused placeholder value; elsewhere in the
+/// picker it is ignored, as before.
+fn handle_paste(app: &mut PickerApp, text: &str) {
+    if let Mode::Fill(fill) = &mut app.mode {
+        fill.push_str_capped(text);
+    }
+}
+
 fn handle_confirm_delete_input(
     app: &mut PickerApp,
     repo: &Repository,
@@ -404,6 +509,7 @@ fn render(f: &mut ratatui::Frame, app: &mut PickerApp) {
             t,
         ),
         Mode::ConfirmDelete { command } => render_confirm_delete_dialog(f, command, t),
+        Mode::Fill(fill) => render_fill_dialog(f, fill, t),
         Mode::Browse => {}
     }
 }
@@ -503,6 +609,21 @@ fn render_footer(f: &mut ratatui::Frame, app: &PickerApp, area: Rect, t: &crate:
             Span::styled(" Switch field  ", badge_label),
             Span::styled(" Esc ", badge_key),
             Span::styled(" Cancel  ", badge_label),
+        ],
+        Mode::Fill(fill) => vec![
+            Span::styled(" Esc ", badge_key),
+            Span::styled(" Back  ", badge_label),
+            Span::styled(" Tab ", badge_key),
+            Span::styled(" Next field  ", badge_label),
+            Span::styled(" Enter ", badge_key),
+            Span::styled(
+                if fill.is_last() {
+                    " Recall  "
+                } else {
+                    " Next  "
+                },
+                badge_label,
+            ),
         ],
         Mode::ConfirmDelete { .. } => vec![
             Span::styled(" y ", badge_key),
@@ -626,6 +747,67 @@ fn render_field(
     f.render_widget(field, area);
 }
 
+fn render_fill_dialog(f: &mut ratatui::Frame, fill: &FillState, t: &crate::theme::Theme) {
+    let placeholders = fill.template.placeholders();
+    // Rows that fit: the popup keeps 2 border rows, a blank line and two
+    // preview lines for itself and scrolls the fields past that.
+    let max_rows = usize::from(f.area().height.saturating_sub(7)).max(1);
+    let shown = placeholders.len().min(max_rows);
+    let first = (fill.focus + 1).saturating_sub(shown);
+    let height = u16::try_from(shown + 5).unwrap_or(u16::MAX);
+    let width = (f.area().width * 80 / 100).clamp(40, 90);
+    let area = centered_rect(f.area(), width, height);
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(t.border_focus))
+        .title(Span::styled(
+            " Fill Placeholders ",
+            Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let name_width = placeholders
+        .iter()
+        .map(|p| p.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut lines: Vec<Line> = placeholders
+        .iter()
+        .zip(&fill.values)
+        .enumerate()
+        .skip(first)
+        .take(shown)
+        .map(|(i, (p, value))| {
+            let focused = i == fill.focus;
+            let marker = if focused { "> " } else { "  " };
+            let name_style = if focused {
+                Style::default().fg(t.primary).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(t.text_secondary)
+            };
+            let cursor = if focused { "▏" } else { "" };
+            Line::from(vec![
+                Span::styled(marker, name_style),
+                Span::styled(format!("{:<name_width$}  ", p.name), name_style),
+                Span::styled(format!("{value}{cursor}"), Style::default().fg(t.text)),
+            ])
+        })
+        .collect();
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  → ", Style::default().fg(t.text_muted)),
+        Span::styled(fill.filled(), Style::default().fg(t.text)),
+    ]));
+    f.render_widget(
+        Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }),
+        inner,
+    );
+}
+
 fn render_confirm_delete_dialog(f: &mut ratatui::Frame, command: &str, t: &crate::theme::Theme) {
     let area = centered_rect(f.area(), 60, 3);
     f.render_widget(Clear, area);
@@ -727,6 +909,123 @@ mod tests {
             Step::Leave(None)
         ));
         assert_eq!(repo.list_bookmarks().unwrap().len(), 1, "nothing deleted");
+    }
+
+    fn key(code: KeyCode) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn type_text(app: &mut PickerApp, repo: &Repository, text: &str) {
+        for c in text.chars() {
+            assert!(matches!(
+                handle_key(app, repo, key(KeyCode::Char(c))).unwrap(),
+                Step::Stay
+            ));
+        }
+    }
+
+    fn leave(step: Step) -> Option<String> {
+        match step {
+            Step::Leave(picked) => picked,
+            Step::Stay => panic!("expected the picker to close"),
+        }
+    }
+
+    #[test]
+    fn picking_a_plain_bookmark_recalls_it_without_a_popup() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = PickerApp::new(vec![make_bookmark(1, "git status", None)]);
+        let picked = leave(handle_key(&mut app, &repo, key(KeyCode::Enter)).unwrap());
+        assert_eq!(picked.as_deref(), Some("git status"));
+    }
+
+    #[test]
+    fn picking_a_parameterised_bookmark_asks_for_each_value_then_recalls_it_filled() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = PickerApp::new(vec![make_bookmark(
+            1,
+            "ssh {{user:root}}@{{host}} -p {{port:22}} # {{host}}",
+            None,
+        )]);
+        assert!(matches!(
+            handle_key(&mut app, &repo, key(KeyCode::Enter)).unwrap(),
+            Step::Stay
+        ));
+        let Mode::Fill(fill) = &app.mode else {
+            panic!("expected the placeholder popup");
+        };
+        // One field per distinct placeholder, prefilled with its default.
+        assert_eq!(fill.values, vec!["root", "", "22"]);
+
+        // Enter on a field that is not the last moves on, like Tab.
+        handle_key(&mut app, &repo, key(KeyCode::Enter)).unwrap();
+        type_text(&mut app, &repo, "db1");
+        handle_key(&mut app, &repo, key(KeyCode::Tab)).unwrap();
+        handle_key(&mut app, &repo, key(KeyCode::Backspace)).unwrap();
+        type_text(&mut app, &repo, "3");
+
+        let screen = crate::test_utils::render_to_text(100, 20, |f| render(f, &mut app));
+        assert!(screen.contains("Fill Placeholders"), "{screen}");
+        assert!(screen.contains("ssh root@db1 -p 23 # db1"), "{screen}");
+        assert!(screen.contains("Esc  Back"), "{screen}");
+
+        let picked = leave(handle_key(&mut app, &repo, key(KeyCode::Enter)).unwrap());
+        assert_eq!(picked.as_deref(), Some("ssh root@db1 -p 23 # db1"));
+    }
+
+    #[test]
+    fn esc_in_the_popup_cancels_the_pick_and_ctrl_c_quits() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = PickerApp::new(vec![make_bookmark(1, "echo {{msg}}", None)]);
+        handle_key(&mut app, &repo, key(KeyCode::Enter)).unwrap();
+        assert!(matches!(app.mode, Mode::Fill(_)));
+        assert!(matches!(
+            handle_key(&mut app, &repo, key(KeyCode::Esc)).unwrap(),
+            Step::Stay
+        ));
+        assert!(matches!(app.mode, Mode::Browse), "back to the list");
+
+        handle_key(&mut app, &repo, key(KeyCode::Enter)).unwrap();
+        assert!(leave(handle_key(&mut app, &repo, ctrl_c()).unwrap()).is_none());
+    }
+
+    #[test]
+    fn popup_values_are_capped_and_a_pasted_line_break_becomes_a_space() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = PickerApp::new(vec![make_bookmark(1, "echo {{msg}}", None)]);
+        handle_key(&mut app, &repo, key(KeyCode::Enter)).unwrap();
+        handle_paste(&mut app, "a\nb");
+        handle_paste(&mut app, &"x".repeat(MAX_FIELD_LEN * 2));
+        let Mode::Fill(fill) = &app.mode else {
+            panic!("expected the placeholder popup");
+        };
+        assert!(fill.values[0].starts_with("a b"));
+        assert_eq!(fill.values[0].len(), MAX_FIELD_LEN);
+        // Control-modified letters are shortcuts, never text.
+        handle_key(
+            &mut app,
+            &repo,
+            crossterm::event::KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+        )
+        .unwrap();
+        let Mode::Fill(fill) = &app.mode else {
+            panic!("expected the placeholder popup");
+        };
+        assert_eq!(fill.values[0].len(), MAX_FIELD_LEN);
+    }
+
+    #[test]
+    fn shift_tab_moves_back_a_field() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        let mut app = PickerApp::new(vec![make_bookmark(1, "{{a}} {{b}}", None)]);
+        handle_key(&mut app, &repo, key(KeyCode::Enter)).unwrap();
+        handle_key(&mut app, &repo, key(KeyCode::Tab)).unwrap();
+        handle_key(&mut app, &repo, key(KeyCode::BackTab)).unwrap();
+        type_text(&mut app, &repo, "1");
+        handle_key(&mut app, &repo, key(KeyCode::Tab)).unwrap();
+        type_text(&mut app, &repo, "2");
+        let picked = leave(handle_key(&mut app, &repo, key(KeyCode::Enter)).unwrap());
+        assert_eq!(picked.as_deref(), Some("1 2"));
     }
 
     #[test]

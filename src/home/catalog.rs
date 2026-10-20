@@ -417,10 +417,12 @@ static FEATURES: &[Feature] = &[
         category: ORGANIZE,
         title: "Bookmarks",
         summary: "Commands you saved to reuse",
-        description: "Keep commands you reuse in one list, with an optional label.",
+        description: "Keep commands you reuse in one list, with an optional label. A bookmark \
+                      can hold {{name}} or {{name:default}} placeholders that you fill in \
+                      when you pick it.",
         opens: "Opens your bookmarks, where you can also add, edit and delete them \
-                (deleting asks first). The command you pick is shown here to copy; nothing \
-                is run.",
+                (deleting asks first). Picking one with placeholders asks for each value \
+                first. The command you pick is shown here to copy; nothing is run.",
         command: "suv bookmarks",
         synonyms: &[
             "bookmark",
@@ -431,11 +433,15 @@ static FEATURES: &[Feature] = &[
             "pin",
             "star",
             "keep",
+            "snippet",
+            "template",
+            "placeholder",
         ],
         command_paths: &[
             "bookmarks",
             "bookmarks add",
             "bookmarks list",
+            "bookmarks get",
             "bookmarks remove",
         ],
         args: &["bookmarks"],
@@ -447,6 +453,10 @@ static FEATURES: &[Feature] = &[
                 "Save a command",
             ),
             ex("suv bookmarks list", "Print them"),
+            ex(
+                "suv bookmarks get <LABEL> --set <NAME>=<VALUE>",
+                "Print one with its {{placeholders}} filled in",
+            ),
             ex("suv bookmarks remove \"<COMMAND>\"", "Forget one"),
         ],
         ..BASE

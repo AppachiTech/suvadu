@@ -107,7 +107,7 @@ Insights & safety:
 
 Organize:
   tag          Manage tags
-  bookmarks    Manage bookmarked commands
+  bookmarks    Manage bookmarked commands (with optional {{placeholders}})
   note         Annotate a history entry with a note
   aliases      Manage shell aliases
 
@@ -618,7 +618,7 @@ pub enum Commands {
     /// Manage bookmarked commands
     #[command(
         alias = "bookmark",
-        after_help = "Examples:\n  suv bookmarks                              # interactive picker\n  suv bookmarks add \"git stash pop\"\n  suv bookmarks add \"cargo test\" -l \"run tests\"\n  suv bookmarks list\n  suv bookmarks remove \"git stash pop\""
+        after_help = "Examples:\n  suv bookmarks                              # interactive picker\n  suv bookmarks add \"git stash pop\"\n  suv bookmarks add \"cargo test\" -l \"run tests\"\n  suv bookmarks list\n  suv bookmarks get deploy-box --set host=db1   # fill {{placeholders}}\n  suv bookmarks remove \"git stash pop\""
     )]
     Bookmarks {
         #[command(subcommand)]
@@ -851,6 +851,24 @@ pub enum BookmarksCommands {
     Remove {
         /// The command text to un-bookmark
         command: String,
+    },
+
+    /// Print a bookmark's command with its placeholders filled in
+    ///
+    /// A bookmark may contain `{{name}}` or `{{name:default}}`
+    /// placeholders (`\{{` is a literal `{{`). Each `--set name=value`
+    /// fills one; the rest take their defaults, and any left without a
+    /// value is an error naming it. Values are inserted verbatim, so quote
+    /// them the way the shell would need. The command is printed, never run.
+    #[command(
+        after_help = "Examples:\n  suv bookmarks add \"ssh {{user:root}}@{{host}}\" -l deploy-box\n  suv bookmarks get deploy-box --set host=db1      # ssh root@db1\n  suv bookmarks get \"ssh {{user:root}}@{{host}}\" --set host=db1 --set user=me"
+    )]
+    Get {
+        /// The bookmark: its label, its exact command text, or its id
+        bookmark: String,
+        /// Fill a placeholder (repeatable)
+        #[arg(long = "set", value_name = "NAME=VALUE")]
+        set: Vec<String>,
     },
 }
 
@@ -1394,6 +1412,30 @@ mod tests {
                 command: Some(BookmarksCommands::Add { command, .. }),
             } => assert_eq!(command, "git status"),
             _ => panic!("Expected Bookmarks{{ command: Some(Add) }}"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_bookmarks_get_with_repeated_set() {
+        let cli = Cli::try_parse_from([
+            "suv",
+            "bookmarks",
+            "get",
+            "box",
+            "--set",
+            "host=db1",
+            "--set",
+            "q=a=b",
+        ])
+        .unwrap();
+        match cli.command.unwrap() {
+            Commands::Bookmarks {
+                command: Some(BookmarksCommands::Get { bookmark, set }),
+            } => {
+                assert_eq!(bookmark, "box");
+                assert_eq!(set, vec!["host=db1", "q=a=b"]);
+            }
+            _ => panic!("Expected Bookmarks{{ command: Some(Get) }}"),
         }
     }
 

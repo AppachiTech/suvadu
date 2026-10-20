@@ -598,8 +598,102 @@ fn handle_bookmarks_with_repo(
                 return Err(format!("No bookmark found for: {command}").into());
             }
         }
+        crate::cli::BookmarksCommands::Get { bookmark, set } => {
+            // stdout carries only the filled command, so it can be piped or
+            // captured; it is printed, never run.
+            println!("{}", fill_bookmark(repo, &bookmark, &set)?);
+        }
     }
     Ok(())
+}
+
+/// Find the bookmark `key` names: its exact command text, else its label
+/// (which must be unambiguous), else its numeric id.
+pub fn find_bookmark(
+    bookmarks: &[crate::models::Bookmark],
+    key: &str,
+) -> Result<crate::models::Bookmark, String> {
+    if let Some(b) = bookmarks.iter().find(|b| b.command == key) {
+        return Ok(b.clone());
+    }
+    let labelled: Vec<&crate::models::Bookmark> = bookmarks
+        .iter()
+        .filter(|b| b.label.as_deref() == Some(key))
+        .collect();
+    match labelled.as_slice() {
+        [one] => return Ok((*one).clone()),
+        [] => {}
+        many => {
+            return Err(format!(
+                "{} bookmarks are labelled '{key}'; name one by its id ({}) or its command",
+                many.len(),
+                many.iter()
+                    .map(|b| b.id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        }
+    }
+    key.parse::<i64>()
+        .ok()
+        .and_then(|id| bookmarks.iter().find(|b| b.id == id))
+        .cloned()
+        .ok_or_else(|| {
+            format!("No bookmark found for '{key}' (by command, label or id). See `suv bookmarks list`.")
+        })
+}
+
+/// `suv bookmarks get`: the bookmark's command with `--set` values and
+/// defaults filled in. A `--set` naming no placeholder, or a placeholder
+/// left with neither a value nor a default, is an error that names it.
+fn fill_bookmark(repo: &Repository, key: &str, sets: &[String]) -> Result<String, String> {
+    let bookmarks = repo.list_bookmarks().map_err(|e| e.to_string())?;
+    let bookmark = find_bookmark(&bookmarks, key)?;
+    let template = crate::snippet::Template::parse(&bookmark.command);
+    let values = crate::snippet::parse_assignments(sets)?;
+
+    let known: Vec<&str> = template
+        .placeholders()
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    let mut unknown: Vec<&str> = values
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !known.contains(k))
+        .collect();
+    if !unknown.is_empty() {
+        unknown.sort_unstable();
+        let has = if known.is_empty() {
+            "it has no placeholders".to_string()
+        } else {
+            format!("it has: {}", known.join(", "))
+        };
+        return Err(format!(
+            "this bookmark has no placeholder named {} — {has}",
+            unknown
+                .iter()
+                .map(|k| format!("'{k}'"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    template.fill(&values).map_err(|missing| {
+        format!(
+            "no value for {} — pass {}",
+            missing
+                .iter()
+                .map(|k| format!("'{k}'"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            missing
+                .iter()
+                .map(|k| format!("--set {k}=..."))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    })
 }
 
 pub fn handle_note(
@@ -1174,6 +1268,84 @@ mod tests {
     }
 
     // ── handle_bookmarks tests ───────────────────────────────────
+
+    #[test]
+    fn bookmarks_get_fills_placeholders_from_set_and_defaults() {
+        let (_dir, repo) = test_repo();
+        repo.add_bookmark("ssh {{user:root}}@{{host}} -p {{port:22}}", Some("box"))
+            .unwrap();
+        let filled = fill_bookmark(&repo, "box", &["host=db1".into(), "port=2222".into()]);
+        assert_eq!(filled.unwrap(), "ssh root@db1 -p 2222");
+
+        // Named by its exact command text, too.
+        let filled = fill_bookmark(
+            &repo,
+            "ssh {{user:root}}@{{host}} -p {{port:22}}",
+            &["host=h".into(), "user=me".into()],
+        );
+        assert_eq!(filled.unwrap(), "ssh me@h -p 22");
+    }
+
+    #[test]
+    fn bookmarks_get_names_every_missing_value() {
+        let (_dir, repo) = test_repo();
+        repo.add_bookmark("scp {{src}} {{host}}:{{dst:~}}", Some("copy"))
+            .unwrap();
+        let err = fill_bookmark(&repo, "copy", &[]).unwrap_err();
+        assert!(err.contains("'src', 'host'"), "{err}");
+        assert!(err.contains("--set src=... --set host=..."), "{err}");
+        assert!(!err.contains("dst"), "dst has a default: {err}");
+    }
+
+    #[test]
+    fn bookmarks_get_rejects_a_value_for_a_placeholder_that_does_not_exist() {
+        let (_dir, repo) = test_repo();
+        repo.add_bookmark("echo {{msg}}", Some("say")).unwrap();
+        let err = fill_bookmark(&repo, "say", &["mgs=hi".into()]).unwrap_err();
+        assert!(
+            err.contains("'mgs'") && err.contains("it has: msg"),
+            "{err}"
+        );
+        assert!(fill_bookmark(&repo, "say", &["oops".into()]).is_err());
+    }
+
+    #[test]
+    fn bookmarks_get_prints_a_plain_bookmark_unchanged_and_finds_by_id() {
+        let (_dir, repo) = test_repo();
+        repo.add_bookmark("git status", None).unwrap();
+        let id = repo.list_bookmarks().unwrap()[0].id;
+        assert_eq!(
+            fill_bookmark(&repo, &id.to_string(), &[]).unwrap(),
+            "git status"
+        );
+        assert!(fill_bookmark(&repo, "nope", &[]).is_err());
+    }
+
+    #[test]
+    fn bookmarks_get_refuses_an_ambiguous_label() {
+        let (_dir, repo) = test_repo();
+        repo.add_bookmark("ls", Some("dup")).unwrap();
+        repo.add_bookmark("ls -la", Some("dup")).unwrap();
+        let err = fill_bookmark(&repo, "dup", &[]).unwrap_err();
+        assert!(err.contains("2 bookmarks are labelled 'dup'"), "{err}");
+    }
+
+    #[test]
+    fn bookmarks_get_via_the_handler_succeeds_and_fails_like_the_fill() {
+        let (_dir, repo) = test_repo();
+        repo.add_bookmark("echo {{x}}", Some("e")).unwrap();
+        let get = |set: Vec<String>| {
+            handle_bookmarks_with_repo(
+                &repo,
+                Some(BookmarksCommands::Get {
+                    bookmark: "e".to_string(),
+                    set,
+                }),
+            )
+        };
+        assert!(get(vec!["x=1".into()]).is_ok());
+        assert!(get(vec![]).is_err());
+    }
 
     #[test]
     fn test_handle_bookmarks_add_and_list() {
