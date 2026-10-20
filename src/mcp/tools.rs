@@ -59,6 +59,7 @@ fn tool_definition(name: &str) -> Option<Value> {
         "get_skill" => get_skill_def(),
         "search_skills" => search_skills_def(),
         "propose_skill" => propose_skill_def(),
+        "list_snippets" => list_snippets_def(),
         _ => return None,
     })
 }
@@ -120,6 +121,7 @@ pub fn call_tool(
         "get_skill" => handle_get_skill(repo, args, mcp),
         "search_skills" => handle_search_skills(repo, args, mcp),
         "propose_skill" => handle_propose_skill(args, mcp),
+        "list_snippets" => handle_list_snippets(repo, args),
         _ => Err(format!("Unknown tool: {name}")),
     }
 }
@@ -392,6 +394,20 @@ fn search_skills_def() -> Value {
                 "scope": { "type": "string", "description": "Filter to \"global\" or a project directory path" }
             }), 50),
             "required": ["query"]
+        }
+    })
+}
+
+fn list_snippets_def() -> Value {
+    json!({
+        "name": "list_snippets",
+        "description": "List the user's bookmarked commands (snippets) with their {{placeholder}} parameters. A bookmark may contain {{name}} or {{name:default}}; each distinct placeholder is listed once, in order, with its default if it has one. Fill them with `suv bookmarks get <label|command|id> --set name=value`, which prints the command — it never runs it. Values are inserted verbatim, so quote them as the shell needs. Read-only.",
+        "inputSchema": {
+            "type": "object",
+            "properties": with_paging(json!({
+                "query": { "type": "string", "description": "Only bookmarks whose command or label contains this text (case-insensitive)" },
+                "parameterised_only": { "type": "boolean", "description": "Only bookmarks that have at least one placeholder (default: false)", "default": false }
+            }), 50)
         }
     })
 }
@@ -3008,6 +3024,78 @@ fn handle_search_skills(
     }))
 }
 
+/// One bookmark row: id, label, command template, then its placeholders.
+fn snippet_lines(b: &crate::models::Bookmark) -> Vec<String> {
+    let template = crate::snippet::Template::parse(&b.command);
+    let mut lines = vec![format!(
+        "#{} | {} | {}",
+        b.id,
+        b.label.as_deref().unwrap_or(conv::UNKNOWN),
+        conv::clip(&b.command, conv::ROW_MAX_CHARS)
+    )];
+    if template.has_placeholders() {
+        let params: Vec<String> = template
+            .placeholders()
+            .iter()
+            .map(|p| {
+                p.default.as_ref().map_or_else(
+                    || format!("{} (required)", p.name),
+                    |d| format!("{} (default: {})", p.name, conv::clip(d, 60)),
+                )
+            })
+            .collect();
+        lines.push(format!("  placeholders: {}", params.join(", ")));
+    }
+    lines
+}
+
+fn handle_list_snippets(repo: &Repository, args: &Value) -> Result<String, String> {
+    let needle = get_str(args, "query").map(str::to_lowercase);
+    let parameterised_only = args
+        .get("parameterised_only")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let (limit, offset) = paging(args, 50);
+    let all = repo
+        .list_bookmarks()
+        .map_err(|e| format!("query failed: {e}"))?;
+    let matching: Vec<_> = all
+        .into_iter()
+        .filter(|b| {
+            needle.as_deref().is_none_or(|n| {
+                b.command.to_lowercase().contains(n)
+                    || b.label
+                        .as_deref()
+                        .is_some_and(|l| l.to_lowercase().contains(n))
+            })
+        })
+        .filter(|b| {
+            !parameterised_only || crate::snippet::Template::parse(&b.command).has_placeholders()
+        })
+        .collect();
+    let matched = matching.len();
+    let page: Vec<_> = matching.into_iter().skip(offset).take(limit).collect();
+    let next = (offset.saturating_add(limit) < matched).then(|| offset.saturating_add(limit));
+    Ok(fit_page(&page, offset, next, |page| {
+        let mut response = conv::Response::new(
+            format!("{} bookmarked commands on this page", page.len()),
+            conv::Provenance::CallerReported,
+        );
+        for b in page {
+            for line in snippet_lines(b) {
+                response.line(line);
+            }
+        }
+        if page.is_empty() {
+            response.line("(none — the user adds them with `suv bookmarks add \"<command>\"`)");
+        }
+        response
+            .shown(page.len())
+            .matched(matched)
+            .note("bookmarks are commands the user saved; fill placeholders with `suv bookmarks get <label|command|id> --set name=value`, which prints the command and never runs it")
+    }))
+}
+
 /// Writes a proposed skill with `status = pending_review`. Unlike every
 /// other MCP tool, this needs a write-capable connection — it opens its own
 /// short-lived one on demand rather than relaxing the read-only guarantee
@@ -3128,7 +3216,7 @@ mod tests {
         mcp.disabled_tools = vec!["assess_risk".to_string(), "suggest_next".to_string()];
         let resp = list_tools(&json!(1), &mcp);
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 19);
+        assert_eq!(tools.len(), 20);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(!names.contains(&"assess_risk"));
         assert!(!names.contains(&"suggest_next"));
@@ -4992,6 +5080,51 @@ mod tests {
         // Pending proposals must not surface through the read tools.
         let listed = call_tool(&repo, "list_skills", &json!({}), &default_mcp()).unwrap();
         assert!(!listed.contains("new-idea"));
+    }
+
+    #[test]
+    fn list_snippets_shows_each_template_with_its_placeholders_and_defaults() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        repo.add_bookmark("ssh {{user:root}}@{{host}} # {{host}}", Some("box"))
+            .unwrap();
+        repo.add_bookmark("git status", None).unwrap();
+
+        let text = call_tool(&repo, "list_snippets", &json!({}), &default_mcp()).unwrap();
+        assert!(
+            text.contains("| box | ssh {{user:root}}@{{host}} # {{host}}"),
+            "{text}"
+        );
+        assert!(
+            text.contains("placeholders: user (default: root), host (required)"),
+            "{text}"
+        );
+        assert_eq!(text.matches("host (required)").count(), 1, "listed once");
+        assert!(text.contains("| unknown | git status"), "{text}");
+        assert!(text.contains("provenance: caller-reported"), "{text}");
+
+        let only = call_tool(
+            &repo,
+            "list_snippets",
+            &json!({"parameterised_only": true}),
+            &default_mcp(),
+        )
+        .unwrap();
+        assert!(!only.contains("git status"), "{only}");
+        let found = call_tool(
+            &repo,
+            "list_snippets",
+            &json!({"query": "BOX"}),
+            &default_mcp(),
+        )
+        .unwrap();
+        assert!(found.contains("ssh {{user:root}}") && !found.contains("git status"));
+    }
+
+    #[test]
+    fn list_snippets_is_read_only_and_on_by_default() {
+        let entry = crate::mcp::catalog::find_tool("list_snippets").unwrap();
+        assert!(entry.write_opt_in.is_none());
+        assert!(advertised(&default_mcp()).contains("list_snippets"));
     }
 
     #[test]

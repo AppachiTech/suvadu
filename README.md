@@ -18,7 +18,7 @@
 - **Measured, not asserted** — at 100,000 entries on one M4 Max: **207 µs** p95 to record a command, **0.05–15 ms** p95 for a judged search over the whole history. One machine, one run — the harness, the corpus and what is still unmeasured are in [BENCHMARKS.md](BENCHMARKS.md)
 - **AI agent tracking** — full session capture for Claude Code, Codex and OpenCode; commands and prompts for Cursor and pi.dev; command tagging alone for Antigravity, Windsurf, Aider, Continue and Copilot ([what each tier means](#what-each-agent-actually-gives-you))
 - **Prompt Explorer** — trace every recorded command back to the prompt that triggered it
-- **MCP Server** — **21 read-only tools, 8 resources and 6 prompts, all read-only by default.** The two write tools stay off until you turn their opt-in on. Agent session discovery, project context, failure learning, risk assessment, a shared skills library. Configurable via `suv settings`
+- **MCP Server** — **22 read-only tools, 8 resources and 6 prompts, all read-only by default.** The two write tools stay off until you turn their opt-in on. Agent session discovery, project context, failure learning, risk assessment, a shared skills library, your bookmarked command templates. Configurable via `suv settings`
 - **100% local** — no cloud, no telemetry, no account. The only request Suvadu makes on its own is a once-a-day check for a newer release, which you can turn off. MIT licensed.
 
 > **Website & Docs:** [suvadu.sh](https://suvadu.sh) &middot; **CLI Reference:** [suvadu.sh/cli](https://suvadu.sh/cli/) &middot; **Blog:** [suvadu.sh/blog](https://suvadu.sh/blog/) &middot; **What's new:** [CHANGELOG](CHANGELOG.md)
@@ -157,6 +157,9 @@ suv bookmarks get box --set host=db1   # prints: ssh root@db1 -p 22
   `Esc` goes back to the list. `suv bookmarks get` fails with the names of
   any placeholders left without a value or default.
 - Filled values are never stored.
+- The MCP `list_snippets` tool lists your bookmarks with each one's
+  placeholders and defaults (read-only), so an agent can fill one with
+  `suv bookmarks get … --set …` rather than retyping it.
 
 ---
 
@@ -630,7 +633,7 @@ subsumes the other.
 
 ### MCP: read-only by default
 
-The server advertises **21 read-only tools, 8 resources and 6 prompts**.
+The server advertises **22 read-only tools, 8 resources and 6 prompts**.
 Every one of them reads. There are exactly two write tools, and both are off
 until you turn their opt-in on:
 
@@ -691,7 +694,7 @@ See the [full integration guide](https://suvadu.sh/blog/track-ai-agent-commands-
 | **Search** | Full-history search TUI with four [matching modes](#how-recall-matches-and-ranks) (`^X`) and four scopes (`^P`), matches highlighted in each row, every run or identical commands grouped with last-used and run counts (`^U`), your own commands by default (`Ctrl+A` shows agents, `Ctrl+E` failures only), filters, Smart rank, detail pane, a raw inspector for exact text (`^V`), bookmarks, and `--compact` inline recall |
 | **History** | Non-interactive `suv history` with filters, `--json`, pipeable to other tools |
 | **Agent Dashboard** | Timeline, risk assessment, per-agent analytics, exportable reports; `suv agent report --fail-on <low\|medium\|high\|critical>` for local CI / git-hook gating |
-| **MCP Server** | 21 read-only tools, 8 resources and 6 prompts, plus two opt-in write tools that are off by default — agent session replay and incremental cross-agent summary checkpoints, project context, failure learning; one response convention with explicit provenance |
+| **MCP Server** | 22 read-only tools, 8 resources and 6 prompts, plus two opt-in write tools that are off by default — agent session replay and incremental cross-agent summary checkpoints, project context, failure learning; one response convention with explicit provenance |
 | **Skills Library** | `suv skills` — interactive TUI to browse, add, edit, delete, sync, and review shared skills any MCP-capable agent can read instead of each tool keeping its own copy. `sync --dry-run` diffs the managed region of each generated file; a region edited outside Suvadu is reported as a conflict and skipped, not overwritten (`--force` overrides). `add/list/show/edit/rm/disable/enable/sync/cleanup` also work as scriptable subcommands |
 | **Prompt Explorer** | `suv agent prompts` groups **recorded commands** by the prompt that triggered them, with that turn's successes, failures and duration. A prompt that ran no recorded command does not appear — for the agent's own transcript, use a session timeline |
 | **Unified Sessions** | `suv sessions` browses human and AI sessions together, with a **Capture** column that reports `full` or `gaps: N` from recorded gaps alone — never inferred from exit codes. Native Codex, Claude Code and OpenCode sessions show prompts, responses, commands, every observed model and provider-reported token totals; `s` opens saved summaries (badged CURRENT / NEW ACTIVITY / EVIDENCE CHANGED; `Tab` toggles rendered/raw, `Ctrl+Y` copies) and `h` builds a handoff scaffold from captured records only |

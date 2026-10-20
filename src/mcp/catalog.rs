@@ -239,6 +239,11 @@ pub const TOOLS: &[ToolEntry] = &[
         write_opt_in: None,
     },
     ToolEntry {
+        name: "list_snippets",
+        summary: "List bookmarked commands with their {{placeholder}} parameters and defaults.",
+        write_opt_in: None,
+    },
+    ToolEntry {
         name: "propose_skill",
         summary: "WRITE: propose a new shared skill, saved as pending review until a human approves it.",
         write_opt_in: Some(WriteOptIn::SkillProposals),

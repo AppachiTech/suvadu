@@ -380,11 +380,11 @@ mod tests {
         };
         assert!(!names(&mcp).contains(&"save_session_summary".into()));
         mcp.allow_session_summaries = true;
-        assert_eq!(names(&mcp).len(), 22);
+        assert_eq!(names(&mcp).len(), 23);
         assert!(names(&mcp).contains(&"save_session_summary".into()));
         assert!(names(&mcp).contains(&"resolve_current_agent_session".into()));
         mcp.disabled_tools.push("save_session_summary".into());
-        assert_eq!(names(&mcp).len(), 21);
+        assert_eq!(names(&mcp).len(), 22);
     }
 
     #[test]

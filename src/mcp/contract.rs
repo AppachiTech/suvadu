@@ -198,6 +198,7 @@ fn tool_args(name: &str) -> Option<Value> {
         "list_skills" => json!({}),
         "get_skill" => json!({"name": "release"}),
         "search_skills" => json!({"query": "release"}),
+        "list_snippets" => json!({}),
         // Writes and JSON-shaped session tools are covered separately.
         _ => return None,
     })

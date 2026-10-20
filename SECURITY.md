@@ -356,7 +356,7 @@ Precedence and scope:
 
 ### What an MCP client can reach
 
-The MCP server opens the database **read-only**. Every one of its 21 tools,
+The MCP server opens the database **read-only**. Every one of its 22 read tools,
 8 resources and 6 prompts reads; a short-lived writable connection is opened
 only for an explicitly enabled write.
 
