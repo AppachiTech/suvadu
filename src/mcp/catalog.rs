@@ -225,12 +225,12 @@ pub const TOOLS: &[ToolEntry] = &[
     },
     ToolEntry {
         name: "list_skills",
-        summary: "List skills in the shared cross-agent skills library.",
+        summary: "List skills in the shared cross-agent skills library and the project's repo skills.",
         write_opt_in: None,
     },
     ToolEntry {
         name: "get_skill",
-        summary: "Read the full content of one shared skill by name.",
+        summary: "Read the full content of one shared skill, or a trusted repo skill, by name.",
         write_opt_in: None,
     },
     ToolEntry {

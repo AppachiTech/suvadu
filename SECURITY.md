@@ -386,6 +386,12 @@ deletes them — and skips a symlink (which could point anywhere on disk), a
 file over 256 KB, one that is not UTF-8, and one whose name could escape the
 agent directories it is written into; terminal control characters are
 dropped from their text before it is printed or copied.
+Over MCP, `list_skills` and `search_skills` show an untrusted or changed repo
+skill by name, file path and trust state only, and `get_skill` refuses its
+body: until you have read it, its text is a stranger's instructions, which is
+exactly what an agent should not be handed as a skill. (An agent that can
+read files can still open the file itself; Suvadu just does not vouch for
+it.)
 
 **Summaries are caller-reported text.** Suvadu invokes no model and
 generates no prose — a summary is whatever the connected agent wrote, stored

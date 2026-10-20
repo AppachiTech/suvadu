@@ -500,6 +500,19 @@ fn a_repo_skill_syncs_only_once_trusted_and_again_after_every_change() {
         "an untrusted repo skill is never written"
     );
 
+    // An agent sees that it exists, but not its text.
+    let mcp = sb.mcp_call("list_skills", "{}");
+    assert!(
+        mcp.contains("ship | scope") && mcp.contains("trust untrusted"),
+        "{mcp}"
+    );
+    assert!(
+        !mcp.contains("How this team ships") && !mcp.contains("Tag, then push"),
+        "{mcp}"
+    );
+    let mcp = sb.mcp_call("get_skill", r#"{"name":"ship"}"#);
+    assert!(!mcp.contains("Tag, then push"), "{mcp}");
+
     let preview = sb.suv(&["skills", "trust", "--dry-run"]);
     assert!(preview.contains("would trust"), "{preview}");
     let trusted = sb.suv(&["skills", "trust"]);
@@ -513,6 +526,11 @@ fn a_repo_skill_syncs_only_once_trusted_and_again_after_every_change() {
     assert!(
         shown.contains("file:") && shown.contains("ship.md"),
         "{shown}"
+    );
+    let mcp = sb.mcp_call("get_skill", r#"{"name":"ship"}"#);
+    assert!(
+        mcp.contains("Tag, then push.") && mcp.contains("source: repo file"),
+        "{mcp}"
     );
 
     // Suvadu never edits a repo skill; it says where the file is instead.

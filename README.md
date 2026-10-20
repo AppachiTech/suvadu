@@ -179,6 +179,11 @@ suv skills sync                 # from the repository root: writes them like pro
   sync says so. An untrusted one changes nothing.
 - Deleting the file removes its synced copies on the next sync — only
   copies Suvadu wrote and nobody edited since.
+- Over MCP, `list_skills`, `get_skill` and `search_skills` include the
+  repo skills of the project the agent names (`scope`) or the server runs
+  in, with `source repo`, the file path and the trust state. An untrusted
+  or changed one is listed by name and path only: its description and body
+  are not served until you trust it.
 - A file is skipped, with a warning naming it, when its name is not
   letters, digits, `-` and `_`, it is a symlink, it is over 256 KB or not
   UTF-8, it has no body, or its `targets` names an unknown agent.
