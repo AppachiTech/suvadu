@@ -510,6 +510,12 @@ fn cleanup_integrations() {
         println!("✓ Removed shell integration from ~/.bashrc");
     }
 
+    match crate::integrations::antigravity::cleanup() {
+        Ok(true) => println!("✓ Removed Antigravity capture from ~/.zshenv"),
+        Ok(false) => {}
+        Err(e) => eprintln!("Warning: Failed to clean up .zshenv: {e}"),
+    }
+
     let codex_cleaned = match crate::integrations::codex::cleanup() {
         Ok(changed) => {
             if changed {

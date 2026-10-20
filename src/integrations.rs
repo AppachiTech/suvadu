@@ -1,9 +1,10 @@
 //! IDE and agent integration hooks for Suvadu.
 //!
-//! Contains Claude Code hook handlers, IDE init routines (Cursor, Antigravity),
+//! Contains Claude Code hook handlers, IDE init routines (Cursor),
 //! and helpers for merging settings into `~/.claude/settings.json`.
 
 pub mod agent_hook;
+pub mod antigravity;
 pub mod codex;
 pub mod cursor;
 pub mod hook_input;
@@ -1979,84 +1980,6 @@ fn add_cursor_hook_if_missing(
     if !already_has {
         arr.push(serde_json::json!({ "command": hook_path }));
     }
-    Ok(())
-}
-
-/// Unified init handler for terminal-based IDE integrations (Antigravity, etc.).
-///
-/// These IDEs are detected via environment variables set in their integrated terminals.
-/// Suvadu's shell hooks automatically pick them up — this command just verifies the setup.
-///
-/// # Arguments
-/// * `name` — Display name of the IDE (e.g. "Cursor", "Antigravity")
-/// * `detection_info` — Human-readable description of how Suvadu detects the IDE
-/// * `verify_executor` — The executor name for `suv search --executor <name>`
-pub fn handle_init_ide(
-    name: &str,
-    detection_info: &str,
-    verify_executor: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let color = crate::util::color_enabled();
-    let (b, r) = if color {
-        ("\x1b[1m", "\x1b[0m")
-    } else {
-        ("", "")
-    };
-    let green = if color { "\x1b[32m" } else { "" };
-    let yellow = if color { "\x1b[33m" } else { "" };
-    let cyan = if color { "\x1b[36m" } else { "" };
-
-    println!("{b}Suvadu \u{2014} {name} Integration{r}");
-    println!();
-
-    // Check if shell hooks are configured
-    let home = std::env::var("HOME")?;
-    let zshrc_path = PathBuf::from(&home).join(".zshrc");
-    let bashrc_path = PathBuf::from(&home).join(".bashrc");
-
-    let zsh_ok = zshrc_path
-        .exists()
-        .then(|| std::fs::read_to_string(&zshrc_path).ok())
-        .flatten()
-        .is_some_and(|c| c.contains("suv init zsh"));
-
-    let bash_ok = bashrc_path
-        .exists()
-        .then(|| std::fs::read_to_string(&bashrc_path).ok())
-        .flatten()
-        .is_some_and(|c| c.contains("suv init bash"));
-
-    if zsh_ok || bash_ok {
-        println!("{green}\u{2713}{r} Shell hooks detected:");
-        if zsh_ok {
-            println!("    Zsh:  ~/.zshrc");
-        }
-        if bash_ok {
-            println!("    Bash: ~/.bashrc");
-        }
-        println!();
-        println!("{green}\u{2713}{r} {name} commands are automatically tracked when you");
-        println!("  run commands in {name}'s integrated terminal.");
-        println!();
-        for line in detection_info.lines() {
-            println!("  {line}");
-        }
-    } else {
-        println!("{yellow}!{r} Shell hooks not found. Set them up first:");
-        println!();
-        println!("  For Zsh:");
-        println!("    echo 'eval \"$(suv init zsh)\"' >> ~/.zshrc && source ~/.zshrc");
-        println!();
-        println!("  For Bash:");
-        println!("    echo 'eval \"$(suv init bash)\"' >> ~/.bashrc && source ~/.bashrc");
-        println!();
-        println!("  Then reopen {name} \u{2014} commands will be tracked automatically.");
-    }
-
-    println!();
-    println!("Verify with: {cyan}suv search --executor {verify_executor}{r}");
-    print_post_install_tips(cyan, r, false, false);
-
     Ok(())
 }
 

@@ -15,9 +15,9 @@ pub enum InstallKind {
     HookScripts,
     /// A single plugin/extension file, at this path relative to `$HOME`.
     PluginFile(&'static str),
-    /// Nothing to install: the agent's terminal is covered by the ordinary
-    /// shell hooks, which tag commands via an environment variable.
-    ShellHooks,
+    /// A zsh capture script in `~/.config/suvadu/hooks/`, loaded by a guarded
+    /// block in `~/.zshenv` (see `integrations::antigravity`).
+    ZshEnvScript,
 }
 
 /// Static facts about one supported agent/IDE integration.
@@ -86,7 +86,7 @@ pub const REGISTRY: &[AgentIntegration] = &[
         executor_name: "antigravity",
         session_agent: None,
         process_names: &["Antigravity", "antigravity"],
-        install: InstallKind::ShellHooks,
+        install: InstallKind::ZshEnvScript,
     },
     AgentIntegration {
         id: "opencode",

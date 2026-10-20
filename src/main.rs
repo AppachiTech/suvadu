@@ -437,11 +437,7 @@ fn run_init(target: cli::InitTarget) -> Result<(), Box<dyn std::error::Error>> {
         cli::InitTarget::Codex => integrations::codex::handle_init(),
         cli::InitTarget::ClaudeCode => integrations::handle_init_claude_code(),
         cli::InitTarget::Cursor => integrations::handle_init_cursor(),
-        cli::InitTarget::Antigravity => integrations::handle_init_ide(
-            "Antigravity",
-            "Suvadu detects Antigravity via the $ANTIGRAVITY_AGENT\nenvironment variable.",
-            "antigravity",
-        ),
+        cli::InitTarget::Antigravity => integrations::antigravity::handle_init(),
         cli::InitTarget::Opencode => integrations::handle_init_opencode(),
         cli::InitTarget::Pi => integrations::handle_init_pi(),
     }

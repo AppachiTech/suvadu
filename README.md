@@ -16,7 +16,7 @@
 **Suvadu** replaces your shell history with a SQLite-backed store. Every command gets structured context — exit code, duration, directory, executor, session. AI agents can query it via MCP. 100% local.
 
 - **Measured, not asserted** — at 100,000 entries on one M4 Max: **207 µs** p95 to record a command, **0.05–15 ms** p95 for a judged search over the whole history. One machine, one run — the harness, the corpus and what is still unmeasured are in [BENCHMARKS.md](BENCHMARKS.md)
-- **AI agent tracking** — full session capture for Claude Code, Codex, OpenCode and Cursor (Cursor without token usage); commands and prompts for pi.dev; command tagging alone for Antigravity, Windsurf, Aider, Continue and Copilot ([what each tier means](#what-each-agent-actually-gives-you))
+- **AI agent tracking** — full session capture for Claude Code, Codex, OpenCode and Cursor (Cursor without token usage); commands and prompts for pi.dev; commands for Antigravity's agent; command tagging alone for Windsurf, Aider, Continue and Copilot ([what each tier means](#what-each-agent-actually-gives-you))
 - **Prompt Explorer** — trace every recorded command back to the prompt that triggered it
 - **MCP Server** — **22 read-only tools, 8 resources and 6 prompts, all read-only by default.** The two write tools stay off until you turn their opt-in on. Agent session discovery, project context, failure learning, risk assessment, a shared skills library, your bookmarked command templates. Configurable via `suv settings`
 - **100% local** — no cloud, no telemetry, no account. The only request Suvadu makes on its own is a once-a-day check for a newer release, which you can turn off. MIT licensed.
@@ -513,7 +513,7 @@ suv init codex          # Codex — commands, sessions, tokens + MCP
 suv init cursor         # Cursor — commands, sessions (no tokens) + MCP
 suv init opencode       # OpenCode — plugin + full session capture (commands, sessions, tokens)
 suv init pi             # pi.dev — extension + prompt capture
-suv init antigravity    # Antigravity — auto-detect
+suv init antigravity    # Antigravity — agent commands (via ~/.zshenv)
 ```
 
 After setup, relaunch the configured agent. For either VS Code extension, fully quit and reopen VS Code. Codex also requires reviewing/trusting the Suvadu hooks when prompted (or through `/hooks`). Both installers preserve unrelated hooks and configure the Suvadu MCP server; Codex backs up an existing `hooks.json` before changing it and uses `CODEX_HOME` when set.
@@ -529,12 +529,27 @@ Three different things get called "AI agent support". Here is which one you get:
 | OpenCode | `opencode` | yes (plugin) | yes | **yes** | CLI 1.18.30 |
 | Cursor | `cursor` | yes (hooks) | yes | **yes** — prompts, final responses and turn ends; no token usage | not pinned |
 | pi.dev | `pi` | yes (extension) | yes (capped at 500 characters by the extension) | no | not pinned |
-| Antigravity | `antigravity` | via the shell hook | no | no | — |
+| Antigravity | `antigravity` | yes (`~/.zshenv` capture script) | no | no | Antigravity IDE 2.5.5 with zsh 5.9 |
 | Windsurf, Aider, Continue, Copilot | — | via the shell hook | no | no | — |
 
-The last two rows are **command tagging, not an integration**: the shell hook
+The last row is **command tagging, not an integration**: the shell hook
 recognises the environment variable those tools set and labels commands with
 the right executor. There is nothing to install and no prompt is captured.
+
+Antigravity's agent runs each command as `zsh -c '<command>'` from its language
+server, a shell that never reads `~/.zshrc`, so the shell hook cannot see it.
+`suv init antigravity` writes a capture script to
+`~/.config/suvadu/hooks/antigravity-zsh.sh` and adds a marked block to
+`~/.zshenv` (`$ZDOTDIR/.zshenv` when set), backing up the previous file as
+`.zshenv.suvadu-backup-<id>`. The block sources the script only when
+`$ANTIGRAVITY_AGENT` is set in a non-interactive zsh running a `-c` command;
+every other shell skips it. Each agent command is recorded when its shell
+exits, with exit code, duration and directory, in a session per Antigravity
+run (`antigravity-<pid>`). Only zsh is covered. A command Antigravity starts
+with `exec`, or one killed by a signal, is not recorded. To make the shell wait
+for the command so it can record it, the script sets a no-op `EXIT` trap,
+which replaces an `EXIT` trap set earlier in `~/.zshenv` in those shells only.
+`suv uninstall` removes the block.
 
 Only the Codex and OpenCode figures above are versions Suvadu has actually
 been exercised against; nothing enforces them at runtime except for Atuin

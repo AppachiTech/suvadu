@@ -637,8 +637,6 @@ enum IntegrationInstall {
     /// metadata, not executable). The string is the exact reason.
     Broken(String),
     NotInstalled,
-    /// Nothing to install: the agent's terminal is covered by shell hooks.
-    ShellHookBased,
 }
 
 /// Whether Suvadu's MCP server is registered with an agent.
@@ -678,7 +676,6 @@ fn assess_agent(agent: &AgentIntegration, ev: &AgentEvidence) -> CheckResult {
             IntegrationInstall::Installed => "installed",
             IntegrationInstall::Broken(_) => "installed but broken",
             IntegrationInstall::NotInstalled => "not installed",
-            IntegrationInstall::ShellHookBased => "shell hooks (nothing to install)",
         },
         ev.commands_captured,
         ev.native_sessions
@@ -719,15 +716,6 @@ fn assess_agent(agent: &AgentIntegration, ev: &AgentEvidence) -> CheckResult {
         ))
         .with_aspects(aspects),
 
-        IntegrationInstall::ShellHookBased if ev.process_detected => {
-            optional(Status::Warn, "running, nothing captured yet".to_string())
-                .with_fix(format!(
-                    "open a new terminal inside {} (its commands are captured by the shell hooks)",
-                    agent.display_name
-                ))
-                .with_aspects(aspects)
-        }
-
         IntegrationInstall::NotInstalled if ev.process_detected => optional(
             Status::Warn,
             "running, but the integration is not installed".to_string(),
@@ -735,7 +723,7 @@ fn assess_agent(agent: &AgentIntegration, ev: &AgentEvidence) -> CheckResult {
         .with_fix(format!("run {} to capture its commands", agent.init_hint()))
         .with_aspects(aspects),
 
-        _ => optional(
+        IntegrationInstall::NotInstalled => optional(
             Status::NotConfigured,
             format!("not in use (optional: {})", agent.init_hint()),
         ),
@@ -818,7 +806,21 @@ fn integration_install(
     hooks: &[(String, Result<(), String>)],
 ) -> IntegrationInstall {
     match agent.install {
-        InstallKind::ShellHooks => IntegrationInstall::ShellHookBased,
+        InstallKind::ZshEnvScript => {
+            let Some(home) = home else {
+                return IntegrationInstall::NotInstalled;
+            };
+            let zshenv =
+                std::fs::read_to_string(crate::integrations::antigravity::zshenv_path(home)).ok();
+            match crate::integrations::antigravity::inspect(
+                &crate::integrations::antigravity::script_path(home),
+                zshenv.as_deref(),
+            ) {
+                None => IntegrationInstall::NotInstalled,
+                Some(Ok(())) => IntegrationInstall::Installed,
+                Some(Err(reason)) => IntegrationInstall::Broken(reason),
+            }
+        }
         InstallKind::PluginFile(relpath) => {
             if home.is_some_and(|home| home.join(relpath).exists()) {
                 IntegrationInstall::Installed
@@ -1182,20 +1184,22 @@ mod tests {
     }
 
     #[test]
-    fn shell_hook_based_integrations_are_not_asked_to_install_hook_scripts() {
+    fn a_running_antigravity_without_its_capture_script_is_told_to_install_it() {
         let r = assess_agent(
             agent("antigravity"),
             &AgentEvidence {
                 process_detected: true,
-                integration: IntegrationInstall::ShellHookBased,
-                commands_captured: 7,
+                integration: IntegrationInstall::NotInstalled,
+                commands_captured: 0,
                 native_sessions: None,
                 mcp: McpState::Unsupported,
             },
         );
-        assert!(matches!(r.status, Status::Pass), "{}", r.detail);
-        let aspects = r.aspects.unwrap_or_default();
-        assert!(aspects.contains("shell hooks"), "{aspects}");
+        assert!(matches!(r.status, Status::Warn), "{}", r.detail);
+        assert_eq!(
+            r.fix.as_deref(),
+            Some("run suv init antigravity to capture its commands")
+        );
     }
 
     #[test]
