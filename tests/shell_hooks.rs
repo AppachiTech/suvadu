@@ -1050,3 +1050,167 @@ fn zsh_init_explains_how_to_enable_the_autosuggest_strategy() {
         "the hook must not change the user's strategy itself"
     );
 }
+
+// ── zsh: is Up-arrow still Suvadu's? ───────────────────────
+
+impl Sandbox {
+    /// Where the hook notes that something rebound Up-arrow.
+    fn up_arrow_note(&self) -> PathBuf {
+        let data = if cfg!(target_os = "macos") {
+            self.path("Library/Application Support/tech.appachi.suvadu")
+        } else {
+            self.path("data/suvadu")
+        };
+        data.join("up-arrow-binding")
+    }
+
+    fn write_config(&self, contents: &str) {
+        let config = if cfg!(target_os = "macos") {
+            self.path("Library/Application Support/tech.appachi.suvadu/config.toml")
+        } else {
+            self.path("config/suvadu/config.toml")
+        };
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, contents).unwrap();
+    }
+}
+
+/// What a plugin loaded after the hook does to Up-arrow.
+const REBIND_UP: &str = "bindkey '^[[A' up-line-or-history";
+
+#[test]
+fn zsh_with_the_hook_loaded_last_notes_nothing_and_checks_only_once() {
+    let Some(zsh) = zsh_bin() else { return };
+    let s = Sandbox::new();
+    let out = s.zsh(
+        &zsh,
+        "",
+        "",
+        "print -r -- \"hooks=[${precmd_functions[*]}]\"\n",
+    );
+    assert_clean(&out);
+    assert!(!s.up_arrow_note().exists(), "Up-arrow is Suvadu's");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("hooks=["), "{stdout}");
+    assert!(
+        !stdout.contains("arrow"),
+        "the check must remove itself after the first prompt: {stdout}"
+    );
+}
+
+#[test]
+fn zsh_notes_a_plugin_that_rebinds_up_arrow_after_the_hook() {
+    let Some(zsh) = zsh_bin() else { return };
+    for (rebind, key, widget) in [
+        (REBIND_UP, "^[[A", "up-line-or-history"),
+        (
+            "bindkey '^[OA' up-line-or-beginning-search",
+            "^[OA",
+            "up-line-or-beginning-search",
+        ),
+    ] {
+        let s = Sandbox::new();
+        let out = s.zsh(&zsh, "", rebind, "true\n");
+        assert_clean(&out);
+        assert!(
+            out.stdout.is_empty(),
+            "the check printed something: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let note = std::fs::read_to_string(s.up_arrow_note())
+            .unwrap_or_else(|e| panic!("no note after `{rebind}`: {e}"));
+        let lines: Vec<&str> = note.lines().collect();
+        assert_eq!(lines.len(), 3, "{note}");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(lines[0]).is_ok(),
+            "{note}"
+        );
+        assert_eq!(lines[1], key, "{note}");
+        assert_eq!(lines[2], widget, "{note}");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(s.up_arrow_note())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+}
+
+#[test]
+fn zsh_notes_a_rebinding_made_by_a_later_first_prompt_hook() {
+    let Some(zsh) = zsh_bin() else { return };
+    let s = Sandbox::new();
+    // Like zsh-vi-mode, which binds its keys from a first-prompt hook that
+    // it registers when it is loaded.
+    let rc_after = format!(
+        "_late_init() {{ {REBIND_UP}; precmd_functions=(${{precmd_functions:#_late_init}}); }}\n\
+         precmd_functions+=(_late_init)"
+    );
+    let out = s.zsh(&zsh, "", &rc_after, "true\n");
+    assert_clean(&out);
+    let note = std::fs::read_to_string(s.up_arrow_note()).expect("rebinding not noted");
+    assert!(note.contains("up-line-or-history"), "{note}");
+}
+
+#[test]
+fn zsh_clears_the_note_once_the_hook_is_loaded_last() {
+    let Some(zsh) = zsh_bin() else { return };
+    let s = Sandbox::new();
+    assert_clean(&s.zsh(&zsh, "", REBIND_UP, "true\n"));
+    assert!(s.up_arrow_note().exists(), "rebinding not noted");
+    // The plugin now loads before the hook.
+    assert_clean(&s.zsh(&zsh, REBIND_UP, "", "true\n"));
+    assert!(!s.up_arrow_note().exists(), "note left after the fix");
+}
+
+#[test]
+fn zsh_skips_the_up_arrow_check_when_arrow_navigation_is_off() {
+    let Some(zsh) = zsh_bin() else { return };
+    let s = Sandbox::new();
+    s.write_config("[shell]\nenable_arrow_navigation = false\n");
+    let out = s.zsh(
+        &zsh,
+        "",
+        REBIND_UP,
+        "print -r -- \"hooks=[${precmd_functions[*]}]\"\n",
+    );
+    assert_clean(&out);
+    assert!(!s.up_arrow_note().exists());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("arrow"), "{stdout}");
+}
+
+/// What the one-time Up-arrow check costs a shell start, as printed by
+/// `cargo test --release --test shell_hooks up_arrow_check_overhead --
+/// --ignored --nocapture`.
+#[test]
+#[ignore = "timing run; prints what the Up-arrow check costs"]
+fn up_arrow_check_overhead() {
+    let Some(zsh) = zsh_bin() else { return };
+    // Time `runs` calls of the check in this shell, re-arming it each time,
+    // and print the median and p95 in milliseconds.
+    let timing = |label: &str, runs: u32| {
+        format!(
+            "typeset -a t; t=(); for i in {{1..{runs}}}; do \
+             t0=$EPOCHREALTIME; _suvadu_check_up_arrow; t1=$EPOCHREALTIME; \
+             t+=$(( (t1 - t0) * 1000 )); add-zsh-hook precmd _suvadu_check_up_arrow; done; \
+             t=(${{(n)t}}); printf '{label}: %.2f ms median, %.2f ms p95\\n' \
+             $t[$(( {runs} / 2 ))] $t[$(( {runs} * 95 / 100 ))]\n"
+        )
+    };
+    let s = Sandbox::new();
+    let rc_after = [
+        "zmodload zsh/datetime".to_string(),
+        timing("Up bound to Suvadu, no note", 200),
+        REBIND_UP.to_string(),
+        timing("Up rebound, note already there", 200),
+    ]
+    .join("\n");
+    let out = s.zsh(&zsh, "", &rc_after, "");
+    assert_clean(&out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.lines().count(), 2, "{stdout}");
+    print!("{stdout}");
+}

@@ -318,6 +318,18 @@ pub enum Commands {
     #[command(name = "hook-cursor", hide = true)]
     HookCursor,
 
+    /// Note, for `suv doctor`, that the zsh hook found Up-arrow bound to
+    /// another widget at the first prompt
+    #[command(name = "hook-arrow-status", hide = true)]
+    HookArrowStatus {
+        /// The key sequence, as `bindkey` prints it
+        #[arg(long, allow_hyphen_values = true)]
+        key: String,
+        /// The widget bound to it instead of Suvadu's
+        #[arg(long, allow_hyphen_values = true)]
+        widget: String,
+    },
+
     /// Start the MCP server (reads JSON-RPC from stdin, writes to stdout)
     #[command(name = "mcp-serve", hide = true)]
     McpServe,

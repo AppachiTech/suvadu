@@ -136,6 +136,10 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
             directory,
         } => integrations::handle_hook_opencode_session(&session_id, directory.as_deref()),
         Commands::HookCursor => integrations::handle_hook_cursor(),
+        Commands::HookArrowStatus { key, widget } => {
+            hooks::handle_hook_arrow_status(&key, &widget);
+            Ok(())
+        }
         Commands::HookCursorPrompt => integrations::handle_hook_cursor_prompt(),
         Commands::HookCursorSession => integrations::handle_hook_cursor_session(),
         Commands::HookClaudePrompt => integrations::handle_hook_claude_prompt(),
@@ -474,6 +478,7 @@ const fn is_user_facing_command(cmd: &Commands) -> bool {
             | Commands::HookOpencodeSession { .. }
             | Commands::HookOpencodePrompt { .. }
             | Commands::HookCursor
+            | Commands::HookArrowStatus { .. }
             | Commands::HookCursorPrompt
             | Commands::HookCursorSession
             | Commands::McpServe
@@ -575,6 +580,10 @@ mod tests {
         assert!(!is_user_facing_command(&Commands::HookClaudeCode));
         assert!(!is_user_facing_command(&Commands::HookClaudeCodeFailure));
         assert!(!is_user_facing_command(&Commands::HookCursor));
+        assert!(!is_user_facing_command(&Commands::HookArrowStatus {
+            key: "^[[A".into(),
+            widget: "up-line-or-history".into(),
+        }));
         assert!(!is_user_facing_command(&Commands::HookCursorPrompt));
         assert!(!is_user_facing_command(&Commands::HookCursorSession));
         assert!(!is_user_facing_command(&Commands::McpServe));

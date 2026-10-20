@@ -39,6 +39,7 @@ Inside the data directory:
 | `aliases.sh` | the managed alias file your shell sources |
 | `reconcile.key` | 32 random bytes, used to key the HMAC that links a command to its prompt without storing a bare hash of the prompt text |
 | `last-capture-error` | written only when recording, a transcript import or a prompt cache had to fall back because `config.toml` or a `.suvadu.toml` did not load: when, which file, and the parse error. Written `0o600`, overwritten by the next different failure, reported by `suv doctor` while that file still fails. Nothing prunes it; delete it freely |
+| `up-arrow-binding` | written only when the zsh hook finds, at a shell's first prompt, Up-arrow bound to something other than Suvadu's recall: when it was first seen, the key sequence and the widget name — never a command. Written `0o600`, overwritten only by a different binding, removed by the next zsh that finds Up is Suvadu's again, and reported by `suv doctor`. Delete it freely |
 
 `config.toml` lives in the config directory, and a per-project
 `.suvadu.toml` lives wherever you put it in your own repositories.

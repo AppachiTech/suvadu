@@ -89,6 +89,7 @@ pub fn handle_doctor() {
         assess_capture(&gather_capture_facts(repo.as_ref())),
     ];
     checks.extend(check_capture_config());
+    checks.push(check_up_arrow());
     checks.extend(check_agents(repo.as_ref()));
 
     print_report(&checks, &storage_lines(repo.as_ref()), color);
@@ -403,6 +404,69 @@ fn assess_capture_config(
         )
         .with_fix(format!("fix {path}")),
     )
+}
+
+fn check_up_arrow() -> CheckResult {
+    let shell_name = capture::current_shell_name();
+    let enabled = config::load_config()
+        .unwrap_or_default()
+        .shell
+        .enable_arrow_navigation;
+    let note = crate::hooks::read_up_arrow_note();
+    assess_up_arrow(
+        &shell_name,
+        capture::shell_hook_configured(),
+        enabled,
+        note.as_ref(),
+    )
+}
+
+/// Judge Up-arrow recall. Doctor cannot see an interactive shell's key
+/// bindings, so this relies on the zsh hook, which notes at its first prompt
+/// when Up-arrow is bound to something other than Suvadu's widget.
+fn assess_up_arrow(
+    shell_name: &str,
+    hook_installed: bool,
+    enabled: bool,
+    note: Option<&crate::hooks::UpArrowNote>,
+) -> CheckResult {
+    let row = |status, detail: &str| {
+        CheckResult::new("Up-arrow", status, detail.to_string(), Category::Optional)
+    };
+    if shell_name == "bash" {
+        return row(
+            Status::NotConfigured,
+            "Bash keeps its own Up-arrow history (Suvadu's recall is on Ctrl+R)",
+        );
+    }
+    if shell_name != "zsh" {
+        return row(Status::NotConfigured, "Up-arrow recall needs zsh");
+    }
+    if !enabled {
+        return row(
+            Status::NotConfigured,
+            "off ([shell] enable_arrow_navigation = false)",
+        );
+    }
+    if !hook_installed {
+        return row(
+            Status::NotConfigured,
+            "needs the zsh hook (see Shell hooks)",
+        );
+    }
+    let Some(note) = note else {
+        return row(Status::Pass, "Suvadu's recall (checked at each zsh start)");
+    };
+    let by = if note.widget == "undefined-key" {
+        "unbound".to_string()
+    } else {
+        format!("bound to {}", note.widget)
+    };
+    row(
+        Status::Warn,
+        &format!("{by} by something loaded after Suvadu (since {})", note.at),
+    )
+    .with_fix("put `eval \"$(suv init zsh)\"` last in ~/.zshrc, then exec zsh")
 }
 
 /// One line from a possibly multi-line TOML error: its heading, plus the
@@ -925,6 +989,68 @@ mod tests {
     fn a_capture_note_about_a_since_fixed_file_is_not_reported() {
         let note = capture_note("/work/repo/.suvadu.toml", "old");
         assert!(assess_capture_config(&note, false, false).is_none());
+    }
+
+    fn up_arrow_note(widget: &str) -> crate::hooks::UpArrowNote {
+        crate::hooks::UpArrowNote {
+            at: "2026-10-20T09:00:00+05:30".into(),
+            key: "^[[A".into(),
+            widget: widget.into(),
+        }
+    }
+
+    #[test]
+    fn up_arrow_rebound_after_the_hook_is_a_warning_with_the_load_order_fix() {
+        let note = up_arrow_note("up-line-or-beginning-search");
+        let r = assess_up_arrow("zsh", true, true, Some(&note));
+        assert_eq!(r.status, Status::Warn);
+        assert_eq!(r.category, Category::Optional);
+        assert_eq!(
+            r.detail,
+            "bound to up-line-or-beginning-search by something loaded after Suvadu \
+             (since 2026-10-20T09:00:00+05:30)"
+        );
+        assert_eq!(
+            r.fix.as_deref(),
+            Some("put `eval \"$(suv init zsh)\"` last in ~/.zshrc, then exec zsh")
+        );
+    }
+
+    #[test]
+    fn up_arrow_left_unbound_after_the_hook_says_so() {
+        let note = up_arrow_note("undefined-key");
+        let r = assess_up_arrow("zsh", true, true, Some(&note));
+        assert_eq!(r.status, Status::Warn);
+        assert!(
+            r.detail
+                .starts_with("unbound by something loaded after Suvadu"),
+            "{}",
+            r.detail
+        );
+    }
+
+    #[test]
+    fn up_arrow_passes_when_the_zsh_hook_noted_nothing() {
+        let r = assess_up_arrow("zsh", true, true, None);
+        assert_eq!(r.status, Status::Pass, "{}", r.detail);
+        assert!(r.detail.contains("Suvadu"), "{}", r.detail);
+        assert!(r.fix.is_none());
+    }
+
+    #[test]
+    fn up_arrow_is_not_checked_where_suvadu_does_not_bind_it() {
+        let note = up_arrow_note("up-line-or-history");
+        for (shell, hooked, enabled, expect) in [
+            ("bash", true, true, "Bash keeps its own Up-arrow history"),
+            ("zsh", true, false, "enable_arrow_navigation = false"),
+            ("zsh", false, true, "zsh hook"),
+            ("fish", true, true, "zsh"),
+        ] {
+            let r = assess_up_arrow(shell, hooked, enabled, Some(&note));
+            assert_eq!(r.status, Status::NotConfigured, "{shell}: {}", r.detail);
+            assert!(r.detail.contains(expect), "{shell}: {}", r.detail);
+            assert!(r.fix.is_none(), "{shell}: {:?}", r.fix);
+        }
     }
 
     #[test]

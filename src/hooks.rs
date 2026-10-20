@@ -813,6 +813,140 @@ fn aliases_source_script() -> Option<String> {
     ))
 }
 
+/// A one-time zsh check, at the first prompt, that Up-arrow is still bound to
+/// Suvadu's widget. A plugin loaded after the hook (oh-my-zsh key bindings,
+/// zsh-history-substring-search, zsh-vi-mode, fzf, atuin, ...) can rebind it
+/// and silently replace Suvadu's recall, and `suv doctor` runs in another
+/// process that cannot see this shell's key bindings. So the hook looks once
+/// and leaves a note at `note_path` for doctor, or removes a stale one.
+///
+/// Cost per shell start: one subshell to read the bindings. `suv` runs only
+/// when Up is someone else's, and `rm` only when a note is there to clear.
+fn zsh_up_arrow_check_script(note_path: &std::path::Path) -> String {
+    let note = shell_quote_single(&note_path.to_string_lossy());
+    format!(
+        r#"
+# Is Up-arrow still Suvadu's once all of .zshrc has run? Checked once, at the
+# first prompt; prints nothing. A note in the data directory tells
+# `suv doctor` what took it over.
+typeset -g _SUVADU_UP_ARROW_NOTE={note}
+_suvadu_check_up_arrow() {{
+    emulate -L zsh
+    # Some plugins bind keys from a first-prompt hook of their own (zsh-vi-mode
+    # does): if any hook comes after this one, let it run first, once.
+    if [[ -z "$_SUVADU_UP_ARROW_DEFERRED" && "${{precmd_functions[-1]}}" != _suvadu_check_up_arrow ]]; then
+        typeset -g _SUVADU_UP_ARROW_DEFERRED=1
+        precmd_functions=(${{precmd_functions:#_suvadu_check_up_arrow}} _suvadu_check_up_arrow)
+        return 0
+    fi
+    add-zsh-hook -d precmd _suvadu_check_up_arrow
+    unset _SUVADU_UP_ARROW_DEFERRED
+    local -a keys=('^[[A' '^[OA')
+    [[ -n "${{terminfo[kcuu1]}}" ]] && keys+=("${{terminfo[kcuu1]}}")
+    # One subshell for all the keys; each line reads: "<key>" <widget>
+    local key line
+    local -a bound=("${{(@f)$(for key in $keys; do bindkey -- "$key"; done 2>/dev/null)}}")
+    for line in $bound; do
+        [[ "${{line##* }}" == suvadu-up-arrow ]] && continue
+        key="${{line% *}}"
+        key="${{(Q)key}}"
+        __suvadu_ensure_bin || return 0
+        "$_SUVADU_BIN" hook-arrow-status --key "$key" --widget "${{line##* }}" >/dev/null 2>&1
+        return 0
+    done
+    [[ -e "$_SUVADU_UP_ARROW_NOTE" ]] && command rm -f -- "$_SUVADU_UP_ARROW_NOTE" 2>/dev/null
+    return 0
+}}
+add-zsh-hook precmd _suvadu_check_up_arrow
+"#
+    )
+}
+
+/// What the zsh hook found bound to Up-arrow in place of Suvadu's widget,
+/// as noted for `suv doctor`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpArrowNote {
+    /// When this binding was first seen (RFC 3339, local time).
+    pub at: String,
+    /// The key sequence, as `bindkey` prints it (e.g. `^[[A`).
+    pub key: String,
+    /// The widget bound to it instead (`undefined-key` when unbound).
+    pub widget: String,
+}
+
+const UP_ARROW_NOTE_FILE: &str = "up-arrow-binding";
+
+/// Longest key or widget name kept in the note.
+const UP_ARROW_NOTE_FIELD_MAX: usize = 128;
+
+/// `<data dir>/up-arrow-binding`: one small file, overwritten, naming what
+/// took over Up-arrow at the latest zsh start. Absent when it is Suvadu's.
+pub fn up_arrow_note_path() -> Option<std::path::PathBuf> {
+    crate::util::project_dirs().map(|dirs| dirs.data_dir().join(UP_ARROW_NOTE_FILE))
+}
+
+/// `suv hook-arrow-status`: note that `key` is bound to `widget`, not to
+/// Suvadu's recall. Best effort and silent, since it runs from the shell's
+/// first prompt: a failure to write only means `suv doctor` cannot tell.
+pub fn handle_hook_arrow_status(key: &str, widget: &str) {
+    if let Some(file) = up_arrow_note_path() {
+        let now = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+        let _ = write_up_arrow_note(&file, key, widget, &now);
+    }
+}
+
+/// One short line: control characters (newlines included) become spaces.
+fn up_arrow_note_field(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(UP_ARROW_NOTE_FIELD_MAX)
+        .collect()
+}
+
+fn write_up_arrow_note(
+    file: &std::path::Path,
+    key: &str,
+    widget: &str,
+    at: &str,
+) -> std::io::Result<()> {
+    let key = up_arrow_note_field(key);
+    let widget = up_arrow_note_field(widget);
+    // Rewritten only when the binding changes, so the time is when it was
+    // first seen and an unchanged conflict costs a read, not a write.
+    if read_up_arrow_note_at(file).is_some_and(|note| note.key == key && note.widget == widget) {
+        return Ok(());
+    }
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let contents = format!("{}\n{key}\n{widget}\n", up_arrow_note_field(at));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    std::io::Write::write_all(&mut options.open(file)?, contents.as_bytes())
+}
+
+/// The note the zsh hook left, if Up-arrow was not Suvadu's at the latest
+/// zsh start.
+pub fn read_up_arrow_note() -> Option<UpArrowNote> {
+    read_up_arrow_note_at(&up_arrow_note_path()?)
+}
+
+fn read_up_arrow_note_at(file: &std::path::Path) -> Option<UpArrowNote> {
+    let contents = std::fs::read_to_string(file).ok()?;
+    let mut lines = contents.lines();
+    Some(UpArrowNote {
+        at: lines.next()?.to_string(),
+        key: lines.next()?.to_string(),
+        widget: lines.next()?.to_string(),
+    })
+}
+
 pub fn get_zsh_hook(config: &config::Config) -> Result<String, Box<dyn std::error::Error>> {
     let current_exe = std::env::current_exe()?;
     let bin_path = current_exe.to_string_lossy();
@@ -835,6 +969,9 @@ bindkey '^[OB' suvadu-down-arrow
 bindkey '^[a' suvadu-toggle-agents
 ",
         );
+        if let Some(note) = up_arrow_note_path() {
+            script.push_str(&zsh_up_arrow_check_script(&note));
+        }
     }
 
     if let Some(aliases) = aliases_source_script() {
@@ -921,9 +1058,9 @@ mod tests {
             "search widget missing emulate -L zsh"
         );
         assert!(
-            hook.matches("emulate -L zsh").count() == 7,
+            hook.matches("emulate -L zsh").count() == 8,
             "expected emulate -L zsh in all 4 widgets (search, up, down, toggle-agents), \
-             both hooks (preexec, precmd) and the autosuggest strategy"
+             both hooks (preexec, precmd), the autosuggest strategy and the Up-arrow check"
         );
         // Widgets must use LBUFFER/RBUFFER (not BUFFER/CURSOR) for buffer placement
         assert!(hook.contains("LBUFFER=\"$selected\""));
@@ -1341,5 +1478,102 @@ mod tests {
             !between.contains("executor=\""),
             "No custom agents should appear with default config"
         );
+    }
+
+    #[test]
+    fn zsh_hook_checks_up_arrow_once_only_when_arrow_nav_is_enabled() {
+        let mut config = config::Config::default();
+        config.shell.enable_arrow_navigation = true;
+        let hook = get_zsh_hook(&config).unwrap();
+        assert!(hook.contains("add-zsh-hook precmd _suvadu_check_up_arrow"));
+        assert!(hook.contains("add-zsh-hook -d precmd _suvadu_check_up_arrow"));
+        let note = up_arrow_note_path().unwrap();
+        assert!(
+            hook.contains(&shell_quote_single(&note.to_string_lossy())),
+            "the hook must know the note's path without asking suv"
+        );
+
+        config.shell.enable_arrow_navigation = false;
+        let hook = get_zsh_hook(&config).unwrap();
+        assert!(!hook.contains("_suvadu_check_up_arrow"));
+
+        let bash = get_bash_hook(&config::Config::default()).unwrap();
+        assert!(!bash.contains("_suvadu_check_up_arrow"));
+    }
+
+    #[test]
+    fn an_up_arrow_note_is_written_once_per_distinct_binding() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("data").join("up-arrow-binding");
+
+        write_up_arrow_note(
+            &file,
+            "^[[A",
+            "up-line-or-history",
+            "2026-01-01T00:00:00+00:00",
+        )
+        .unwrap();
+        write_up_arrow_note(
+            &file,
+            "^[[A",
+            "up-line-or-history",
+            "2026-01-02T00:00:00+00:00",
+        )
+        .unwrap();
+        let note = read_up_arrow_note_at(&file).unwrap();
+        assert_eq!(
+            note,
+            UpArrowNote {
+                at: "2026-01-01T00:00:00+00:00".into(),
+                key: "^[[A".into(),
+                widget: "up-line-or-history".into(),
+            },
+            "same binding: not rewritten"
+        );
+
+        write_up_arrow_note(
+            &file,
+            "^[OA",
+            "up-line-or-history",
+            "2026-01-03T00:00:00+00:00",
+        )
+        .unwrap();
+        let note = read_up_arrow_note_at(&file).unwrap();
+        assert_eq!(note.at, "2026-01-03T00:00:00+00:00");
+        assert_eq!(note.key, "^[OA");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn an_up_arrow_note_keeps_each_field_on_one_short_line() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("up-arrow-binding");
+        let long = "w".repeat(1000);
+        write_up_arrow_note(&file, "^[[A\nx", &format!("evil\n{long}"), "t").unwrap();
+        let note = read_up_arrow_note_at(&file).unwrap();
+        assert_eq!(note.key, "^[[A x");
+        assert!(note.widget.starts_with("evil w"), "{}", note.widget);
+        assert!(note.widget.chars().count() <= 128, "{}", note.widget.len());
+        assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), 3);
+    }
+
+    #[test]
+    fn hook_arrow_status_records_the_binding_in_the_data_dir() {
+        handle_hook_arrow_status("^[[A", "history-substring-search-up");
+        let note = read_up_arrow_note().unwrap();
+        assert_eq!(note.key, "^[[A");
+        assert_eq!(note.widget, "history-substring-search-up");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&note.at).is_ok(),
+            "{}",
+            note.at
+        );
+        std::fs::remove_file(up_arrow_note_path().unwrap()).unwrap();
     }
 }

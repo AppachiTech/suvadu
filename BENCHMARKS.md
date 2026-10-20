@@ -511,6 +511,23 @@ prompt and once per turn end, never per command. **Upgrading** to schema v15
 creates one empty table: 0.19 ms on `v15_migration_cost_on_a_large_history`'s
 100,000-command corpus (`src/db.rs`).
 
+### The zsh hook's Up-arrow check, 20 October 2026
+
+Measured on **Apple M4 Max, 128 GB RAM, macOS 27.2, rustc 1.96.0, zsh 5.9**,
+release profile, 200 calls of the check in one interactive zsh, three runs
+(`cargo test --release --test shell_hooks up_arrow_check_overhead --
+--ignored --nocapture`). The search baseline above was not re-run: nothing
+here touches search.
+
+| What the check finds | median | p95 |
+|---|---:|---:|
+| Up bound to `suvadu-up-arrow`, no note to remove | 0.76–0.79 ms | 0.91–1.10 ms |
+| Up rebound, the same note already written (starts `suv`) | 5.5–5.6 ms | 5.9–6.9 ms |
+
+It runs once per shell, at the first prompt, and never per command. The
+first line is the one subshell that reads the bindings; when Up has been
+rebound, nearly all of the rest is starting `suv`.
+
 ## Known gaps
 
 - **Ranking quality is not measured.** The judged set records which command
