@@ -91,6 +91,86 @@ pub struct HandoffSession {
     pub capture_known_missing: Vec<String>,
     /// Newest saved summary as `(id, basis label)`, when there is one.
     pub summary: Option<(String, String)>,
+    /// What the session's git snapshots saw change, when it has two that
+    /// can be compared.
+    pub git_changes: Option<super::git_snapshot::ObservedChanges>,
+}
+
+/// Most changed files the handoff lists; the rest are counted.
+const MAX_HANDOFF_FILES: usize = 50;
+
+/// The observed half of "Changed-file evidence": what the git snapshots at
+/// the session's first prompt and latest turn end differ by.
+fn git_evidence(out: &mut String, changes: Option<&super::git_snapshot::ObservedChanges>) {
+    use super::git_snapshot::Commits;
+    let Some(changes) = changes else {
+        bullet(
+            out,
+            "No git snapshots of this session can be compared, so no file change was \
+             observed.",
+        );
+        return;
+    };
+    let short = |head: Option<&str>| {
+        head.map_or_else(|| "none".to_string(), |h| h.chars().take(12).collect())
+    };
+    let commits = match &changes.commits {
+        Commits::Unchanged => "HEAD did not move".to_string(),
+        Commits::Read { ahead, .. } => format!(
+            "HEAD {} → {}, {ahead} commit{}",
+            short(changes.start.head.as_deref()),
+            short(changes.end.head.as_deref()),
+            if *ahead == 1 { "" } else { "s" }
+        ),
+        Commits::Unread(reason) => format!(
+            "HEAD {} → {} (commits not read: {reason})",
+            short(changes.start.head.as_deref()),
+            short(changes.end.head.as_deref())
+        ),
+    };
+    bullet(
+        out,
+        &format!(
+            "Observed in git snapshots of `{}` at the first prompt and the latest turn end \
+             [git-snapshot-start, git-snapshot-end]: {commits}; {} path(s) changed. Paths \
+             only, no contents — changed in the repository, not necessarily by the agent.",
+            changes.end.repo_root,
+            changes.files.len()
+        ),
+    );
+    if let Commits::Read { subjects, .. } = &changes.commits {
+        for subject in subjects {
+            bullet(out, &format!("Commit: `{}`", one_line(subject, 200)));
+        }
+    }
+    for file in changes.files.iter().take(MAX_HANDOFF_FILES) {
+        let from = file.from.as_deref().map_or_else(String::new, |from| {
+            format!(" (from `{}`)", one_line(from, 200))
+        });
+        bullet(
+            out,
+            &format!(
+                "`{}`{from} — {}",
+                one_line(&file.path, 200),
+                file.describe()
+            ),
+        );
+    }
+    if changes.files.len() > MAX_HANDOFF_FILES {
+        bullet(
+            out,
+            &format!(
+                "… {} more changed path(s) not listed.",
+                changes.files.len() - MAX_HANDOFF_FILES
+            ),
+        );
+    }
+    if !changes.complete() {
+        bullet(
+            out,
+            "A snapshot held more than 500 changed paths, so this list may miss some.",
+        );
+    }
 }
 
 /// Whether a command's *text* claims to modify files. This classifies what
@@ -240,6 +320,7 @@ pub fn scaffold(session: &HandoffSession) -> String {
         "Suvadu captures no file contents and no command output, so nothing below is a \
          verified diff.",
     );
+    git_evidence(&mut out, session.git_changes.as_ref());
     if changing.is_empty() {
         bullet(
             &mut out,
@@ -323,6 +404,10 @@ pub fn scaffold(session: &HandoffSession) -> String {
         ids.push(id.clone());
     }
     ids.extend(session.commands.iter().map(|command| command.id.clone()));
+    if session.git_changes.is_some() {
+        ids.push("git-snapshot-start".into());
+        ids.push("git-snapshot-end".into());
+    }
     if ids.is_empty() {
         bullet(&mut out, "No evidence records were available to cite.");
     } else {
@@ -368,7 +453,41 @@ mod tests {
             ],
             capture_known_missing: vec!["Records from a paused window were skipped".into()],
             summary: Some(("summary-1".into(), "CURRENT".into())),
+            git_changes: None,
         }
+    }
+
+    #[test]
+    fn scaffold_lists_files_its_git_snapshots_observed_changing() {
+        let mut observed = session();
+        observed.git_changes = Some(crate::ai_sessions::git_snapshot::tests::sample_changes());
+        let text = scaffold(&observed);
+        let evidence = text
+            .split("## Changed-file evidence")
+            .nth(1)
+            .unwrap()
+            .split("## Verification state")
+            .next()
+            .unwrap();
+        assert!(evidence.contains("Observed in git snapshots"), "{evidence}");
+        assert!(evidence.contains("1 commit"), "{evidence}");
+        assert!(evidence.contains("`bbbbbbb fix the parser`"), "{evidence}");
+        assert!(
+            evidence.contains("`src/parser.rs` — changed by the commits"),
+            "{evidence}"
+        );
+        assert!(evidence.contains("`notes.md` — untracked"), "{evidence}");
+        assert!(
+            evidence.contains("not necessarily by the agent"),
+            "{evidence}"
+        );
+        assert!(
+            text.contains("git-snapshot-start, git-snapshot-end"),
+            "{text}"
+        );
+
+        let text = scaffold(&session());
+        assert!(text.contains("No git snapshots"), "{text}");
     }
 
     /// The template is one list, and every filled scaffold renders all of

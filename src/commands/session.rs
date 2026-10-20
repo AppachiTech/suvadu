@@ -42,13 +42,28 @@ fn load_ai_session_data(
     // rather than guessing in the UI.
     let summary_writes_enabled =
         crate::config::load_config_cached().is_ok_and(|config| config.mcp.allow_session_summaries);
-    Ok(session_ui::build_ai_session_data(
+    let (start, end) = repo.git_snapshots(&summary.id)?;
+    let mut data = session_ui::build_ai_session_data(
         summary,
         events,
         entries,
         summaries,
         summary_writes_enabled,
-    ))
+    );
+    data.git_changes = git_changes(start, end);
+    Ok(data)
+}
+
+/// The session's two git snapshots compared, asking the repository for the
+/// commits between them under its own capture policy.
+fn git_changes(
+    start: Option<crate::ai_sessions::git_snapshot::GitSnapshot>,
+    end: Option<crate::ai_sessions::git_snapshot::GitSnapshot>,
+) -> Option<crate::ai_sessions::git_snapshot::ObservedChanges> {
+    use crate::ai_sessions::git_snapshot;
+    let root = end.as_ref().or(start.as_ref())?.repo_root.clone();
+    let policy = crate::commands::agent_session::capture_policy_for_dir(&root, false);
+    git_snapshot::compare(start, end, Some((&policy, git_snapshot::GIT_TIMEOUT))).ok()
 }
 
 /// Result of the non-TUI session logic, used to decide what the caller should do.

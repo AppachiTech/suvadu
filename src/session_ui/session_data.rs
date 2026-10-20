@@ -13,6 +13,9 @@ pub struct AiSessionData {
     /// explain an empty summary list honestly: with the opt-in off, no
     /// connected agent can save one however nicely the user asks.
     pub summary_writes_enabled: bool,
+    /// What the session's git snapshots saw change, when it has two that
+    /// can be compared.
+    pub git_changes: Option<crate::ai_sessions::git_snapshot::ObservedChanges>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -208,6 +211,7 @@ pub fn build_ai_session_data(
         items,
         summaries,
         summary_writes_enabled,
+        git_changes: None,
     }
 }
 
@@ -269,5 +273,6 @@ pub fn handoff_session(data: &AiSessionData) -> HandoffSession {
             .summaries
             .first()
             .map(|record| (record.id.clone(), record.basis.label().to_owned())),
+        git_changes: data.git_changes.clone(),
     }
 }

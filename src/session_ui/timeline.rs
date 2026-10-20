@@ -261,6 +261,23 @@ pub fn command_summary_line(
     Line::from(spans)
 }
 
+/// `Changed: 3 files, 1 commit` — what the session's git snapshots saw.
+fn changed_text(changes: &crate::ai_sessions::git_snapshot::ObservedChanges) -> String {
+    let plural = |n: usize, word: &str| {
+        if n == 1 {
+            format!("1 {word}")
+        } else {
+            format!("{n} {word}s")
+        }
+    };
+    let files = plural(changes.files.len(), "file");
+    let more = if changes.complete() { "" } else { "+" };
+    changes.commit_count().map_or_else(
+        || format!("Changed: {files}{more}, HEAD moved"),
+        |commits| format!("Changed: {files}{more}, {}", plural(commits, "commit")),
+    )
+}
+
 fn ai_session_info_text(data: &AiSessionData, width: u16) -> [String; 3] {
     let summary = &data.summary;
     let agent = summary.agent.as_deref().unwrap_or("unknown agent");
@@ -285,9 +302,16 @@ fn ai_session_info_text(data: &AiSessionData, width: u16) -> [String; 3] {
         .tag_name
         .as_deref()
         .map_or_else(String::new, |tag| format!("  •  #{tag}"));
+    let changed = data
+        .git_changes
+        .as_ref()
+        .filter(|_| width >= 100)
+        .map_or_else(String::new, |changes| {
+            format!("{}  •  ", changed_text(changes))
+        });
     let identity = align_info_groups(
         &format!(" {agent}  •  {model}{tag}"),
-        &format!("{prompts}  •  {commands}  •  {duration} "),
+        &format!("{prompts}  •  {commands}  •  {changed}{duration} "),
         width,
     );
 
@@ -2036,6 +2060,7 @@ mod tests {
             }],
             summaries: vec![],
             summary_writes_enabled: true,
+            git_changes: None,
         }
     }
 
@@ -2130,6 +2155,21 @@ mod tests {
         assert!(medium[1].contains("20 output"));
         assert!(!medium[1].contains("cached"));
         assert!(!medium[1].contains("reasoning"));
+    }
+
+    #[test]
+    fn ai_session_info_says_what_its_git_snapshots_saw_change() {
+        let mut data = make_ai_data();
+        assert!(!ai_session_info_text(&data, 160)[0].contains("Changed"));
+        data.git_changes = Some(crate::ai_sessions::git_snapshot::tests::sample_changes());
+        let wide = ai_session_info_text(&data, 160);
+        assert!(
+            wide[0].contains("Changed: 2 files, 1 commit"),
+            "{}",
+            wide[0]
+        );
+        let narrow = ai_session_info_text(&data, 70);
+        assert!(!narrow[0].contains("Changed"), "{}", narrow[0]);
     }
 
     #[test]

@@ -880,6 +880,50 @@ pub mod tests {
         dir
     }
 
+    /// Observed changes as a comparison reports them, without a repository:
+    /// one commit, a modified path and an untracked one.
+    pub fn sample_changes() -> ObservedChanges {
+        let shot = |kind, at, head: &str| GitSnapshot {
+            session_id: "codex-fixture".into(),
+            kind,
+            at,
+            cwd: "/work/project".into(),
+            repo_root: "/work/project".into(),
+            head: Some(head.into()),
+            branch: Some("main".into()),
+            paths: Vec::new(),
+            path_count: 0,
+            omitted: 0,
+            capped: false,
+        };
+        ObservedChanges {
+            start: shot(SnapshotKind::Start, 1_000, "aaaaaaaaaaaaaaaa"),
+            end: shot(SnapshotKind::End, 9_000, "bbbbbbbbbbbbbbbb"),
+            commits: Commits::Read {
+                ahead: 1,
+                behind: 0,
+                subjects: vec!["bbbbbbb fix the parser".into()],
+            },
+            files: vec![
+                FileChange {
+                    path: "src/parser.rs".into(),
+                    from: None,
+                    before: None,
+                    after: None,
+                    in_commits: true,
+                },
+                FileChange {
+                    path: "notes.md".into(),
+                    from: None,
+                    before: None,
+                    after: Some("??".into()),
+                    in_commits: false,
+                },
+            ],
+            commit_files_capped: false,
+        }
+    }
+
     fn policy() -> CapturePolicy {
         CapturePolicy::default()
     }

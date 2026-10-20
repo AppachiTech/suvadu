@@ -532,6 +532,11 @@ session's commands for their likely effect, marked inferred, and says why.
 Asked about a directory and a time window instead, it lists the sessions there
 that have snapshots before its usual command-text breakdown.
 
+In `suv sessions`, an AI session's timeline header says what its snapshots
+saw — `Changed: 3 files, 1 commit` — on terminals at least 100 columns wide,
+and the handoff scaffold (`h`) lists the commits and changed paths under
+*Changed-file evidence*, citing the two snapshots.
+
 ### What is never captured
 
 - **Command output and file contents.** Suvadu records that a command ran,
