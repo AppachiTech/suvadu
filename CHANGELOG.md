@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.5.1] - 2026-10-20
 
 ### Added
 - **Bookmarks with placeholders** — a bookmark can hold `{{name}}` or `{{name:default}}` (`suv bookmarks add "ssh {{user:root}}@{{host}}" -l box`). Picking it in `suv bookmarks` opens a small *Fill Placeholders* popup with one field per distinct placeholder, in order, each prefilled with its default and with the filled command previewed below; `Tab`/`Enter` moves to the next field (`Shift+Tab` back), `Enter` on the last puts the filled command on your prompt exactly as a plain bookmark is — never run — and `Esc` goes back to the list. Without a terminal, `suv bookmarks get <label|command|id> --set host=db1` prints the filled command; a placeholder left with neither a value nor a default is an error naming it, as is a `--set` for a placeholder the bookmark does not have. A placeholder used twice is asked for once. Names start with a letter or `_` and continue with letters, digits, `_` or `-`; the default is everything after the first `:`, verbatim. `\{{` is a literal `{{`, and anything else in double braces that is not a placeholder — Go templates' `{{.State.Status}}`, `{{` with no closing `}}` — stays as typed. Values are inserted verbatim, so quote them as the shell would need. They are never stored. A bookmark you saved earlier that already has a `{{word}}` meant literally now asks for it; write it as `\{{word}}` to keep it literal.
