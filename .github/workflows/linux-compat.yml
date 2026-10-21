@@ -1,0 +1,97 @@
+name: Linux compatibility
+
+# Builds the Linux binaries the way release.yml does and runs them on older
+# distributions, so a glibc requirement no supported system can meet is
+# caught before a release instead of by users.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - '.github/workflows/linux-compat.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/release.yml'
+      - '.github/workflows/linux-compat.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross
+        run: cargo install cross --version 0.2.5
+      - name: Build (as release.yml does)
+        run: cross build --release --target ${{ matrix.target }}
+      - name: Check glibc requirement
+        run: |
+          max_allowed=2.28
+          needed=$(strings target/${{ matrix.target }}/release/suv \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
+            | sed 's/GLIBC_//' | sort -V | tail -1)
+          echo "suv needs glibc ${needed:-none}; allowed up to ${max_allowed}"
+          if [ -n "$needed" ] && [ "$(printf '%s\n%s\n' "$needed" "$max_allowed" | sort -V | tail -1)" != "$max_allowed" ]; then
+            echo "::error::suv needs glibc $needed, newer than $max_allowed"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: suv-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/suv
+
+  run-on-distros:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - ubuntu:18.04
+          - ubuntu:20.04
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - debian:11
+          - debian:12
+          - rockylinux:8
+          - rockylinux:9
+          - amazonlinux:2023
+        arch: [amd64]
+        include:
+          - image: ubuntu:20.04
+            arch: arm64
+          - image: debian:12
+            arch: arm64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: suv-${{ matrix.arch == 'arm64' && 'aarch64' || 'x86_64' }}-unknown-linux-gnu
+          path: bin
+      - name: Set up QEMU
+        if: matrix.arch == 'arm64'
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - name: Run suv on ${{ matrix.image }} (${{ matrix.arch }})
+        run: |
+          chmod +x bin/suv
+          docker run --rm --platform linux/${{ matrix.arch }} \
+            -v "$PWD/bin:/opt/suv:ro" -e HOME=/tmp/h -e NO_COLOR=1 \
+            ${{ matrix.image }} sh -euc '
+              mkdir -p /tmp/h
+              /opt/suv/suv --version
+              /opt/suv/suv init zsh > /dev/null
+              /opt/suv/suv add --session-id compat --command "echo hello" --cwd / \
+                --exit-code 0 --started-at 1700000000000 --ended-at 1700000000100
+              /opt/suv/suv history --json -n 1 | grep -q "echo hello"
+              echo "suv runs and records on ${{ matrix.image }}"
+            '

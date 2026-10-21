@@ -28,7 +28,10 @@ jobs:
             runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             suffix: ""
-            use_cross: false
+            # Built in cross's old-glibc image, not on the runner: a native
+            # build links against the runner's glibc (2.39 on Ubuntu 24.04)
+            # and will not start on Ubuntu 22.04, Debian 12 or RHEL 9.
+            use_cross: true
             run_tests: true
             primary_release: false
           - os: linux
@@ -62,6 +65,21 @@ jobs:
             cross build --release --target ${{ matrix.target }}
           else
             cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Check glibc requirement (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          # Fail the release rather than ship a binary that newer-than-needed
+          # glibc symbols lock out of RHEL 8, Debian 10+, Ubuntu 18.04+.
+          max_allowed=2.28
+          needed=$(strings target/${{ matrix.target }}/release/suv \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
+            | sed 's/GLIBC_//' | sort -V | tail -1)
+          echo "suv needs glibc ${needed:-none}; allowed up to ${max_allowed}"
+          if [ -n "$needed" ] && [ "$(printf '%s\n%s\n' "$needed" "$max_allowed" | sort -V | tail -1)" != "$max_allowed" ]; then
+            echo "::error::suv needs glibc $needed, newer than $max_allowed"
+            exit 1
           fi
 
       - name: Install minisign (macOS)

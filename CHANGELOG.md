@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **The x86_64 Linux binary starts on older distributions again** — it was built on GitHub's Ubuntu 24.04 runner and linked against its glibc 2.39, so on Ubuntu 22.04, Debian 12, RHEL/Rocky 9, Amazon Linux 2023 and anything older, `suv` refused to start with `GLIBC_2.39 not found` — whether installed by the install script, Homebrew on Linux, `suv update` or `cargo binstall`. It is now built the same way as the arm64 binary, in an old-glibc image, and needs glibc 2.28 at most. Every release now fails rather than publish a Linux binary that needs a newer glibc, and a new `linux-compat` workflow runs both Linux binaries on Ubuntu 18.04–24.04, Debian 11–12, Rocky Linux 8–9 and Amazon Linux 2023 before a release.
+
 ## [0.5.2] - 2026-10-20
 
 ### Added
