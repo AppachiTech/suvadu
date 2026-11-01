@@ -190,6 +190,57 @@ fn an_agent_command_is_recorded_with_its_exit_code_and_directory() {
     );
 }
 
+/// The script hands the agent's command to `suv add`, so the text it reads
+/// from `$ZSH_EXECUTION_STRING` must be masked before anything is written.
+#[test]
+fn an_agent_commands_secrets_never_reach_a_file() {
+    fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            if entry.path().is_dir() {
+                files_under(&entry.path(), out);
+            } else {
+                out.push(entry.path());
+            }
+        }
+    }
+
+    let Some(sb) = Sandbox::with_zsh() else {
+        return;
+    };
+    sb.init();
+    let project = sb.path("project");
+    std::fs::create_dir_all(&project).unwrap();
+
+    // `:` runs nothing, but the shell still reports the whole line.
+    let out = sb.agent_zsh(
+        r#": curl -d '{"password":"hunter2fake"}' -H "Authorization: Bearer faketoken123""#,
+        true,
+        &project,
+    );
+    assert!(out.status.success(), "{out:?}");
+
+    let rows = sb.recorded();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(
+        rows[0].command,
+        r#": curl -d '{"password":"***REDACTED***"}' -H "Authorization: Bearer ***REDACTED***""#
+    );
+
+    // Not only the column: the search indexes and anything else on disk.
+    let mut files = Vec::new();
+    files_under(&sb.home, &mut files);
+    for file in files {
+        let bytes = std::fs::read(&file).unwrap();
+        for secret in ["hunter2fake", "faketoken123"] {
+            assert!(
+                !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
+                "{secret} reached {}",
+                file.display()
+            );
+        }
+    }
+}
+
 #[test]
 fn shells_outside_antigravity_are_left_alone() {
     let Some(sb) = Sandbox::with_zsh() else {
