@@ -142,12 +142,22 @@ const BARE_NO_DASH: &str = r#"[^\s"'-][^\s"']*"#;
 fn env_var_patterns() -> Vec<String> {
     // Matches: GITHUB_TOKEN=, MY_SECRET=, DB_PASSWORD=, export AUTH=, AWS_SECRET_ACCESS_KEY=, etc.
     // Rejects: AUTHOR_NAME=, TOKEN_BUCKET_SIZE=, SECRET_SCANNING=, PASSWORD_FILE=, etc.
-    value_forms(
+    let mut v: Vec<String> = value_forms(
         "(?i)",
         r"(?:export\s+)?(?:\w+_)?(?:SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|AUTH|(?:API|ACCESS|PRIVATE|SECRET)_KEY)=",
         BARE,
     )
-    .into()
+    .into();
+    // Short spellings need a word boundary the names above do without: they
+    // turn up inside other words (`BYPASS=`), and a bare `PWD=` is the
+    // working directory. An unquoted `&` ends the value, in a shell word and
+    // in the query string `apikey=` is often found in.
+    v.extend(value_forms(
+        "(?i)",
+        r"(?:export\s+)?\b(?:(?:\w+_)?(?:PASS|APIKEY)|\w+_PWD)=",
+        r#"[^\s"'&]+"#,
+    ));
+    v
 }
 
 /// CLI flags that take passwords
@@ -1451,6 +1461,45 @@ mod tests {
             r#"curl -H "Content-Type: application/json" -H "X-Request-Id: abc" https://example.com"#,
             r#"python3 -c "h = {'Authorization': f'Bearer {token}'}""#,
             r#"curl "https://example.com/x?keyword=foo&monkey=1&sort_key=name""#,
+        ]);
+    }
+
+    #[test]
+    fn test_short_env_names_are_redacted() {
+        assert_redacts(&[
+            ("DB_PASS=hunter2 ./migrate", "DB_PASS=***REDACTED*** ./migrate"),
+            ("PASS=hunter2 ./migrate", "PASS=***REDACTED*** ./migrate"),
+            (
+                r#"DB_PASS="two words" ./migrate"#,
+                r#"DB_PASS="***REDACTED***" ./migrate"#,
+            ),
+            (
+                "MYSQL_PWD=hunter2 mysql -u root",
+                "MYSQL_PWD=***REDACTED*** mysql -u root",
+            ),
+            ("export APIKEY=short1", "export APIKEY=***REDACTED***"),
+            (
+                "docker run -e PASS=hunter2 app",
+                "docker run -e PASS=***REDACTED*** app",
+            ),
+            (
+                "cat > .env <<'EOF'\nDB_PASS=hunter2\nEOF",
+                "cat > .env <<'EOF'\nDB_PASS=***REDACTED***\nEOF",
+            ),
+        ]);
+    }
+
+    /// `PWD` and `PASS` turn up inside and beside ordinary names, and a bare
+    /// `*_KEY=` is as often `SORT_KEY=name` as a secret.
+    #[test]
+    fn test_env_names_that_only_look_secret_are_kept() {
+        assert_keeps(&[
+            "PWD=/srv/app ./run",
+            "OLDPWD=/srv ./run",
+            "BYPASS=true ./run",
+            "COMPASS=north ./run",
+            "PASS_COUNT=3 ./run",
+            "SORT_KEY=name ./run",
         ]);
     }
 
