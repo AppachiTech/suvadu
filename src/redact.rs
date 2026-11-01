@@ -19,9 +19,84 @@ struct SecretPattern {
     regex: Regex,
 }
 
+/// Text every rule needs at least one of, lowercased. Compiling the rules takes
+/// longer than the rest of `suv add` together, and every recorded command is a
+/// new process, so a command with none of these skips them entirely.
+///
+/// A new rule must be reachable from here: anything it can match has to hold
+/// one of these, or the rule never runs. `test_each_trigger_reaches_its_rule`
+/// holds this list to that.
+const TRIGGERS: &[&str] = &[
+    "pass",
+    "pwd",
+    "secret",
+    "token",
+    "credential",
+    "auth",
+    "key",
+    "cookie",
+    "login",
+    "mysql",
+    "mariadb",
+    "redis-cli",
+    "mongo",
+    "sqlcmd",
+    "ldap",
+    "zip",
+    "from-literal",
+    "curl",
+    "wget",
+    "http",
+    "xh",
+    "://",
+    "akia",
+    "asia",
+    "aiza",
+    "eyj",
+    "xox",
+    "xapp-",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "github_pat_",
+    "sk-",
+    "sk_",
+    "rk_",
+    "npm_",
+    "pypi-",
+    "hf_",
+    "ntn_",
+    "_v1_",
+    "lin_",
+    "xai-",
+    "sntry",
+    "sg.",
+    "glpat-",
+    "gldt-",
+    "glrt-",
+    "glptt-",
+    "glcbt-",
+    "glsoat-",
+    "hooks.slack",
+    "/webhooks/",
+    "api.telegram",
+    "sig=",
+    "signature=",
+];
+
+fn may_hold_secret(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    TRIGGERS.iter().any(|trigger| lower.contains(trigger))
+}
+
 /// Redact secrets from a command string.
 /// Returns the command with all detected secret values replaced by `***REDACTED***`.
 pub fn redact_secrets(command: &str) -> String {
+    if !may_hold_secret(command) {
+        return command.to_string();
+    }
     let patterns = &*SECRET_PATTERNS;
     let mut result = command.to_string();
 
@@ -1821,6 +1896,112 @@ mod tests {
             r#"curl -d '{"token":"string"}' https://example.com"#,
             "cat > ci.yml <<'EOF'\npermissions:\n  id-token: write\nEOF",
         ]);
+    }
+
+    /// One command per trigger, holding no other. A trigger missing from the
+    /// list leaves its rule unreachable and a secret stored as typed, and
+    /// nothing else would show that: other tables' commands hold several.
+    #[test]
+    fn test_each_trigger_reaches_its_rule() {
+        let commands = [
+            "DB_PASS=fake",
+            "ROOT_PWD=fake",
+            "SECRET=fake",
+            "TOKEN=fake",
+            "CREDENTIAL=fake",
+            "AUTH=fake",
+            "PRIVATE_KEY=fake",
+            r#"tool -H "Cookie: a=fake""#,
+            "docker login -p fake r",
+            "mysql -pfake db",
+            "mariadb -pfake db",
+            "redis-cli -a fake ping",
+            "mongosh -p fake",
+            "sqlcmd -P fake",
+            "ldapsearch -w fake",
+            "zip -P fake a f",
+            "kubectl create configmap c --from-literal=a=fake",
+            "curl -u a:fake example.com",
+            "wget --user a:fake example.com",
+            "http -a u:fake example.com",
+            "xh -a u:fake example.com",
+            "ftp://a:fake@example.com",
+            "echo AKIAXXXXXXXXXXXXXXXX",
+            "echo ASIAXXXXXXXXXXXXXXXX",
+            concat!("echo AI", "zaXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"),
+            "echo eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmYWtlIn0.ZmFrZQ",
+            concat!("echo xo", "xb-XXXXXXXXXX"),
+            concat!("echo xa", "pp-1-XXXXXXXXXXXX"),
+            "echo ghp_XXXXXXXXXXXXXXXXXXXXXXXX",
+            "echo gho_XXXXXXXXXXXXXXXXXXXXXXXX",
+            "echo ghu_XXXXXXXXXXXXXXXXXXXXXXXX",
+            "echo ghs_XXXXXXXXXXXXXXXXXXXXXXXX",
+            "echo ghr_XXXXXXXXXXXXXXXXXXXXXXXX",
+            "echo github_pat_XXXXXXXXXXXXXXXXXXXXXXXX",
+            "echo sk-XXXXXXXXXXXXXXXXXXXXXXXX",
+            concat!("echo sk", "_live_XXXXXXXXXXXXXXXXXXXXXXXX"),
+            concat!("echo rk", "_live_XXXXXXXXXXXXXXXXXXXXXXXX"),
+            "echo npm_XXXXXXXXXXXXXXXXXXXXXXXX",
+            "echo pypi-XXXXXXXXXXXXXXXXXXXXXXXX",
+            "echo hf_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+            "echo gsk_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+            "echo ntn_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+            "echo dop_v1_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+            "echo lin_api_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+            "echo xai-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+            "echo sntrys_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+            concat!("echo S", "G.XXXXXXXXXXXXXXXXXXXX.XXXXXXXXXXXXXXXXXXXX"),
+            "echo glpat-XXXXXXXXXXXXXXXXXXXXXXXX",
+            "echo gldt-XXXXXXXXXXXXXXXXXXXXXXXX",
+            "echo glrt-XXXXXXXXXXXXXXXXXXXXXXXX",
+            "echo glptt-XXXXXXXXXXXXXXXXXXXXXXXX",
+            "echo glcbt-XXXXXXXXXXXXXXXXXXXXXXXX",
+            "echo glsoat-XXXXXXXXXXXXXXXXXXXXXXXX",
+            concat!("hooks.sl", "ack.com/services/T0/B0/fake"),
+            "discord.com/api/webhooks/1/fake",
+            "api.telegram.org/bot1:fake",
+            "open example.com/a?sig=fake",
+            "open example.com/a?signature=fake",
+        ];
+        let reaching = |trigger: &str, cmd: &str| cmd.to_ascii_lowercase().contains(trigger);
+        let mut problems = Vec::new();
+        for cmd in commands {
+            let held: Vec<&str> = TRIGGERS
+                .iter()
+                .copied()
+                .filter(|t| reaching(t, cmd))
+                .collect();
+            if held.len() != 1 {
+                problems.push(format!("holds {held:?}: {cmd}"));
+            }
+            if redact_secrets(cmd) == cmd {
+                problems.push(format!("no rule reached: {cmd}"));
+            }
+        }
+        for trigger in TRIGGERS {
+            if !commands.iter().any(|cmd| reaching(trigger, cmd)) {
+                problems.push(format!("no command for: {trigger}"));
+            }
+        }
+        assert!(problems.is_empty(), "\n{}", problems.join("\n"));
+    }
+
+    /// The point of the trigger list: these are what a shell mostly runs, and
+    /// each must not cost a compile of every rule.
+    #[test]
+    fn test_ordinary_commands_are_not_candidates() {
+        for cmd in [
+            "ls -la /tmp",
+            "git status",
+            "git push origin main",
+            "cd /home/user/projects",
+            "cargo test --lib",
+            "npm run build",
+            "mkdir -p src/app",
+            "docker run -p 8080:80 nginx",
+        ] {
+            assert!(!may_hold_secret(cmd), "{cmd}");
+        }
     }
 
     /// Consolidated corpus: each (input, `must_be_absent`) pair locks in a known
