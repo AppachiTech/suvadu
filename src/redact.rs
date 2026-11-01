@@ -5,7 +5,9 @@ use regex::Regex;
 /// Placeholder that replaces detected secret values
 const REDACTED: &str = "***REDACTED***";
 
-/// Compiled secret patterns — built once, reused forever
+/// Compiled secret patterns — built once, reused forever. They use ASCII word
+/// classes and boundaries (`[[:word:]]`, `(?-u:\\b)`): Unicode's tables make a
+/// rule several times slower to compile, and names and flags are ASCII anyway.
 static SECRET_PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(build_patterns);
 
 /// (source strings, compiled regexes) for the extra-pattern cache.
@@ -252,7 +254,7 @@ fn env_var_patterns() -> Vec<String> {
     // Rejects: AUTHOR_NAME=, TOKEN_BUCKET_SIZE=, SECRET_SCANNING=, PASSWORD_FILE=, etc.
     let mut v: Vec<String> = value_forms(
         "(?i)",
-        r"(?:export\s+)?(?:\w+_)?(?:SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|AUTH|(?:API|ACCESS|PRIVATE|SECRET)_KEY)=",
+        r"(?:export\s+)?(?:[[:word:]]+_)?(?:SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|AUTH|(?:API|ACCESS|PRIVATE|SECRET)_KEY)=",
         BARE,
     )
     .into();
@@ -263,7 +265,7 @@ fn env_var_patterns() -> Vec<String> {
     // is often found in.
     v.extend(value_forms(
         "(?i)",
-        r"(?:export\s+)?\b(?:(?:\w+_)?(?:PASS|APIKEY)|(?:MYSQL|DB|SQL|ADMIN|ROOT)_PWD)=",
+        r"(?:export\s+)?(?-u:\b)(?:(?:[[:word:]]+_)?(?:PASS|APIKEY)|(?:MYSQL|DB|SQL|ADMIN|ROOT)_PWD)=",
         r#"[^\s"'&]+"#,
     ));
     v
@@ -278,7 +280,7 @@ fn cli_password_patterns() -> Vec<String> {
         // Case-sensitive: mysql's `-P` is its port. The span stops at shell
         // separators so `mysql ... | perl -pe ...` leaves perl's -p alone.
         // group(1) = "<client> ... -p", group(2) = the password value.
-        format!(r"(\b(?:mysql|mysqldump|mysqladmin|mariadb)(?:\s{SPAN})?\s-p)([^\s-]\S*)"),
+        format!(r"((?-u:\b)(?:mysql|mysqldump|mysqladmin|mariadb)(?:\s{SPAN})?\s-p)([^\s-]\S*)"),
     ];
     // --password / --token / --secret / --api-key, `=` or space separated
     v.extend(value_forms("", r"--password[=\s]", BARE));
@@ -297,13 +299,13 @@ fn cli_password_patterns() -> Vec<String> {
     // prompt flag, so this is case-sensitive)
     v.extend(value_forms(
         "",
-        r"\bsshpass(?:\s+-[fdP]\s*\S+|\s+-e\S*|\s+-[vh])*\s+-p\s*",
+        r"(?-u:\b)sshpass(?:\s+-[fdP]\s*\S+|\s+-e\S*|\s+-[vh])*\s+-p\s*",
         BARE,
     ));
     // docker/podman/nerdctl login -p <password>
     v.extend(value_forms(
         "",
-        &format!(r"\b(?:docker|podman|nerdctl)\s+login(?:\s{SPAN})?\s-p(?:=|\s+)?"),
+        &format!(r"(?-u:\b)(?:docker|podman|nerdctl)\s+login(?:\s{SPAN})?\s-p(?:=|\s+)?"),
         BARE_NO_DASH,
     ));
     // Password flags that mean something else on other commands, so each is
@@ -317,14 +319,14 @@ fn cli_password_patterns() -> Vec<String> {
             "-p",
         ),
         client("sqlcmd", "-P"),
-        client(r"ldap\w+", "-w"),
+        client(r"ldap[[:word:]]+", "-w"),
         client("zip|unzip", "-P"),
         client(r"az\s+login", "-p"),
     ]
     .join("|");
     v.extend(value_forms(
         "",
-        &format!(r"\b(?:{clients})\s+"),
+        &format!(r"(?-u:\b)(?:{clients})\s+"),
         BARE_NO_DASH,
     ));
     // openssl -pass pass:<password>; env: and file: name where it lives
@@ -332,18 +334,18 @@ fn cli_password_patterns() -> Vec<String> {
     // gh secret set <name> --body <value>
     v.extend(value_forms(
         "",
-        &format!(r"\bgh\s+secret\s+set(?:\s{SPAN})?\s(?:--body[=\s]\s*|-b\s*)"),
+        &format!(r"(?-u:\b)gh\s+secret\s+set(?:\s{SPAN})?\s(?:--body[=\s]\s*|-b\s*)"),
         BARE,
     ));
     // kubectl create secret --from-literal=<name>=<value>, as often as given.
     // A configmap's values go too, which costs less than a secret's staying.
     v.extend(value_forms("", r"--from-literal[=\s][^=\s]+=", BARE));
     // fly secrets set A=1 B=2: every pair, up to the next command
-    v.push(r"(\bfly(?:ctl)?\s+secrets\s+set\s+)((?:[^\n|;&]|&[^&\s])*[^\s|;&])".to_string());
+    v.push(r"((?-u:\b)fly(?:ctl)?\s+secrets\s+set\s+)((?:[^\n|;&]|&[^&\s])*[^\s|;&])".to_string());
     // aws configure set [profile.]aws_secret_access_key|aws_session_token <value>
     v.extend(value_forms(
         "(?i)",
-        r"\baws\s+configure\s+set\s+(?:[\w.-]+\.)?(?:aws_secret_access_key|aws_session_token)\s+",
+        r"(?-u:\b)aws\s+configure\s+set\s+(?:[[:word:].-]+\.)?(?:aws_secret_access_key|aws_session_token)\s+",
         BARE,
     ));
     v
@@ -353,22 +355,22 @@ fn cli_password_patterns() -> Vec<String> {
 fn api_key_patterns() -> Vec<String> {
     [
         // AWS access key ids: long-term (AKIA) and temporary STS (ASIA)
-        r"()(\b(?:AKIA|ASIA)[0-9A-Z]{16}\b)",
+        r"()((?-u:\b)(?:AKIA|ASIA)[0-9A-Z]{16}(?-u:\b))",
         // GitHub tokens: ghp_, gho_, ghu_, ghs_, ghr_, github_pat_
-        r"()\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}",
+        r"()(?-u:\b)(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}",
         // OpenAI API key: sk-... (Anthropic keys have hyphens early in
         // "sk-ant-api..." so [A-Za-z0-9]{20,} naturally excludes them). The
         // word boundary keeps `my-disk-<long id>` from matching.
-        r"()(\bsk-[A-Za-z0-9]{20,})",
+        r"()((?-u:\b)sk-[A-Za-z0-9]{20,})",
         // OpenAI project / service-account / admin keys
-        r"()(\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,})",
+        r"()((?-u:\b)sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,})",
         // Anthropic API key: sk-ant-api...
         r"()(sk-ant-api[A-Za-z0-9_-]{20,})",
         // Slack tokens: xoxb-, xoxp-, xoxo-, xoxa-, xoxr-, xoxs-, xoxe-,
         // and the xoxe.xoxp- rotating form
-        r"()(\bxox[abeoprs](?:\.xox[abeoprs])?-[A-Za-z0-9-]+)",
+        r"()((?-u:\b)xox[abeoprs](?:\.xox[abeoprs])?-[A-Za-z0-9-]+)",
         // Slack app-level tokens: xapp-<n>-...
-        r"()(\bxapp-\d-[A-Za-z0-9-]{10,})",
+        r"()((?-u:\b)xapp-\d-[A-Za-z0-9-]{10,})",
         // Stripe keys: sk_live_, sk_test_, pk_live_, pk_test_
         r"()([sr]k_(?:live|test)_[A-Za-z0-9]{20,})",
         // NPM tokens: npm_...
@@ -384,24 +386,24 @@ fn api_key_patterns() -> Vec<String> {
         // base64 body that follows it (a truncated paste).
         r"()(-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----(?:(?s:.*?)-----END [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----|(?:[A-Za-z0-9+/=\s:,-]*[A-Za-z0-9+/=:,-])?))",
         // Google API key
-        r"()(\bAIza[0-9A-Za-z_-]{35})",
+        r"()((?-u:\b)AIza[0-9A-Za-z_-]{35})",
         // GitLab personal, deploy, runner, trigger, CI job and service tokens
-        r"()(\bgl(?:pat|dt|rt|ptt|cbt|soat)-[A-Za-z0-9_-]{20,})",
+        r"()((?-u:\b)gl(?:pat|dt|rt|ptt|cbt|soat)-[A-Za-z0-9_-]{20,})",
         // OpenRouter, which the OpenAI rule's run of alphanumerics can't reach
-        r"()(\bsk-or-v\d+-[A-Za-z0-9_-]{20,})",
+        r"()((?-u:\b)sk-or-v\d+-[A-Za-z0-9_-]{20,})",
         // Hugging Face, Groq, Notion, DigitalOcean, Linear and xAI: a prefix
         // and a long alphanumeric run, so names with more words don't match
-        r"()(\b(?:(?:hf|gsk|ntn|do[opr]_v1|lin_api|lin_oauth)_|xai-)[A-Za-z0-9]{30,})",
+        r"()((?-u:\b)(?:(?:hf|gsk|ntn|do[opr]_v1|lin_api|lin_oauth)_|xai-)[A-Za-z0-9]{30,})",
         // Sentry auth tokens
-        r"()(\bsntry[su]_[A-Za-z0-9_=-]{30,})",
+        r"()((?-u:\b)sntry[su]_[A-Za-z0-9_=-]{30,})",
         // SendGrid: SG.<id>.<secret>
-        r"()(\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})",
+        r"()((?-u:\b)SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})",
         // JWTs: every segment, up to the five of an encrypted one, and the
         // trailing dot of an unsigned one. Base64 JSON with no dots is data.
-        r"()(\beyJ[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]+){1,4}\.?)",
+        r"()((?-u:\b)eyJ[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]+){1,4}\.?)",
         // Generic long hex secrets (32+ hex chars, common for API keys)
         // Only match when preceded by a key-like assignment
-        r"(?i)((?:SECRET|TOKEN|KEY|PASSWORD|AUTH|CREDENTIAL)\w*[=:]\s*)([0-9a-f]{32,})",
+        r"(?i)((?:SECRET|TOKEN|KEY|PASSWORD|AUTH|CREDENTIAL)[[:word:]]*[=:]\s*)([0-9a-f]{32,})",
         // Base64 / base64url secrets after a secret-ish key name, for the `:`
         // (JSON/YAML) and `=` forms that the hex rule misses, e.g.
         // {"apiToken":"YWxhZGRpbjpvcGVuc2VzYW1l"} or --config token:AbC123...
@@ -412,7 +414,7 @@ fn api_key_patterns() -> Vec<String> {
         // (`--grep=token:...`) are not mistaken for secret assignments. Dotted
         // segments after the long run go with it, so a dotted token is not
         // left half-masked.
-        r#"(?i)((?:^|[^\w=-])(?:\w[\w-]*?)?(?:secret|token|key|password|passwd|auth|credential)["']?\s*[=:]\s*["']?)([A-Za-z0-9+/_-]{24,}(?:\.[A-Za-z0-9+/_-]+)*={0,2})"#,
+        r#"(?i)((?:^|[^[:word:]=-])(?:[[:word:]][[:word:]-]*?)?(?:secret|token|key|password|passwd|auth|credential)["']?\s*[=:]\s*["']?)([A-Za-z0-9+/_-]{24,}(?:\.[A-Za-z0-9+/_-]+)*={0,2})"#,
     ]
     .into_iter()
     .map(String::from)
@@ -425,7 +427,7 @@ fn api_key_patterns() -> Vec<String> {
 /// `"key":"id"` and `"auth":"oauth"` are ordinary, and `pwd` because it is
 /// usually the working directory; a long value under those names is caught
 /// by the long-value rule in [`api_key_patterns`].
-const SECRET_NAME: &str = r"(?:\w[\w-]*?)?(?:password|passwd|passphrase|secret|token|credential|(?:api|access|private|secret)[_-]?key)";
+const SECRET_NAME: &str = r"(?:[[:word:]][[:word:]-]*?)?(?:password|passwd|passphrase|secret|token|credential|(?:api|access|private|secret)[_-]?key)";
 
 /// Short secrets under a secret name, in the shapes agents write them: JSON
 /// and code with a quoted value, and YAML. A quoted value can't start with
@@ -433,7 +435,7 @@ const SECRET_NAME: &str = r"(?:\w[\w-]*?)?(?:password|passwd|passphrase|secret|t
 /// ending in the name: `rg "password: " src/ | rg "foo"` searches for the key,
 /// and `print("with token:", "OK")` has no value to lose.
 fn key_value_patterns() -> Vec<String> {
-    let key = format!(r#"(?i)((?:^|[^\w=-]){SECRET_NAME}(?:\\?["'])?\]?\s*(?:=>|:=|=|:)\s*"#);
+    let key = format!(r#"(?i)((?:^|[^[:word:]=-]){SECRET_NAME}(?:\\?["'])?\]?\s*(?:=>|:=|=|:)\s*"#);
     vec![
         format!(r#"{key}")([^"'\s\\,;)\]}}+](?:[^"\\\n]|\\.)*)(")"#),
         format!(r#"{key}')([^'"\s\\,;)\]}}+](?:[^'\\\n]|\\.)*)(')"#),
@@ -443,31 +445,36 @@ fn key_value_patterns() -> Vec<String> {
         format!(r#"(?im)(^[ \t]*(?:-[ \t]+)?{SECRET_NAME}:[ \t]+)([^\s"'#]\S*)([ \t]*$)"#),
         // The same line echoed into a file. Scoped to echo and printf: a
         // quoted `token: rotated` is a commit message or a search anywhere else.
-        format!(r#"(?i)(\b(?:echo|printf)\s+(?:-\w+\s+)*"{SECRET_NAME}:[ \t]*)([^\s"]+)(")"#),
-        format!(r"(?i)(\b(?:echo|printf)\s+(?:-\w+\s+)*'{SECRET_NAME}:[ \t]*)([^\s']+)(')"),
+        format!(
+            r#"(?i)((?-u:\b)(?:echo|printf)\s+(?:-[[:word:]]+\s+)*"{SECRET_NAME}:[ \t]*)([^\s"]+)(")"#
+        ),
+        format!(
+            r"(?i)((?-u:\b)(?:echo|printf)\s+(?:-[[:word:]]+\s+)*'{SECRET_NAME}:[ \t]*)([^\s']+)(')"
+        ),
     ]
 }
 
 /// Authorization headers and credentials in curl/wget/httpie commands
 fn auth_header_patterns() -> Vec<String> {
     // The scheme word of an Authorization header, kept so it stays readable.
-    const SCHEME: &str = r"(?:[A-Za-z][\w-]*\s+)?";
+    const SCHEME: &str = r"(?:[A-Za-z][[:word:]-]*\s+)?";
     let mut v = vec![
         // Authorization: Bearer|Basic|token xxx — however it's passed:
         // curl -H / --header, httpie `Authorization:"Bearer xxx"`, JSON.
-        r#"(?i)(\bAuthorization['"]?:\s*['"]?\s*(?:Bearer|Basic|token)\s+)([^'"}\s]+)"#.to_string(),
+        r#"(?i)((?-u:\b)Authorization['"]?:\s*['"]?\s*(?:Bearer|Basic|token)\s+)([^'"}\s]+)"#
+            .to_string(),
         // curl/wget -u user:password, -uuser:password, --user[=]user:password —
         // scoped to the client so `docker run -u 1000:1000` (UID:GID) is left
         // alone. The user is kept; only the password after the colon is hidden.
         // group(1) = "<client> ... -u user:", group(2) = password.
         format!(
-            r#"(?i)(\b(?:curl|wget)(?:\s{SPAN})?\s(?:-u|--user[=\s])\s*['"]?[^\s:'"]*:)([^\s'"]+)"#
+            r#"(?i)((?-u:\b)(?:curl|wget)(?:\s{SPAN})?\s(?:-u|--user[=\s])\s*['"]?[^\s:'"]*:)([^\s'"]+)"#
         ),
         // httpie / xh: -a user:password, --auth[=]user:password (and -u, as
         // before). The client name must be followed by whitespace so the
         // `https` of a URL elsewhere in the command doesn't count.
         format!(
-            r#"(?i)(\b(?:http|https|xh|xhs)(?:\s{SPAN})?\s(?:-a|--auth[=\s]|-u)\s*['"]?[^\s:'"]*:)([^\s'"]+)"#
+            r#"(?i)((?-u:\b)(?:http|https|xh|xhs)(?:\s{SPAN})?\s(?:-a|--auth[=\s]|-u)\s*['"]?[^\s:'"]*:)([^\s'"]+)"#
         ),
         // A header with a secret name, whatever its length. Only after
         // -H/--header: a quoted `token: x` anywhere else is text.
@@ -481,13 +488,13 @@ fn auth_header_patterns() -> Vec<String> {
         // The same as a key with a quoted value, in code or JSON. The quote
         // right after the colon leaves f"Bearer {token}" alone.
         format!(
-            r#"(?i)(\b(?:Authorization|Cookie)['"]?\s*:\s*['"]{SCHEME})([^'"\s][^'"\n]*)(['"])"#
+            r#"(?i)((?-u:\b)(?:Authorization|Cookie)['"]?\s*:\s*['"]{SCHEME})([^'"\s][^'"\n]*)(['"])"#
         ),
     ];
     // curl -b / --cookie name=value. Without a `=` it names a cookie file.
     v.extend(value_forms(
         "",
-        &format!(r"\bcurl(?:\s{SPAN})?\s(?:-b|--cookie)[=\s]\s*"),
+        &format!(r"(?-u:\b)curl(?:\s{SPAN})?\s(?:-b|--cookie)[=\s]\s*"),
         r#"[^\s"'=]+=[^\s"']*"#,
     ));
     v
@@ -506,7 +513,7 @@ fn connection_string_patterns() -> Vec<String> {
         // Any other scheme (https, git+ssh, ftp, ...): user:password@ in the
         // authority. The password stays inside the authority (no `/`, `?`,
         // `#`) so `host:8080/path?email=a@b` is not mistaken for credentials.
-        r"(\b[A-Za-z][A-Za-z0-9+.-]*://[^/@\s:]*:)([^\s/?#]+)(@[^@\s/?#]+)".to_string(),
+        r"((?-u:\b)[A-Za-z][A-Za-z0-9+.-]*://[^/@\s:]*:)([^\s/?#]+)(@[^@\s/?#]+)".to_string(),
         // URLs whose path is the credential: anyone holding one can post
         r"(hooks\.slack\.com/services/)(T[A-Za-z0-9]+/B[A-Za-z0-9]+/[A-Za-z0-9]+)".to_string(),
         r"(discord(?:app)?\.com/api/webhooks/\d+/)([A-Za-z0-9_-]+)".to_string(),
