@@ -166,6 +166,14 @@ fn cli_password_patterns() -> Vec<String> {
     v.extend(value_forms("", r"--token[=\s]", BARE));
     v.extend(value_forms("", r"--secret[=\s]", BARE));
     v.extend(value_forms("(?i)", r"--api[-_]?key[=\s]", BARE));
+    // Other flags whose value is a credential. A list, not every name ending
+    // in `token` or `password`: `--with-token` and `--no-password` take no
+    // value, and the argument after them would be lost.
+    v.extend(value_forms(
+        "(?i)",
+        r"--(?:pass|passwd|passphrase|oauth2-bearer|(?:http|ftp|proxy)-password|(?:client|app|api|shared|webhook)[-_]secret|(?:access|api|app|auth|bot|github|gitlab|id|oauth|refresh|session)[-_]token)[=\s]",
+        BARE_NO_DASH,
+    ));
     // sshpass -p <password> (other sshpass options may come first; -P is its
     // prompt flag, so this is case-sensitive)
     v.extend(value_forms(
@@ -1243,6 +1251,65 @@ mod tests {
             r#"curl -d '{"pwd":"/srv/app"}' https://example.com"#,
             // Values that aren't strings
             r#"curl -d '{"password":null,"token":true,"secret":1}' https://example.com"#,
+        ]);
+    }
+
+    #[test]
+    fn test_credential_flags_are_redacted() {
+        assert_redacts(&[
+            (
+                "az ad sp credential reset --client-secret fakevalue1",
+                "az ad sp credential reset --client-secret ***REDACTED***",
+            ),
+            ("tool --auth-token=fakevalue1", "tool --auth-token=***REDACTED***"),
+            (
+                "tool --access-token fakevalue1 --verbose",
+                "tool --access-token ***REDACTED*** --verbose",
+            ),
+            ("tool --api-token fakevalue1", "tool --api-token ***REDACTED***"),
+            ("tool --github-token fakevalue1", "tool --github-token ***REDACTED***"),
+            ("tool --refresh_token fakevalue1", "tool --refresh_token ***REDACTED***"),
+            (
+                "gpg --batch --passphrase fakevalue1 -d f.gpg",
+                "gpg --batch --passphrase ***REDACTED*** -d f.gpg",
+            ),
+            ("tool --pass fakevalue1", "tool --pass ***REDACTED***"),
+            ("tool --passwd=fakevalue1", "tool --passwd=***REDACTED***"),
+            (
+                "curl --oauth2-bearer fakevalue1 https://example.com",
+                "curl --oauth2-bearer ***REDACTED*** https://example.com",
+            ),
+            (
+                "wget --http-password=fakevalue1 https://example.com/f",
+                "wget --http-password=***REDACTED*** https://example.com/f",
+            ),
+            (
+                "wget --ftp-password fakevalue1 ftp://example.com/f",
+                "wget --ftp-password ***REDACTED*** ftp://example.com/f",
+            ),
+            (
+                r#"tool --client-secret "two words" --verbose"#,
+                r#"tool --client-secret "***REDACTED***" --verbose"#,
+            ),
+        ]);
+    }
+
+    /// Each of these takes no value, or a value that isn't a secret. Treating
+    /// them as credential flags would lose the argument that follows.
+    #[test]
+    fn test_flags_that_only_look_like_credentials_are_kept() {
+        assert_keeps(&[
+            "gh auth login --with-token < token.txt",
+            "psql --no-password -h db",
+            "tool --token-file ~/.token --host db",
+            "tool --password-file ~/.pw --host db",
+            "gpg --passphrase-file pw.txt -d f.gpg",
+            "gpg --passphrase-fd 0 -d f.gpg",
+            "tool --pwd /srv/app",
+            "tool --pass --verbose",
+            "tool --pass-through --host db",
+            "llm --max-tokens 100",
+            "kubectl run x --image-pull-secret regcred",
         ]);
     }
 
