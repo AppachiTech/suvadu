@@ -203,14 +203,21 @@ fn cli_password_patterns() -> Vec<String> {
     let client = |names: &str, flag: &str| format!(r"(?:{names})(?:\s{SPAN})?\s{flag}");
     let clients = [
         client("redis-cli", "-a"),
-        client("mongosh|mongo|mongodump|mongorestore|mongoexport|mongoimport", "-p"),
+        client(
+            "mongosh|mongo|mongodump|mongorestore|mongoexport|mongoimport",
+            "-p",
+        ),
         client("sqlcmd", "-P"),
         client(r"ldap\w+", "-w"),
         client("zip|unzip", "-P"),
         client(r"az\s+login", "-p"),
     ]
     .join("|");
-    v.extend(value_forms("", &format!(r"\b(?:{clients})\s+"), BARE_NO_DASH));
+    v.extend(value_forms(
+        "",
+        &format!(r"\b(?:{clients})\s+"),
+        BARE_NO_DASH,
+    ));
     // openssl -pass pass:<password>; env: and file: name where it lives
     v.extend(value_forms("", r"\s-pass(?:in|out)?\s+pass:", BARE));
     // gh secret set <name> --body <value>
@@ -316,8 +323,7 @@ const SECRET_NAME: &str = r"(?:\w[\w-]*?)?(?:password|passwd|passphrase|secret|t
 /// whitespace or a quote, so a search for the key itself
 /// (`rg "password: " src/ | rg "foo"`) has no value to lose.
 fn key_value_patterns() -> Vec<String> {
-    let key =
-        format!(r#"(?i)((?:^|[^\w=-]){SECRET_NAME}(?:\\?["'])?\]?\s*(?:=>|:=|=|:)\s*"#);
+    let key = format!(r#"(?i)((?:^|[^\w=-]){SECRET_NAME}(?:\\?["'])?\]?\s*(?:=>|:=|=|:)\s*"#);
     vec![
         format!(r#"{key}")([^"'\s\\](?:[^"\\\n]|\\.)*)(")"#),
         format!(r#"{key}')([^'"\s\\](?:[^'\\\n]|\\.)*)(')"#),
@@ -328,7 +334,7 @@ fn key_value_patterns() -> Vec<String> {
         // The same line echoed into a file. Scoped to echo and printf: a
         // quoted `token: rotated` is a commit message or a search anywhere else.
         format!(r#"(?i)(\b(?:echo|printf)\s+(?:-\w+\s+)*"{SECRET_NAME}:[ \t]*)([^\s"]+)(")"#),
-        format!(r#"(?i)(\b(?:echo|printf)\s+(?:-\w+\s+)*'{SECRET_NAME}:[ \t]*)([^\s']+)(')"#),
+        format!(r"(?i)(\b(?:echo|printf)\s+(?:-\w+\s+)*'{SECRET_NAME}:[ \t]*)([^\s']+)(')"),
     ]
 }
 
@@ -356,7 +362,7 @@ fn auth_header_patterns() -> Vec<String> {
         // A header with a secret name, whatever its length. Only after
         // -H/--header: a quoted `token: x` anywhere else is text.
         format!(r#"(?i)(\s(?:-H|--header)[=\s]?\s*"{SECRET_NAME}:[ \t]*)([^\s"]+)(")"#),
-        format!(r#"(?i)(\s(?:-H|--header)[=\s]?\s*'{SECRET_NAME}:[ \t]*)([^\s']+)(')"#),
+        format!(r"(?i)(\s(?:-H|--header)[=\s]?\s*'{SECRET_NAME}:[ \t]*)([^\s']+)(')"),
         // Authorization under any scheme, and Cookie. Again only when sent:
         // `grep "Authorization: Bearer"` holds no secret.
         format!(
@@ -364,9 +370,7 @@ fn auth_header_patterns() -> Vec<String> {
         ),
         // The same as a key with a quoted value, in code or JSON. The quote
         // right after the colon leaves f"Bearer {token}" alone.
-        format!(
-            r#"(?i)(\b(?:Authorization|Cookie)['"]?\s*:\s*['"]\s*{SCHEME})([^'"\n]+)(['"])"#
-        ),
+        format!(r#"(?i)(\b(?:Authorization|Cookie)['"]?\s*:\s*['"]\s*{SCHEME})([^'"\n]+)(['"])"#),
     ];
     // curl -b / --cookie name=value. Without a `=` it names a cookie file.
     v.extend(value_forms(
@@ -1168,7 +1172,12 @@ mod tests {
                 (got != *want).then(|| format!("\n  in:   {input}\n  got:  {got}\n  want: {want}"))
             })
             .collect();
-        assert!(misses.is_empty(), "{} rows:{}", misses.len(), misses.concat());
+        assert!(
+            misses.is_empty(),
+            "{} rows:{}",
+            misses.len(),
+            misses.concat()
+        );
     }
 
     fn assert_keeps(commands: &[&str]) {
@@ -1179,7 +1188,12 @@ mod tests {
                 (got != *cmd).then(|| format!("\n  in:   {cmd}\n  got:  {got}"))
             })
             .collect();
-        assert!(misses.is_empty(), "{} rows:{}", misses.len(), misses.concat());
+        assert!(
+            misses.is_empty(),
+            "{} rows:{}",
+            misses.len(),
+            misses.concat()
+        );
     }
 
     /// Masking only a JWT's header would hide the one part that isn't
@@ -1342,14 +1356,26 @@ mod tests {
                 "az ad sp credential reset --client-secret fakevalue1",
                 "az ad sp credential reset --client-secret ***REDACTED***",
             ),
-            ("tool --auth-token=fakevalue1", "tool --auth-token=***REDACTED***"),
+            (
+                "tool --auth-token=fakevalue1",
+                "tool --auth-token=***REDACTED***",
+            ),
             (
                 "tool --access-token fakevalue1 --verbose",
                 "tool --access-token ***REDACTED*** --verbose",
             ),
-            ("tool --api-token fakevalue1", "tool --api-token ***REDACTED***"),
-            ("tool --github-token fakevalue1", "tool --github-token ***REDACTED***"),
-            ("tool --refresh_token fakevalue1", "tool --refresh_token ***REDACTED***"),
+            (
+                "tool --api-token fakevalue1",
+                "tool --api-token ***REDACTED***",
+            ),
+            (
+                "tool --github-token fakevalue1",
+                "tool --github-token ***REDACTED***",
+            ),
+            (
+                "tool --refresh_token fakevalue1",
+                "tool --refresh_token ***REDACTED***",
+            ),
             (
                 "gpg --batch --passphrase fakevalue1 -d f.gpg",
                 "gpg --batch --passphrase ***REDACTED*** -d f.gpg",
@@ -1511,7 +1537,10 @@ mod tests {
     #[test]
     fn test_short_env_names_are_redacted() {
         assert_redacts(&[
-            ("DB_PASS=hunter2 ./migrate", "DB_PASS=***REDACTED*** ./migrate"),
+            (
+                "DB_PASS=hunter2 ./migrate",
+                "DB_PASS=***REDACTED*** ./migrate",
+            ),
             ("PASS=hunter2 ./migrate", "PASS=***REDACTED*** ./migrate"),
             (
                 r#"DB_PASS="two words" ./migrate"#,
