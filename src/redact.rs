@@ -197,6 +197,33 @@ fn cli_password_patterns() -> Vec<String> {
         &format!(r"\b(?:docker|podman|nerdctl)\s+login(?:\s{SPAN})?\s-p(?:=|\s+)?"),
         BARE_NO_DASH,
     ));
+    // Password flags that mean something else on other commands, so each is
+    // scoped to its client like mysql's above. Case-sensitive for the same
+    // reason: sqlcmd's -p and zip's -p are not their -P.
+    let client = |names: &str, flag: &str| format!(r"(?:{names})(?:\s{SPAN})?\s{flag}");
+    let clients = [
+        client("redis-cli", "-a"),
+        client("mongosh|mongo|mongodump|mongorestore|mongoexport|mongoimport", "-p"),
+        client("sqlcmd", "-P"),
+        client(r"ldap\w+", "-w"),
+        client("zip|unzip", "-P"),
+        client(r"az\s+login", "-p"),
+    ]
+    .join("|");
+    v.extend(value_forms("", &format!(r"\b(?:{clients})\s+"), BARE_NO_DASH));
+    // openssl -pass pass:<password>; env: and file: name where it lives
+    v.extend(value_forms("", r"\s-pass(?:in|out)?\s+pass:", BARE));
+    // gh secret set <name> --body <value>
+    v.extend(value_forms(
+        "",
+        &format!(r"\bgh\s+secret\s+set(?:\s{SPAN})?\s(?:--body[=\s]\s*|-b\s*)"),
+        BARE,
+    ));
+    // kubectl create secret --from-literal=<name>=<value>, as often as given.
+    // A configmap's values go too, which costs less than a secret's staying.
+    v.extend(value_forms("", r"--from-literal[=\s][^=\s]+=", BARE));
+    // fly secrets set A=1 B=2: every pair, up to the next command
+    v.push(r"(\bfly(?:ctl)?\s+secrets\s+set\s+)((?:[^\n|;&]|&[^&\s])*[^\s|;&])".to_string());
     // aws configure set [profile.]aws_secret_access_key|aws_session_token <value>
     v.extend(value_forms(
         "(?i)",
@@ -1610,6 +1637,89 @@ mod tests {
             "ollama run xai-grok-2-latest",
             "git checkout glpat-rotation-docs",
             "curl https://hooks.slack.com/commands/T00000000/123",
+        ]);
+    }
+
+    #[test]
+    fn test_tool_password_flags_are_redacted() {
+        assert_redacts(&[
+            ("redis-cli -a hunter2 ping", "redis-cli -a ***REDACTED*** ping"),
+            (
+                "redis-cli -h db -a 'two words' ping",
+                "redis-cli -h db -a '***REDACTED***' ping",
+            ),
+            (
+                "mongosh -u root -p hunter2 mongodb://localhost",
+                "mongosh -u root -p ***REDACTED*** mongodb://localhost",
+            ),
+            (
+                "mongodump -u root -p hunter2 --db app",
+                "mongodump -u root -p ***REDACTED*** --db app",
+            ),
+            ("sqlcmd -S db -U sa -P hunter2", "sqlcmd -S db -U sa -P ***REDACTED***"),
+            (
+                "ldapsearch -D cn=admin -w hunter2",
+                "ldapsearch -D cn=admin -w ***REDACTED***",
+            ),
+            ("zip -P hunter2 out.zip a", "zip -P ***REDACTED*** out.zip a"),
+            ("unzip -P hunter2 out.zip", "unzip -P ***REDACTED*** out.zip"),
+            (
+                "openssl enc -aes-256-cbc -pass pass:hunter2 -in x",
+                "openssl enc -aes-256-cbc -pass pass:***REDACTED*** -in x",
+            ),
+            (
+                "openssl rsa -passin pass:hunter2 -passout pass:hunter3 -in k",
+                "openssl rsa -passin pass:***REDACTED*** -passout pass:***REDACTED*** -in k",
+            ),
+            (
+                "az login --service-principal -u id -p hunter2 --tenant t",
+                "az login --service-principal -u id -p ***REDACTED*** --tenant t",
+            ),
+            (
+                "gh secret set API_KEY --body short1",
+                "gh secret set API_KEY --body ***REDACTED***",
+            ),
+            (
+                "gh secret set API_KEY -b short1 --repo a/b",
+                "gh secret set API_KEY -b ***REDACTED*** --repo a/b",
+            ),
+            (
+                r#"gh secret set API_KEY --body "two words""#,
+                r#"gh secret set API_KEY --body "***REDACTED***""#,
+            ),
+            (
+                "fly secrets set STRIPE_WEBHOOK=short1 OTHER=short2 && fly deploy",
+                "fly secrets set ***REDACTED*** && fly deploy",
+            ),
+            (
+                "kubectl create secret generic db --from-literal=pass=hunter2 --from-literal=user=admin",
+                "kubectl create secret generic db --from-literal=pass=***REDACTED*** --from-literal=user=***REDACTED***",
+            ),
+        ]);
+    }
+
+    /// The same flags mean something else on other commands, or are followed
+    /// by a reference to a secret instead of the secret.
+    #[test]
+    fn test_tool_flags_that_hold_no_password_are_kept() {
+        assert_keeps(&[
+            "redis-cli -h db -p 6379 ping",
+            "redis-cli ping; ls -a /tmp",
+            "ls -a /tmp",
+            "docker run -a stdout alpine",
+            "mongosh --port 27017",
+            "zip -r out.zip dir",
+            "unzip -l out.zip",
+            "gzip -k file",
+            "az login --use-device-code",
+            "sqlcmd -S db -Q 'select 1'",
+            "gh secret list",
+            "gh secret set API_KEY < key.txt",
+            "gh secret set API_KEY --body-file key.txt",
+            "openssl enc -pass env:PW -in x",
+            "openssl enc -pass file:pw.txt -in x",
+            "fly secrets list",
+            "fly secrets unset OLD_NAME",
         ]);
     }
 
