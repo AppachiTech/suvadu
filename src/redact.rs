@@ -221,6 +221,9 @@ fn api_key_patterns() -> Vec<String> {
         // into a heredoc). Without an END line, the BEGIN marker plus any
         // base64 body that follows it (a truncated paste).
         r"()(-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----(?:(?s:.*?)-----END [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----|(?:[A-Za-z0-9+/=\s:,-]*[A-Za-z0-9+/=:,-])?))",
+        // JWTs: every segment, up to the five of an encrypted one, and the
+        // trailing dot of an unsigned one. Base64 JSON with no dots is data.
+        r"()(\beyJ[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]+){1,4}\.?)",
         // Generic long hex secrets (32+ hex chars, common for API keys)
         // Only match when preceded by a key-like assignment
         r"(?i)((?:SECRET|TOKEN|KEY|PASSWORD|AUTH|CREDENTIAL)\w*[=:]\s*)([0-9a-f]{32,})",
@@ -231,8 +234,10 @@ fn api_key_patterns() -> Vec<String> {
         // separator) so KEY_PATH=/usr/local/... is NOT redacted as a secret.
         // The identifier must start at a word character that follows neither
         // `-` nor `=`, so CLI flag names (`--sort-key=...`) and flag values
-        // (`--grep=token:...`) are not mistaken for secret assignments.
-        r#"(?i)((?:^|[^\w=-])(?:\w[\w-]*?)?(?:secret|token|key|password|passwd|auth|credential)["']?\s*[=:]\s*["']?)([A-Za-z0-9+/_-]{24,}={0,2})"#,
+        // (`--grep=token:...`) are not mistaken for secret assignments. Dotted
+        // segments after the long run go with it, so a dotted token is not
+        // left half-masked.
+        r#"(?i)((?:^|[^\w=-])(?:\w[\w-]*?)?(?:secret|token|key|password|passwd|auth|credential)["']?\s*[=:]\s*["']?)([A-Za-z0-9+/_-]{24,}(?:\.[A-Za-z0-9+/_-]+)*={0,2})"#,
     ]
     .into_iter()
     .map(String::from)
@@ -1032,6 +1037,71 @@ mod tests {
         for cmd in cases {
             assert_eq!(redact_secrets(cmd), cmd, "false positive on: {cmd}");
         }
+    }
+
+    /// Every row is checked before the test fails, so one run shows every miss.
+    fn assert_redacts(table: &[(&str, &str)]) {
+        let misses: Vec<String> = table
+            .iter()
+            .filter_map(|(input, want)| {
+                let got = redact_secrets(input);
+                (got != *want).then(|| format!("\n  in:   {input}\n  got:  {got}\n  want: {want}"))
+            })
+            .collect();
+        assert!(misses.is_empty(), "{} rows:{}", misses.len(), misses.concat());
+    }
+
+    fn assert_keeps(commands: &[&str]) {
+        let misses: Vec<String> = commands
+            .iter()
+            .filter_map(|cmd| {
+                let got = redact_secrets(cmd);
+                (got != *cmd).then(|| format!("\n  in:   {cmd}\n  got:  {got}"))
+            })
+            .collect();
+        assert!(misses.is_empty(), "{} rows:{}", misses.len(), misses.concat());
+    }
+
+    /// Masking only a JWT's header would hide the one part that isn't
+    /// sensitive and store the payload and signature beside the placeholder.
+    #[test]
+    fn test_jwt_is_redacted_whole() {
+        assert_redacts(&[
+            (
+                r#"curl -d '{"access_token":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmYWtlIn0.ZmFrZXNpZ25hdHVyZQ"}' https://example.com"#,
+                r#"curl -d '{"access_token":"***REDACTED***"}' https://example.com"#,
+            ),
+            (
+                "echo eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmYWtlIn0.ZmFrZXNpZ25hdHVyZQ",
+                "echo ***REDACTED***",
+            ),
+            // alg=none: the signature segment is empty
+            (
+                "echo eyJhbGciOiJub25lIn0.eyJzdWIiOiJmYWtlIn0. done",
+                "echo ***REDACTED*** done",
+            ),
+            // An encrypted JWT has five segments
+            (
+                "echo eyJhbGciOiJSU0EtT0FFUCJ9.Zm9v.YmFy.YmF6.cXV4",
+                "echo ***REDACTED***",
+            ),
+        ]);
+    }
+
+    /// Any dotted value after a secret-ish key, not only a JWT, has to go in
+    /// one piece: bot tokens are three dotted segments too.
+    #[test]
+    fn test_dotted_value_after_key_is_redacted_whole() {
+        assert_redacts(&[(
+            r#"curl -d '{"token":"XXXXXXXXXXXXXXXXXXXXXXXXXXXX.XXXXXX.XXXXXXXXXXXXXXXXXXXXXXXXXXX"}' https://example.com"#,
+            r#"curl -d '{"token":"***REDACTED***"}' https://example.com"#,
+        )]);
+    }
+
+    /// Base64 of a JSON object starts `eyJ` as well; with no dots it is data.
+    #[test]
+    fn test_base64_json_is_not_a_jwt() {
+        assert_keeps(&["echo eyJmb28iOiJiYXIiLCJiYXoiOjF9 | base64 -d"]);
     }
 
     /// Consolidated corpus: each (input, `must_be_absent`) pair locks in a known
