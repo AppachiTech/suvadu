@@ -29,6 +29,9 @@ pub fn redact_secrets(command: &str) -> String {
         result = p
             .regex
             .replace_all(&result, |caps: &regex::Captures| {
+                if caps.get(2).is_some_and(|m| is_not_a_secret(m.as_str())) {
+                    return caps[0].to_string();
+                }
                 let prefix = caps.get(1).map_or("", |m| m.as_str());
                 let suffix = caps.get(3).map_or("", |m| m.as_str());
                 format!("{prefix}{REDACTED}{suffix}")
@@ -37,6 +40,34 @@ pub fn redact_secrets(command: &str) -> String {
     }
 
     result
+}
+
+/// A value that says nothing secret even under a secret name: a type
+/// (`token: str` in a Python class, `password: string;` in an interface,
+/// `"token":"string"` in an `OpenAPI` example) or a setting (`id-token: write`
+/// in a GitHub workflow).
+fn is_not_a_secret(value: &str) -> bool {
+    let word = value.trim_end_matches([',', ';']).to_ascii_lowercase();
+    matches!(
+        word.as_str(),
+        "str"
+            | "&str"
+            | "string"
+            | "bool"
+            | "boolean"
+            | "int"
+            | "integer"
+            | "number"
+            | "float"
+            | "bytes"
+            | "any"
+            | "none"
+            | "null"
+            | "true"
+            | "false"
+            | "read"
+            | "write"
+    )
 }
 
 /// Like [`redact_secrets`], then apply user-configured `extra_patterns`. Each
@@ -323,15 +354,16 @@ const SECRET_NAME: &str = r"(?:\w[\w-]*?)?(?:password|passwd|passphrase|secret|t
 
 /// Short secrets under a secret name, in the shapes agents write them: JSON
 /// and code with a quoted value, and YAML. A quoted value can't start with
-/// whitespace or a quote, so a search for the key itself
-/// (`rg "password: " src/ | rg "foo"`) has no value to lose.
+/// whitespace, a quote or punctuation, because then that quote closed a string
+/// ending in the name: `rg "password: " src/ | rg "foo"` searches for the key,
+/// and `print("with token:", "OK")` has no value to lose.
 fn key_value_patterns() -> Vec<String> {
     let key = format!(r#"(?i)((?:^|[^\w=-]){SECRET_NAME}(?:\\?["'])?\]?\s*(?:=>|:=|=|:)\s*"#);
     vec![
-        format!(r#"{key}")([^"'\s\\](?:[^"\\\n]|\\.)*)(")"#),
-        format!(r#"{key}')([^'"\s\\](?:[^'\\\n]|\\.)*)(')"#),
+        format!(r#"{key}")([^"'\s\\,;)\]}}+](?:[^"\\\n]|\\.)*)(")"#),
+        format!(r#"{key}')([^'"\s\\,;)\]}}+](?:[^'\\\n]|\\.)*)(')"#),
         // JSON inside a double-quoted shell argument: {\"password\":\"x\"}
-        format!(r#"{key}\\")([^"'\s\\](?:[^"\\\n]|\\[^"\n])*)(\\")"#),
+        format!(r#"{key}\\")([^"'\s\\,;)\]}}+](?:[^"\\\n]|\\[^"\n])*)(\\")"#),
         // A whole line of YAML with a one-word value, so prose keeps its words
         format!(r#"(?im)(^[ \t]*(?:-[ \t]+)?{SECRET_NAME}:[ \t]+)([^\s"'#]\S*)([ \t]*$)"#),
         // The same line echoed into a file. Scoped to echo and printf: a
@@ -1779,6 +1811,15 @@ mod tests {
             "aws sqs get-queue-attributes --query 'Attributes[?Key==`x`]' 2>&1",
             // A string that ends straight after the header name
             r#"let s = "authorization: " + token + "x""#,
+            // The same for a secret name, with the next argument after it
+            r#"print("with token:", "OK" if ok else "FAIL")"#,
+            // Types under a secret name, in source written by heredoc
+            "cat > m.py <<'EOF'\nclass Req(BaseModel):\n    token: str\n    api_key: str\nEOF",
+            "cat > a.ts <<'EOF'\n  password: string;\nEOF",
+            "cat > a.rs <<'EOF'\n    token: String,\n    secret: &str,\nEOF",
+            // An OpenAPI example value, and a GitHub workflow permission
+            r#"curl -d '{"token":"string"}' https://example.com"#,
+            "cat > ci.yml <<'EOF'\npermissions:\n  id-token: write\nEOF",
         ]);
     }
 
