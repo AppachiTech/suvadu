@@ -1040,6 +1040,17 @@ mod tests {
         assert!(out2.contains("API_KEY=***REDACTED***"));
     }
 
+    /// The trigger list knows only the built-in rules; a user's own format
+    /// has none of its words, and must be applied all the same.
+    #[test]
+    fn test_extra_patterns_run_without_a_trigger() {
+        let extra = vec![r"CORP-[A-Z0-9]{8}".to_string()];
+        assert_eq!(
+            redact_secrets_with_extra("deploy CORP-AB12CD34", &extra),
+            "deploy ***REDACTED***"
+        );
+    }
+
     #[test]
     fn test_extra_patterns_empty_is_noop() {
         assert_eq!(redact_secrets_with_extra("git status", &[]), "git status");
