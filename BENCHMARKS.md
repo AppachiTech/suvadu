@@ -528,6 +528,30 @@ It runs once per shell, at the first prompt, and never per command. The
 first line is the one subshell that reads the bindings; when Up has been
 rebound, nearly all of the rest is starting `suv`.
 
+### Redaction on the recording path, 1 November 2026
+
+Measured on **Apple M4 Max, 128 GB RAM, macOS 27.2, rustc 1.96.0**, release
+profile: 200 interleaved rounds of a whole `suv add` through a fresh process,
+0.5.2 against the unreleased changes on `releases/v0.5.3`, each binary with its
+own empty HOME. The search baseline above was not re-run: nothing here touches
+search.
+
+| Command recorded | 0.5.2 p50 / p95 | `releases/v0.5.3` p50 / p95 |
+|---|---:|---:|
+| `git status --short`, no trigger word | 13.5 ms / 15.1 ms | 7.6 ms / 8.9 ms |
+| `curl https://example.com`, has one | 13.1 ms / 14.7 ms | 15.0 ms / 16.5 ms |
+
+Compiling the redaction rules was most of what `suv add` cost, in a process
+that exists only to record one command. The branch has about twice as many
+rules, which took the second line to 23.0 ms before they were switched to ASCII
+word classes. The first line now skips them altogether: a command with none of
+the words in `TRIGGERS` (`src/redact.rs`) never compiles a rule.
+
+How often a command pays the second line depends on what it runs. Over one
+developer's history of 37,192 commands, 19% of agent commands and 6% of the
+rest held a trigger word. Over 37,147 of those commands, matching alone took
+6.1 µs per command on 0.5.2 and 6.7 µs here, trigger check included.
+
 ## Known gaps
 
 - **Ranking quality is not measured.** The judged set records which command

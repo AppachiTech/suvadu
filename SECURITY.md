@@ -257,16 +257,33 @@ Detected secret **values** are replaced with `***REDACTED***` before the
 command is stored. Coverage includes:
 
 - Sensitive environment-variable assignments (`*_TOKEN=`, `*_SECRET=`,
-  `*_PASSWORD=`, `AUTH=`, `*_API_KEY=`, …), gated so names like `AUTHOR_NAME`
-  or `PASSWORD_FILE` are not false-positived
-- Password CLI flags: `--password`, `--token`, `--secret`, `--api-key`, and
-  `-p<pw>` scoped to DB clients (`mysql`/`mysqldump`/`mariadb`)
-- Well-known key formats: AWS (`AKIA…`), GitHub (`ghp_…`), OpenAI/Anthropic
-  (`sk-…`), Slack, Stripe, npm, PyPI, Azure, and PEM private keys
-- `Authorization:` headers (Bearer/Basic/token) and `curl -u user:pass`
+  `*_PASSWORD=`, `*_PASS=`, `AUTH=`, `*_API_KEY=`, `APIKEY=`, `MYSQL_PWD=`, …),
+  gated so names like `AUTHOR_NAME`, `BYPASS` or `PASSWORD_FILE` are not
+  false-positived
+- Credential CLI flags: `--password`, `--token`, `--secret`, `--api-key`, and
+  named ones such as `--client-secret`, `--auth-token`, `--access-token`,
+  `--passphrase`, `--oauth2-bearer` and `--http-password`. The list is explicit
+  because `--with-token` and `--no-password` take no value.
+- Password flags scoped to their tool: `-p<pw>` for `mysql`/`mysqldump`/
+  `mariadb`, `redis-cli -a`, `-p` for `mongosh` and the Mongo tools, `sqlcmd -P`,
+  `-w` for the `ldap*` tools, `zip`/`unzip -P`, `az login -p`, `openssl -pass
+  pass:`, `gh secret set --body`, `kubectl --from-literal` and `fly secrets set`
+- Well-known key formats: AWS (`AKIA…`), GitHub (`ghp_…`), OpenAI/Anthropic/
+  OpenRouter (`sk-…`), Slack, Stripe, npm, PyPI, Azure, Google, GitLab, Hugging
+  Face, Groq, xAI, DigitalOcean, SendGrid, Linear, Notion, Sentry, PEM private
+  keys, and JWTs, every segment
+- A value of any length under a secret name in JSON, YAML or code
+  (`{"password":"…"}`, `password = "…"`, `api_key: …`), unless it names a type
+  or a setting (`token: str`, `id-token: write`)
+- `Authorization:` under any scheme, headers with a secret name (`x-api-key`,
+  `X-Auth-Token`, `PRIVATE-TOKEN`), `Cookie:` and `curl -b name=value`, as sent
+  with `-H`/`--header` or as a quoted key in code, so a search such as
+  `grep "Authorization: Bearer"` keeps its words; and `curl -u user:pass`
   (scoped to HTTP clients, so `docker run -u 1000:1000` is left intact)
 - Database connection-string passwords (`postgres://user:pass@host`),
   including passwords containing `@` and password-only URIs
+- URLs that are credentials: Slack and Discord webhooks, Telegram bot URLs, and
+  the `key=`, `apikey=`, `sig=` and `X-Amz-Signature=` of a query string
 - Long hex / base64 secrets that follow a secret-ish key name
 
 **Limitations** — redaction is best-effort pattern matching, not a guarantee:
@@ -274,10 +291,16 @@ command is stored. Coverage includes:
 - Novel or custom secret formats may not be detected. Use exclusion patterns
   (or a space prefix) for commands you never want recorded.
 - Redaction applies only to **newly recorded** commands; it does not
-  retroactively rewrite already-stored history.
+  retroactively rewrite already-stored history. A rule added in an upgrade does
+  not reach what was stored before it.
 - To keep recalled commands runnable, non-secret flags that merely look
   password-shaped (e.g. `docker run -p 8080:80`, `ssh -p 2222`) are
   intentionally **not** redacted.
+- A short value under a name that is ordinary elsewhere is kept: `"key":"id"`,
+  `"auth":"oauth"`, `SORT_KEY=name`, and so `OPENAI_KEY=abc` too. A long value
+  under those names is redacted.
+- The built-in rules run only on text holding one of a list of words, so that
+  recording `ls` doesn't compile them. `redaction.extra_patterns` always run.
 
 ### Risk rules and `suv guard`
 
