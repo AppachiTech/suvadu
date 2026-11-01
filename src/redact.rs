@@ -113,6 +113,8 @@ const SPAN: &str = r"(?:[^\n|;&]|&[^&\s])*?";
 /// - `prefix"value"` and `prefix'value'`: the quotes are kept and everything
 ///   between them is redacted, so `DB_PASSWORD="correct horse battery"` loses
 ///   the whole phrase, not just its first word.
+///   A quoted value can't start with whitespace: in `grep "PASSWORD=" .env`
+///   that quote closes the pattern, and what follows it is the next argument.
 /// - `prefix value`: `bare` should stop at a quote, so a value inside a quoted
 ///   argument (`-d "password=x"`) keeps its closing quote.
 ///
@@ -120,8 +122,8 @@ const SPAN: &str = r"(?:[^\n|;&]|&[^&\s])*?";
 /// group(3) = closing quote (quoted forms only).
 fn value_forms(flags: &str, prefix: &str, bare: &str) -> [String; 3] {
     [
-        format!(r#"{flags}({prefix}")([^"]+)(")"#),
-        format!(r"{flags}({prefix}')([^']+)(')"),
+        format!(r#"{flags}({prefix}")([^"\s][^"]*)(")"#),
+        format!(r"{flags}({prefix}')([^'\s][^']*)(')"),
         format!(r"{flags}({prefix})({bare})"),
     ]
 }
@@ -148,13 +150,14 @@ fn env_var_patterns() -> Vec<String> {
         BARE,
     )
     .into();
-    // Short spellings need a word boundary the names above do without: they
-    // turn up inside other words (`BYPASS=`), and a bare `PWD=` is the
-    // working directory. An unquoted `&` ends the value, in a shell word and
-    // in the query string `apikey=` is often found in.
+    // Short spellings need a word boundary the names above do without, since
+    // they turn up inside other words (`BYPASS=`). `PWD` is a directory unless
+    // named otherwise: `BUILD_PWD=/srv`, `MYSQL_PWD=<password>`. An unquoted
+    // `&` ends the value, in a shell word and in the query string `apikey=`
+    // is often found in.
     v.extend(value_forms(
         "(?i)",
-        r"(?:export\s+)?\b(?:(?:\w+_)?(?:PASS|APIKEY)|\w+_PWD)=",
+        r"(?:export\s+)?\b(?:(?:\w+_)?(?:PASS|APIKEY)|(?:MYSQL|DB|SQL|ADMIN|ROOT)_PWD)=",
         r#"[^\s"'&]+"#,
     ));
     v
@@ -366,11 +369,13 @@ fn auth_header_patterns() -> Vec<String> {
         // Authorization under any scheme, and Cookie. Again only when sent:
         // `grep "Authorization: Bearer"` holds no secret.
         format!(
-            r#"(?i)(\s(?:-H|--header)[=\s]?\s*['"](?:Proxy-)?(?:Authorization|Cookie):\s*{SCHEME})([^'"\n]+)(['"])"#
+            r#"(?i)(\s(?:-H|--header)[=\s]?\s*['"](?:Proxy-)?(?:Authorization|Cookie):\s*{SCHEME})([^'"\s][^'"\n]*)(['"])"#
         ),
         // The same as a key with a quoted value, in code or JSON. The quote
         // right after the colon leaves f"Bearer {token}" alone.
-        format!(r#"(?i)(\b(?:Authorization|Cookie)['"]?\s*:\s*['"]\s*{SCHEME})([^'"\n]+)(['"])"#),
+        format!(
+            r#"(?i)(\b(?:Authorization|Cookie)['"]?\s*:\s*['"]{SCHEME})([^'"\s][^'"\n]*)(['"])"#
+        ),
     ];
     // curl -b / --cookie name=value. Without a `=` it names a cookie file.
     v.extend(value_forms(
@@ -400,8 +405,9 @@ fn connection_string_patterns() -> Vec<String> {
         r"(discord(?:app)?\.com/api/webhooks/\d+/)([A-Za-z0-9_-]+)".to_string(),
         r"(api\.telegram\.org/(?:file/)?bot)(\d+:[A-Za-z0-9_-]+)".to_string(),
         // Keys and signatures in a query string, by exact name so `?sort_key=`
-        // and `?keyword=` stay. A signed URL is a credential until it expires.
-        r#"(?i)([?&](?:key|apikey|api-key|sig|signature|x-amz-signature|x-goog-signature)=)([^&\s"'#]+)"#
+        // and `?keyword=` stay, and not after `[`, which is a JMESPath filter.
+        // A signed URL is a credential until it expires.
+        r#"(?i)((?:[^\[\s]\?|&)(?:key|apikey|api-key|sig|signature|x-amz-signature|x-goog-signature)=)([^&\s"'#]+)"#
             .to_string(),
     ]
 }
@@ -1550,6 +1556,10 @@ mod tests {
                 "MYSQL_PWD=hunter2 mysql -u root",
                 "MYSQL_PWD=***REDACTED*** mysql -u root",
             ),
+            (
+                "DB_PWD=hunter2 ./migrate",
+                "DB_PWD=***REDACTED*** ./migrate",
+            ),
             ("export APIKEY=short1", "export APIKEY=***REDACTED***"),
             (
                 "docker run -e PASS=hunter2 app",
@@ -1749,6 +1759,26 @@ mod tests {
             "openssl enc -pass file:pw.txt -in x",
             "fly secrets list",
             "fly secrets unset OLD_NAME",
+        ]);
+    }
+
+    /// Each of these came out of running the rules over a real history, and
+    /// each is a command that would no longer say what ran.
+    #[test]
+    fn test_near_misses_from_real_commands_are_kept() {
+        assert_keeps(&[
+            // A directory, not a password
+            r#"_SUVADU_START_PWD="$PWD""#,
+            "BUILD_PWD=/srv/app ./run",
+            // A search for the assignment: the quote after `=` closes the
+            // pattern and opens nothing
+            r#"P1=$(grep "^DB_PASS=" .env | cut -d= -f2); P2=$(grep "^X=" b)"#,
+            r#"grep "PASSWORD=" .env | grep "foo""#,
+            // JMESPath filters aren't query strings
+            "aws ec2 describe-instances --query 'Reservations[*].Tags[?Key==`Name`].Value'",
+            "aws sqs get-queue-attributes --query 'Attributes[?Key==`x`]' 2>&1",
+            // A string that ends straight after the header name
+            r#"let s = "authorization: " + token + "x""#,
         ]);
     }
 
