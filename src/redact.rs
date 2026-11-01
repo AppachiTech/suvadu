@@ -240,6 +240,19 @@ fn api_key_patterns() -> Vec<String> {
         // into a heredoc). Without an END line, the BEGIN marker plus any
         // base64 body that follows it (a truncated paste).
         r"()(-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----(?:(?s:.*?)-----END [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----|(?:[A-Za-z0-9+/=\s:,-]*[A-Za-z0-9+/=:,-])?))",
+        // Google API key
+        r"()(\bAIza[0-9A-Za-z_-]{35})",
+        // GitLab personal, deploy, runner, trigger, CI job and service tokens
+        r"()(\bgl(?:pat|dt|rt|ptt|cbt|soat)-[A-Za-z0-9_-]{20,})",
+        // OpenRouter, which the OpenAI rule's run of alphanumerics can't reach
+        r"()(\bsk-or-v\d+-[A-Za-z0-9_-]{20,})",
+        // Hugging Face, Groq, Notion, DigitalOcean, Linear and xAI: a prefix
+        // and a long alphanumeric run, so names with more words don't match
+        r"()(\b(?:(?:hf|gsk|ntn|do[opr]_v1|lin_api|lin_oauth)_|xai-)[A-Za-z0-9]{30,})",
+        // Sentry auth tokens
+        r"()(\bsntry[su]_[A-Za-z0-9_=-]{30,})",
+        // SendGrid: SG.<id>.<secret>
+        r"()(\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})",
         // JWTs: every segment, up to the five of an encrypted one, and the
         // trailing dot of an unsigned one. Base64 JSON with no dots is data.
         r"()(\beyJ[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]+){1,4}\.?)",
@@ -351,6 +364,10 @@ fn connection_string_patterns() -> Vec<String> {
         // authority. The password stays inside the authority (no `/`, `?`,
         // `#`) so `host:8080/path?email=a@b` is not mistaken for credentials.
         r"(\b[A-Za-z][A-Za-z0-9+.-]*://[^/@\s:]*:)([^\s/?#]+)(@[^@\s/?#]+)".to_string(),
+        // URLs whose path is the credential: anyone holding one can post
+        r"(hooks\.slack\.com/services/)(T[A-Za-z0-9]+/B[A-Za-z0-9]+/[A-Za-z0-9]+)".to_string(),
+        r"(discord(?:app)?\.com/api/webhooks/\d+/)([A-Za-z0-9_-]+)".to_string(),
+        r"(api\.telegram\.org/(?:file/)?bot)(\d+:[A-Za-z0-9_-]+)".to_string(),
         // Keys and signatures in a query string, by exact name so `?sort_key=`
         // and `?keyword=` stay. A signed URL is a credential until it expires.
         r#"(?i)([?&](?:key|apikey|api-key|sig|signature|x-amz-signature|x-goog-signature)=)([^&\s"'#]+)"#
@@ -1500,6 +1517,99 @@ mod tests {
             "COMPASS=north ./run",
             "PASS_COUNT=3 ./run",
             "SORT_KEY=name ./run",
+        ]);
+    }
+
+    /// Fakes are split so secret scanners don't take them for real tokens.
+    #[test]
+    fn test_more_vendor_tokens_are_redacted() {
+        assert_redacts(&[
+            (
+                concat!("echo AI", "zaXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"),
+                "echo ***REDACTED***",
+            ),
+            (
+                concat!("echo gl", "pat-XXXXXXXXXXXXXXXXXXXX"),
+                "echo ***REDACTED***",
+            ),
+            (
+                concat!("echo sk-", "or-v1-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"),
+                "echo ***REDACTED***",
+            ),
+            (
+                concat!("echo hf", "_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"),
+                "echo ***REDACTED***",
+            ),
+            (
+                concat!("echo gs", "k_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"),
+                "echo ***REDACTED***",
+            ),
+            (
+                concat!("echo xa", "i-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"),
+                "echo ***REDACTED***",
+            ),
+            (
+                concat!("echo do", "p_v1_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"),
+                "echo ***REDACTED***",
+            ),
+            (
+                concat!("echo S", "G.XXXXXXXXXXXXXXXXXXXXXX.XXXXXXXXXXXXXXXXXXXXXX"),
+                "echo ***REDACTED***",
+            ),
+            (
+                concat!("echo li", "n_api_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"),
+                "echo ***REDACTED***",
+            ),
+            (
+                concat!("echo nt", "n_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"),
+                "echo ***REDACTED***",
+            ),
+            (
+                concat!("echo sn", "trys_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"),
+                "echo ***REDACTED***",
+            ),
+        ]);
+    }
+
+    /// The path of these URLs is the credential; the host stays readable.
+    #[test]
+    fn test_secret_urls_are_redacted() {
+        assert_redacts(&[
+            (
+                concat!(
+                    "curl -X POST https://hooks.sl",
+                    "ack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX"
+                ),
+                concat!("curl -X POST https://hooks.sl", "ack.com/services/***REDACTED***"),
+            ),
+            (
+                concat!(
+                    "export SLACK_WEBHOOK_URL=https://hooks.sl",
+                    "ack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX"
+                ),
+                concat!(
+                    "export SLACK_WEBHOOK_URL=https://hooks.sl",
+                    "ack.com/services/***REDACTED***"
+                ),
+            ),
+            (
+                "curl -X POST https://discord.com/api/webhooks/123456789012345678/XXXXXXXXXXXX",
+                "curl -X POST https://discord.com/api/webhooks/123456789012345678/***REDACTED***",
+            ),
+            (
+                "curl https://api.telegram.org/bot123456789:XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX/getMe",
+                "curl https://api.telegram.org/bot***REDACTED***/getMe",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn test_ordinary_names_near_vendor_prefixes_are_kept() {
+        assert_keeps(&[
+            "echo hf_model_name_for_the_new_release",
+            "ollama run xai-grok-2-latest",
+            "git checkout glpat-rotation-docs",
+            "curl https://hooks.slack.com/commands/T00000000/123",
         ]);
     }
 
