@@ -84,6 +84,7 @@ fn build_patterns() -> Vec<SecretPattern> {
         env_var_patterns(),
         cli_password_patterns(),
         api_key_patterns(),
+        key_value_patterns(),
         auth_header_patterns(),
         connection_string_patterns(),
     ];
@@ -242,6 +243,35 @@ fn api_key_patterns() -> Vec<String> {
     .into_iter()
     .map(String::from)
     .collect()
+}
+
+/// The last word of a name whose value is a secret however short it is, so
+/// `client_secret`, `accessToken` and `x-api-key` count, and `token_type`,
+/// `max_tokens` and `password_hint` don't. `key` and `auth` stay out because
+/// `"key":"id"` and `"auth":"oauth"` are ordinary, and `pwd` because it is
+/// usually the working directory; a long value under those names is caught
+/// by the long-value rule in [`api_key_patterns`].
+const SECRET_NAME: &str = r"(?:\w[\w-]*?)?(?:password|passwd|passphrase|secret|token|credential|(?:api|access|private|secret)[_-]?key)";
+
+/// Short secrets under a secret name, in the shapes agents write them: JSON
+/// and code with a quoted value, and YAML. A quoted value can't start with
+/// whitespace or a quote, so a search for the key itself
+/// (`rg "password: " src/ | rg "foo"`) has no value to lose.
+fn key_value_patterns() -> Vec<String> {
+    let key =
+        format!(r#"(?i)((?:^|[^\w=-]){SECRET_NAME}(?:\\?["'])?\]?\s*(?:=>|:=|=|:)\s*"#);
+    vec![
+        format!(r#"{key}")([^"'\s\\](?:[^"\\\n]|\\.)*)(")"#),
+        format!(r#"{key}')([^'"\s\\](?:[^'\\\n]|\\.)*)(')"#),
+        // JSON inside a double-quoted shell argument: {\"password\":\"x\"}
+        format!(r#"{key}\\")([^"'\s\\](?:[^"\\\n]|\\[^"\n])*)(\\")"#),
+        // A whole line of YAML with a one-word value, so prose keeps its words
+        format!(r#"(?im)(^[ \t]*(?:-[ \t]+)?{SECRET_NAME}:[ \t]+)([^\s"'#]\S*)([ \t]*$)"#),
+        // The same line echoed into a file. Scoped to echo and printf: a
+        // quoted `token: rotated` is a commit message or a search anywhere else.
+        format!(r#"(?i)(\b(?:echo|printf)\s+(?:-\w+\s+)*"{SECRET_NAME}:[ \t]*)([^\s"]+)(")"#),
+        format!(r#"(?i)(\b(?:echo|printf)\s+(?:-\w+\s+)*'{SECRET_NAME}:[ \t]*)([^\s']+)(')"#),
+    ]
 }
 
 /// Authorization headers and credentials in curl/wget/httpie commands
@@ -477,6 +507,7 @@ mod tests {
             env_var_patterns(),
             cli_password_patterns(),
             api_key_patterns(),
+            key_value_patterns(),
             auth_header_patterns(),
             connection_string_patterns(),
         ];
@@ -1102,6 +1133,117 @@ mod tests {
     #[test]
     fn test_base64_json_is_not_a_jwt() {
         assert_keeps(&["echo eyJmb28iOiJiYXIiLCJiYXoiOjF9 | base64 -d"]);
+    }
+
+    /// A password is usually far shorter than the 24 characters the
+    /// long-value rule asks for, and is no less a secret for it.
+    #[test]
+    fn test_short_secret_under_a_secret_name_is_redacted() {
+        assert_redacts(&[
+            // JSON bodies
+            (
+                r#"curl -d '{"email":"a@b.c","password":"hunter2"}' https://example.com/login"#,
+                r#"curl -d '{"email":"a@b.c","password":"***REDACTED***"}' https://example.com/login"#,
+            ),
+            (
+                r#"curl -d '{"password": "two words"}' https://example.com"#,
+                r#"curl -d '{"password": "***REDACTED***"}' https://example.com"#,
+            ),
+            (
+                r#"curl -d '{"apiKey":"short1","client_secret":"short2"}' https://example.com"#,
+                r#"curl -d '{"apiKey":"***REDACTED***","client_secret":"***REDACTED***"}' https://example.com"#,
+            ),
+            (
+                r#"curl -d '{"token":"short1","accessToken":"short2"}' https://example.com"#,
+                r#"curl -d '{"token":"***REDACTED***","accessToken":"***REDACTED***"}' https://example.com"#,
+            ),
+            // JSON inside a double-quoted shell argument
+            (
+                r#"curl -d "{\"password\":\"hunter2\"}" https://example.com"#,
+                r#"curl -d "{\"password\":\"***REDACTED***\"}" https://example.com"#,
+            ),
+            // Quotes inside the value don't end the masking early
+            (
+                r#"curl -d '{"password":"a\"b"}' https://example.com"#,
+                r#"curl -d '{"password":"***REDACTED***"}' https://example.com"#,
+            ),
+            (
+                r#"http POST example.com '{"password":"it's"}'"#,
+                r#"http POST example.com '{"password":"***REDACTED***"}'"#,
+            ),
+            // Code
+            (
+                r#"python3 -c "login({'password': 'hunter2'})""#,
+                r#"python3 -c "login({'password': '***REDACTED***'})""#,
+            ),
+            (
+                "python3 - <<'EOF'\npassword = \"hunter2\"\nEOF",
+                "python3 - <<'EOF'\npassword = \"***REDACTED***\"\nEOF",
+            ),
+            (
+                r#"node -e "const token = 'short1'""#,
+                r#"node -e "const token = '***REDACTED***'""#,
+            ),
+            (
+                r#"python3 -c "os.environ['API_KEY'] = 'short1'""#,
+                r#"python3 -c "os.environ['API_KEY'] = '***REDACTED***'""#,
+            ),
+            (
+                r#"go run . -e 'token := "short1"'"#,
+                r#"go run . -e 'token := "***REDACTED***"'"#,
+            ),
+            (
+                r#"php -r "login(['password' => 'hunter2']);""#,
+                r#"php -r "login(['password' => '***REDACTED***']);""#,
+            ),
+            // YAML written by heredoc or echo
+            (
+                "cat > config.yml <<'EOF'\ndb:\n  password: hunter2\n  host: db\nEOF",
+                "cat > config.yml <<'EOF'\ndb:\n  password: ***REDACTED***\n  host: db\nEOF",
+            ),
+            (
+                "echo 'password: hunter2' >> config.yml",
+                "echo 'password: ***REDACTED***' >> config.yml",
+            ),
+            (
+                r#"echo "api_key: short1" >> config.yml"#,
+                r#"echo "api_key: ***REDACTED***" >> config.yml"#,
+            ),
+            (
+                r"printf 'token: short1\n' > t.yml",
+                "printf 'token: ***REDACTED***' > t.yml",
+            ),
+        ]);
+    }
+
+    /// Searches for these names, and ordinary text about them, are not
+    /// secrets. Masking can't be undone, so each of these would be a command
+    /// that no longer says what ran.
+    #[test]
+    fn test_text_about_secrets_is_kept() {
+        assert_keeps(&[
+            // Searches
+            r#"grep -n '"password":' src/auth.py | sed 's/x/y/'"#,
+            r#"rg "password: " src/ | rg "foo""#,
+            "rg 'token = ' src | head",
+            "grep -rn api_key src",
+            "jq '.token' response.json",
+            r#"rg "password: required" docs/"#,
+            r#"git log --grep="token: rotation""#,
+            // Prose
+            r#"git commit -m "fix: password: must be 8 chars""#,
+            r#"git commit -m "token: rotated""#,
+            // Names that end in something other than the secret word
+            r#"curl -d '{"max_tokens":"100"}' https://example.com"#,
+            r#"curl -d '{"token_type":"bearer"}' https://example.com"#,
+            r#"curl -d '{"password_hint":"pet"}' https://example.com"#,
+            // Names too ordinary to treat a short value as secret
+            r#"curl -d '{"key":"id","sort_key":"name","auth":"oauth"}' https://example.com"#,
+            // `pwd` is the working directory far more often than a password
+            r#"curl -d '{"pwd":"/srv/app"}' https://example.com"#,
+            // Values that aren't strings
+            r#"curl -d '{"password":null,"token":true,"secret":1}' https://example.com"#,
+        ]);
     }
 
     /// Consolidated corpus: each (input, `must_be_absent`) pair locks in a known
