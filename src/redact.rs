@@ -284,7 +284,9 @@ fn key_value_patterns() -> Vec<String> {
 
 /// Authorization headers and credentials in curl/wget/httpie commands
 fn auth_header_patterns() -> Vec<String> {
-    vec![
+    // The scheme word of an Authorization header, kept so it stays readable.
+    const SCHEME: &str = r"(?:[A-Za-z][\w-]*\s+)?";
+    let mut v = vec![
         // Authorization: Bearer|Basic|token xxx — however it's passed:
         // curl -H / --header, httpie `Authorization:"Bearer xxx"`, JSON.
         r#"(?i)(\bAuthorization['"]?:\s*['"]?\s*(?:Bearer|Basic|token)\s+)([^'"}\s]+)"#.to_string(),
@@ -301,7 +303,28 @@ fn auth_header_patterns() -> Vec<String> {
         format!(
             r#"(?i)(\b(?:http|https|xh|xhs)(?:\s{SPAN})?\s(?:-a|--auth[=\s]|-u)\s*['"]?[^\s:'"]*:)([^\s'"]+)"#
         ),
-    ]
+        // A header with a secret name, whatever its length. Only after
+        // -H/--header: a quoted `token: x` anywhere else is text.
+        format!(r#"(?i)(\s(?:-H|--header)[=\s]?\s*"{SECRET_NAME}:[ \t]*)([^\s"]+)(")"#),
+        format!(r#"(?i)(\s(?:-H|--header)[=\s]?\s*'{SECRET_NAME}:[ \t]*)([^\s']+)(')"#),
+        // Authorization under any scheme, and Cookie. Again only when sent:
+        // `grep "Authorization: Bearer"` holds no secret.
+        format!(
+            r#"(?i)(\s(?:-H|--header)[=\s]?\s*['"](?:Proxy-)?(?:Authorization|Cookie):\s*{SCHEME})([^'"\n]+)(['"])"#
+        ),
+        // The same as a key with a quoted value, in code or JSON. The quote
+        // right after the colon leaves f"Bearer {token}" alone.
+        format!(
+            r#"(?i)(\b(?:Authorization|Cookie)['"]?\s*:\s*['"]\s*{SCHEME})([^'"\n]+)(['"])"#
+        ),
+    ];
+    // curl -b / --cookie name=value. Without a `=` it names a cookie file.
+    v.extend(value_forms(
+        "",
+        &format!(r"\bcurl(?:\s{SPAN})?\s(?:-b|--cookie)[=\s]\s*"),
+        r#"[^\s"'=]+=[^\s"']*"#,
+    ));
+    v
 }
 
 /// Connection strings and URLs with embedded passwords
@@ -318,6 +341,10 @@ fn connection_string_patterns() -> Vec<String> {
         // authority. The password stays inside the authority (no `/`, `?`,
         // `#`) so `host:8080/path?email=a@b` is not mistaken for credentials.
         r"(\b[A-Za-z][A-Za-z0-9+.-]*://[^/@\s:]*:)([^\s/?#]+)(@[^@\s/?#]+)".to_string(),
+        // Keys and signatures in a query string, by exact name so `?sort_key=`
+        // and `?keyword=` stay. A signed URL is a credential until it expires.
+        r#"(?i)([?&](?:key|apikey|api-key|sig|signature|x-amz-signature|x-goog-signature)=)([^&\s"'#]+)"#
+            .to_string(),
     ]
 }
 
@@ -1310,6 +1337,120 @@ mod tests {
             "tool --pass-through --host db",
             "llm --max-tokens 100",
             "kubectl run x --image-pull-secret regcred",
+        ]);
+    }
+
+    #[test]
+    fn test_secret_headers_are_redacted() {
+        assert_redacts(&[
+            (
+                r#"curl -H "x-api-key: short1" https://example.com"#,
+                r#"curl -H "x-api-key: ***REDACTED***" https://example.com"#,
+            ),
+            (
+                r#"curl -H "x-api-key:short1" https://example.com"#,
+                r#"curl -H "x-api-key:***REDACTED***" https://example.com"#,
+            ),
+            (
+                r#"curl -H "X-Auth-Token: short1" -H "X-Api-Key: short2" https://example.com"#,
+                r#"curl -H "X-Auth-Token: ***REDACTED***" -H "X-Api-Key: ***REDACTED***" https://example.com"#,
+            ),
+            (
+                "curl -H 'PRIVATE-TOKEN: short1' https://gitlab.example.com/api",
+                "curl -H 'PRIVATE-TOKEN: ***REDACTED***' https://gitlab.example.com/api",
+            ),
+            (
+                r#"wget --header="X-Auth-Token: short1" https://example.com"#,
+                r#"wget --header="X-Auth-Token: ***REDACTED***" https://example.com"#,
+            ),
+            (
+                r#"curl -H "Authorization: Bot short1" https://discord.com/api"#,
+                r#"curl -H "Authorization: Bot ***REDACTED***" https://discord.com/api"#,
+            ),
+            (
+                r#"curl -H "Authorization: ApiKey short1" https://example.com"#,
+                r#"curl -H "Authorization: ApiKey ***REDACTED***" https://example.com"#,
+            ),
+            (
+                r#"curl -H "Authorization: short1" https://example.com"#,
+                r#"curl -H "Authorization: ***REDACTED***" https://example.com"#,
+            ),
+            (
+                r#"curl -H "Authorization: AWS4-HMAC-SHA256 Credential=short1/x, Signature=short2" https://example.com"#,
+                r#"curl -H "Authorization: AWS4-HMAC-SHA256 ***REDACTED***" https://example.com"#,
+            ),
+            (
+                r#"curl -H "Proxy-Authorization: Digest short1" https://example.com"#,
+                r#"curl -H "Proxy-Authorization: Digest ***REDACTED***" https://example.com"#,
+            ),
+            (
+                r#"python3 -c "requests.get(u, headers={'Authorization': 'Bot short1'})""#,
+                r#"python3 -c "requests.get(u, headers={'Authorization': 'Bot ***REDACTED***'})""#,
+            ),
+        ]);
+    }
+
+    #[test]
+    fn test_cookies_are_redacted() {
+        assert_redacts(&[
+            (
+                r#"curl -H "Cookie: sessionid=short1; theme=dark" https://example.com"#,
+                r#"curl -H "Cookie: ***REDACTED***" https://example.com"#,
+            ),
+            (
+                r#"curl -b "session=short1" https://example.com"#,
+                r#"curl -b "***REDACTED***" https://example.com"#,
+            ),
+            (
+                "curl --cookie 'a=1; b=2' https://example.com",
+                "curl --cookie '***REDACTED***' https://example.com",
+            ),
+            (
+                "curl -b session=short1 https://example.com",
+                "curl -b ***REDACTED*** https://example.com",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn test_secret_query_params_are_redacted() {
+        assert_redacts(&[
+            (
+                r#"curl "https://example.com/x?key=short1""#,
+                r#"curl "https://example.com/x?key=***REDACTED***""#,
+            ),
+            (
+                r#"curl "https://example.com/x?a=1&apikey=short1&b=2""#,
+                r#"curl "https://example.com/x?a=1&apikey=***REDACTED***&b=2""#,
+            ),
+            (
+                r#"curl "https://acct.blob.core.windows.net/c/f?sv=2024&sig=short1""#,
+                r#"curl "https://acct.blob.core.windows.net/c/f?sv=2024&sig=***REDACTED***""#,
+            ),
+            (
+                r#"curl "https://b.s3.amazonaws.com/k?X-Amz-Signature=short1&X-Amz-Date=2026""#,
+                r#"curl "https://b.s3.amazonaws.com/k?X-Amz-Signature=***REDACTED***&X-Amz-Date=2026""#,
+            ),
+            (
+                "curl https://storage.googleapis.com/b/k?X-Goog-Signature=short1",
+                "curl https://storage.googleapis.com/b/k?X-Goog-Signature=***REDACTED***",
+            ),
+        ]);
+    }
+
+    /// Searching for a header is not sending one, a `-b` without `=` names a
+    /// cookie file, and a code header built from a variable holds no secret.
+    #[test]
+    fn test_header_shaped_text_is_kept() {
+        assert_keeps(&[
+            r#"grep -rn "Authorization: Bearer" src/"#,
+            "rg 'Authorization: Basic' .",
+            r#"rg "Cookie: session" src/"#,
+            "curl -b cookies.txt https://example.com",
+            "curl -c cookies.txt -b cookies.txt https://example.com",
+            r#"curl -H "Content-Type: application/json" -H "X-Request-Id: abc" https://example.com"#,
+            r#"python3 -c "h = {'Authorization': f'Bearer {token}'}""#,
+            r#"curl "https://example.com/x?keyword=foo&monkey=1&sort_key=name""#,
         ]);
     }
 
