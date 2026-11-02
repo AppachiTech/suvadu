@@ -88,7 +88,7 @@ governs it.
 | Sessions | shell sessions (id, **machine hostname**, creation time, tag), and agent sessions with their captured transcript events and the adapter checkpoints that record which transcript files were read and how far (for a Cursor conversation, which Cursor pushes event by event: a 64-bit fingerprint of each stored event, taken after redaction, so a repeated hook run is stored once, and the count of events seen); and, unless `agent.record_git_snapshots` is off, up to two **git snapshots** per agent session (`ai_snapshots`: when, the directory, the repository root, the commit and branch checked out, and up to 500 changed paths with their git status — never contents or diffs) | an agent session is removed with `suv agent delete-session <id>`, snapshots included; `suv gc` removes snapshots a day old whose session left no other record; a shell session row stays behind after its commands are deleted |
 | Summaries | session summaries written over MCP, with their cited evidence IDs, the session revision they were written from, and the caller-declared agent and model | their agent session is deleted — editing or deleting commands only marks a summary *stale*, it does not remove it |
 | Skills | shared skill documents; and, for each repo skill file you trusted, its project root, its path inside the project, a sha256 of its content and when you trusted it (`skill_trust` — never the file's text) | you run `suv skills remove`; a sync rewrites agent-side copies, not the stored row; `suv skills untrust` forgets a repository's trust |
-| Backups | full database copies from `suv backup`, the automatic pre-delete snapshot, and the pre-import snapshot taken by `suv import --from atuin-db` | **you delete the files yourself** |
+| Backups | full database copies from `suv backup`, the automatic pre-delete snapshot, the pre-import snapshot taken by `suv import --from atuin-db`, and the pre-redact snapshot taken by `suv redact` | **you delete the files yourself** |
 
 The `context` blob of a command recorded live carries `git_branch` — the
 branch checked out where the command started, or the short commit hash of a
@@ -199,6 +199,56 @@ with full-disk snapshots in play, even that is not a guarantee that the bytes
 are unrecoverable — full-disk encryption is the control that addresses that
 threat, not a row delete.
 
+### Masking what is already stored
+
+Redaction runs before a row is written, so a rule added in an upgrade does not
+reach older rows. `suv redact` applies today's rules to what is stored:
+commands, the prompt and branch in a command's context, failure output, agent
+prompts, replies and summaries, git snapshots, cached prompt files, and the
+`.db` files in `<data_dir>/backups/`, which keep the schema they were taken
+under. It uses each directory's `.suvadu.toml`, and runs even with
+`redaction.enabled = false`, because asking for it is asking for redaction.
+
+A value a rule masks is then masked wherever else it appears, so a secret that
+also sits in plain prose goes too. Only a literal value of at least 16
+characters spreads: `password=hunter2` says nothing about `grep hunter2`, and
+`${DB_PASSWORD}` is a reference rather than a secret. A secret that no rule
+recognises anywhere stays where it is.
+
+Masking works by pattern and **cannot be undone**, so:
+
+- `suv redact --dry-run` lists each row's first change, masked, and writes
+  nothing. It prints no secret value.
+- A real run asks first, then copies `history.db` to
+  `backups/preredact-<timestamp>.db`. If that copy fails, nothing is masked.
+  `--no-backup` skips it. Older backups are masked in place with no copy of
+  their own.
+- That copy **still holds every secret**. No later run masks it, and every run
+  names it until you delete it.
+
+**What it clears.** Rewriting a row is not enough: FTS5 marks a replaced term
+deleted without removing it, a shorter row leaves the old one's start in freed
+space, and stale copies sit in the unused space of pages that split as the row
+was recorded. So each changed file also has its search indexes rebuilt and is
+compacted with `VACUUM`, and the write-ahead log is emptied. The masked rows
+commit with a note in the database header that the file owes this compaction,
+so a run that stops in between is finished by the next one rather than
+reporting nothing to do. If another process is mid-read, the log empties when
+the last one exits, and the run says so.
+
+**What it does not reach.** The pre-redact copy, `suv export` files,
+`suv backup --out` copies, filesystem snapshots and Time Machine, your shell's
+own history file, and agents' transcript files. Bookmarks, notes and aliases
+are counted and left alone: you wrote them, and masking one would break it. The
+caveats under *Deleting data* apply here too: on a copy-on-write filesystem or
+an SSD, rewriting a file does not promise the old bytes are unrecoverable.
+
+Masking a stored secret does not make it safe. Anything that could read the file
+before could have copied it, so rotate any secret that is still in use.
+
+Agent summaries of sessions whose commands were masked read as stale afterwards,
+because the text they were written from has changed.
+
 ### Redaction and exclusions by ingestion path
 
 The same configuration governs every path that writes to the database.
@@ -281,7 +331,8 @@ command is stored. Coverage includes:
   `grep "Authorization: Bearer"` keeps its words; and `curl -u user:pass`
   (scoped to HTTP clients, so `docker run -u 1000:1000` is left intact)
 - Database connection-string passwords (`postgres://user:pass@host`),
-  including passwords containing `@` and password-only URIs
+  including passwords containing `@` and password-only URIs, and SQL's
+  `PASSWORD '…'` and `IDENTIFIED BY '…'`
 - URLs that are credentials: Slack and Discord webhooks, Telegram bot URLs, and
   the `key=`, `apikey=`, `sig=` and `X-Amz-Signature=` of a query string
 - Long hex / base64 secrets that follow a secret-ish key name
@@ -290,9 +341,9 @@ command is stored. Coverage includes:
 
 - Novel or custom secret formats may not be detected. Use exclusion patterns
   (or a space prefix) for commands you never want recorded.
-- Redaction applies only to **newly recorded** commands; it does not
-  retroactively rewrite already-stored history. A rule added in an upgrade does
-  not reach what was stored before it.
+- Redaction applies only to **newly recorded** commands. A rule added in an
+  upgrade does not reach what was stored before it until you run `suv redact`
+  (see *Masking what is already stored*).
 - To keep recalled commands runnable, non-secret flags that merely look
   password-shaped (e.g. `docker run -p 8080:80`, `ssh -p 2222`) are
   intentionally **not** redacted.
