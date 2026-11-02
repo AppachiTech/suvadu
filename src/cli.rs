@@ -116,6 +116,7 @@ Data:
   export       Export history to a file (JSON, JSONL, or CSV format)
   import       Import history from a file (JSONL, Zsh, Bash, or an Atuin database)
   delete       Bulk delete commands matching a pattern
+  redact       Mask secrets in history that is already stored
   gc           Remove orphaned data and compact the database
 
 AI integration:
@@ -595,6 +596,24 @@ pub enum Commands {
         before: Option<String>,
 
         /// Skip the automatic database backup taken before deleting
+        #[arg(long)]
+        no_backup: bool,
+    },
+
+    /// Mask secrets in history that is already stored
+    #[command(
+        after_help = "Recording masks secrets before they are stored, so this is for text recorded\nbefore a rule existed. It applies today's rules, and each project's .suvadu.toml,\nto commands, command context, failure output, agent prompts, replies and\nsummaries, git snapshots, cached prompts and the backups in the backups\ndirectory, even with redaction.enabled off. A value a rule masks is then masked\nwherever else it appears, if it is literal and at least 16 characters long.\nBookmarks, notes and aliases are only counted: you wrote those, and masking one\nwould break it.\n\nThis cannot be undone. It backs up history.db first; that copy still holds\nevery secret and no later run touches it, so delete it once you have checked\nthe result.\n\nExamples:\n  suv redact --dry-run  # List what would change\n  suv redact            # Mask, after a question"
+    )]
+    Redact {
+        /// Dry run (show what would change without changing anything)
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Skip confirmation prompt
+        #[arg(long, short)]
+        yes: bool,
+
+        /// Skip the automatic database backup taken before masking
         #[arg(long)]
         no_backup: bool,
     },

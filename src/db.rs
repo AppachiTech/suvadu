@@ -658,6 +658,21 @@ fn migrate_v7(conn: &Connection) -> DbResult<()> {
 /// checked and rebuilt the same way.
 const SEARCH_INDEXES: [&str; 2] = ["entries_fts", "entries_norm_fts"];
 
+/// The search indexes `conn` has. A backup keeps the schema it was taken
+/// under, so one from before v7 or v11 has fewer of them.
+fn search_indexes_in(conn: &Connection) -> DbResult<Vec<&'static str>> {
+    let mut indexes = Vec::with_capacity(SEARCH_INDEXES.len());
+    for index in SEARCH_INDEXES {
+        let exists = conn
+            .prepare_cached("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")?
+            .exists([index])?;
+        if exists {
+            indexes.push(index);
+        }
+    }
+    Ok(indexes)
+}
+
 /// Whether every search index holds exactly what `entries` does.
 ///
 /// Uses FTS5's thorough `integrity-check` (`rank = 1`), which compares an
@@ -666,7 +681,7 @@ const SEARCH_INDEXES: [&str; 2] = ["entries_fts", "entries_norm_fts"];
 /// The check reads only — it changes nothing — so `suv doctor` can run it.
 /// A mismatch in either index is `Ok(false)`; any other failure is an error.
 pub fn search_index_is_consistent(conn: &Connection) -> DbResult<bool> {
-    for index in SEARCH_INDEXES {
+    for index in search_indexes_in(conn)? {
         match conn.execute(
             &format!("INSERT INTO {index}({index}, rank) VALUES('integrity-check', 1)"),
             [],
@@ -687,7 +702,7 @@ pub fn search_index_is_consistent(conn: &Connection) -> DbResult<bool> {
 /// on the old index contents, so this is always safe; it holds the write
 /// lock meanwhile, about one and a half seconds per 100,000 entries.
 pub fn rebuild_search_index(conn: &Connection) -> DbResult<()> {
-    for index in SEARCH_INDEXES {
+    for index in search_indexes_in(conn)? {
         conn.execute(
             &format!("INSERT INTO {index}({index}) VALUES('rebuild')"),
             [],

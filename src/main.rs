@@ -217,6 +217,11 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
             before.as_deref(),
             no_backup,
         ),
+        Commands::Redact {
+            dry_run,
+            yes,
+            no_backup,
+        } => commands::redact::handle_redact(dry_run, yes, no_backup),
         Commands::Backup { out } => commands::entry::handle_backup(out.as_deref()),
         Commands::Gc {
             dry_run,

@@ -3,7 +3,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use regex::Regex;
 
 /// Placeholder that replaces detected secret values
-const REDACTED: &str = "***REDACTED***";
+pub const REDACTED: &str = "***REDACTED***";
 
 /// Compiled secret patterns — built once, reused forever. They use ASCII word
 /// classes and boundaries (`[[:word:]]`, `(?-u:\\b)`): Unicode's tables make a
@@ -97,6 +97,11 @@ fn may_hold_secret(command: &str) -> bool {
 /// Redact secrets from a command string.
 /// Returns the command with all detected secret values replaced by `***REDACTED***`.
 pub fn redact_secrets(command: &str) -> String {
+    redact_noting(command, &mut |_| {})
+}
+
+/// [`redact_secrets`], telling `found` each value it masks.
+fn redact_noting(command: &str, found: &mut dyn FnMut(&str)) -> String {
     if !may_hold_secret(command) {
         return command.to_string();
     }
@@ -109,6 +114,11 @@ pub fn redact_secrets(command: &str) -> String {
             .replace_all(&result, |caps: &regex::Captures| {
                 if caps.get(2).is_some_and(|m| is_not_a_secret(m.as_str())) {
                     return caps[0].to_string();
+                }
+                // A later rule can match the mask an earlier one left.
+                let value = caps.get(2).map_or(&caps[0], |m| m.as_str());
+                if value != REDACTED {
+                    found(value);
                 }
                 let prefix = caps.get(1).map_or("", |m| m.as_str());
                 let suffix = caps.get(3).map_or("", |m| m.as_str());
@@ -153,13 +163,27 @@ fn is_not_a_secret(value: &str) -> bool {
 /// patterns are skipped (they're validated at config load). Compilation is
 /// cached so the hot recording path doesn't recompile per command.
 pub fn redact_secrets_with_extra(command: &str, extra_patterns: &[String]) -> String {
-    let mut result = redact_secrets(command);
+    redact_secrets_noting(command, extra_patterns, &mut |_| {})
+}
+
+/// [`redact_secrets_with_extra`], telling `found` each value it masks.
+pub fn redact_secrets_noting(
+    command: &str,
+    extra_patterns: &[String],
+    found: &mut dyn FnMut(&str),
+) -> String {
+    let mut result = redact_noting(command, found);
     if extra_patterns.is_empty() {
         return result;
     }
     let compiled = compiled_extra(extra_patterns);
     for re in compiled.iter() {
-        result = re.replace_all(&result, REDACTED).to_string();
+        result = re
+            .replace_all(&result, |caps: &regex::Captures| {
+                found(&caps[0]);
+                REDACTED
+            })
+            .to_string();
     }
     result
 }
@@ -1938,6 +1962,32 @@ mod tests {
                 "ALTER USER app IDENTIFIED BY '***REDACTED***';",
             ),
         ]);
+    }
+
+    #[test]
+    fn test_noting_reports_each_value_and_masks_as_usual() {
+        let command = "deploy --token abc123 && curl -H 'Authorization: Bearer xyz789' corp-42";
+        let extra = vec!["corp-[0-9]+".to_string()];
+        let mut found = Vec::new();
+
+        let masked = redact_secrets_noting(command, &extra, &mut |value| {
+            found.push(value.to_string());
+        });
+
+        assert_eq!(masked, redact_secrets_with_extra(command, &extra));
+        found.sort();
+        assert_eq!(found, ["abc123", "corp-42", "xyz789"]);
+    }
+
+    #[test]
+    fn test_noting_skips_what_is_not_a_secret_and_a_quiet_command() {
+        let mut found = Vec::new();
+        let mut note = |value: &str| found.push(value.to_string());
+
+        redact_secrets_noting("TOKEN=true", &[], &mut note);
+        redact_secrets_noting("ls -la", &[], &mut note);
+
+        assert!(found.is_empty(), "{found:?}");
     }
 
     #[test]

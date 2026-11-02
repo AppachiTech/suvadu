@@ -901,7 +901,7 @@ fn clean_prompt_caches() -> u64 {
     process_old_files(&prompts_dir, PROMPT_CACHE_MAX_AGE_SECS, true)
 }
 
-fn get_prompts_dir() -> Option<std::path::PathBuf> {
+pub(super) fn get_prompts_dir() -> Option<std::path::PathBuf> {
     let dirs = crate::util::project_dirs()?;
     Some(dirs.data_dir().join("prompts"))
 }

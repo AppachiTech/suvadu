@@ -8,6 +8,7 @@ mod followups;
 mod notes;
 mod output;
 mod ranking;
+mod redaction;
 mod skill_trust;
 mod skills;
 mod snapshots;
@@ -18,6 +19,7 @@ mod tags;
 pub use capture::{CaptureRecordStats, PLACEHOLDER_IMPORT_HOSTNAME, RESTORED_AT_KEY};
 pub use followups::Run;
 pub use ranking::Followers;
+pub use redaction::{KeptSecrets, Mask, RedactionPlan, COMMANDS};
 pub use skills::is_valid_skill_name;
 pub use snapshots::ORPHAN_SNAPSHOT_AGE_MS;
 

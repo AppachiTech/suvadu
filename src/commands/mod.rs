@@ -7,6 +7,7 @@ pub mod entry;
 pub mod guard;
 pub mod history;
 pub mod picker;
+pub mod redact;
 pub mod replay;
 pub mod search;
 pub mod session;

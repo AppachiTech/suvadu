@@ -1354,6 +1354,37 @@ static FEATURES: &[Feature] = &[
         ..BASE
     },
     Feature {
+        id: FeatureId("redact"),
+        category: MANAGE,
+        title: "Mask stored secrets",
+        summary: "Mask secrets already in your history",
+        description: "Apply today's redaction rules to what is already stored.",
+        command: "suv redact --dry-run",
+        synonyms: &[
+            "redact",
+            "mask",
+            "secret",
+            "password",
+            "token",
+            "leaked",
+            "scrub",
+            "clean history",
+        ],
+        command_paths: &["redact"],
+        guide: &[
+            "Preview with --dry-run first: it lists every change, masked, and writes nothing.",
+            "Without it, suv redact asks, backs up the database, then masks the database, the \
+             backups beside it and cached prompts. It cannot be undone.",
+            "The new backup still holds every secret, so delete it once you have checked the \
+             result. Bookmarks, notes and aliases are only counted.",
+        ],
+        examples: &[
+            ex("suv redact --dry-run", "Preview"),
+            ex("suv redact", "Mask, after a question"),
+        ],
+        ..BASE
+    },
+    Feature {
         id: FeatureId("gc"),
         category: MANAGE,
         title: "Clean up the database",
@@ -1845,6 +1876,7 @@ mod tests {
         for id in [
             "import",
             "delete",
+            "redact",
             "gc",
             "update",
             "uninstall",
