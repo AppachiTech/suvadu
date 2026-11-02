@@ -38,6 +38,7 @@ const TRIGGERS: &[&str] = &[
     "key",
     "cookie",
     "login",
+    "identified by",
     "mysql",
     "mariadb",
     "redis-cli",
@@ -282,6 +283,8 @@ fn cli_password_patterns() -> Vec<String> {
         // group(1) = "<client> ... -p", group(2) = the password value.
         format!(r"((?-u:\b)(?:mysql|mysqldump|mysqladmin|mariadb)(?:\s{SPAN})?\s-p)([^\s-]\S*)"),
     ];
+    // SQL: `CREATE ROLE app LOGIN PASSWORD 'x'`, `ALTER USER app IDENTIFIED BY 'x'`.
+    v.push(r"(?i)((?-u:\b)(?:PASSWORD|IDENTIFIED\s+BY)\s+')([^'\s][^']*)(')".to_string());
     // --password / --token / --secret / --api-key, `=` or space separated
     v.extend(value_forms("", r"--password[=\s]", BARE));
     v.extend(value_forms("", r"--token[=\s]", BARE));
@@ -1920,8 +1923,27 @@ mod tests {
     /// list leaves its rule unreachable and a secret stored as typed, and
     /// nothing else would show that: other tables' commands hold several.
     #[test]
+    fn test_sql_passwords_are_redacted() {
+        assert_redacts(&[
+            (
+                "CREATE ROLE app LOGIN PASSWORD 'hunter2';",
+                "CREATE ROLE app LOGIN PASSWORD '***REDACTED***';",
+            ),
+            (
+                "psql -c \"create user app with password 'hunter2'\"",
+                "psql -c \"create user app with password '***REDACTED***'\"",
+            ),
+            (
+                "ALTER USER app IDENTIFIED BY 'hunter2';",
+                "ALTER USER app IDENTIFIED BY '***REDACTED***';",
+            ),
+        ]);
+    }
+
+    #[test]
     fn test_each_trigger_reaches_its_rule() {
         let commands = [
+            "ALTER USER app IDENTIFIED BY 'fake'",
             "DB_PASS=fake",
             "ROOT_PWD=fake",
             "SECRET=fake",
