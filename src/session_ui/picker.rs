@@ -315,6 +315,7 @@ enum SessionColumn {
     Preview,
     Tag,
     Kind,
+    Started,
     LastActive,
     Agent,
     Model,
@@ -332,6 +333,7 @@ impl SessionColumn {
             Self::Preview => "Preview",
             Self::Tag => "Tag",
             Self::Kind => "Type",
+            Self::Started => "Started",
             Self::LastActive => "Last Active",
             Self::Agent => "Agent / Host",
             Self::Model => "Model",
@@ -342,17 +344,19 @@ impl SessionColumn {
         }
     }
 
-    const fn constraint(self) -> Constraint {
+    const fn constraint(self, width: u16) -> Constraint {
         match self {
+            // A UUID, which is what an ID is once its agent prefix is gone.
+            Self::Id if width >= FULL_ID_WIDTH => Constraint::Length(36),
             Self::Id => Constraint::Percentage(18),
             Self::Project | Self::Agent => Constraint::Length(14),
             Self::Preview => Constraint::Percentage(26),
             Self::Tag | Self::Model => Constraint::Length(10),
             Self::Kind | Self::Commands => Constraint::Length(5),
-            Self::LastActive => Constraint::Length(12),
+            Self::Started | Self::LastActive => Constraint::Length(12),
             Self::Tokens => Constraint::Length(7),
             Self::Capture => Constraint::Length(9),
-            Self::Duration => Constraint::Min(7),
+            Self::Duration => Constraint::Min(8),
         }
     }
 
@@ -362,7 +366,7 @@ impl SessionColumn {
             Self::Project | Self::Tag => Style::default().fg(t.primary),
             Self::Preview => Style::default().fg(t.text),
             Self::Kind | Self::Agent | Self::Commands => Style::default().fg(t.text_secondary),
-            Self::LastActive | Self::Duration => Style::default().fg(t.text_muted),
+            Self::Started | Self::LastActive | Self::Duration => Style::default().fg(t.text_muted),
             Self::Model => Style::default().fg(t.badge_executor),
             Self::Tokens => Style::default().fg(t.info),
             Self::Capture => Style::default().fg(t.warning),
@@ -379,6 +383,7 @@ impl SessionColumn {
                 s.id.strip_prefix("claude-")
                     .or_else(|| s.id.strip_prefix("opencode-"))
                     .or_else(|| s.id.strip_prefix("cursor-"))
+                    .or_else(|| s.id.strip_prefix("codex-"))
                     .unwrap_or(&s.id)
                     .to_owned()
             }
@@ -386,13 +391,8 @@ impl SessionColumn {
             Self::Preview => s.preview.clone().unwrap_or_else(|| "—".into()),
             Self::Tag => s.tag_name.clone().unwrap_or_else(|| "—".into()),
             Self::Kind => s.kind.to_string(),
-            Self::LastActive => Local
-                .timestamp_millis_opt(crate::util::normalize_display_ms(s.last_activity_at))
-                .single()
-                .map_or_else(
-                    || "??-?? ??:??".into(),
-                    |dt| dt.format("%m-%d %H:%M").to_string(),
-                ),
+            Self::Started => local_minute(s.first_activity_at),
+            Self::LastActive => local_minute(s.last_activity_at),
             Self::Agent => s.agent.as_deref().unwrap_or(&s.hostname).to_owned(),
             Self::Model => compact_model(s),
             Self::Tokens => format_tokens(s),
@@ -420,6 +420,16 @@ impl SessionColumn {
     }
 }
 
+fn local_minute(ms: i64) -> String {
+    Local
+        .timestamp_millis_opt(crate::util::normalize_display_ms(ms))
+        .single()
+        .map_or_else(
+            || "??-?? ??:??".into(),
+            |dt| dt.format("%m-%d %H:%M").to_string(),
+        )
+}
+
 /// Last path component, so a row reads `suvadu` rather than a long home path.
 fn project_name(cwd: &str) -> String {
     let trimmed = cwd.trim_end_matches('/');
@@ -434,13 +444,17 @@ fn project_name(cwd: &str) -> String {
         .to_owned()
 }
 
+/// From this width the table has room for a whole ID and a start time and
+/// still leaves the preview about 30 columns.
+const FULL_ID_WIDTH: u16 = 190;
+
 /// Which columns a terminal this wide shows. Project, preview, time and
 /// agent are what actually tell two rows apart, so they survive every width;
 /// token counts and durations are the first to go.
 const fn session_columns(width: u16) -> &'static [SessionColumn] {
     use SessionColumn::{
-        Agent, Capture, Commands, Duration, Id, Kind, LastActive, Model, Preview, Project, Tag,
-        Tokens,
+        Agent, Capture, Commands, Duration, Id, Kind, LastActive, Model, Preview, Project, Started,
+        Tag, Tokens,
     };
     const NARROW: &[SessionColumn] = &[Id, Project, Preview, LastActive, Agent];
     const MEDIUM: &[SessionColumn] = &[
@@ -450,12 +464,18 @@ const fn session_columns(width: u16) -> &'static [SessionColumn] {
         Id, Project, Preview, Tag, Kind, LastActive, Agent, Model, Tokens, Commands, Capture,
         Duration,
     ];
+    const FULL: &[SessionColumn] = &[
+        Id, Project, Preview, Tag, Kind, Started, LastActive, Agent, Model, Tokens, Commands,
+        Capture, Duration,
+    ];
     if width < 100 {
         NARROW
     } else if width < 140 {
         MEDIUM
-    } else {
+    } else if width < FULL_ID_WIDTH {
         WIDE
+    } else {
+        FULL
     }
 }
 
@@ -592,7 +612,7 @@ impl PickerApp {
             .map(|&idx| Self::build_session_row(&self.sessions[idx], t, area.width))
             .collect();
 
-        let widths = columns.iter().map(|column| column.constraint());
+        let widths = columns.iter().map(|column| column.constraint(area.width));
 
         let table = Table::new(rows, widths)
             .header(table_header)
@@ -1322,6 +1342,46 @@ mod tests {
         assert_eq!(
             cell(&session_row_values(&gapped, 200), "Capture"),
             "gaps: 1"
+        );
+    }
+
+    fn expected_minute(ms: i64) -> String {
+        Local
+            .timestamp_millis_opt(ms)
+            .unwrap()
+            .format("%m-%d %H:%M")
+            .to_string()
+    }
+
+    /// A terminal wide enough has room for the whole ID, so a row can be
+    /// told apart by its ID alone, and for when the session started as well
+    /// as when it was last active.
+    #[test]
+    fn a_wide_terminal_shows_the_whole_id_and_when_the_session_started() {
+        let started = 1_700_000_000_000;
+        let ended = started + 3 * 3_600_000;
+        let summary = SessionSummary {
+            first_activity_at: started,
+            last_activity_at: ended,
+            ..make_summary("claude-9f3c1d2e-4b5a-4c6d-8e7f-0a1b2c3d4e5f", 3)
+        };
+        let mut app = PickerApp::new(vec![summary]);
+        let screen = crate::test_utils::render_to_text(190, 20, |f| app.render_picker(f));
+        assert!(screen.contains("Started"), "{screen}");
+        assert!(
+            screen.contains("9f3c1d2e-4b5a-4c6d-8e7f-0a1b2c3d4e5f"),
+            "{screen}"
+        );
+        assert!(screen.contains(&expected_minute(started)), "{screen}");
+        assert!(screen.contains(&expected_minute(ended)), "{screen}");
+    }
+
+    #[test]
+    fn a_codex_id_drops_its_agent_prefix_like_the_others() {
+        let summary = make_summary("codex-01a07538-192c-7193-abe7-f488f17a7de2", 1);
+        assert_eq!(
+            cell(&session_row_values(&summary, 200), "Session"),
+            "01a07538-192c-7193-abe7-f488f17a7de2"
         );
     }
 

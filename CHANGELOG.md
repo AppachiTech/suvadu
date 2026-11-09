@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - **Recording is faster for most commands** — every recorded command is a new process, and each one compiled all the redaction rules, even for `ls`, which was most of what `suv add` cost. A command with none of the words the rules need now skips them: 7.6 ms p50 against 13.5 ms in 0.5.2 on the machine in `BENCHMARKS.md`. One that needs them takes 15.0 ms against 13.1 ms, because there are about twice as many rules.
+- **`suv sessions` shows the whole session ID and when each session started** — on a terminal at least 190 columns wide, the Session column fits a whole ID instead of cutting it at a fifth of the width, and a Started column sits beside Last Active. Codex IDs drop their `codex-` prefix like Claude Code, OpenCode and Cursor IDs, since the Agent column already says which agent it was, and the Duration header is no longer cut to `Duratio`. Narrower terminals show the same columns as before.
 
 ### Fixed
 - **Searching for a secret's name keeps the whole command** — in `grep "PASSWORD=" .env | grep "foo"`, the quote closing the pattern was read as opening a value, and everything up to the next quote was masked. A quoted value can no longer start with whitespace.
