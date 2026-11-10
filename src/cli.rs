@@ -1128,7 +1128,10 @@ pub enum SkillsCommands {
         scope: Option<String>,
     },
 
-    /// Edit an existing skill's content
+    /// Edit an existing skill's content, or rename it or move it to another scope
+    #[command(
+        after_help = "Examples:\n  suv skills edit deploy --body - < deploy.md\n  suv skills edit deploy --rename deploy-checklist\n  suv skills edit deploy --move-to here"
+    )]
     Edit {
         /// Skill name
         name: String,
@@ -1144,6 +1147,12 @@ pub enum SkillsCommands {
         /// Replace triggers with these (repeatable). Omit to leave unchanged
         #[arg(long = "trigger")]
         triggers: Vec<String>,
+        /// Give the skill a new name (letters, digits, '-' and '_')
+        #[arg(long, value_name = "NEW_NAME")]
+        rename: Option<String>,
+        /// Move the skill to "global", "here" (current directory), or a directory path
+        #[arg(long, value_name = "SCOPE")]
+        move_to: Option<String>,
     },
 
     /// Remove a skill from the library (generated agent files stay until the

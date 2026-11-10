@@ -44,17 +44,20 @@ pub fn is_valid_skill_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+fn invalid_name(name: &str) -> DbError {
+    DbError::Validation(format!(
+        "invalid skill name '{name}' — names may only contain letters, digits, '-', and '_' \
+         (max 128 chars); this keeps them safe to use as file paths during `suv skills sync`"
+    ))
+}
+
 impl Repository {
     /// Create a new skill. Fails with a `UNIQUE` constraint violation if a
     /// skill with the same `(name, scope)` already exists — callers should
     /// use [`Repository::update_skill`] to edit an existing one.
     pub fn create_skill(&self, new: &NewSkill) -> DbResult<Skill> {
         if !is_valid_skill_name(&new.name) {
-            return Err(DbError::Validation(format!(
-                "invalid skill name '{}' — names may only contain letters, digits, '-', and '_' \
-                 (max 128 chars); this keeps them safe to use as file paths during `suv skills sync`",
-                new.name
-            )));
+            return Err(invalid_name(&new.name));
         }
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().timestamp_millis();
@@ -126,6 +129,43 @@ impl Repository {
         }
 
         self.get_skill(name, scope)
+    }
+
+    /// Rename a skill, move it to another scope, or both, keeping its id,
+    /// content and history. Bumps `version` and `updated_at`. Returns `None`
+    /// if no skill matches `(name, scope)`, and fails if `new_name` is not a
+    /// valid name or `(new_name, new_scope)` is taken by a skill in any
+    /// status. Files generated under the old name or scope are left for the
+    /// next sync to remove, as after [`Repository::delete_skill`].
+    pub fn move_skill(
+        &self,
+        name: &str,
+        scope: &str,
+        new_name: &str,
+        new_scope: &str,
+    ) -> DbResult<Option<Skill>> {
+        if self.get_skill(name, scope)?.is_none() {
+            return Ok(None);
+        }
+        if !is_valid_skill_name(new_name) {
+            return Err(invalid_name(new_name));
+        }
+        if (new_name, new_scope) != (name, scope) && self.get_skill(new_name, new_scope)?.is_some()
+        {
+            return Err(DbError::Validation(format!(
+                "a skill named '{new_name}' already exists in scope '{new_scope}'"
+            )));
+        }
+        let now = chrono::Utc::now().timestamp_millis();
+        let changed = self.conn.execute(
+            "UPDATE skills SET name = ?1, scope = ?2, version = version + 1, updated_at = ?3
+             WHERE name = ?4 AND scope = ?5",
+            params![new_name, new_scope, now, name, scope],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.get_skill(new_name, new_scope)
     }
 
     /// Create a skill, or update it in place if `(name, scope)` already
@@ -451,6 +491,92 @@ mod tests {
         assert_eq!(updated.body, "new body");
         assert_eq!(updated.description, "s1 description"); // unchanged
         assert_eq!(updated.triggers, vec!["deploy", "release"]); // unchanged
+    }
+
+    #[test]
+    fn move_skill_renames_and_rescopes_keeping_its_content() {
+        let (_dir, repo) = test_repo();
+        let original = repo
+            .create_skill(&new_skill(
+                "deploy",
+                SKILL_SCOPE_GLOBAL,
+                SKILL_STATUS_ACTIVE,
+            ))
+            .unwrap();
+        let moved = repo
+            .move_skill(
+                "deploy",
+                SKILL_SCOPE_GLOBAL,
+                "deploy-checklist",
+                "/work/app",
+            )
+            .unwrap()
+            .expect("the skill exists");
+        assert_eq!(moved.name, "deploy-checklist");
+        assert_eq!(moved.scope, "/work/app");
+        assert_eq!(moved.id, original.id);
+        assert_eq!(moved.body, original.body);
+        assert_eq!(moved.triggers, original.triggers);
+        assert_eq!(moved.version, 2);
+        assert!(repo
+            .get_skill("deploy", SKILL_SCOPE_GLOBAL)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn move_skill_refuses_a_name_already_taken_in_the_target_scope() {
+        let (_dir, repo) = test_repo();
+        repo.create_skill(&new_skill(
+            "deploy",
+            SKILL_SCOPE_GLOBAL,
+            SKILL_STATUS_ACTIVE,
+        ))
+        .unwrap();
+        // Taken even though it is only waiting for review.
+        repo.create_skill(&new_skill("ship", SKILL_SCOPE_GLOBAL, SKILL_STATUS_PENDING))
+            .unwrap();
+        let err = repo
+            .move_skill("deploy", SKILL_SCOPE_GLOBAL, "ship", SKILL_SCOPE_GLOBAL)
+            .unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        assert!(repo
+            .get_skill("deploy", SKILL_SCOPE_GLOBAL)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn move_skill_rejects_a_name_unsafe_as_a_path() {
+        let (_dir, repo) = test_repo();
+        repo.create_skill(&new_skill(
+            "deploy",
+            SKILL_SCOPE_GLOBAL,
+            SKILL_STATUS_ACTIVE,
+        ))
+        .unwrap();
+        let err = repo
+            .move_skill(
+                "deploy",
+                SKILL_SCOPE_GLOBAL,
+                "../escape",
+                SKILL_SCOPE_GLOBAL,
+            )
+            .unwrap_err();
+        assert!(matches!(err, DbError::Validation(_)), "{err}");
+        assert!(repo
+            .get_skill("deploy", SKILL_SCOPE_GLOBAL)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn move_skill_returns_none_for_a_missing_skill() {
+        let (_dir, repo) = test_repo();
+        assert!(repo
+            .move_skill("missing", SKILL_SCOPE_GLOBAL, "other", SKILL_SCOPE_GLOBAL)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

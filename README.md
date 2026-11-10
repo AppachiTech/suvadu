@@ -165,6 +165,7 @@ suv agent sessions          # List captured Codex/Claude sessions and reported t
 suv skills                  # Interactive skills management (browse, add, edit, sync, review)
 suv skills add my-skill     # Add a skill any MCP-capable agent can read
 suv skills sync             # Materialize skills into Claude Code/Cursor/Codex
+suv skills edit my-skill --rename new-name   # Rename a skill (--move-to here: change its scope)
 suv skills trust            # Trust this repo's .suvadu/skills/*.md so sync writes them
 suv bookmarks get box --set host=db1   # Print a bookmark with its {{placeholders}} filled
 ```

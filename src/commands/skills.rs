@@ -58,13 +58,19 @@ fn handle_skills_with_repo(
             description,
             body,
             triggers,
+            rename,
+            move_to,
         } => handle_edit(
             repo,
             &name,
             scope.as_deref(),
-            description.as_deref(),
-            body.as_deref(),
-            &triggers,
+            &SkillEdit {
+                description: description.as_deref(),
+                body: body.as_deref(),
+                triggers: &triggers,
+                rename: rename.as_deref(),
+                move_to: move_to.as_deref(),
+            },
         ),
         SkillsCommands::Rm { name, scope } => handle_rm(repo, &name, scope.as_deref()),
         SkillsCommands::Disable { name, scope } => {
@@ -696,36 +702,83 @@ fn handle_show(
     Ok(())
 }
 
+/// What `suv skills edit` changes. `None` and an empty `triggers` leave
+/// that part as it is.
+#[derive(Default)]
+struct SkillEdit<'a> {
+    description: Option<&'a str>,
+    body: Option<&'a str>,
+    triggers: &'a [String],
+    rename: Option<&'a str>,
+    /// The new scope, given as `--scope` is: "global", "here" or a path.
+    move_to: Option<&'a str>,
+}
+
 fn handle_edit(
     repo: &Repository,
     name: &str,
     scope: Option<&str>,
-    description: Option<&str>,
-    body: Option<&str>,
-    triggers: &[String],
+    change: &SkillEdit,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let existing = resolve_target(repo, name, scope)?;
-    let body = match body {
+    let body = match change.body {
         Some("-") => Some(read_stdin_to_string()?),
         other => other.map(str::to_string),
     };
-    let triggers_arg = if triggers.is_empty() {
-        None
-    } else {
-        Some(triggers)
+    let triggers = (!change.triggers.is_empty()).then_some(change.triggers);
+    let new_name = change.rename.unwrap_or(&existing.name);
+    let new_scope = match change.move_to {
+        Some(target) => resolve_scope(Some(target))?,
+        None => existing.scope.clone(),
     };
+    let moving = new_name != existing.name || new_scope != existing.scope;
+    let content = change.description.is_some() || body.is_some() || triggers.is_some();
 
-    let updated = repo
-        .update_skill(
+    // One step: when the move can't happen, the content stays as it was.
+    let tx = repo.transaction()?;
+    let edited = if content || !moving {
+        repo.update_skill(
             &existing.name,
             &existing.scope,
-            description,
+            change.description,
             body.as_deref(),
-            triggers_arg,
+            triggers,
         )?
-        .ok_or("skill disappeared during edit")?;
-    println!("✓ Skill '{}' updated (v{})", updated.name, updated.version);
+        .ok_or("skill disappeared during edit")?
+    } else {
+        existing.clone()
+    };
+    let updated = if moving {
+        repo.move_skill(&edited.name, &edited.scope, new_name, &new_scope)?
+            .ok_or("skill disappeared during edit")?
+    } else {
+        edited
+    };
+    tx.commit()?;
+
+    if moving {
+        println!("{}", move_notice(&existing, &updated));
+    } else {
+        println!("✓ Skill '{}' updated (v{})", updated.name, updated.version);
+    }
     Ok(())
+}
+
+/// What renaming or moving a skill did, and what it leaves for a sync.
+pub fn move_notice(old: &Skill, new: &Skill) -> String {
+    let mut done = Vec::new();
+    if old.name != new.name {
+        done.push(format!("renamed to '{}'", new.name));
+    }
+    if old.scope != new.scope {
+        done.push(format!("moved from {} to {}", old.scope, new.scope));
+    }
+    format!(
+        "✓ Skill '{}' {} (v{})\n  Run `suv skills sync` to write it to its new place. As after `suv skills rm`, files\n  generated under its old name or scope stay until a sync, or `suv skills cleanup`,\n  runs where they were written.",
+        old.name,
+        done.join(" and "),
+        new.version
+    )
 }
 
 /// What removing a skill from the library does *not* do. Deleting the row
@@ -1290,11 +1343,52 @@ mod tests {
     fn edit_updates_body_and_bumps_version() {
         let (_dir, repo) = test_repo();
         add(&repo, "s1", None, "old body").unwrap();
-        handle_edit(&repo, "s1", None, None, Some("new body"), &[]).unwrap();
+        let change = SkillEdit {
+            body: Some("new body"),
+            ..SkillEdit::default()
+        };
+        handle_edit(&repo, "s1", None, &change).unwrap();
 
         let skill = resolve_target(&repo, "s1", None).unwrap();
         assert_eq!(skill.body, "new body");
         assert_eq!(skill.version, 2);
+    }
+
+    #[test]
+    fn edit_renames_and_moves_a_skill_along_with_its_content() {
+        let (_dir, repo) = test_repo();
+        add(&repo, "s1", None, "old body").unwrap();
+        let change = SkillEdit {
+            body: Some("new body"),
+            rename: Some("s2"),
+            move_to: Some("/work/proj"),
+            ..SkillEdit::default()
+        };
+        handle_edit(&repo, "s1", None, &change).unwrap();
+
+        assert!(repo.get_skill("s1", SKILL_SCOPE_GLOBAL).unwrap().is_none());
+        let moved = repo.get_skill("s2", "/work/proj").unwrap().unwrap();
+        assert_eq!(moved.body, "new body");
+    }
+
+    /// The content change and the move are one step: when the move can't
+    /// happen, the content is left as it was too.
+    #[test]
+    fn an_edit_that_cannot_rename_changes_nothing() {
+        let (_dir, repo) = test_repo();
+        add(&repo, "s1", None, "old body").unwrap();
+        add(&repo, "s2", None, "other body").unwrap();
+        let change = SkillEdit {
+            body: Some("new body"),
+            rename: Some("s2"),
+            ..SkillEdit::default()
+        };
+        let err = handle_edit(&repo, "s1", None, &change).unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+
+        let s1 = repo.get_skill("s1", SKILL_SCOPE_GLOBAL).unwrap().unwrap();
+        assert_eq!(s1.body, "old body");
+        assert_eq!(s1.version, 1);
     }
 
     #[test]

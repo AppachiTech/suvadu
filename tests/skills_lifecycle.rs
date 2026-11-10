@@ -473,6 +473,37 @@ fn the_next_sync_removes_the_files_of_a_removed_or_disabled_skill() {
     }
 }
 
+/// Renaming a skill or moving it to another scope changes where the next
+/// sync writes it, and that sync removes what it wrote under the old name
+/// or scope.
+#[test]
+fn a_renamed_or_moved_skill_syncs_to_its_new_place_and_leaves_nothing_behind() {
+    let sb = Sandbox::new();
+    sb.suv(&["skills", "add", "deploy", "--body", "Deploy steps."]);
+    sb.suv(&["skills", "sync"]);
+    assert!(sb.claude_skill("deploy").exists());
+
+    let out = sb.suv(&["skills", "edit", "deploy", "--rename", "ship"]);
+    assert!(out.contains("'ship'"), "{out}");
+    assert!(out.contains("suv skills sync"), "{out}");
+    let sync = sb.suv(&["skills", "sync"]);
+    assert!(!sb.claude_skill("deploy").exists(), "{sync}");
+    assert!(!sb.cursor_rule("deploy").exists(), "{sync}");
+    assert!(sb.claude_skill("ship").exists(), "{sync}");
+    assert!(sb.cursor_rule("ship").exists(), "{sync}");
+
+    sb.suv(&["skills", "edit", "ship", "--move-to", "here"]);
+    let sync = sb.suv(&["skills", "sync"]);
+    assert!(!sb.claude_skill("ship").exists(), "{sync}");
+    assert!(
+        sb.project
+            .path()
+            .join(".claude/skills/ship/SKILL.md")
+            .exists(),
+        "{sync}"
+    );
+}
+
 /// A skill committed in the repository is untrusted until the user trusts
 /// it, then syncs like a project skill, stops syncing when its file
 /// changes, and is never edited by suvadu.
