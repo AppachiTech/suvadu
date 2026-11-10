@@ -446,6 +446,7 @@ const MAX_OPENCODE_HOOK_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 pub fn handle_hook_opencode_session(
     session_id: &str,
     directory: Option<&str>,
+    parent_id: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Read;
 
@@ -472,8 +473,12 @@ pub fn handle_hook_opencode_session(
     );
     // A failure exits non-zero: the plugin then keeps these messages and
     // sends them again on the next idle instead of treating them as done.
-    crate::commands::agent_session::import_native_opencode(session_id, directory, &input)
-        .map_err(|error| format!("OpenCode session capture: {error}"))?;
+    // A parent that is not a valid ID is left out; the session still is not.
+    let parent_id = parent_id.filter(|parent| is_valid_session_id(parent));
+    crate::commands::agent_session::import_native_opencode(
+        session_id, parent_id, directory, &input,
+    )
+    .map_err(|error| format!("OpenCode session capture: {error}"))?;
     Ok(())
 }
 
@@ -1322,6 +1327,25 @@ function isComplete(message) {
 // them; after a restart the first import sends the history once more.
 const sentMessageIDs = new Map();
 
+// The session that started each session, or null for one started by you.
+// Only a sub-session (one a task tool started) has a parent, and it names it
+// in the session itself, not in its messages. A parent never changes, so
+// each session is looked up once; a failed lookup is tried again next time.
+const parentIDs = new Map();
+
+async function parentOf(client, sessionID) {
+  if (parentIDs.has(sessionID)) return parentIDs.get(sessionID);
+  try {
+    const response = await client.session.get({ path: { id: sessionID } });
+    if (response?.error) return null;
+    const parentID = (response.data ?? response)?.parentID ?? null;
+    parentIDs.set(sessionID, parentID);
+    return parentID;
+  } catch {
+    return null;
+  }
+}
+
 // Stay well under the hook's 16 MB input cap, however long the session.
 const MAX_BATCH_BYTES = 4 * 1024 * 1024;
 
@@ -1329,10 +1353,12 @@ const MAX_BATCH_BYTES = 4 * 1024 * 1024;
 // its last 64 KB to clean and redact, and stores the last 4 KB of that.
 const OUTPUT_TAIL_CHARS = 64 * 1024;
 
-function sendBatch(sessionID, directory, batch) {
+function sendBatch(sessionID, directory, batch, parentID) {
+  const args = ["hook-opencode-session", "--session-id", sessionID, "--directory", directory];
+  if (parentID) args.push("--parent-id", parentID);
   const result = spawnSync(
     "suv",
-    ["hook-opencode-session", "--session-id", sessionID, "--directory", directory],
+    args,
     { input: JSON.stringify(batch), stdio: ["pipe", "ignore", "inherit"], timeout: 10000 }
   );
   return result.status === 0;
@@ -1345,11 +1371,12 @@ async function importSession(client, sessionID, directory) {
     if (!Array.isArray(messages)) return;
     const sent = sentMessageIDs.get(sessionID) ?? new Set();
     sentMessageIDs.set(sessionID, sent);
+    const parentID = await parentOf(client, sessionID);
     let batch = [];
     let batchBytes = 2;
     const flush = () => {
       if (batch.length === 0) return true;
-      if (!sendBatch(sessionID, directory, batch)) return false;
+      if (!sendBatch(sessionID, directory, batch, parentID)) return false;
       for (const message of batch) {
         if (isComplete(message)) sent.add(message.info.id);
       }
@@ -2445,6 +2472,17 @@ mod tests {
             OPENCODE_PLUGIN_SCRIPT.contains("if (isComplete(message)) sent.add(message.info.id);")
         );
         assert!(OPENCODE_PLUGIN_SCRIPT.contains("const MAX_BATCH_BYTES = 4 * 1024 * 1024;"));
+    }
+
+    #[test]
+    fn opencode_plugin_passes_a_sub_sessions_parent_to_the_import() {
+        // A sub-session (one a task tool started) names its parent only in
+        // the session itself, not in its messages.
+        assert!(OPENCODE_PLUGIN_SCRIPT.contains("client.session.get({ path: { id: sessionID } })"));
+        assert!(OPENCODE_PLUGIN_SCRIPT.contains("?.parentID"));
+        assert!(OPENCODE_PLUGIN_SCRIPT.contains(r#"args.push("--parent-id", parentID)"#));
+        // Looked up once per session: a parent never changes.
+        assert!(OPENCODE_PLUGIN_SCRIPT.contains("parentIDs.set(sessionID"));
     }
 
     #[test]

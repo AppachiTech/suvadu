@@ -128,15 +128,23 @@ pub fn import_native_claude(
     })?)
 }
 
+/// Import an `OpenCode` session's messages and, for a sub-session, link it
+/// to `parent_id`, the session that started it.
 pub fn import_native_opencode(
     session_id: &str,
+    parent_id: Option<&str>,
     cwd: &str,
     messages_json: &str,
 ) -> Result<serde_json::Value> {
     let paused = config::is_paused();
     let repo = crate::repository::Repository::init()?;
     let policy = capture_policy_for_dir(cwd, paused);
-    Ok(repo.import_opencode_session(session_id, cwd, messages_json, |_| Ok(policy.clone()))?)
+    let result =
+        repo.import_opencode_session(session_id, cwd, messages_json, |_| Ok(policy.clone()))?;
+    if let Some(parent_id) = parent_id {
+        repo.link_ai_session_parent(&format!("opencode-{session_id}"), parent_id)?;
+    }
+    Ok(result)
 }
 
 /// Store one event a Cursor hook delivered, under its directory's policy.

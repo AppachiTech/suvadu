@@ -1238,6 +1238,17 @@ impl Repository {
         Ok(json!({"sessions":sessions,"next_offset":more.then_some(offset.saturating_add(limit))}))
     }
 
+    /// Record `parent_id`, the native ID of the session that started this
+    /// one, for a stored session that has none yet. A link, once made, is
+    /// never replaced. Returns whether one was made.
+    pub fn link_ai_session_parent(&self, id: &str, parent_id: &str) -> DbResult<bool> {
+        let changed = self.conn.execute(
+            "UPDATE ai_sessions SET parent_id=?2 WHERE id=?1 AND parent_id IS NULL",
+            params![id, parent_id],
+        )?;
+        Ok(changed > 0)
+    }
+
     pub fn get_ai_session(
         &self,
         id: &str,
@@ -2616,6 +2627,42 @@ mod tests {
             })
             .unwrap();
         assert_eq!(second["imported_events"], 0);
+    }
+
+    /// A sub-session records the session that started it, once: a link is
+    /// never overwritten, and there is nothing to link before the session's
+    /// first event is stored.
+    #[test]
+    fn an_opencode_sub_session_is_linked_to_its_parent_once() {
+        let (_dir, repo) = crate::test_utils::test_repo();
+        assert!(!repo
+            .link_ai_session_parent("opencode-ses_child", "ses_parent")
+            .unwrap());
+
+        let messages = serde_json::json!([{
+            "info": {"id": "msg_u1", "role": "user", "time": {"created": 1000}},
+            "parts": [{"type": "text", "messageID": "msg_u1", "text": "look into the parser"}]
+        }])
+        .to_string();
+        repo.import_opencode_session("ses_child", "/work", &messages, |_| {
+            Ok(crate::ai_sessions::CapturePolicy::default())
+        })
+        .unwrap();
+        let parent = |repo: &Repository| {
+            repo.get_ai_session("opencode-ses_child", 20, 0, &[])
+                .unwrap()["session"]["parent_id"]
+                .clone()
+        };
+        assert_eq!(parent(&repo), serde_json::Value::Null);
+
+        assert!(repo
+            .link_ai_session_parent("opencode-ses_child", "ses_parent")
+            .unwrap());
+        assert_eq!(parent(&repo), "ses_parent");
+        assert!(!repo
+            .link_ai_session_parent("opencode-ses_child", "ses_other")
+            .unwrap());
+        assert_eq!(parent(&repo), "ses_parent");
     }
 
     #[test]

@@ -134,7 +134,12 @@ fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
         Commands::HookOpencodeSession {
             session_id,
             directory,
-        } => integrations::handle_hook_opencode_session(&session_id, directory.as_deref()),
+            parent_id,
+        } => integrations::handle_hook_opencode_session(
+            &session_id,
+            directory.as_deref(),
+            parent_id.as_deref(),
+        ),
         Commands::HookCursor => integrations::handle_hook_cursor(),
         Commands::HookArrowStatus { key, widget } => {
             hooks::handle_hook_arrow_status(&key, &widget);

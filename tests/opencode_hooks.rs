@@ -72,6 +72,36 @@ impl Sandbox {
             &messages.to_string(),
         );
     }
+    fn import_sub_session(
+        &self,
+        session_id: &str,
+        parent_id: &str,
+        directory: &str,
+        messages: &serde_json::Value,
+    ) {
+        self.run_with_stdin(
+            &[
+                "hook-opencode-session",
+                "--session-id",
+                session_id,
+                "--directory",
+                directory,
+                "--parent-id",
+                parent_id,
+            ],
+            &messages.to_string(),
+        );
+    }
+    fn parent_of(&self, full_session_id: &str) -> serde_json::Value {
+        let output = self.run(&["agent", "session", full_session_id]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let session: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        session["session"]["parent_id"].clone()
+    }
     fn add_command(&self, full_session_id: &str, command: &str, cwd: &str) {
         let result = self.run(&[
             "add",
@@ -116,6 +146,44 @@ fn user_message(id: &str, text: &str) -> serde_json::Value {
         "info": {"id": id, "sessionID": "ses1", "role": "user", "time": {"created": 1000}},
         "parts": [{"type": "text", "text": text}]
     })
+}
+
+/// A sub-session `OpenCode`'s task tool started is stored with the session
+/// that started it. One captured before the plugin sent the parent gets it on
+/// its next import, and a parent ID that is not a valid session ID is
+/// dropped while the import itself still goes through.
+#[test]
+fn an_opencode_sub_session_is_stored_with_its_parent() {
+    let s = Sandbox::new();
+    s.import_sub_session(
+        "ses_child",
+        "ses_parent",
+        "/project",
+        &serde_json::json!([user_message("msg_u1", "check the parser")]),
+    );
+    assert_eq!(s.parent_of("opencode-ses_child"), "ses_parent");
+
+    s.import_session(
+        "ses_older",
+        "/project",
+        &serde_json::json!([user_message("msg_o1", "an older sub-session")]),
+    );
+    assert_eq!(s.parent_of("opencode-ses_older"), serde_json::Value::Null);
+    s.import_sub_session(
+        "ses_older",
+        "ses_parent",
+        "/project",
+        &serde_json::json!([user_message("msg_o2", "its next turn")]),
+    );
+    assert_eq!(s.parent_of("opencode-ses_older"), "ses_parent");
+
+    s.import_sub_session(
+        "ses_odd",
+        "../not-an-id",
+        "/project",
+        &serde_json::json!([user_message("msg_x1", "still captured")]),
+    );
+    assert_eq!(s.parent_of("opencode-ses_odd"), serde_json::Value::Null);
 }
 
 /// A prompt over the plugin's old hardcoded 500-char cache cutoff, with a

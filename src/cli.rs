@@ -313,6 +313,9 @@ pub enum Commands {
         session_id: String,
         #[arg(long)]
         directory: Option<String>,
+        /// The session that started this one, for a sub-session
+        #[arg(long)]
+        parent_id: Option<String>,
     },
 
     /// Process a Cursor `afterShellExecution` hook event (reads JSON from stdin)
@@ -1654,6 +1657,26 @@ mod tests {
     }
 
     #[test]
+    fn hook_opencode_session_takes_the_parent_of_a_sub_session() {
+        let cli = Cli::parse_from([
+            "suv",
+            "hook-opencode-session",
+            "--session-id",
+            "ses_child",
+            "--directory",
+            "/work",
+            "--parent-id",
+            "ses_parent",
+        ]);
+        match cli.command.unwrap() {
+            Commands::HookOpencodeSession { parent_id, .. } => {
+                assert_eq!(parent_id.as_deref(), Some("ses_parent"));
+            }
+            _ => panic!("Expected HookOpencodeSession"),
+        }
+    }
+
+    #[test]
     fn hook_opencode_session_parses_session_id_and_directory() {
         let cli = Cli::parse_from([
             "suv",
@@ -1667,6 +1690,7 @@ mod tests {
             Commands::HookOpencodeSession {
                 session_id,
                 directory,
+                ..
             } => {
                 assert_eq!(session_id, "ses_abc123");
                 assert_eq!(directory.as_deref(), Some("/work"));
