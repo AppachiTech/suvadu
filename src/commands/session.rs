@@ -271,7 +271,7 @@ fn open_session_timeline(
     result.map(|_| ()).map_err(Into::into)
 }
 
-fn open_session_timeline_tui<B: ratatui::backend::Backend>(
+pub fn open_session_timeline_tui<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     repo: &repository::Repository,
     session_id: &str,

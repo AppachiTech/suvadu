@@ -1778,10 +1778,10 @@ fn build_help_columns(
     t: &crate::theme::Theme,
     vim_enabled: bool,
 ) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
-    let mut left = vec![
-        Line::from(""),
-        help_section("\u{2500}\u{2500} Navigation \u{2500}\u{2500}", t),
-    ];
+    let mut left = vec![help_section(
+        "\u{2500}\u{2500} Navigation \u{2500}\u{2500}",
+        t,
+    )];
     if vim_enabled {
         left.extend([
             help_row("  j/k \u{2191}/\u{2193}   ", "Move selection", t),
@@ -1808,6 +1808,7 @@ fn build_help_columns(
         help_row("  ^D        ", "Delete entry", t),
         help_row("  ^T        ", "Tag session", t),
         help_row("  ^V        ", "Inspect raw command", t),
+        help_row("  ^K        ", "Open its session", t),
     ]);
     // `?/F1` moves here so the right column has room for the recall
     // controls; both columns must still fit 18 rows at 80x24.
@@ -1819,7 +1820,6 @@ fn build_help_columns(
     // Matching mode and scope lead: they decide what is eligible. Ranking
     // and display only reorder what they chose.
     let mut right = vec![
-        Line::from(""),
         help_section("\u{2500}\u{2500} Recall \u{2500}\u{2500}", t),
         help_row("  ^X        ", "Matching mode", t),
         help_row("  ^P        ", "Scope: all/dir/repo", t),

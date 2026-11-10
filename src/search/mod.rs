@@ -36,6 +36,8 @@ pub enum SearchAction {
     SetPage(usize),
     SetPageLast(usize),
     AssociateSession(i64),
+    /// Open this session's timeline, then come back to recall.
+    OpenSession(String),
     ToggleBookmark(String),
     SaveNote(i64, String),
     DeleteNote(i64),
@@ -243,6 +245,9 @@ pub struct SearchApp {
     /// Home opened it (and comes back when it closes), otherwise "Quit".
     /// Set by the caller, so a test never depends on the environment.
     leave_label: &'static str,
+    /// Drawn inline under the prompt (compact recall) rather than full
+    /// screen, which leaves too few rows to open a session's timeline in.
+    inline: bool,
 }
 
 /// The detail pane's extras for one command: its recorded failure output
@@ -352,6 +357,7 @@ impl SearchApp {
             detail_scroll: DetailScroll::default(),
             detail_extras: DetailExtras::default(),
             leave_label: "Quit",
+            inline: false,
         };
         // Derive the directory filter from the scope, unless the caller
         // supplied an explicit one (`--cwd`), which always wins.
@@ -430,6 +436,15 @@ impl SearchApp {
                             self.set_page(repo, page)?;
                             if !self.entries.is_empty() {
                                 self.table_state.select(Some(self.entries.len() - 1));
+                            }
+                            false
+                        }
+                        SearchAction::OpenSession(session_id) => {
+                            // Ctrl+C in the timeline closes recall too.
+                            if self.open_session(terminal, repo, &session_id)
+                                == crate::util::ScreenExit::Interrupted
+                            {
+                                return Ok(None);
                             }
                             false
                         }
@@ -545,6 +560,28 @@ impl SearchApp {
         }
     }
 
+    /// Show `session_id`'s timeline on this terminal until it is left. A
+    /// session that can't be opened is reported in the status row instead,
+    /// and recall carries on.
+    pub(super) fn open_session<B: ratatui::backend::Backend>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+        repo: &Repository,
+        session_id: &str,
+    ) -> crate::util::ScreenExit
+    where
+        io::Error: From<B::Error>,
+    {
+        crate::commands::session::open_session_timeline_tui(terminal, repo, session_id)
+            .unwrap_or_else(|e| {
+                self.status_message = Some((
+                    format!("Can't open the session: {e}"),
+                    std::time::Instant::now(),
+                ));
+                crate::util::ScreenExit::Closed
+            })
+    }
+
     /// Handle side-effecting actions (copy, delete, notes, bookmarks, tags).
     fn dispatch_action(
         &mut self,
@@ -637,6 +674,7 @@ impl SearchApp {
             SearchAction::Continue
             | SearchAction::Select(_)
             | SearchAction::Exit
+            | SearchAction::OpenSession(_)
             | SearchAction::Reload
             | SearchAction::SetPage(_)
             | SearchAction::SetPageLast(_) => {}
@@ -909,6 +947,7 @@ pub fn run_search(
         mut terminal,
         surface,
     } = open_recall_terminal(recall_surface(args.compact))?;
+    app.inline = matches!(surface, crate::util::RecallSurface::Inline { .. });
 
     let result = app.run(&mut terminal, repo);
 

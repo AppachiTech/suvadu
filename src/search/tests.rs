@@ -6116,3 +6116,86 @@ fn sequence_boost_can_be_turned_off() {
     app.reload_entries(&repo).unwrap();
     assert_eq!(app.entries[0].command, "git status");
 }
+
+// ── Opening a command's session (^K) ──────────────────────────────
+
+#[test]
+fn ctrl_k_opens_the_selected_commands_session() {
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("git push")], 1));
+    app.table_state.select(Some(0));
+    match app.handle_input(ctrl_key('k')) {
+        SearchAction::OpenSession(id) => assert_eq!(id, "session123"),
+        _ => panic!("Expected SearchAction::OpenSession"),
+    }
+}
+
+#[test]
+fn ctrl_k_with_nothing_selected_says_so() {
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    app.table_state.select(None);
+    assert!(matches!(
+        app.handle_input(ctrl_key('k')),
+        SearchAction::Continue
+    ));
+    let (message, _) = app.status_message.expect("a status message");
+    assert_eq!(message, "Nothing selected");
+}
+
+/// Compact recall draws in a few rows under the prompt, too few for a
+/// timeline, so it says where a session can be opened instead.
+#[test]
+fn compact_recall_does_not_open_a_session_and_says_why() {
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    app.table_state.select(Some(0));
+    app.inline = true;
+    assert!(matches!(
+        app.handle_input(ctrl_key('k')),
+        SearchAction::Continue
+    ));
+    let (message, _) = app.status_message.expect("a status message");
+    assert!(message.contains("full-screen"), "{message}");
+}
+
+/// A session that can't be opened is reported in the status row, and recall
+/// stays open rather than failing.
+#[test]
+fn a_session_that_cannot_be_found_is_reported_and_recall_stays_open() {
+    let (_dir, repo) = crate::test_utils::test_repo();
+    let mut app = SearchApp::new(test_search_config(vec![create_test_entry("ls")], 1));
+    // An io-error backend, as the timelines need; a fixed viewport never
+    // asks a real terminal for its size.
+    let mut terminal = Terminal::with_options(
+        ratatui::backend::CrosstermBackend::new(Vec::<u8>::new()),
+        ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(0, 0, 80, 24)),
+        },
+    )
+    .unwrap();
+    let exit = app.open_session(&mut terminal, &repo, "no-such-session");
+    assert_eq!(exit, crate::util::ScreenExit::Closed);
+    let (message, _) = app.status_message.expect("a status message");
+    assert!(message.contains("not found"), "{message}");
+}
+
+#[test]
+fn the_help_overlay_lists_opening_a_session_and_still_fits_80x24() {
+    for vim in [false, true] {
+        let mut app = render_app();
+        app.vim_enabled = vim;
+        app.dialog = DialogState::Help;
+        let screen = render_lines(&mut app, 80, 24).join("\n");
+        for expected in [
+            "^K",
+            "Open its session",
+            "Bookmarked only",
+            "Go to page...",
+            "This help",
+            "Press any key to close",
+        ] {
+            assert!(
+                screen.contains(expected),
+                "vim={vim}: help overlay clipped {expected:?} at 80x24:\n{screen}"
+            );
+        }
+    }
+}

@@ -473,6 +473,16 @@ impl SearchApp {
                     return Some(SearchAction::ToggleBookmark(cmd));
                 }
             }
+            KeyCode::Char('k') => {
+                let message = if self.inline {
+                    "Open a session from full-screen recall"
+                } else if let Some(entry) = self.get_selected_entry() {
+                    return Some(SearchAction::OpenSession(entry.session_id.clone()));
+                } else {
+                    "Nothing selected"
+                };
+                self.status_message = Some((message.into(), std::time::Instant::now()));
+            }
             KeyCode::Char('n') => {
                 if let Some(entry) = self.get_selected_entry() {
                     if let Some(id) = entry.id {
