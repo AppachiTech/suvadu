@@ -8,12 +8,12 @@
     "url": "https://github.com/AppachiTech/suvadu",
     "source": "github"
   },
-  "version": "0.5.2",
+  "version": "0.5.3",
   "packages": [
     {
       "registryType": "cargo",
       "identifier": "suvadu",
-      "version": "0.5.2",
+      "version": "0.5.3",
       "transport": {
         "type": "stdio"
       },
