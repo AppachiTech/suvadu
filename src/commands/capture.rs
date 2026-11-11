@@ -734,7 +734,7 @@ mod tests {
             steps[0]
         );
         assert!(
-            steps[1].contains(&format!("suv get {VERIFY_MARKER}")),
+            steps[1].contains(&format!("suv get --query {VERIFY_MARKER}")),
             "step 2 must search for it: {}",
             steps[1]
         );
