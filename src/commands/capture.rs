@@ -356,7 +356,7 @@ pub fn facts_from_records(
 pub fn verification_steps() -> Vec<String> {
     vec![
         format!("1. In the shell you want recorded, run:  echo {VERIFY_MARKER}"),
-        format!("2. Search for it:                        suv get {VERIFY_MARKER}"),
+        format!("2. Search for it:                        suv get --query {VERIFY_MARKER}"),
         "3. Confirm the stored record:            suv history --limit 3".to_string(),
     ]
 }
@@ -734,7 +734,7 @@ mod tests {
             steps[0]
         );
         assert!(
-            steps[1].contains(&format!("suv get {VERIFY_MARKER}")),
+            steps[1].contains(&format!("suv get --query {VERIFY_MARKER}")),
             "step 2 must search for it: {}",
             steps[1]
         );
